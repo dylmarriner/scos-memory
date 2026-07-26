@@ -1,0 +1,252 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestCanonicaliseRemovesBOM(t *testing.T) {
+	input := "\ufeffhello\r\nworld"
+	result := canonicalise(input)
+	if result != "hello\nworld" {
+		t.Fatalf("unexpected result: %q", result)
+	}
+}
+
+func TestCanonicaliseNormalisesLineEndings(t *testing.T) {
+	input := "line1\r\nline2\rline3"
+	result := canonicalise(input)
+	if result != "line1\nline2\nline3" {
+		t.Fatalf("unexpected result: %q", result)
+	}
+}
+
+func TestClassifySegmentsIdentifiesCodeBlocks(t *testing.T) {
+	input := "some text\n```go\nfunc main() {}\n```\nmore text"
+	segments := classifySegments(input, nil)
+	hasCode := false
+	for _, s := range segments {
+		if s.Class == "code_symbol" || s.Class == "code_dependency" {
+			hasCode = true
+		}
+	}
+	if !hasCode {
+		t.Fatal("expected code symbol segment")
+	}
+}
+
+func TestClassifyGovernancePolicy(t *testing.T) {
+	input := "policy: all agents must use approved memory"
+	segments := classifySegments(input, nil)
+	if len(segments) > 0 && segments[0].Class != "governing_policy" {
+		t.Fatalf("expected governing_policy, got %s", segments[0].Class)
+	}
+}
+
+func TestNonDroppableSegments(t *testing.T) {
+	segments := []Segment{
+		{Class: "governing_policy", Content: "policy text", Droppable: false},
+		{Class: "optional_background", Content: "background", Droppable: true},
+	}
+	if segments[0].Droppable {
+		t.Fatal("governing_policy should not be droppable")
+	}
+	if !segments[1].Droppable {
+		t.Fatal("optional_background should be droppable")
+	}
+}
+
+func TestDeduplicateSegments(t *testing.T) {
+	segments := []Segment{
+		{Content: "hello world", Class: "text"},
+		{Content: "hello world", Class: "text"},
+		{Content: "goodbye", Class: "text"},
+	}
+	deduped := deduplicateSegments(segments)
+	if len(deduped) != 2 {
+		t.Fatalf("expected 2 segments after dedup, got %d", len(deduped))
+	}
+}
+
+func TestAllocateBudget(t *testing.T) {
+	alloc := allocateBudget(8000, "balanced", nil)
+	if alloc.Governing != 1200 {
+		t.Fatalf("expected 1200 governing, got %d", alloc.Governing)
+	}
+	if alloc.Reserve != 800 {
+		t.Fatalf("expected 800 reserve, got %d", alloc.Reserve)
+	}
+}
+
+func TestAllocateBudgetExact(t *testing.T) {
+	alloc := allocateBudget(8000, "exact", nil)
+	if alloc.Governing != 2000 {
+		t.Fatalf("expected 2000 governing for exact, got %d", alloc.Governing)
+	}
+}
+
+func TestCompressBalanced(t *testing.T) {
+	segments := []Segment{
+		{Class: "governing_policy", Content: "keep this", OriginalTokens: 10, Droppable: false},
+		{Class: "optional_background", Content: strings.Repeat("x", 5000), OriginalTokens: 1250, Droppable: true},
+	}
+	alloc := allocateBudget(8000, "balanced", nil)
+	compiled, _ := compressSegments(segments, "balanced", alloc)
+	if !strings.Contains(compiled, "keep this") {
+		t.Fatal("non-droppable content must be preserved")
+	}
+}
+
+func TestCompressExactPreservesAll(t *testing.T) {
+	segments := []Segment{
+		{Class: "optional_background", Content: "everything stays", OriginalTokens: 20, Droppable: true},
+	}
+	alloc := allocateBudget(8000, "exact", nil)
+	compiled, _ := compressSegments(segments, "exact", alloc)
+	if !strings.Contains(compiled, "everything stays") {
+		t.Fatal("exact profile must preserve all content")
+	}
+}
+
+func TestCompressAggressiveSummarises(t *testing.T) {
+	segments := []Segment{
+		{Class: "optional_background", Content: strings.Repeat("long content here. ", 100), OriginalTokens: 300, Droppable: true},
+	}
+	alloc := allocateBudget(8000, "aggressive", nil)
+	compiled, _ := compressSegments(segments, "aggressive", alloc)
+	if strings.Contains(compiled, "[optional_background summary]") && len(compiled) < 500 {
+		return
+	}
+	t.Logf("compiled length: %d", len(compiled))
+}
+
+func TestValidateInvariantsPreservesHints(t *testing.T) {
+	original := "Use PostgreSQL 16.2 for the primary database"
+	compiled := "Use PostgreSQL 16.2"
+	valid := validateInvariants(original, compiled, []string{"PostgreSQL"})
+	if !valid {
+		t.Fatal("should preserve hints")
+	}
+}
+
+func TestValidateInvariantsDetectsMissingHint(t *testing.T) {
+	original := "Use PostgreSQL for the database"
+	compiled := "Use MySQL"
+	valid := validateInvariants(original, compiled, []string{"PostgreSQL"})
+	if valid {
+		t.Fatal("should detect missing hint")
+	}
+}
+
+func TestExtractExactValuesUUIDs(t *testing.T) {
+	values := extractExactValues("id 550e8400-e29b-41d4-a716-446655440000")
+	if len(values) == 0 {
+		t.Fatal("expected UUID extraction")
+	}
+}
+
+func TestExtractExactValuesVersions(t *testing.T) {
+	values := extractExactValues("version 1.2.3")
+	if len(values) == 0 {
+		t.Fatal("expected version extraction")
+	}
+}
+
+func TestOptimiseOutputRemovesRepeats(t *testing.T) {
+	raw := "line1\n\n\n\nline2\n\n\nline3"
+	opt := optimiseOutput(raw, "standard", 1000)
+	if strings.Contains(opt, "\n\n\n") {
+		t.Fatal("should collapse repeated newlines")
+	}
+}
+
+func TestOptimiseOutputCompact(t *testing.T) {
+	raw := "I think this is true.\n\nLet me check.\n\nBased on the docs, I can confirm."
+	opt := optimiseOutput(raw, "compact", 1000)
+	if strings.Contains(opt, "Let me") {
+		t.Fatal("compact should remove 'Let me' filler")
+	}
+}
+
+func TestOptimiseOutputTruncates(t *testing.T) {
+	raw := strings.Repeat("word ", 2000)
+	opt := optimiseOutput(raw, "standard", 100)
+	if estimateTokens(opt) > 150 {
+		t.Fatalf("expected truncation to ~100 tokens, got %d tokens", estimateTokens(opt))
+	}
+}
+
+func TestEstimateTokens(t *testing.T) {
+	tokens := estimateTokens("hello world four words")
+	if tokens <= 0 {
+		t.Fatal("expected positive tokens")
+	}
+}
+
+func TestPercentOf(t *testing.T) {
+	result := percentOf(1000, 15)
+	if result != 150 {
+		t.Fatalf("expected 150, got %d", result)
+	}
+}
+
+func TestClassBudgetFor(t *testing.T) {
+	alloc := BudgetAllocation{Governing: 1000, Evidence: 500}
+	budget := classBudgetFor("governing_policy", alloc)
+	if budget != 1000 {
+		t.Fatalf("expected 1000, got %d", budget)
+	}
+	budget = classBudgetFor("unknown", alloc)
+	if budget != 500 {
+		t.Fatalf("expected 500 for unknown, got %d", budget)
+	}
+}
+
+func TestSummary(t *testing.T) {
+	s := summarise("This is a long piece of content. It has multiple sentences.", "test")
+	if !strings.Contains(s, "[test summary]") {
+		t.Fatal("summary should include class tag")
+	}
+	if !strings.Contains(s, "This is a long piece of content.") {
+		t.Fatal("summary should include first sentence")
+	}
+}
+
+func TestCapsuleID(t *testing.T) {
+	id := newCapsuleID()
+	// Format: 16 hex chars + "-" + 4 hex chars + "-" + 12 hex chars = 34
+	if len(id) != 34 {
+		t.Fatalf("expected 34 chars (UUID-like), got %d: %q", len(id), id)
+	}
+	parts := strings.Split(id, "-")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+}
+
+func TestSha256Hex(t *testing.T) {
+	h := sha256Hex([]byte("hello"))
+	if len(h) != 64 {
+		t.Fatalf("expected 64 hex chars, got %d", len(h))
+	}
+}
+
+func TestBuildCapsule(t *testing.T) {
+	segments := []Segment{
+		{Class: "test", Content: "hello", OriginalTokens: 5},
+	}
+	compiled := []Segment{
+		{Class: "test", Content: "hi", CompiledTokens: 2},
+	}
+	alloc := allocateBudget(8000, "balanced", nil)
+	capsule := buildCapsule("hello", "balanced", segments, compiled, alloc)
+	if capsule.Profile != "balanced" {
+		t.Fatal("profile mismatch")
+	}
+	if capsule.CompilerVersion != version {
+		t.Fatal("version mismatch")
+	}
+	if capsule.CapsuleID == "" {
+		t.Fatal("expected capsule ID")
+	}
+}

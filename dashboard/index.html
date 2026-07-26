@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SCOS Transparency</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; background: #101318; color: #edf2f7; }
+    pre { white-space: pre-wrap; background: #1b222c; padding: 1rem; border-radius: .5rem; overflow: auto; }
+    .status { color: #9ae6b4; }
+  </style>
+</head>
+<body>
+  <h1>SCOS Transparency</h1>
+  <p class="status" id="status">Loading authorised operational state…</p>
+  <pre id="snapshot">Waiting for projection…</pre>
+  <script>
+    const endpoint = window.SCOS_TRANSPARENCY_ENDPOINT || '/v1/transparency/snapshot';
+    async function refresh() {
+      const response = await fetch(endpoint, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error(`projection returned ${response.status}`);
+      document.getElementById('snapshot').textContent = JSON.stringify(await response.json(), null, 2);
+      document.getElementById('status').textContent = `Live projection refreshed ${new Date().toISOString()}`;
+    }
+    refresh().catch(error => {
+      document.getElementById('status').textContent = `Projection unavailable: ${error.message}`;
+      document.getElementById('status').style.color = '#feb2b2';
+    });
+    setInterval(() => refresh().catch(() => {}), 15000);
+  </script>
+</body>
+</html>

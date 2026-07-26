@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExtensionManifest",
+  "type": "object",
+  "required": ["package_id", "name", "version", "type"],
+  "properties": {
+    "package_id": { "type": "string" },
+    "name": { "type": "string" },
+    "version": { "type": "string" },
+    "type": { "type": "string", "enum": ["plugin", "skill", "hook"] },
+    "publisher": { "type": "string" },
+    "signature": { "type": "string" },
+    "required_permissions": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

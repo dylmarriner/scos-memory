@@ -1,0 +1,6 @@
+{
+  "hook_id": "pre-turn-sanitizer",
+  "stage": "pre_turn",
+  "priority": 1,
+  "description": "Sanitizes prompt injection and redacts sensitive data before turn processing"
+}

@@ -1,0 +1,27 @@
+{
+  "package_id": "org.scos.plugins.example",
+  "name": "Example Memory Extension Plugin",
+  "version": "1.0.0",
+  "type": "plugin",
+  "publisher": "SCOS Core Team",
+  "required_permissions": [
+    "memory:read",
+    "code:query"
+  ],
+  "hooks": [
+    {
+      "hook_id": "pre-turn-linter",
+      "stage": "pre_turn",
+      "priority": 10,
+      "timeout_ms": 1000
+    }
+  ],
+  "skills": [
+    {
+      "skill_id": "memory-search",
+      "name": "Memory Search Skill",
+      "description": "Searches persistent memory fabric",
+      "parameters": ["query", "namespace"]
+    }
+  ]
+}

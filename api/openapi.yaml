@@ -1,0 +1,480 @@
+openapi: 3.1.0
+info:
+  title: SCOS Memory Gateway API
+  version: 0.1.0
+  description: Governed persistent memory and crash-recovery service for AI agents.
+servers:
+  - url: http://localhost:8080
+paths:
+  /health/live:
+    get:
+      operationId: live
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+  /health/ready:
+    get:
+      operationId: ready
+      responses:
+        '200':
+          description: Required dependencies are reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '503':
+          description: Service is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+  /v1/version:
+    get:
+      operationId: version
+      responses:
+        '200':
+          description: Service version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+  /v1/sessions:
+    post:
+      operationId: createSession
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session accepted and journaled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+  /v1/sessions/{sessionID}/messages:
+    post:
+      operationId: appendMessage
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: sessionID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppendMessageRequest'
+      responses:
+        '201':
+          description: Message and turn committed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageReceipt'
+  /v1/turns/{turnID}/complete:
+    post:
+      operationId: completeTurn
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: turnID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteTurnRequest'
+      responses:
+        '201':
+          description: Reply, checkpoint, event, and outbox job committed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionReceipt'
+  /v1/operations:
+    post:
+      operationId: prepareOperation
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrepareOperationRequest'
+      responses:
+        '201':
+          description: Side-effecting operation durably prepared.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationReceipt'
+  /v1/control/route:
+    post:
+      operationId: routeInteraction
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Explainable route decision}
+  /v1/control/decisions/{interactionID}:
+    get:
+      operationId: getRouteDecision
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - name: interactionID
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Latest permission-scoped route decision}
+        '404': {description: Route decision not found}
+  /v1/context/compile:
+    post:
+      operationId: compileContext
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Reversible compiled context capsule}
+  /v1/context/restore:
+    post:
+      operationId: restoreContext
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Restored authoritative context}
+  /v1/code/query:
+    post:
+      operationId: queryCode
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Permission-scoped code query results}
+  /v1/code/impact:
+    post:
+      operationId: analyseCodeImpact
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Change impact analysis}
+  /v1/proxy/execute:
+    post:
+      operationId: executeThroughProxy
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Audited execution result}
+  /v1/extensions/install:
+    post:
+      operationId: installExtension
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Governed installation receipt}
+  /v1/transparency/stream:
+    get:
+      operationId: transparencyStream
+      responses:
+        '200': {description: Authorised server-sent transparency events}
+  /v1/users/{user_id}/knowledge:
+    get:
+      operationId: userKnowledge
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Versioned user knowledge ledger}
+  /v1/turns:
+    get:
+      operationId: listTurns
+      responses:
+        '200': {description: List of committed turn records}
+  /v1/memory:
+    get:
+      operationId: queryMemory
+      responses:
+        '200': {description: Scoped memory items and provenance}
+  /v1/okf:
+    get:
+      operationId: okfStatus
+      responses:
+        '200': {description: Open Knowledge Fabric repository status}
+  /v1/audit:
+    get:
+      operationId: getAuditLogs
+      responses:
+        '200': {description: Immutable security audit entries}
+  /v1/retrieval-runs:
+    get:
+      operationId: getRetrievalRuns
+      responses:
+        '200': {description: Traceability data for past retrieval runs}
+  /v1/control/ingest:
+    post:
+      operationId: controlIngest
+      responses:
+        '200': {description: Control plane event ingestion receipt}
+  /v1/control/decisions:
+    get:
+      operationId: listControlDecisions
+      responses:
+        '200': {description: History of autonomous control routing decisions}
+  /v1/control/replay:
+    post:
+      operationId: controlReplay
+      responses:
+        '200': {description: Replay execution result for decision audit}
+  /v1/control/recover:
+    post:
+      operationId: controlRecover
+      responses:
+        '200': {description: Rebuild and recovery trigger receipt}
+  /v1/capabilities:
+    get:
+      operationId: listCapabilities
+      responses:
+        '200': {description: Capability registry entries}
+  /v1/triggers:
+    get:
+      operationId: listTriggers
+      responses:
+        '200': {description: Registered event triggers}
+  /v1/context/evaluate:
+    post:
+      operationId: evaluateContext
+      responses:
+        '200': {description: Evaluation metric scores for compiled context}
+  /v1/code/index:
+    post:
+      operationId: indexCode
+      responses:
+        '200': {description: Code indexing trigger receipt}
+  /v1/proxy/restore:
+    post:
+      operationId: proxyRestore
+      responses:
+        '200': {description: Restored tool state result}
+  /v1/proxy/explain:
+    get:
+      operationId: proxyExplain
+      responses:
+        '200': {description: Explanation of command rewriting decisions}
+  /v1/benchmarks:
+    get:
+      operationId: runBenchmarks
+      responses:
+        '200': {description: Benchmark harness evaluation report}
+  /v1/extensions:
+    get:
+      operationId: listExtensions
+      responses:
+        '200': {description: Installed extension packages}
+  /v1/extensions/{package_id}:
+    get:
+      operationId: getExtension
+      parameters: [{name: package_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: Extension package details}
+  /v1/extensions/{package_id}/enable:
+    post:
+      operationId: enableExtension
+      parameters: [{name: package_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: Extension enabled status}
+  /v1/extensions/{package_id}/disable:
+    post:
+      operationId: disableExtension
+      parameters: [{name: package_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: Extension disabled status}
+  /v1/extensions/{package_id}/rollback:
+    post:
+      operationId: rollbackExtension
+      parameters: [{name: package_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: Extension rolled back status}
+  /v1/skills:
+    get:
+      operationId: listSkills
+      responses:
+        '200': {description: Registered skill definitions}
+  /v1/hooks:
+    get:
+      operationId: listHooks
+      responses:
+        '200': {description: Registered lifecycle hooks}
+  /v1/hooks/executions:
+    get:
+      operationId: listHookExecutions
+      responses:
+        '200': {description: History of hook executions}
+  /v1/adapters:
+    get:
+      operationId: listAdapters
+      responses:
+        '200': {description: Supported agent runtime adapters}
+  /v1/compatibility:
+    get:
+      operationId: getCompatibilityStatus
+      responses:
+        '200': {description: Compatibility gateway status report}
+  /v1/entities:
+    get:
+      operationId: listEntities
+      responses:
+        '200': {description: Modelled entity representations}
+  /v1/entities/{entity_id}/representation:
+    get:
+      operationId: getEntityRepresentation
+      parameters: [{name: entity_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: Structured entity representation}
+  /v1/memory/graph:
+    get:
+      operationId: getMemoryGraph
+      responses:
+        '200': {description: Temporal knowledge graph representation}
+  /v1/beliefs:
+    get:
+      operationId: listBeliefs
+      responses:
+        '200': {description: User belief revisions and evidence}
+  /v1/learnings:
+    get:
+      operationId: listLearnings
+      responses:
+        '200': {description: Governed learning signals}
+  /v1/diary:
+    get:
+      operationId: getDiary
+      responses:
+        '200': {description: Personal user memory diary summary}
+  /v1/transparency/snapshot:
+    get:
+      operationId: getTransparencySnapshot
+      responses:
+        '200': {description: System transparency snapshot}
+  /v1/transparency/events:
+    get:
+      operationId: getTransparencyEvents
+      responses:
+        '200': {description: Audit event log stream}
+components:
+  parameters:
+    TenantID:
+      name: X-SCOS-Tenant-ID
+      in: header
+      required: true
+      schema: {type: string, format: uuid}
+    PrincipalID:
+      name: X-SCOS-Principal-ID
+      in: header
+      required: true
+      schema: {type: string, format: uuid}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 255}
+  schemas:
+    Status:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        checks:
+          type: object
+            additionalProperties:
+              type: string
+    CreateSessionRequest:
+      type: object
+      required: [namespace_id]
+      properties:
+        namespace_id: {type: string, format: uuid}
+    Session:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string, format: uuid}
+    AppendMessageRequest:
+      type: object
+      required: [role, content]
+      properties:
+        role: {type: string, enum: [user, assistant, tool]}
+        content: {type: string, minLength: 1}
+    MessageReceipt:
+      type: object
+      required: [turn_id, message_id, sequence]
+      properties:
+        turn_id: {type: string, format: uuid}
+        message_id: {type: string, format: uuid}
+        sequence: {type: integer, format: int64}
+    CompleteTurnRequest:
+      type: object
+      required: [content]
+      properties:
+        content: {type: string, minLength: 1}
+        state: {type: object}
+    CompletionReceipt:
+      type: object
+      required: [turn_id, message_id, checkpoint_id]
+      properties:
+        turn_id: {type: string, format: uuid}
+        message_id: {type: string, format: uuid}
+        checkpoint_id: {type: string, format: uuid}
+    PrepareOperationRequest:
+      type: object
+      required: [tool_name, tool_version, input]
+      properties:
+        tool_name: {type: string, minLength: 1}
+        tool_version: {type: string, minLength: 1}
+        input: {type: object}
+        expected_effects: {type: object}
+        retry_policy: {type: object}
+        reconciliation_method: {type: string}
+    OperationReceipt:
+      type: object
+      required: [operation_id, status]
+      properties:
+        operation_id: {type: string, format: uuid}
+        status: {type: string, enum: [prepared]}

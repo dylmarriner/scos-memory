@@ -1,0 +1,14 @@
+version: "1.3.0"
+name: "default-execution-proxy-policy"
+description: "Governing policy for Native Adaptive Execution Proxy"
+
+rewrites:
+  block_destructive_root_commands: true
+  blocked_patterns:
+    - "rm -rf /"
+    - "mkfs"
+    - "dd if=/dev/zero"
+
+output_reduction:
+  default_max_bytes: 4096
+  truncate_middle: true

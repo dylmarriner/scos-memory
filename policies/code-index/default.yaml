@@ -1,0 +1,19 @@
+version: "1.3.0"
+name: "default-code-index-policy"
+description: "Governing policy for Native Code Intelligence indexing"
+
+indexing:
+  incremental: true
+  max_file_size_bytes: 5242880
+  supported_extensions:
+    - ".go"
+    - ".py"
+    - ".ts"
+    - ".js"
+    - ".sql"
+    - ".json"
+    - ".yaml"
+
+chunking:
+  strategy: "symbol_aware"
+  max_lines_per_chunk: 100

@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TransparencySnapshot",
+  "type": "object",
+  "required": ["timestamp", "active_sessions", "total_tokens_saved"],
+  "properties": {
+    "timestamp": { "type": "string" },
+    "active_sessions": { "type": "integer" },
+    "total_tokens_saved": { "type": "integer" },
+    "system_health": { "type": "string" }
+  }
+}

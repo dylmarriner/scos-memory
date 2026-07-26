@@ -1,0 +1,57 @@
+version: 1.0.0
+policy_id: scos-default-autonomous-routing
+mode: automatic
+
+mandatory_every_turn:
+  - journal_ingress
+  - resolve_identity_and_scope
+  - load_checkpoint
+  - retrieve_scoped_memory
+  - compile_context
+  - commit_reply
+  - commit_checkpoint
+  - enqueue_consolidation
+
+routing:
+  code_indicators:
+    - repository_path
+    - source_path
+    - symbol_reference
+    - stack_trace
+    - code_change_intent
+  tool_indicators:
+    - proposed_tool
+    - command_execution_intent
+    - external_side_effect
+  freshness_indicators:
+    - current
+    - latest
+    - real_time
+    - provider_state
+
+constraints:
+  deterministic_before_learned_ranking: true
+  require_confirmation_for:
+    - destructive
+    - financial
+    - legal
+    - permission_change
+    - external_communication
+    - production_deployment
+  direct_agent_database_access: false
+  direct_agent_unrestricted_credentials: false
+  allow_read_only_safe_fallback: true
+  retain_route_decisions: true
+  replayable_decisions: true
+
+confidence:
+  automatic_read_only_minimum: 0.65
+  automatic_write_minimum: 0.90
+  request_input_below_write_threshold: true
+
+learning:
+  live_policy_self_edit: false
+  require_offline_replay: true
+  require_shadow_evaluation: true
+  require_canary: true
+  require_rollback: true

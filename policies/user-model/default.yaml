@@ -1,0 +1,15 @@
+version: "1.3.0"
+name: "default-user-model-policy"
+description: "Governing policy for Advanced Memory Intelligence user modeling"
+
+belief_revision:
+  confidence_threshold: 0.70
+  auto_update_preferences: true
+  contradiction_review_required: true
+
+privacy:
+  redact_pii_fields:
+    - "ssn"
+    - "credit_card"
+    - "password"
+    - "api_key"

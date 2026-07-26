@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scos.local/schemas/routing/route-decision.schema.json",
+  "title": "SCOS Autonomous Route Decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision_id",
+    "interaction_id",
+    "intent_labels",
+    "risk_class",
+    "selected_plan",
+    "confidence",
+    "policy_version",
+    "registry_generation",
+    "reason_codes",
+    "created_at"
+  ],
+  "properties": {
+    "decision_id": {"type": "string", "minLength": 1},
+    "interaction_id": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "actor_id": {"type": "string"},
+    "agent_id": {"type": "string"},
+    "intent_labels": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    },
+    "risk_class": {
+      "enum": ["read_only", "low", "moderate", "high", "critical"]
+    },
+    "freshness_requirement": {
+      "enum": ["none", "cached", "current", "real_time"]
+    },
+    "selected_plan": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["order", "system", "action", "required"],
+        "properties": {
+          "order": {"type": "integer", "minimum": 1},
+          "system": {"type": "string", "minLength": 1},
+          "action": {"type": "string", "minLength": 1},
+          "required": {"type": "boolean"}
+        }
+      }
+    },
+    "rejected_alternatives": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "confirmation_required": {"type": "boolean"},
+    "policy_version": {"type": "string", "minLength": 1},
+    "registry_generation": {"type": "integer", "minimum": 1},
+    "reason_codes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "context_capsule_id": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"}
+  }
+}

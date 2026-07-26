@@ -1,0 +1,24 @@
+version: "1.3.0"
+name: "default-context-policy"
+description: "Governing policy for Native Context Optimisation Layer"
+
+context_budget:
+  default_token_limit: 8192
+  max_token_limit: 128000
+  segment_allocations:
+    system_mandatory: 0.20
+    user_current: 0.30
+    memory_retrieved: 0.30
+    code_context: 0.15
+    tool_output: 0.05
+
+compression_profiles:
+  lossless:
+    strategy: "semantic_dedup"
+    preserve_exact_values: true
+  budgeted:
+    strategy: "summarization"
+    target_reduction: 0.40
+  aggressive:
+    strategy: "key_extract"
+    target_reduction: 0.70

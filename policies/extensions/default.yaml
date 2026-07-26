@@ -1,0 +1,17 @@
+version: "1.3.0"
+name: "default-extensions-policy"
+description: "Governing policy for Native Extension Platform"
+
+security:
+  require_signed_manifest: true
+  allow_untrusted_publishers: false
+  permission_whitelist:
+    - "memory:read"
+    - "memory:write"
+    - "code:query"
+    - "proxy:execute"
+
+isolation:
+  sandbox_mode: "strict"
+  max_memory_mb: 256
+  timeout_ms: 5000

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.scos.local/handoffs/agent-handoff.schema.json",
+  "title": "SCOS Agent Handoff",
+  "type": "object",
+  "required": [
+    "handoff_id",
+    "task_id",
+    "source_agent",
+    "target_agent",
+    "objective",
+    "constraints",
+    "authorised_namespaces",
+    "memory_references",
+    "artifact_references",
+    "completed_work",
+    "open_work",
+    "known_failures",
+    "acceptance_criteria",
+    "expires_at"
+  ],
+  "properties": {
+    "handoff_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "authorised_namespaces": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "memory_references": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_references": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "completed_work": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "open_work": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "known_failures": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}
