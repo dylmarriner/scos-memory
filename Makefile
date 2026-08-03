@@ -2,11 +2,13 @@
 
 fmt:
 	gofmt -w $$(find services -name '*.go' -type f)
-	python3 -m compileall -q workers/consolidation
+	python3 -m compileall -q workers/consolidation workers/index-maintenance workers/policy-evaluation
 
 test:
 	go test ./...
 	python3 -m unittest discover -s workers/consolidation/tests -v
+	python3 -m unittest discover -s workers/index-maintenance -p "test_*.py" -v
+	python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
 
 validate:
 	python3 scripts/validate_json.py
