@@ -11,8 +11,8 @@ COPY packages/capability-registry ./packages/capability-registry
 COPY services/readiness ./services/readiness
 RUN CGO_ENABLED=0 go build -o /out/autonomous-control-plane ./services/autonomous-control-plane/cmd/server
 
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates && adduser -D -H -u 10001 scos
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates && addgroup -S scos && adduser -S -G scos scos
 USER scos
 COPY --from=build /out/autonomous-control-plane /usr/local/bin/autonomous-control-plane
 EXPOSE 8081
