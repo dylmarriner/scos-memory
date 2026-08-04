@@ -842,11 +842,14 @@ func (c *controlPlane) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.TenantID, req.ActorID = tenantID, actorID
+	planningStarted := time.Now()
 	decision, err := buildRoute(req)
 	if err != nil {
+		recordBypassAttempt("invalid_ingress", req)
 		writeControlError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	recordRouteMetrics(req, decision, time.Since(planningStarted))
 	if err = c.persistRoute(r.Context(), req, decision); err != nil {
 		writeControlError(w, http.StatusServiceUnavailable, "persist route decision: "+err.Error())
 		return

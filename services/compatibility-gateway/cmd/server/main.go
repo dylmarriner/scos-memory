@@ -15,9 +15,14 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("compatibility-gateway")
 
 const version = "0.1.0"
 
@@ -385,7 +390,15 @@ func (s *compatServer) handleAdapters(w http.ResponseWriter, r *http.Request) {
 	}
 	adapters := make([]*Adapter, 0, len(s.adapters))
 	for _, a := range s.adapters {
-		adapters = append(adapters, s.snapshotAdapter(r.Context(), identity.TenantID, a))
+		snapshot := s.snapshotAdapter(r.Context(), identity.TenantID, a)
+		adapters = append(adapters, snapshot)
+		// §32 adapter compatibility tier, reported per boundary from the
+		// computed snapshot rather than the declared registration.
+		serviceMetrics.Gauge(telemetry.MetricAdapterTier, 1, "count", map[string]string{
+			"boundary": snapshot.Boundary,
+			"tier":     snapshot.Tier,
+			"health":   snapshot.HealthStatus,
+		}, telemetry.Correlation{Tenant: identity.TenantID})
 	}
 	writeJSON(w, adapters)
 }

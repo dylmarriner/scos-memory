@@ -4,6 +4,7 @@ import (
 	"time"
 
 	capabilityregistry "github.com/dylmarriner/scos-memory/packages/capability-registry"
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 )
 
 // Capability registration and selection (GOVERNANCE.md §21.6, §21.7).
@@ -17,6 +18,65 @@ import (
 // routingRegistry holds the platform capability records that route building
 // selects from (§21.6). It is seeded once at process start.
 var routingRegistry = newPlatformRegistry()
+
+// controlMetrics emits this service's §32 measures.
+var controlMetrics = telemetry.FromEnvironment("autonomous-control-plane")
+
+// recordRouteMetrics emits the control-plane measures §32 requires for a
+// completed route decision.
+func recordRouteMetrics(req RouteRequest, decision RouteDecision, planning time.Duration) {
+	corr := telemetry.Correlation{
+		SessionID: req.SessionID,
+		TurnID:    req.TurnID,
+		TaskID:    req.TaskID,
+		AgentID:   req.AgentID,
+		Tenant:    req.TenantID,
+	}
+	controlMetrics.Observe(telemetry.MetricRoutePlanningLatency, planning, nil, corr)
+
+	// Every decision that reaches here entered through the control plane, so
+	// it counts toward ingress coverage.
+	controlMetrics.Count(telemetry.MetricIngressCoverage,
+		map[string]string{"boundary": "control_plane"}, corr)
+
+	// Mandatory-system selection: §21.8 requires journal, scope resolution,
+	// memory retrieval and context optimisation on every interaction. Report
+	// the observed fraction rather than asserting compliance.
+	mandatory := map[string]bool{
+		"journal": false, "autonomous-control-plane": false,
+		"memory-gateway": false, "context-optimisation": false,
+	}
+	for _, step := range decision.SelectedPlan {
+		if _, required := mandatory[step.System]; required {
+			mandatory[step.System] = true
+		}
+	}
+	present := 0
+	for _, ok := range mandatory {
+		if ok {
+			present++
+		}
+	}
+	controlMetrics.Gauge(telemetry.MetricMandatorySystemSelection,
+		float64(present)/float64(len(mandatory)), "ratio", nil, corr)
+
+	if decision.ConfirmationRequired {
+		controlMetrics.Count(telemetry.MetricConfirmationRecall,
+			map[string]string{"risk_class": decision.RiskClass}, corr)
+	}
+	for _, id := range decision.ReservedFallbacks {
+		controlMetrics.Count(telemetry.MetricFallbackUse,
+			map[string]string{"capability": id, "state": "reserved"}, corr)
+	}
+}
+
+// recordBypassAttempt counts an attempt to reach a downstream system without
+// passing through the control plane (§21.4, §32).
+func recordBypassAttempt(reason string, req RouteRequest) {
+	controlMetrics.Count(telemetry.MetricBypassAttempts,
+		map[string]string{"reason": reason},
+		telemetry.Correlation{SessionID: req.SessionID, Tenant: req.TenantID})
+}
 
 // platformCapabilities returns the built-in capability records for the
 // subsystems this control plane coordinates. Each declares the intents it

@@ -17,8 +17,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("code-intelligence")
 
 const version = "0.1.0"
 
@@ -749,7 +754,43 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		Count:      len(results),
 		PlanesUsed: determinePlanes(q.Intent),
 	}
+
+	// §32 code-intelligence measures. Symbol quality is the share of returned
+	// results that resolved to a named symbol rather than a raw chunk; token
+	// count is what the caller would actually spend on this context.
+	corr := telemetry.Correlation{Tenant: tenant}
+	labels := map[string]string{"intent": q.Intent}
+	serviceMetrics.Gauge(telemetry.MetricSymbolQuality, symbolQuality(results), "ratio", labels, corr)
+	serviceMetrics.Gauge(telemetry.MetricContextTokensPerTask,
+		float64(estimateResultTokens(results)), "tokens", labels, corr)
+
 	writeJSON(w, resp)
+}
+
+// symbolQuality reports the share of results that resolved to a named symbol.
+// An empty result set has no quality to report and scores zero rather than a
+// misleading one.
+func symbolQuality(results []CodeQueryResult) float64 {
+	if len(results) == 0 {
+		return 0
+	}
+	named := 0
+	for _, r := range results {
+		if strings.TrimSpace(r.Symbol.FullyQualifiedName) != "" {
+			named++
+		}
+	}
+	return float64(named) / float64(len(results))
+}
+
+// estimateResultTokens approximates the token cost of a result set using the
+// same 4-bytes-per-token heuristic the rest of the platform uses.
+func estimateResultTokens(results []CodeQueryResult) int {
+	bytes := 0
+	for _, r := range results {
+		bytes += len(r.Chunk.Content)
+	}
+	return bytes / 4
 }
 
 // scopedSymbols returns the subset of the index restricted to the requested

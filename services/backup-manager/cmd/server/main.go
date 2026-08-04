@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"io"
 	"log"
 	"net/http"
@@ -26,6 +27,10 @@ import (
 	"sync"
 	"time"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("backup-manager")
 
 const version = "0.1.0"
 
@@ -292,6 +297,12 @@ func (s *backupServer) handleBackups(w http.ResponseWriter, _ *http.Request) {
 	if err != nil {
 		http.Error(w, "backup storage unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
+	}
+	// §32 backup age: report the age of the newest verified backup, which is
+	// what a stale-backup alert must fire on.
+	if age, ok := newestVerifiedBackupAge(backups, time.Now()); ok {
+		serviceMetrics.Gauge(telemetry.MetricBackupAge, age.Seconds(), "s",
+			map[string]string{"provider": s.provider}, telemetry.Correlation{})
 	}
 	writeJSON(w, backups)
 }
@@ -965,4 +976,27 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// newestVerifiedBackupAge returns the age of the most recently verified
+// backup. It reports false when no verified backup exists, so the caller
+// emits nothing rather than a misleading zero age (§42).
+func newestVerifiedBackupAge(backups []*BackupRecord, now time.Time) (time.Duration, bool) {
+	var newest time.Time
+	for _, b := range backups {
+		if b == nil || b.VerifiedAt == "" {
+			continue
+		}
+		verified, err := time.Parse(time.RFC3339, b.VerifiedAt)
+		if err != nil {
+			continue
+		}
+		if verified.After(newest) {
+			newest = verified
+		}
+	}
+	if newest.IsZero() {
+		return 0, false
+	}
+	return now.Sub(newest), true
 }

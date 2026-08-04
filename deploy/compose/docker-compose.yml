@@ -142,6 +142,7 @@ services:
       dockerfile: services/memory-gateway/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_HTTP_ADDR: ${SCOS_HTTP_ADDR:-:8080}
       SCOS_VERSION: ${SCOS_VERSION:-0.1.0-dev}
@@ -170,6 +171,7 @@ services:
       dockerfile: services/autonomous-control-plane/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_CONTROL_HTTP_ADDR: ${SCOS_CONTROL_HTTP_ADDR:-:8081}
       SCOS_CONTROL_PLANE_STATE_PATH: ${SCOS_CONTROL_PLANE_STATE_PATH:-/var/lib/scos/control-plane/state.json}
@@ -224,6 +226,7 @@ services:
       dockerfile: services/retrieval-orchestrator/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_RETRIEVAL_HTTP_ADDR: ${SCOS_RETRIEVAL_HTTP_ADDR:-:8082}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -250,6 +253,7 @@ services:
       dockerfile: services/context-optimisation/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_CONTEXT_HTTP_ADDR: ${SCOS_CONTEXT_HTTP_ADDR:-:8083}
       SCOS_CONTEXT_SOURCE_STORE: ${SCOS_CONTEXT_SOURCE_STORE:-/var/lib/scos/context/sources}
@@ -273,6 +277,7 @@ services:
       dockerfile: services/code-intelligence/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_CODE_INTELLIGENCE_HTTP_ADDR: ${SCOS_CODE_INTELLIGENCE_HTTP_ADDR:-:8084}
       SCOS_CODE_INTELLIGENCE_STORE_PATH: ${SCOS_CODE_INTELLIGENCE_STORE_PATH:-/var/lib/scos/code-intelligence/state.json}
@@ -296,6 +301,7 @@ services:
       dockerfile: services/execution-proxy/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_EXECUTION_PROXY_HTTP_ADDR: ${SCOS_EXECUTION_PROXY_HTTP_ADDR:-:8085}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -326,6 +332,7 @@ services:
       dockerfile: services/extension-manager/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_EXTENSION_MANAGER_HTTP_ADDR: ${SCOS_EXTENSION_MANAGER_HTTP_ADDR:-:8086}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -352,6 +359,7 @@ services:
       dockerfile: services/compatibility-gateway/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR: ${SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR:-:8087}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -404,6 +412,7 @@ services:
       dockerfile: services/memory-intelligence/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR: ${SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR:-:8089}
       SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
@@ -465,6 +474,7 @@ services:
       dockerfile: services/security-gate/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_SECURITY_GATE_HTTP_ADDR: ${SCOS_SECURITY_GATE_HTTP_ADDR:-:8091}
       SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
@@ -550,6 +560,7 @@ services:
       dockerfile: services/recovery-orchestrator/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR: ${SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR:-:8094}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -576,6 +587,7 @@ services:
       dockerfile: services/backup-manager/Dockerfile
     restart: unless-stopped
     environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment]
       SCOS_BACKUP_MANAGER_HTTP_ADDR: ${SCOS_BACKUP_MANAGER_HTTP_ADDR:-:8095}
       SCOS_BACKUP_PROVIDER: ${SCOS_BACKUP_PROVIDER:-disabled}

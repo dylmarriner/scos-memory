@@ -19,9 +19,14 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("security-gate")
 
 const version = "0.1.0"
 
@@ -384,10 +389,20 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 		check.DataClass = ClassPublic
 	}
 	if classRank(check.DataClass) > classRank(authToken.DataClass) {
+		serviceMetrics.Count(telemetry.MetricPermissionDenial,
+			map[string]string{"reason": "data_class_exceeds_token", "action": check.Action},
+			telemetry.Correlation{Tenant: check.Tenant})
 		writeJSON(w, PermissionResult{Allowed: false, Reason: "requested data class exceeds token authorisation"})
 		return
 	}
 	allowed := evaluatePermission(&check)
+	if !allowed {
+		// §32 tracks permission denial; the target is zero unauthorised
+		// retrieval, so every denial must be countable.
+		serviceMetrics.Count(telemetry.MetricPermissionDenial,
+			map[string]string{"reason": "policy_denied", "action": check.Action},
+			telemetry.Correlation{Tenant: check.Tenant})
+	}
 
 	identity := requestIdentity{TenantID: authToken.Tenant, PrincipalID: authToken.Principal}
 	record := &AuditRecord{

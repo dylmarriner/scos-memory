@@ -18,9 +18,14 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("retrieval-orchestrator")
 
 // ── request / response types ─────────────────────────────────────────────
 
@@ -277,6 +282,18 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		TotalTokens:    totalTokens,
 		LatencyMs:      int(time.Since(start).Milliseconds()),
 	}
+
+	// §32 retrieval latency. Staleness is not emitted here: nothing in the
+	// result set carries a freshness timestamp, and a hardcoded zero would be
+	// a fabricated metric (§42). Index freshness is owned and emitted by the
+	// index-maintenance worker, which actually measures it.
+	corr := telemetry.Correlation{
+		SessionID: req.SessionID,
+		AgentID:   req.AgentID,
+		Tenant:    req.TenantID,
+	}
+	serviceMetrics.Observe(telemetry.MetricRetrievalLatency, time.Since(start),
+		map[string]string{"sections": strconv.Itoa(len(sections))}, corr)
 
 	writeJSON(w, resp)
 }

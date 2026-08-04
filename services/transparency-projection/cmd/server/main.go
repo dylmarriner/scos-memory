@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"io"
 	"log"
 	"net/http"
@@ -16,6 +19,10 @@ import (
 	"strings"
 	"time"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("transparency-projection")
 
 type projectionServer struct {
 	upstream  string // primary dependency (memory-intelligence), used for readiness
@@ -158,6 +165,7 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make(map[string]json.RawMessage, len(views))
 	errored := make(map[string]string)
+	projectionStarted := time.Now()
 	for name, view := range views {
 		body, status, err := s.fetch(r, view.base, view.path)
 		if err != nil {
@@ -174,6 +182,15 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "no transparency views were available", "unavailable": errored})
 		return
 	}
+	// §32 projection freshness: how long the snapshot took to assemble, and
+	// what share of views were actually available. A partially-available
+	// snapshot must not read as a complete one.
+	serviceMetrics.Observe(telemetry.MetricProjectionFreshness, time.Since(projectionStarted),
+		map[string]string{
+			"views_available": strconv.Itoa(len(result)),
+			"views_total":     strconv.Itoa(len(views)),
+		}, telemetry.Correlation{})
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"generated":   time.Now().UTC().Format(time.RFC3339Nano),
 		"views":       result,
@@ -186,6 +203,13 @@ func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
+	// §32 event-stream lag: time to first byte from the upstream stream is the
+	// delay a dashboard viewer actually experiences.
+	streamStarted := time.Now()
+	defer func() {
+		serviceMetrics.Observe(telemetry.MetricEventStreamLag, time.Since(streamStarted),
+			map[string]string{"stream": "transparency"}, telemetry.Correlation{})
+	}()
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, s.upstream+"/v1/stream", nil)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})

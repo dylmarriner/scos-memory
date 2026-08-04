@@ -23,10 +23,15 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("extension-manager")
 
 const version = "0.1.0"
 
@@ -648,10 +653,25 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "event, tenant_id and principal_id are required", http.StatusBadRequest)
 		return
 	}
+	dispatchStarted := time.Now()
 	results, err := s.dispatchHooks(r.Context(), req)
+	// §32 hook latency and failure. Latency covers the whole bounded dispatch;
+	// failures are counted per hook so one failing extension is attributable.
+	serviceMetrics.Observe(telemetry.MetricHookLatency, time.Since(dispatchStarted),
+		map[string]string{"event": req.Event}, telemetry.Correlation{})
 	if err != nil {
+		serviceMetrics.Count(telemetry.MetricHookFailure,
+			map[string]string{"event": req.Event, "reason": "dispatch_error"}, telemetry.Correlation{})
 		http.Error(w, "hook dispatch failed: "+err.Error(), http.StatusServiceUnavailable)
 		return
+	}
+	for _, result := range results {
+		if result.Status == "ok" || result.Status == "succeeded" {
+			continue
+		}
+		serviceMetrics.Count(telemetry.MetricHookFailure, map[string]string{
+			"event": req.Event, "extension": result.ExtensionID, "reason": result.Status,
+		}, telemetry.Correlation{})
 	}
 	writeJSON(w, map[string]any{"event": req.Event, "results": results})
 }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -26,6 +27,9 @@ type server struct {
 	dialTimeout time.Duration
 	db          *sql.DB
 	validator   *eventValidator
+	// metrics emits this service's §32 measures. It is nil-safe and a no-op
+	// when no collector is configured.
+	metrics *telemetry.Emitter
 }
 
 type statusResponse struct {
@@ -40,7 +44,9 @@ func main() {
 		version:     getenv("SCOS_VERSION", "0.1.0"),
 		databaseURL: os.Getenv("DATABASE_URL"),
 		dialTimeout: 2 * time.Second,
+		metrics:     telemetry.FromEnvironment("memory-gateway"),
 	}
+	defer s.metrics.Close()
 	if s.databaseURL != "" {
 		if err := database.RequireTLS(s.databaseURL); err != nil {
 			log.Fatal(err)
@@ -188,12 +194,26 @@ func (s server) handleAppendMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON or request too large"})
 		return
 	}
+	// §32 requires journal append latency; measure the durable write itself
+	// rather than the whole request, so transport noise is excluded.
+	started := time.Now()
 	result, err := s.journal().appendMessage(r.Context(), rc, r.PathValue("sessionID"), r.Header.Get("Idempotency-Key"), req)
+	s.metrics.Observe(telemetry.MetricJournalLatency, time.Since(started),
+		map[string]string{"operation": "append_message", "outcome": outcomeLabel(err)},
+		telemetry.Correlation{SessionID: r.PathValue("sessionID"), Tenant: rc.TenantID})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
+}
+
+// outcomeLabel renders a success/failure label for metric dimensions.
+func outcomeLabel(err error) string {
+	if err != nil {
+		return "failure"
+	}
+	return "success"
 }
 
 func (s server) handleAppendChunk(w http.ResponseWriter, r *http.Request) {
@@ -236,8 +256,17 @@ func (s server) handleCompleteTurn(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON or request too large"})
 		return
 	}
-	result, err := s.journal().completeTurn(r.Context(), rc, r.PathValue("turnID"), r.Header.Get("Idempotency-Key"), req)
+	turnID := r.PathValue("turnID")
+	started := time.Now()
+	result, err := s.journal().completeTurn(r.Context(), rc, turnID, r.Header.Get("Idempotency-Key"), req)
+	corr := telemetry.Correlation{TurnID: turnID, Tenant: rc.TenantID}
+	s.metrics.Observe(telemetry.MetricTurnCompletionLatency, time.Since(started),
+		map[string]string{"outcome": outcomeLabel(err)}, corr)
 	if err != nil {
+		// A turn that fails to complete is an interrupted turn: §32 tracks
+		// these separately from latency so partial work stays visible.
+		s.metrics.Count(telemetry.MetricInterruptedTurns,
+			map[string]string{"reason": "completion_failed"}, corr)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

@@ -18,9 +18,14 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("memory-intelligence")
 
 const version = "0.1.0"
 
@@ -479,6 +484,17 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// §32 correction propagation: a new fact that contradicts existing
+		// ones propagates a correction across every contradicted record.
+		serviceMetrics.Count(telemetry.MetricUserModelChanges,
+			map[string]string{"change": "fact_recorded"},
+			telemetry.Correlation{Tenant: identity.TenantID})
+		if len(contradictions) > 0 {
+			serviceMetrics.Gauge(telemetry.MetricCorrectionPropagation,
+				float64(len(contradictions)), "count",
+				map[string]string{"namespace": fact.NamespaceID},
+				telemetry.Correlation{Tenant: identity.TenantID})
+		}
 		writeJSON(w, map[string]any{"fact": fact, "contradictions": contradictions})
 
 	default:
@@ -676,6 +692,14 @@ func (s *engineServer) handleBeliefs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		belief.ID = beliefID
+		// §32 belief revisions: a new belief over existing evidence is a
+		// revision of the user model, so both measures move together.
+		serviceMetrics.Count(telemetry.MetricBeliefRevisions,
+			map[string]string{"evidence_count": strconv.Itoa(len(belief.Evidence))},
+			telemetry.Correlation{Tenant: identity.TenantID})
+		serviceMetrics.Count(telemetry.MetricUserModelChanges,
+			map[string]string{"change": "belief_recorded"},
+			telemetry.Correlation{Tenant: identity.TenantID})
 		writeJSON(w, belief)
 
 	default:

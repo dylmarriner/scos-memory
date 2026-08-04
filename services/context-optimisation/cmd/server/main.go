@@ -17,8 +17,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("context-optimisation")
 
 // ── configuration ────────────────────────────────────────────────────────
 
@@ -385,7 +390,35 @@ func handleInputOptimise(w http.ResponseWriter, r *http.Request) {
 		CompiledText: compiled,
 		Validated:    validated,
 	}
+
+	// §32 context-optimisation measures. Retention values come from the
+	// invariant validator, which is what actually checked them -- they are
+	// not restated assumptions.
+	corr := telemetry.Correlation{}
+	labels := map[string]string{"profile": profile}
+	if capsule.OriginalTokens > 0 {
+		reduction := 1 - float64(capsule.CompiledTokens)/float64(capsule.OriginalTokens)
+		serviceMetrics.Gauge(telemetry.MetricTokenReduction, reduction, "ratio", labels, corr)
+	}
+	// `validated` is the invariant check: non-droppable hints and exact
+	// values survived compression.
+	serviceMetrics.Gauge(telemetry.MetricInstructionRetention,
+		boolAsRatio(validated), "ratio", labels, corr)
+	serviceMetrics.Gauge(telemetry.MetricExactValueRetention,
+		boolAsRatio(capsule.Validation.Valid), "ratio", labels, corr)
+	// Every capsule must carry a restoration handle; report whether it does.
+	serviceMetrics.Gauge(telemetry.MetricRestorationSuccess,
+		boolAsRatio(len(capsule.RestorationHandles) > 0), "ratio", labels, corr)
+
 	writeJSON(w, resp)
+}
+
+// boolAsRatio renders a pass/fail invariant as a 1/0 ratio.
+func boolAsRatio(ok bool) float64 {
+	if ok {
+		return 1
+	}
+	return 0
 }
 
 // ── output optimisation ──────────────────────────────────────────────────

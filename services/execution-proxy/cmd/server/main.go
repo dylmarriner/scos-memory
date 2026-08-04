@@ -22,8 +22,15 @@ import (
 
 	servicestate "github.com/dylmarriner/scos-memory/packages/service-state"
 
+	"strconv"
+
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("execution-proxy")
 
 const version = "0.1.0"
 
@@ -714,6 +721,16 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 	result.RawContentHash = sha256Hex([]byte(stdout + "\x00" + stderr))
 	result.RestorationHandle = result.RawContentHash
+
+	// §32 proxy measures. Bypass rate is counted per execution so the share of
+	// unreduced passthroughs is visible; critical-diagnostic retention reports
+	// whether errors and warnings survived reduction, which is the property
+	// §20 actually requires.
+	proxyCorr := telemetry.Correlation{OperationID: opID, Tenant: req.TenantID, AgentID: req.AgentID}
+	serviceMetrics.Count(telemetry.MetricProxyBypassRate,
+		map[string]string{"mode": plan.Mode, "reduced": strconv.FormatBool(reducesOutput(plan.Mode))}, proxyCorr)
+	serviceMetrics.Gauge(telemetry.MetricDiagnosticRetention,
+		diagnosticRetention(stderr, result), "ratio", map[string]string{"mode": plan.Mode}, proxyCorr)
 	if err := s.persistRaw(result.RestorationHandle, rawArtifact{Stdout: stdout, Stderr: stderr}); err != nil {
 		http.Error(w, "persist raw output: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -1231,4 +1248,19 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("encode response: %v", err)
 	}
+}
+
+// diagnosticRetention reports the share of critical diagnostics that survived
+// output reduction. When the raw stream carried no diagnostics there is
+// nothing to lose and retention is complete by definition.
+func diagnosticRetention(stderr string, result *ExecutionResult) float64 {
+	expected := len(extractErrors(stderr)) + len(extractWarnings(stderr))
+	if expected == 0 {
+		return 1
+	}
+	retained := len(result.Errors) + len(result.Warnings)
+	if retained > expected {
+		retained = expected
+	}
+	return float64(retained) / float64(expected)
 }

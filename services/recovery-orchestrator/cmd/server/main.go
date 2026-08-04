@@ -16,9 +16,16 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"strconv"
+
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// serviceMetrics emits this service's §32 measures. It is nil-safe and a
+// no-op when no collector is configured.
+var serviceMetrics = telemetry.FromEnvironment("recovery-orchestrator")
 
 const version = "0.1.0"
 
@@ -255,7 +262,14 @@ func (s *recoveryServer) handleRecoveryComplete(w http.ResponseWriter, r *http.R
 	}
 	status.Phase = "completed"
 	status.RecoveryEnded = time.Now().UTC().Format(time.RFC3339)
+	interrupted := len(status.InterruptedTurns)
 	s.mu.Unlock()
+	// §32 recoveries: count each completed recovery, labelled by whether it
+	// had interrupted turns to reconcile.
+	serviceMetrics.Count(telemetry.MetricRecoveries, map[string]string{
+		"service":           req.ServiceID,
+		"had_interruptions": strconv.FormatBool(interrupted > 0),
+	}, telemetry.Correlation{})
 	if err := s.persistRecoveryStatus(r.Context(), status, "recovery_completed"); err != nil {
 		http.Error(w, "persist recovery completion: "+err.Error(), http.StatusInternalServerError)
 		return
