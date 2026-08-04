@@ -5,6 +5,7 @@ RUN go mod download
 COPY services/backup-manager ./services/backup-manager
 COPY packages/tlsserve ./packages/tlsserve
 COPY packages/auth ./packages/auth
+COPY packages/telemetry ./packages/telemetry
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./services/backup-manager/cmd/server
 
 FROM alpine:3.21

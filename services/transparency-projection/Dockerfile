@@ -5,6 +5,7 @@ RUN go mod download
 COPY services/transparency-projection ./services/transparency-projection
 COPY packages/tlsserve ./packages/tlsserve
 COPY packages/auth ./packages/auth
+COPY packages/telemetry ./packages/telemetry
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/transparency-projection ./services/transparency-projection/cmd/server
 
 FROM alpine:3.21

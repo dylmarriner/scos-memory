@@ -7,6 +7,7 @@ COPY packages/tlsserve ./packages/tlsserve
 COPY packages/auth ./packages/auth
 COPY packages/database ./packages/database
 COPY packages/service-state ./packages/service-state
+COPY packages/telemetry ./packages/telemetry
 COPY services/readiness ./services/readiness
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/execution-proxy ./services/execution-proxy/cmd/server
 

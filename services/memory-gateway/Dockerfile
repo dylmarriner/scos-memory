@@ -5,6 +5,7 @@ COPY services/memory-gateway ./services/memory-gateway
 COPY packages/tlsserve ./packages/tlsserve
 COPY packages/auth ./packages/auth
 COPY packages/database ./packages/database
+COPY packages/telemetry ./packages/telemetry
 RUN go mod download
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/memory-gateway ./services/memory-gateway/cmd/server
 

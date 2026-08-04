@@ -5,6 +5,7 @@ RUN go mod download
 COPY services/code-intelligence ./services/code-intelligence
 COPY packages/tlsserve ./packages/tlsserve
 COPY packages/auth ./packages/auth
+COPY packages/telemetry ./packages/telemetry
 COPY services/readiness ./services/readiness
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/code-intelligence ./services/code-intelligence/cmd/server
 

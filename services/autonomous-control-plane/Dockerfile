@@ -6,6 +6,8 @@ COPY services/autonomous-control-plane ./services/autonomous-control-plane
 COPY packages/tlsserve ./packages/tlsserve
 COPY packages/auth ./packages/auth
 COPY packages/database ./packages/database
+COPY packages/telemetry ./packages/telemetry
+COPY packages/capability-registry ./packages/capability-registry
 COPY services/readiness ./services/readiness
 RUN CGO_ENABLED=0 go build -o /out/autonomous-control-plane ./services/autonomous-control-plane/cmd/server
 

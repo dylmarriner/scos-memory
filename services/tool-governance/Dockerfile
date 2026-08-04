@@ -6,6 +6,7 @@ COPY services/tool-governance ./services/tool-governance
 COPY packages/tlsserve ./packages/tlsserve
 COPY packages/auth ./packages/auth
 COPY packages/database ./packages/database
+COPY services/readiness ./services/readiness
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./services/tool-governance/cmd/server
 
 FROM alpine:3.21

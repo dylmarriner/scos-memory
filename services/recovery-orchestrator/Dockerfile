@@ -6,6 +6,7 @@ COPY services/recovery-orchestrator ./services/recovery-orchestrator
 COPY packages/tlsserve ./packages/tlsserve
 COPY packages/auth ./packages/auth
 COPY packages/database ./packages/database
+COPY packages/telemetry ./packages/telemetry
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./services/recovery-orchestrator/cmd/server
 
 FROM alpine:3.21
