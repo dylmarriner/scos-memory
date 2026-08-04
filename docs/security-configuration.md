@@ -40,6 +40,30 @@ The Compose deployment validates the issuer secret before creating the service.
 The readiness endpoint verifies both configuration values and store
 availability, without returning the secret or a derived value.
 
+### Securestore secret-reference provider (optional)
+
+`security-gate` supports a `securestore` provider for `SecretReference`
+entries (§27: memory retains only a reference, never the value). A
+`securestore` reference's `ref` field stores the credential's Securestore
+`credentialId`. To enable resolution, set:
+
+- `SCOS_SECURESTORE_URL` — base URL of the Securestore deployment, e.g.
+  `https://securestore:8443`
+- `SCOS_SECURESTORE_AGENT_API_KEY` — the `sss_...` agent API key sent as
+  `Authorization: Bearer <key>` to Securestore
+- `SCOS_SECURESTORE_WORKSPACE_ID` — optional; sent as
+  `X-SecureStore-Workspace-Id` when set
+
+These are optional. If `SCOS_SECURESTORE_URL` is unset, `POST
+/v1/secrets/{id}/resolve` fails closed with `503 securestore provider not
+configured` rather than silently no-oping. When configured, resolution calls
+Securestore's `GET /v1/secrets/:credentialId` on every request — the value is
+never cached or persisted — and fails closed (`502` if Securestore is
+unreachable or returns a non-2xx response, `503` if Securestore reports
+`approval_required`). Every successful resolution is audited with
+`Action: restricted_retrieval`, matching the audit trail security-gate keeps
+for all other restricted reads.
+
 Generate a high-entropy value with a local secret generator, for example:
 
 ```sh

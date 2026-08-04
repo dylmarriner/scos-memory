@@ -480,6 +480,9 @@ services:
       SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
       SCOS_SECURITY_GATE_STORE_PATH: ${SCOS_SECURITY_GATE_STORE_PATH:-/var/lib/scos/security-gate.json}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_SECURESTORE_URL: ${SCOS_SECURESTORE_URL:-}
+      SCOS_SECURESTORE_AGENT_API_KEY: ${SCOS_SECURESTORE_AGENT_API_KEY:-}
+      SCOS_SECURESTORE_WORKSPACE_ID: ${SCOS_SECURESTORE_WORKSPACE_ID:-}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - security-gate-data:/var/lib/scos

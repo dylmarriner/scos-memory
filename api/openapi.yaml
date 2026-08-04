@@ -406,6 +406,50 @@ paths:
       operationId: getAuditLogs
       responses:
         '200': {description: Immutable security audit entries}
+  /v1/secrets:
+    get:
+      operationId: listSecretReferences
+      responses:
+        '200': {description: Secret references for the authenticated tenant (never secret values)}
+    post:
+      operationId: upsertSecretReference
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Secret reference created or updated}
+        '400': {description: Missing fields or unsupported provider}
+  /v1/secrets/{id}:
+    get:
+      operationId: getSecretReference
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Secret reference metadata (never the secret value)}
+        '404': {description: Secret reference not found}
+  /v1/secrets/{id}/resolve:
+    post:
+      operationId: resolveSecretReference
+      description: >-
+        Resolves a securestore-provider SecretReference to its live value via
+        the Securestore platform. Fails closed (502/503) if Securestore is
+        unreachable, returns approval_required, or the integration is not
+        configured. Never caches or persists the resolved value.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Resolved secret value from Securestore}
+        '400': {description: Secret reference provider is not securestore}
+        '404': {description: Secret reference not found}
+        '502': {description: Securestore unreachable or returned an error}
+        '503': {description: Securestore integration not configured, or approval required}
   /v1/capabilities:
     get:
       operationId: listCapabilities

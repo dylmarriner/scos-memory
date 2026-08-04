@@ -4,6 +4,7 @@ import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,8 +13,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -83,10 +86,23 @@ type PermissionResult struct {
 type SecretReference struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
-	Provider  string `json:"provider"` // env, vault, aws-secrets, gcp-sm
+	Provider  string `json:"provider"` // env, vault, aws-secrets, gcp-sm, securestore
 	Ref       string `json:"ref"`
 	Scope     string `json:"scope"`
 	UpdatedAt string `json:"updated_at"`
+}
+
+// validSecretProviders lists the secret-manager backends a SecretReference
+// may point at. "securestore" resolves ref as a Securestore credentialId
+// via the Securestore REST API (see securestoreClient); all others are
+// resolved out-of-band by the caller and are stored here as a reference
+// only, per §27.
+var validSecretProviders = map[string]bool{
+	"env":         true,
+	"vault":       true,
+	"aws-secrets": true,
+	"gcp-sm":      true,
+	"securestore": true,
 }
 
 // ── token / principal ────────────────────────────────────────────────────
@@ -116,10 +132,36 @@ type AuthResult struct {
 type securityServer struct {
 	db           *sql.DB
 	issuerSecret string
+
+	// securestore holds the configuration for resolving SecretReference
+	// values whose Provider is "securestore" against the Securestore
+	// platform's REST API. securestoreURL empty means the integration is
+	// not configured and the resolve endpoint must fail closed.
+	securestoreURL         string
+	securestoreAPIKey      string
+	securestoreWorkspaceID string
+	securestoreHTTPClient  *http.Client
+
+	// auditHook, when set, observes every AuditRecord passed to auditAction
+	// regardless of whether s.db is configured. It exists so tests can
+	// assert an audit record was produced without standing up PostgreSQL,
+	// the same way s.db == nil lets handlers run without it.
+	auditHook func(AuditRecord)
 }
 
 func newSecurityServer() *securityServer {
-	return &securityServer{issuerSecret: os.Getenv("SCOS_SECURITY_ISSUER_SECRET")}
+	httpClient, err := tlsserve.TrustedClient(5 * time.Second)
+	if err != nil {
+		log.Printf("securestore http client: %v; falling back to a plain client", err)
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
+	return &securityServer{
+		issuerSecret:           os.Getenv("SCOS_SECURITY_ISSUER_SECRET"),
+		securestoreURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_SECURESTORE_URL")), "/"),
+		securestoreAPIKey:      os.Getenv("SCOS_SECURESTORE_AGENT_API_KEY"),
+		securestoreWorkspaceID: os.Getenv("SCOS_SECURESTORE_WORKSPACE_ID"),
+		securestoreHTTPClient:  httpClient,
+	}
 }
 
 func (s *securityServer) ready() error {
@@ -459,6 +501,9 @@ func (s *securityServer) insertPermissionAudit(r *http.Request, identity request
 }
 
 func (s *securityServer) auditAction(r *http.Request, identity requestIdentity, record AuditRecord) error {
+	if s.auditHook != nil {
+		s.auditHook(record)
+	}
 	if s.db == nil {
 		return nil
 	} // unit handlers may be exercised without PostgreSQL
@@ -608,6 +653,10 @@ func (s *securityServer) handleSecrets(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "id, name, provider, and ref required", http.StatusBadRequest)
 			return
 		}
+		if !validSecretProviders[ref.Provider] {
+			http.Error(w, "unsupported provider", http.StatusBadRequest)
+			return
+		}
 		identity, status, msg := resolveIdentity(r, "", "")
 		if status != 0 {
 			http.Error(w, msg, status)
@@ -646,12 +695,16 @@ func (s *securityServer) handleSecrets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *securityServer) handleSecretByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/v1/secrets/")
+	if resolveID, ok := strings.CutSuffix(id, "/resolve"); ok {
+		s.handleSecretResolve(w, r, resolveID)
+		return
+	}
 	identity, status, msg := resolveIdentity(r, "", "")
 	if status != 0 {
 		http.Error(w, msg, status)
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/v1/secrets/")
 	ref, err := getSecretReference(r.Context(), s.db, identity, id)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -671,6 +724,149 @@ func (s *securityServer) handleSecretByID(w http.ResponseWriter, r *http.Request
 		"ref": ref.Ref, "scope": ref.Scope,
 		"note": "secret value not exposed via API",
 	})
+}
+
+// handleSecretResolve is the sole path in this service that returns a live
+// secret value. It only serves SecretReferences whose Provider is
+// "securestore": ref.Ref is treated as the Securestore credentialId and the
+// value is fetched on-demand from the Securestore platform's REST API. The
+// value is never cached or persisted — every call makes a fresh upstream
+// request — and any failure (missing configuration, unreachable upstream,
+// non-2xx response, or an approval_required policy result) fails closed
+// with no partial or stale value ever returned.
+func (s *securityServer) handleSecretResolve(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, "", "")
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	if s.securestoreURL == "" {
+		http.Error(w, "securestore provider not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ref, err := getSecretReference(r.Context(), s.db, identity, id)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "unable to read secret reference", http.StatusInternalServerError)
+		return
+	}
+	s.resolveSecretValue(w, r, identity, ref)
+}
+
+// resolveSecretValue performs the securestore-facing part of a resolve
+// request: given an already-looked-up SecretReference, it calls out to
+// Securestore, audits the result, and writes the HTTP response. It is
+// factored out of handleSecretResolve so it can be exercised directly
+// against a securestore stub without a database dependency, matching how
+// other handlers in this file are exercised with s.db == nil.
+func (s *securityServer) resolveSecretValue(w http.ResponseWriter, r *http.Request, identity requestIdentity, ref *SecretReference) {
+	id := ref.ID
+	if ref.Provider != "securestore" {
+		http.Error(w, "secret reference is not resolvable: provider is not securestore", http.StatusBadRequest)
+		return
+	}
+
+	secret, err := s.securestoreClient().getSecret(r.Context(), ref.Ref)
+	if err != nil {
+		log.Printf("securestore resolve failed for ref %s: %v", id, err)
+		if failErr := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "error", Reason: "securestore unreachable"}); failErr != nil {
+			log.Printf("unable to persist audit record for failed resolve of %s: %v", id, failErr)
+		}
+		http.Error(w, "securestore unreachable", http.StatusBadGateway)
+		return
+	}
+	if secret.Status == "approval_required" || secret.Value == "" {
+		if failErr := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "denied", Reason: "securestore requires approval"}); failErr != nil {
+			log.Printf("unable to persist audit record for pending resolve of %s: %v", id, failErr)
+		}
+		http.Error(w, "secret retrieval requires approval", http.StatusServiceUnavailable)
+		return
+	}
+
+	if err := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "allowed", Reason: "secret value resolved via securestore"}); err != nil {
+		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"id":              ref.ID,
+		"provider":        ref.Provider,
+		"credential_type": secret.CredentialType,
+		"auth_scheme":     secret.AuthScheme,
+		"value":           secret.Value,
+		"version":         secret.Version,
+	})
+}
+
+// ── securestore client ───────────────────────────────────────────────────
+
+// securestoreSecret mirrors the response shape of Securestore's
+// GET /v1/secrets/:credentialId.
+type securestoreSecret struct {
+	CredentialID   string         `json:"credentialId"`
+	Provider       string         `json:"provider"`
+	CredentialType string         `json:"credentialType"`
+	AuthScheme     string         `json:"authScheme"`
+	Value          string         `json:"value"`
+	Metadata       map[string]any `json:"metadata"`
+	Version        string         `json:"version"`
+	Status         string         `json:"status"` // e.g. "approval_required"
+}
+
+type securestoreClient struct {
+	baseURL     string
+	apiKey      string
+	workspaceID string
+	httpClient  *http.Client
+}
+
+func (s *securityServer) securestoreClient() *securestoreClient {
+	client := s.securestoreHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	return &securestoreClient{
+		baseURL:     s.securestoreURL,
+		apiKey:      s.securestoreAPIKey,
+		workspaceID: s.securestoreWorkspaceID,
+		httpClient:  client,
+	}
+}
+
+// getSecret fetches credentialId's live value from Securestore's REST API.
+// It never retries and never caches: every call is a fresh round trip so a
+// revoked or rotated credential is reflected immediately.
+func (c *securestoreClient) getSecret(ctx context.Context, credentialID string) (*securestoreSecret, error) {
+	endpoint := c.baseURL + "/v1/secrets/" + url.PathEscape(credentialID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build securestore request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Accept", "application/json")
+	if c.workspaceID != "" {
+		req.Header.Set("X-SecureStore-Workspace-Id", c.workspaceID)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("securestore request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("securestore returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var secret securestoreSecret
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&secret); err != nil {
+		return nil, fmt.Errorf("decode securestore response: %w", err)
+	}
+	return &secret, nil
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
