@@ -217,6 +217,41 @@ func TestGitCommitReadsRepositoryHead(t *testing.T) {
 	}
 }
 
+func TestOKFProposalRequiresValidationAndIndependentReview(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "policy.md")
+	if err := os.WriteFile(path, []byte("# old\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &okfServer{okfRoot: root, proposals: map[string]*OKFProposal{}}
+	p, err := s.createProposal(okfProposalRequest{Path: "policy.md", Content: "# new\n", Proposer: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.reviewProposal(p.ID, "bob"); err == nil {
+		t.Fatal("review before validation must fail")
+	}
+	if _, err := s.validateProposal(p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.reviewProposal(p.ID, "alice"); err == nil {
+		t.Fatal("self-review must fail")
+	}
+	if _, err := s.reviewProposal(p.ID, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if p.Status != "reviewed" || p.Diff == "" {
+		t.Fatalf("proposal was not fully evidenced: %#v", p)
+	}
+}
+
+func TestOKFProposalRejectsPathEscape(t *testing.T) {
+	s := &okfServer{okfRoot: t.TempDir(), proposals: map[string]*OKFProposal{}}
+	if _, err := s.createProposal(okfProposalRequest{Path: "../GOVERNANCE.md", Content: "bad", Proposer: "alice"}); err == nil {
+		t.Fatal("path escape must be rejected")
+	}
+}
+
 func TestSynchronisePersistsProjectionCommit(t *testing.T) {
 	root := t.TempDir()
 	statePath := filepath.Join(t.TempDir(), "projections.json")

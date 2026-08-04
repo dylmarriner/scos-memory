@@ -63,6 +63,7 @@ type okfServer struct {
 	mu          sync.RWMutex
 	documents   map[string]*OKFDocument
 	projections map[string]*IndexProjection // path -> projection
+	proposals   map[string]*OKFProposal
 	okfRoot     string
 	statePath   string
 	db          *pgxpool.Pool
@@ -90,6 +91,7 @@ func newOKFServer() *okfServer {
 	s := &okfServer{
 		documents:   make(map[string]*OKFDocument),
 		projections: make(map[string]*IndexProjection),
+		proposals:   make(map[string]*OKFProposal),
 		okfRoot:     root,
 		statePath:   statePath,
 	}
@@ -123,6 +125,9 @@ func main() {
 		log.Fatalf("connect to database: %v", err)
 	}
 	config.ConnConfig.RuntimeParams["scos.service_id"] = "okf-synchroniser"
+	// OKF is platform-scoped; the service identity is the authenticated
+	// principal for its RLS-gated governance projections.
+	config.ConnConfig.RuntimeParams["scos.principal_id"] = "okf-synchroniser"
 	db, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
@@ -131,6 +136,9 @@ func main() {
 	srv.db = db
 	if err := srv.loadConceptsFromDB(context.Background()); err != nil {
 		log.Fatalf("load okf concepts: %v", err)
+	}
+	if err := srv.loadProposalsFromDB(context.Background()); err != nil {
+		log.Fatalf("load okf proposals: %v", err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -144,6 +152,8 @@ func main() {
 	mux.HandleFunc("/v1/documents/", srv.handleDocumentByID)
 	mux.HandleFunc("/v1/projections", srv.handleProjections)
 	mux.HandleFunc("/v1/divergence", srv.handleDivergence)
+	mux.HandleFunc("/v1/proposals", srv.handleProposals)
+	mux.HandleFunc("/v1/proposals/", srv.handleProposalAction)
 
 	addr := os.Getenv("SCOS_OKF_SYNCHRONISER_HTTP_ADDR")
 	if addr == "" {
@@ -153,6 +163,33 @@ func main() {
 	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (s *okfServer) loadProposalsFromDB(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT id,path,base_commit,base_hash,content,diff,status,proposer,COALESCE(reviewer,''),COALESCE(review_role,''),COALESCE(decision,''),reason,created_at,COALESCE(reviewed_at,'epoch'),COALESCE(merged_commit,''),COALESCE(indexed_at,'epoch'),diverged FROM okf_proposals`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p OKFProposal
+		var created, reviewed, indexed time.Time
+		if err := rows.Scan(&p.ID, &p.Path, &p.BaseCommit, &p.BaseHash, &p.Content, &p.Diff, &p.Status, &p.Proposer, &p.Reviewer, &p.ReviewRole, &p.Decision, &p.Reason, &created, &reviewed, &p.MergedCommit, &indexed, &p.Diverged); err != nil {
+			return err
+		}
+		p.CreatedAt = created.UTC().Format(time.RFC3339)
+		if reviewed.Unix() > 0 {
+			p.ReviewedAt = reviewed.UTC().Format(time.RFC3339)
+		}
+		if indexed.Unix() > 0 {
+			p.IndexedAt = indexed.UTC().Format(time.RFC3339)
+		}
+		s.proposals[p.ID] = &p
+	}
+	return rows.Err()
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {

@@ -161,6 +161,8 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		"routing":              {s.upstreams["autonomous_control_plane"], "/v1/control/decisions"},
 		"recovery":             {s.upstreams["recovery_orchestrator"], "/v1/recovery/status"},
 		"security":             {s.upstreams["security_gate"], "/v1/audit"},
+		"token_flow":           {s.upstreams["observability"], "/v1/metrics?metric=token"},
+		"costs":                {s.upstreams["observability"], "/v1/metrics?metric=cost"},
 		"costs_and_token_flow": {s.upstreams["observability"], "/v1/metrics"},
 	}
 	result := make(map[string]json.RawMessage, len(views))
@@ -216,6 +218,9 @@ func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	copyIdentityHeaders(r, req)
+	if lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID")); lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream stream unavailable"})

@@ -203,6 +203,10 @@ def audit() -> list[str]:
             not path.is_file()
             or path.suffix not in CODE_SUFFIXES
             or ".git" in path.parts
+            or "node_modules" in path.parts
+            or "vendor" in path.parts
+            or "dist" in path.parts
+            or "build" in path.parts
             or "tests" in path.parts
             or "__pycache__" in path.parts
             or relative(path) == "scripts/audit_governance.py"

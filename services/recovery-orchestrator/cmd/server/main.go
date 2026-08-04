@@ -148,7 +148,9 @@ func (s *recoveryServer) handleRecoveryStart(w http.ResponseWriter, r *http.Requ
 	var req struct {
 		ServiceID string `json:"service_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -207,7 +209,9 @@ func (s *recoveryServer) handleChecklistUpdate(w http.ResponseWriter, r *http.Re
 		Status    string `json:"status"`
 		Detail    string `json:"detail,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -244,7 +248,9 @@ func (s *recoveryServer) handleRecoveryComplete(w http.ResponseWriter, r *http.R
 	var req struct {
 		ServiceID string `json:"service_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}

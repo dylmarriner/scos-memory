@@ -146,12 +146,19 @@ func newBackupServer() *backupServer {
 
 func newBackupServerWithDir(dir string) *backupServer {
 	cfg := loadBackupConfig()
-	return &backupServer{
+	s := &backupServer{
 		backups: make(map[string]*BackupRecord), restoreTests: make(map[string]*RestoreTestResult),
 		backupDir: dir, provider: cfg.provider, config: cfg,
 		plan:      backupPlan(cfg),
 		retention: RetentionPolicy{WALAndDaily: 35, Weekly: 12, Monthly: 12, OKFIndefinite: true},
 	}
+	// Restore test results must survive process restarts: the §31 monthly and
+	// quarterly cadence is only meaningful if "when did this last pass" is
+	// durable, not reset every time the service redeploys.
+	if loaded, err := loadRestoreTests(s.restoreTestDir()); err == nil {
+		s.restoreTests = loaded
+	}
+	return s
 }
 
 func loadBackupConfig() backupConfig {
@@ -222,11 +229,17 @@ func main() {
 	mux.HandleFunc("/v1/restore-tests", s.handleRestoreTests)
 	mux.HandleFunc("/v1/restore-tests/start", s.handleRestoreTestStart)
 	mux.HandleFunc("/v1/restore-tests/complete", s.handleRestoreTestComplete)
+	mux.HandleFunc("/v1/restore-tests/cadence", s.handleRestoreCadence)
 	mux.HandleFunc("/v1/plan", s.handlePlan)
 	mux.HandleFunc("/v1/retention", s.handleRetention)
 	addr := os.Getenv("SCOS_BACKUP_MANAGER_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8095"
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED")), "true") {
+		interval := restoreSchedulerInterval()
+		go s.runRestoreCadenceScheduler(context.Background(), interval)
+		log.Printf("restore-test cadence scheduler enabled, checking every %s", interval)
 	}
 	log.Printf("backup manager listening on %s", addr)
 	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
@@ -454,6 +467,45 @@ func (s *backupServer) handleRestoreTests(w http.ResponseWriter, _ *http.Request
 	writeJSON(w, tests)
 }
 
+// executeRestoreTest runs a real restore attempt against backupID and
+// records the outcome. It is shared by the HTTP-triggered start/complete
+// handlers and by the automatic §31 cadence scheduler so both paths produce
+// the same durable, verifiable result -- no code path fabricates a "passed"
+// restore test without actually attempting a restore.
+func (s *backupServer) executeRestoreTest(testType, backupID string) *RestoreTestResult {
+	t := &RestoreTestResult{ID: fmt.Sprintf("restore-test-%d", time.Now().UnixNano()), TestType: testType, BackupID: backupID, Status: "running", StartedAt: time.Now().UTC().Format(time.RFC3339)}
+	if s.production() {
+		if err := s.restoreProduction(backupID); err != nil {
+			t.Status, t.Detail = "failed", err.Error()
+		} else {
+			t.Status, t.Detail = "passed", "backup restored into a temporary PostgreSQL database"
+		}
+	} else if _, err := s.verifyBackup(backupID); err != nil {
+		t.Status = "failed"
+		t.Detail = err.Error()
+	} else {
+		t.Status = "failed"
+		t.Detail = "synthetic local artifact is not a production backup and cannot satisfy a restore drill"
+	}
+	t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+	s.mu.Lock()
+	s.restoreTests[t.ID] = t
+	s.mu.Unlock()
+	s.recordRestoreTest(t)
+	return t
+}
+
+func (s *backupServer) recordRestoreTest(t *RestoreTestResult) {
+	if err := persistRestoreTest(s.restoreTestDir(), t); err != nil {
+		log.Printf("persist restore test %s: %v", t.ID, err)
+	}
+	// §32 restore status: emit pass/fail for every attempted restore drill so
+	// "scheduled restore success" is measurable, not just logged.
+	serviceMetrics.Count(telemetry.MetricRestoreStatus, map[string]string{
+		"test_type": t.TestType, "status": t.Status,
+	}, telemetry.Correlation{})
+}
+
 func (s *backupServer) handleRestoreTestStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -467,25 +519,7 @@ func (s *backupServer) handleRestoreTestStart(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	t := &RestoreTestResult{ID: fmt.Sprintf("restore-test-%d", time.Now().UnixNano()), TestType: req.TestType, BackupID: req.BackupID, Status: "running", StartedAt: time.Now().UTC().Format(time.RFC3339)}
-	if s.production() {
-		if err := s.restoreProduction(req.BackupID); err != nil {
-			t.Status, t.Detail = "failed", err.Error()
-		} else {
-			t.Status, t.Detail = "passed", "backup restored into a temporary PostgreSQL database"
-		}
-	} else if _, err := s.verifyBackup(req.BackupID); err != nil {
-		t.Status = "failed"
-		t.Detail = err.Error()
-	} else {
-		t.Status = "failed"
-		t.Detail = "synthetic local artifact is not a production backup and cannot satisfy a restore drill"
-	}
-	t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-	s.mu.Lock()
-	s.restoreTests[t.ID] = t
-	s.mu.Unlock()
-	writeJSON(w, t)
+	writeJSON(w, s.executeRestoreTest(req.TestType, req.BackupID))
 }
 
 func (s *backupServer) handleRestoreTestComplete(w http.ResponseWriter, r *http.Request) {
@@ -519,7 +553,187 @@ func (s *backupServer) handleRestoreTestComplete(w http.ResponseWriter, r *http.
 		t.Status, t.Detail = "failed", "synthetic local artifact is not a production backup and cannot satisfy a restore drill"
 	}
 	t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+	s.recordRestoreTest(t)
 	writeJSON(w, t)
+}
+
+// ── §31 restore-test cadence ──────────────────────────────────────────────
+//
+// GOVERNANCE.md §31 requires backups to be exercised by "automated integrity
+// tests, monthly database restore tests and quarterly full recovery
+// drills". A gate flag that only says whether the *capability* exists is not
+// evidence any of those actually ran on schedule -- this tracks real pass
+// timestamps (persisted, so they survive restarts) and reports whether each
+// cadence is currently satisfied.
+const (
+	restoreTestTypeIntegrity = "automated_integrity"
+	restoreTestTypeMonthly   = "monthly_restore"
+	restoreTestTypeQuarterly = "quarterly_full_recovery"
+	integrityCadenceInterval = 24 * time.Hour
+	monthlyCadenceInterval   = 31 * 24 * time.Hour
+	quarterlyCadenceInterval = 93 * 24 * time.Hour
+)
+
+type CadenceStatus struct {
+	TestType      string `json:"test_type"`
+	IntervalHours int    `json:"interval_hours"`
+	LastPassedAt  string `json:"last_passed_at,omitempty"`
+	NextDueAt     string `json:"next_due_at,omitempty"`
+	Overdue       bool   `json:"overdue"`
+}
+
+// restoreCadenceStatus computes, from the full set of recorded restore
+// tests, whether each required cadence currently has a passing result
+// within its interval.
+func restoreCadenceStatus(tests map[string]*RestoreTestResult, now time.Time) []CadenceStatus {
+	cadences := []struct {
+		testType string
+		interval time.Duration
+	}{
+		{restoreTestTypeIntegrity, integrityCadenceInterval},
+		{restoreTestTypeMonthly, monthlyCadenceInterval},
+		{restoreTestTypeQuarterly, quarterlyCadenceInterval},
+	}
+	result := make([]CadenceStatus, 0, len(cadences))
+	for _, c := range cadences {
+		status := CadenceStatus{TestType: c.testType, IntervalHours: int(c.interval.Hours()), Overdue: true}
+		var lastPassed time.Time
+		for _, t := range tests {
+			if t == nil || t.TestType != c.testType || t.Status != "passed" {
+				continue
+			}
+			completed, err := time.Parse(time.RFC3339, t.CompletedAt)
+			if err != nil {
+				continue
+			}
+			if completed.After(lastPassed) {
+				lastPassed = completed
+			}
+		}
+		if !lastPassed.IsZero() {
+			status.LastPassedAt = lastPassed.Format(time.RFC3339)
+			nextDue := lastPassed.Add(c.interval)
+			status.NextDueAt = nextDue.Format(time.RFC3339)
+			status.Overdue = now.After(nextDue)
+		}
+		result = append(result, status)
+	}
+	return result
+}
+
+func (s *backupServer) handleRestoreCadence(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	tests := make(map[string]*RestoreTestResult, len(s.restoreTests))
+	for id, t := range s.restoreTests {
+		tests[id] = t
+	}
+	s.mu.RUnlock()
+	writeJSON(w, restoreCadenceStatus(tests, time.Now().UTC()))
+}
+
+func (s *backupServer) restoreTestDir() string {
+	return filepath.Join(s.backupDir, "restore-tests")
+}
+
+func persistRestoreTest(dir string, t *RestoreTestResult) error {
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return err
+	}
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(dir, t.ID+".json"), data, 0600)
+}
+
+func loadRestoreTests(dir string) (map[string]*RestoreTestResult, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	tests := make(map[string]*RestoreTestResult)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var t RestoreTestResult
+		if err := json.Unmarshal(data, &t); err != nil {
+			continue
+		}
+		tests[t.ID] = &t
+	}
+	return tests, nil
+}
+
+func restoreSchedulerInterval() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_SCHEDULER_INTERVAL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return time.Hour
+}
+
+// runRestoreCadenceScheduler is the real periodic driver behind the §31
+// cadence: on each tick it checks which required drills are overdue and, if
+// a verifiable backup exists to restore, actually runs them. It exits when
+// ctx is cancelled.
+func (s *backupServer) runRestoreCadenceScheduler(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.runDueRestoreTests()
+		}
+	}
+}
+
+func (s *backupServer) runDueRestoreTests() {
+	s.mu.RLock()
+	tests := make(map[string]*RestoreTestResult, len(s.restoreTests))
+	for id, t := range s.restoreTests {
+		tests[id] = t
+	}
+	s.mu.RUnlock()
+	due := restoreCadenceStatus(tests, time.Now().UTC())
+	backupID, err := s.latestBackupID()
+	if err != nil {
+		log.Printf("restore-test scheduler: no backup available to test: %v", err)
+		return
+	}
+	for _, c := range due {
+		if !c.Overdue {
+			continue
+		}
+		result := s.executeRestoreTest(c.TestType, backupID)
+		log.Printf("restore-test scheduler: ran overdue %s -> %s", c.TestType, result.Status)
+	}
+}
+
+func (s *backupServer) latestBackupID() (string, error) {
+	var backups []*BackupRecord
+	var err error
+	if s.production() {
+		backups, err = s.readProductionBackups()
+	} else {
+		backups, err = s.readBackups()
+	}
+	if err != nil {
+		return "", err
+	}
+	if len(backups) == 0 {
+		return "", fmt.Errorf("no backups recorded")
+	}
+	// readBackups/readProductionBackups sort ascending by ID; IDs are
+	// nanosecond timestamps, so the last entry is the newest.
+	return backups[len(backups)-1].ID, nil
 }
 
 func (s *backupServer) handlePlan(w http.ResponseWriter, _ *http.Request) {

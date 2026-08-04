@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -384,6 +385,49 @@ func TestAgentSuccessIsReturnedOnlyAfterAuthoritativeCommit(t *testing.T) {
 	status, lifecycle := plane.executeRoute(context.Background(), req, decision)
 	if !committer.committed || status != "completed" || lifecycle.Checkpoint.Status != "completed" {
 		t.Fatalf("success returned before commit: committed=%t status=%s lifecycle=%+v", committer.committed, status, lifecycle)
+	}
+}
+
+func TestDispatchHookIsNoopWhenExtensionManagerIsUnconfigured(t *testing.T) {
+	t.Setenv("SCOS_EXTENSION_MANAGER_URL", "")
+	plane := &controlPlane{}
+	if err := plane.dispatchHook(context.Background(), "on_checkpoint", map[string]any{"id": "checkpoint"}, RouteRequest{}); err != nil {
+		t.Fatalf("unconfigured hook dispatch should be a no-op: %v", err)
+	}
+}
+
+func TestAgentLifecycleDispatchesGovernedHookStages(t *testing.T) {
+	var events []string
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Event string `json:"event"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode hook request: %v", err)
+		}
+		events = append(events, payload.Event)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hookServer.Close()
+	t.Setenv("SCOS_EXTENSION_MANAGER_URL", hookServer.URL)
+
+	store, err := newLocalStateStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}}
+	req := RouteRequest{TenantID: "tenant", ActorID: "actor", AgentID: "agent", InteractionID: "hook-lifecycle", Input: "hello"}
+	decision := RouteDecision{DecisionID: "decision", InteractionID: req.InteractionID, SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}, {Order: 2, System: "turn-coordinator", Action: "complete", Required: true}}}
+	if err := store.saveRoute(req.TenantID, req.ActorID, decision); err != nil {
+		t.Fatal(err)
+	}
+	status, _ := plane.executeRoute(context.Background(), req, decision)
+	if status != "completed" {
+		t.Fatalf("lifecycle status = %s, events = %v", status, events)
+	}
+	want := []string{"pre_turn", "on_turn_start", "on_before_model", "on_after_model", "on_checkpoint", "post_turn"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("hook events = %v, want %v", events, want)
 	}
 }
 

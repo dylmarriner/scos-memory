@@ -185,3 +185,26 @@ func TestSnapshotToleratesPartialUpstreamUnavailability(t *testing.T) {
 		t.Fatal("expected the working memory-intelligence views to still be present")
 	}
 }
+
+func TestEventsResumesFromLastEventID(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Last-Event-ID"); got != "41" {
+			t.Errorf("Last-Event-ID = %q, want 41", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("id: 42\nevent: memory.updated\ndata: {\"sequence\":42}\n\n"))
+	}))
+	defer upstream.Close()
+
+	s := &projectionServer{upstream: upstream.URL, client: upstream.Client()}
+	req := httptest.NewRequest(http.MethodGet, "/v1/transparency/stream", nil)
+	req.Header.Set("Last-Event-ID", "41")
+	res := httptest.NewRecorder()
+	s.events(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "id: 42") {
+		t.Fatalf("expected resumed event in response: %s", res.Body.String())
+	}
+}

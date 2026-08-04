@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -437,7 +436,9 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			Config   map[string]any `json:"config,omitempty"`
 			AgentIDs []string       `json:"agent_ids,omitempty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&update); err != nil {
 			http.Error(w, "invalid update: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -554,7 +555,9 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var skill Skill
-		if err := json.NewDecoder(r.Body).Decode(&skill); err != nil {
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512<<10))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&skill); err != nil {
 			http.Error(w, "invalid skill: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -662,7 +665,9 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req hookDispatchRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid hook dispatch: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -700,6 +705,9 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 	results := make([]hookDispatchResult, 0, len(hooks))
 	for _, hook := range hooks {
 		if hook.Endpoint == "" {
+			if hook.FallbackPolicy == "fail_closed" {
+				return nil, fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID)
+			}
 			results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "skipped", Reason: "hook endpoint is not declared"})
 			continue
 		}
@@ -775,7 +783,9 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var manifest ExtensionManifest
-	if err := json.NewDecoder(r.Body).Decode(&manifest); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&manifest); err != nil {
 		http.Error(w, "invalid manifest: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -872,7 +882,9 @@ func (s *extServer) handleInstallDryRun(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var manifest ExtensionManifest
-	if err := json.NewDecoder(r.Body).Decode(&manifest); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&manifest); err != nil {
 		http.Error(w, "invalid manifest: "+err.Error(), http.StatusBadRequest)
 		return
 	}

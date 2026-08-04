@@ -635,6 +635,17 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		StartedAt:  now,
 	}
 
+	// Build the next generation off to the side and drop the previous
+	// generation's symbols/chunks for this repository before publishing the new
+	// one. A committed generation must be a complete snapshot for that repo,
+	// never an accumulation of stale rows from older generations (§19.3–§19.4).
+	for symbolID, sym := range candidate.symbols {
+		if sym != nil && sym.RepoID == req.RepoID {
+			delete(candidate.symbols, symbolID)
+			delete(candidate.chunks, symbolID)
+		}
+	}
+
 	// Index each file
 	for _, file := range req.Files {
 		lang := detectLanguage(file)
@@ -642,6 +653,9 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		tier := 0
 		if adapter != nil {
 			tier = adapter.Tier
+		}
+		if lang == "configuration" {
+			tier = 1
 		}
 
 		// Extract symbols based on tier
@@ -652,10 +666,11 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 			// Create chunk for this symbol
 			candidate.chunks[sym.ID] = &Chunk{
-				SymbolID: sym.ID,
-				Content:  sym.Signature,
-				Path:     sym.Path,
-				Range:    sym.Range,
+				SymbolID:    sym.ID,
+				Content:     sym.Signature,
+				Path:        sym.Path,
+				Range:       sym.Range,
+				ContentHash: sym.ContentHash,
 			}
 		}
 	}
@@ -1390,17 +1405,23 @@ func extractSymbols(path string, language string, tier int, repoID string) []Sym
 	dir := filepath.Dir(path)
 	var symbols []Symbol
 
+	kind := "file"
+	if language == "configuration" {
+		kind = "configuration"
+	}
+
 	// Tier 0: file-level indexing
 	contentHash := symbolScope(repoID, path)
 	symbols = append(symbols, Symbol{
 		ID:                 contentHash[:16],
 		RepoID:             repoID,
 		FullyQualifiedName: path,
-		Kind:               "file",
+		Kind:               kind,
 		Path:               path,
 		Range:              "1-",
 		Language:           language,
 		ContentHash:        contentHash,
+		Signature:          path,
 	})
 
 	if tier < 1 {
@@ -1415,6 +1436,8 @@ func extractSymbols(path string, language string, tier int, repoID string) []Sym
 		symbols = append(symbols, extractPythonSymbols(base, dir, path, repoID)...)
 	case "typescript", "javascript":
 		symbols = append(symbols, extractTSJSSymbols(base, dir, path, language, repoID)...)
+	case "configuration":
+		symbols = append(symbols, extractConfigurationSymbols(base, path, repoID)...)
 	}
 
 	return symbols
@@ -1476,6 +1499,21 @@ func extractTSJSSymbols(base, dir, path, language, repoID string) []Symbol {
 		ContentHash:        modID,
 	})
 	return symbols
+}
+
+func extractConfigurationSymbols(base, path, repoID string) []Symbol {
+	configID := symbolScope(repoID, "config:"+path)
+	return []Symbol{{
+		ID:                 "cfg:" + configID[:12],
+		RepoID:             repoID,
+		FullyQualifiedName: base,
+		Kind:               "configuration",
+		Path:               path,
+		Range:              "1-",
+		Language:           "configuration",
+		ContentHash:        configID,
+		Signature:          path,
+	}}
 }
 
 // ── language detection ───────────────────────────────────────────────────

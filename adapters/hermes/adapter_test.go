@@ -2,12 +2,21 @@ package hermesadapter
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
 func TestHermesBridge(t *testing.T) {
-	bridge := &HermesBridge{EndpointURL: "http://127.0.0.1:8080"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions/sess-hermes-1/messages" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+	bridge := &HermesBridge{EndpointURL: server.URL, TenantID: "tenant", PrincipalID: "principal"}
 	payload := &MemoryPayload{
 		SessionID: "sess-hermes-1",
 		Key:       "user_fact",

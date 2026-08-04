@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestNewAgentRegistry(t *testing.T) {
@@ -28,10 +29,45 @@ func TestAgentRegisterRequiresGovernanceFields(t *testing.T) {
 	}
 	complete := AgentRegistration{
 		Name: "coder-agent", Version: "1.0", Maintainer: "scos-team",
+		Capabilities:  []string{"code-generation"},
+		Inputs:        []string{"repository-context"},
+		Outputs:       []string{"patch"},
 		ModelProvider: "anthropic", CostPolicy: "standard", HealthEndpoint: "http://coder-agent/health/live",
 	}
 	if err := validateAgentRegistration(complete); err != nil {
 		t.Fatalf("expected complete registration to validate, got %v", err)
+	}
+}
+
+// TestAgentRegisterRequiresCapabilitiesInputsOutputs guards GOVERNANCE.md
+// §29: "Every agent SHALL register identity, version, maintainer,
+// capabilities, inputs, outputs, ...". Omitting any of the three must fail
+// validation the same way an omitted maintainer does.
+func TestAgentRegisterRequiresCapabilitiesInputsOutputs(t *testing.T) {
+	base := AgentRegistration{
+		Name: "coder-agent", Version: "1.0", Maintainer: "scos-team",
+		Capabilities:  []string{"code-generation"},
+		Inputs:        []string{"repository-context"},
+		Outputs:       []string{"patch"},
+		ModelProvider: "anthropic", CostPolicy: "standard", HealthEndpoint: "http://coder-agent/health/live",
+	}
+
+	missingCapabilities := base
+	missingCapabilities.Capabilities = nil
+	if err := validateAgentRegistration(missingCapabilities); err == nil {
+		t.Fatal("expected validation error for missing capabilities")
+	}
+
+	missingInputs := base
+	missingInputs.Inputs = nil
+	if err := validateAgentRegistration(missingInputs); err == nil {
+		t.Fatal("expected validation error for missing inputs")
+	}
+
+	missingOutputs := base
+	missingOutputs.Outputs = nil
+	if err := validateAgentRegistration(missingOutputs); err == nil {
+		t.Fatal("expected validation error for missing outputs")
 	}
 }
 
@@ -117,6 +153,37 @@ func TestResolveIdentityFromHeaders(t *testing.T) {
 	}
 	if identity.TenantID != "tenant-1" || identity.PrincipalID != "principal-1" {
 		t.Fatalf("unexpected identity: %+v", identity)
+	}
+}
+
+// TestAgentEffectiveStatusReflectsRealStaleness proves the reported status
+// changes when the underlying real state (elapsed time since last
+// heartbeat) changes, rather than echoing back a persisted "active" value
+// forever (ss42 prohibits unconditional/fabricated health claims -- this
+// mirrors the fix applied to compatibility-gateway's adapter HealthStatus).
+func TestAgentEffectiveStatusReflectsRealStaleness(t *testing.T) {
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	fresh := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	if got := agentEffectiveStatus("active", fresh, now); got != "active" {
+		t.Fatalf("expected recently-seen agent to remain active, got %q", got)
+	}
+
+	stale := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	if got := agentEffectiveStatus("active", stale, now); got != "inactive" {
+		t.Fatalf("expected agent silent for 48h to be reported inactive, got %q", got)
+	}
+
+	// A non-"active" persisted status (e.g. operator-set "degraded") must
+	// pass through untouched regardless of staleness.
+	if got := agentEffectiveStatus("degraded", stale, now); got != "degraded" {
+		t.Fatalf("expected explicit non-active status to pass through, got %q", got)
+	}
+
+	// An unparseable last_seen_at fails open to the stored value rather than
+	// fabricating a claim in either direction.
+	if got := agentEffectiveStatus("active", "not-a-timestamp", now); got != "active" {
+		t.Fatalf("expected unparseable last_seen to fail open to stored status, got %q", got)
 	}
 }
 

@@ -199,6 +199,13 @@ func TestRRFFloat64(t *testing.T) {
 	}
 }
 
+func TestEstimateSectionsTokens(t *testing.T) {
+	got := estimateSectionsTokens([]ContextSection{{Items: []RetrievalResult{{Content: strings.Repeat("x", 40)}}}})
+	if got != 10 {
+		t.Fatalf("expected 10 tokens, got %d", got)
+	}
+}
+
 func TestMinInt(t *testing.T) {
 	if min(5, 10) != 5 {
 		t.Fatal("min should return smaller value")

@@ -62,11 +62,14 @@ type AuditRecord struct {
 // ── permission check ────────────────────────────────────────────────────
 
 type PermissionCheck struct {
-	Principal string    `json:"principal"`
-	Action    string    `json:"action"`
-	Resource  string    `json:"resource"`
-	DataClass DataClass `json:"data_class"`
-	Tenant    string    `json:"tenant"`
+	Principal          string    `json:"principal"`
+	Action             string    `json:"action"`
+	Resource           string    `json:"resource"`
+	DataClass          DataClass `json:"data_class"`
+	Tenant             string    `json:"tenant"`
+	DelegatedAuthority string    `json:"delegated_authority,omitempty"`
+	ExpiresAt          string    `json:"expires_at,omitempty"`
+	TraceID            string    `json:"trace_id,omitempty"`
 }
 
 type PermissionResult struct {
@@ -236,6 +239,10 @@ func (s *securityServer) handleAuthIssue(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unable to persist token", http.StatusInternalServerError)
 		return
 	}
+	if err := s.auditAction(r, identity, AuditRecord{Action: "permission", Principal: req.Principal, AgentID: req.AgentID, Tenant: req.Tenant, SessionID: req.SessionID, Resource: tokenPublicPart(tokenID), Result: "allowed", Reason: "authentication token issued"}); err != nil {
+		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, map[string]any{
 		"token":      tokenID,
@@ -350,8 +357,18 @@ func (s *securityServer) handleAuthRevoke(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	tok, ok, lookupErr := lookupToken(r.Context(), s.db, tokenPublicPart(req.Token))
+	if lookupErr != nil || !ok {
+		http.Error(w, "token not found", http.StatusUnauthorized)
+		return
+	}
 	if _, err := revokeToken(r.Context(), s.db, tokenPublicPart(req.Token)); err != nil {
 		http.Error(w, "unable to revoke token", http.StatusInternalServerError)
+		return
+	}
+	identity := requestIdentity{TenantID: tok.Tenant, PrincipalID: tok.Principal}
+	if err := s.auditAction(r, identity, AuditRecord{Action: "permission", Principal: tok.Principal, AgentID: tok.AgentID, Tenant: tok.Tenant, SessionID: tok.SessionID, Resource: tokenPublicPart(req.Token), Result: "allowed", Reason: "authentication token revoked"}); err != nil {
+		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"revoked": true})
@@ -385,6 +402,12 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 	}
 	check.Principal = authToken.Principal
 	check.Tenant = authToken.Tenant
+	if check.TraceID == "" {
+		check.TraceID = r.Header.Get("X-SCOS-Trace-ID")
+	}
+	if check.TraceID == "" {
+		check.TraceID = "security:" + check.Action
+	}
 	if check.DataClass == "" {
 		check.DataClass = ClassPublic
 	}
@@ -392,7 +415,13 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 		serviceMetrics.Count(telemetry.MetricPermissionDenial,
 			map[string]string{"reason": "data_class_exceeds_token", "action": check.Action},
 			telemetry.Correlation{Tenant: check.Tenant})
-		writeJSON(w, PermissionResult{Allowed: false, Reason: "requested data class exceeds token authorisation"})
+		identity := requestIdentity{TenantID: authToken.Tenant, PrincipalID: authToken.Principal}
+		auditID, err := s.insertPermissionAudit(r, identity, check, authToken, false, "requested data class exceeds token authorisation")
+		if err != nil {
+			http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, PermissionResult{Allowed: false, Reason: "requested data class exceeds token authorisation", AuditID: auditID})
 		return
 	}
 	allowed := evaluatePermission(&check)
@@ -409,6 +438,7 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 		Action: check.Action, Principal: check.Principal,
 		Resource: check.Resource, DataClass: check.DataClass,
 		Tenant: check.Tenant, Result: map[bool]string{true: "allowed", false: "denied"}[allowed],
+		TraceID: check.TraceID, AgentID: authToken.AgentID, SessionID: authToken.SessionID,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
 	auditID, err := insertAuditEntry(r.Context(), s.db, identity, record)
@@ -422,6 +452,18 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 		Reason:  map[bool]string{true: "permitted by policy", false: "data class exceeds authorisation"}[allowed],
 		AuditID: auditID,
 	})
+}
+
+func (s *securityServer) insertPermissionAudit(r *http.Request, identity requestIdentity, check PermissionCheck, token *AuthToken, allowed bool, reason string) (string, error) {
+	return insertAuditEntry(r.Context(), s.db, identity, &AuditRecord{Action: check.Action, Principal: check.Principal, Resource: check.Resource, DataClass: check.DataClass, Tenant: check.Tenant, Result: map[bool]string{true: "allowed", false: "denied"}[allowed], Reason: reason, TraceID: check.TraceID, AgentID: token.AgentID, SessionID: token.SessionID, Timestamp: time.Now().UTC().Format(time.RFC3339)})
+}
+
+func (s *securityServer) auditAction(r *http.Request, identity requestIdentity, record AuditRecord) error {
+	if s.db == nil {
+		return nil
+	} // unit handlers may be exercised without PostgreSQL
+	_, err := insertAuditEntry(r.Context(), s.db, identity, &record)
+	return err
 }
 
 func evaluatePermission(check *PermissionCheck) bool {
@@ -460,8 +502,18 @@ func (s *securityServer) handleClassifyData(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	token, ok := s.authenticatedToken(r)
+	if !ok {
+		http.Error(w, "valid bearer token required", http.StatusUnauthorized)
+		return
+	}
 
 	classified := classifyContent(req.Content)
+	identity := requestIdentity{TenantID: token.Tenant, PrincipalID: token.Principal}
+	if err := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: token.Principal, AgentID: token.AgentID, Tenant: token.Tenant, SessionID: token.SessionID, Resource: "content-classification", DataClass: classified, Result: "allowed", Reason: "automated classification"}); err != nil {
+		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"data_class": classified,
 		"reason":     "automated classification",
@@ -565,6 +617,10 @@ func (s *securityServer) handleSecrets(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unable to persist secret reference", http.StatusInternalServerError)
 			return
 		}
+		if err := s.auditAction(r, identity, AuditRecord{Action: "policy_change", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: ref.ID, Result: "allowed", Reason: "secret reference created or updated"}); err != nil {
+			http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, ref)
 		return
 	}
@@ -580,6 +636,10 @@ func (s *securityServer) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	refs, err := listSecretReferences(r.Context(), s.db, identity)
 	if err != nil {
 		http.Error(w, "unable to list secret references", http.StatusInternalServerError)
+		return
+	}
+	if err := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: "secret-references", Result: "allowed", Reason: "secret references listed"}); err != nil {
+		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, refs)
@@ -602,6 +662,10 @@ func (s *securityServer) handleSecretByID(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// Never return the actual secret value
+	if err := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "allowed", Reason: "secret reference retrieved"}); err != nil {
+		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"id": ref.ID, "name": ref.Name, "provider": ref.Provider,
 		"ref": ref.Ref, "scope": ref.Scope,

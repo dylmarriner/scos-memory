@@ -314,6 +314,77 @@ func TestEmptyBackupsList(t *testing.T) {
 	}
 }
 
+func TestRestoreCadenceStatusReportsOverdueWithNoHistory(t *testing.T) {
+	statuses := restoreCadenceStatus(map[string]*RestoreTestResult{}, time.Now().UTC())
+	if len(statuses) != 3 {
+		t.Fatalf("expected 3 cadence entries, got %d", len(statuses))
+	}
+	for _, c := range statuses {
+		if !c.Overdue {
+			t.Fatalf("cadence %s with no history must be overdue", c.TestType)
+		}
+		if c.LastPassedAt != "" {
+			t.Fatalf("cadence %s with no history must have no last_passed_at", c.TestType)
+		}
+	}
+}
+
+func TestRestoreCadenceStatusHonoursRecentPass(t *testing.T) {
+	now := time.Now().UTC()
+	tests := map[string]*RestoreTestResult{
+		"t1": {ID: "t1", TestType: restoreTestTypeMonthly, Status: "passed", CompletedAt: now.Add(-2 * 24 * time.Hour).Format(time.RFC3339)},
+		"t2": {ID: "t2", TestType: restoreTestTypeQuarterly, Status: "passed", CompletedAt: now.Add(-120 * 24 * time.Hour).Format(time.RFC3339)},
+	}
+	statuses := restoreCadenceStatus(tests, now)
+	byType := make(map[string]CadenceStatus, len(statuses))
+	for _, c := range statuses {
+		byType[c.TestType] = c
+	}
+	if byType[restoreTestTypeMonthly].Overdue {
+		t.Fatal("monthly restore test passed 2 days ago must not be overdue")
+	}
+	if !byType[restoreTestTypeQuarterly].Overdue {
+		t.Fatal("quarterly drill passed 120 days ago must be overdue (interval is 93 days)")
+	}
+	if byType[restoreTestTypeIntegrity].LastPassedAt != "" {
+		t.Fatal("integrity cadence has no recorded pass and must report none")
+	}
+}
+
+func TestRestoreTestPersistsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	s := newBackupServerWithDir(dir)
+	artifact := backupArtifact{Manifest: backupManifest{ID: "backup-1", Type: "base_backup", Format: "scos-local-v1", ContentHash: hashString("data"), SizeBytes: 4}, Payload: "data"}
+	data, _ := json.Marshal(artifact)
+	if err := os.WriteFile(filepath.Join(dir, "backup-1.backup.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	result := s.executeRestoreTest(restoreTestTypeMonthly, "backup-1")
+	if result.Status != "failed" {
+		// Local synthetic artifacts never satisfy a restore drill by design;
+		// the point here is that the *result* is durable, not its verdict.
+		t.Fatalf("unexpected status: %s", result.Status)
+	}
+
+	reopened := newBackupServerWithDir(dir)
+	reopened.mu.RLock()
+	_, ok := reopened.restoreTests[result.ID]
+	reopened.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected restore test result to survive server restart")
+	}
+}
+
+func TestRestoreSchedulerIntervalDefaultsAndParses(t *testing.T) {
+	if got := restoreSchedulerInterval(); got != time.Hour {
+		t.Fatalf("expected default 1h interval, got %s", got)
+	}
+	t.Setenv("SCOS_BACKUP_RESTORE_SCHEDULER_INTERVAL", "15m")
+	if got := restoreSchedulerInterval(); got != 15*time.Minute {
+		t.Fatalf("expected 15m interval, got %s", got)
+	}
+}
+
 func TestEmptyRestoreTestsList(t *testing.T) {
 	s := newBackupServer()
 	s.mu.RLock()

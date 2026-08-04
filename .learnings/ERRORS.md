@@ -46,3 +46,19 @@ Direct unittest module selection cannot address the hyphenated `tests/failure-in
 Used `python3 -m unittest discover -s tests/failure-injection -p 'test_*.py' -v`.
 
 ---
+
+## [ERR-20260804-001] unused-io-import-after-hook-decoder-hardening
+
+**Logged**: 2026-08-04
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Extension-manager tests initially failed to compile after replacing the hook dispatch decoder.
+
+### Error
+`services/extension-manager/cmd/server/main.go:15:2: "io" imported and not used`
+
+### Resolution
+Removed the obsolete `io` import after switching to `http.MaxBytesReader`.

@@ -367,6 +367,24 @@ func (c *controlPlane) callService(ctx context.Context, system, path string, pay
 	return responseBody, nil
 }
 
+func (c *controlPlane) dispatchHook(ctx context.Context, event string, payload map[string]any, req RouteRequest) error {
+	if strings.TrimSpace(os.Getenv("SCOS_EXTENSION_MANAGER_URL")) == "" {
+		return nil
+	}
+	_, err := c.callService(ctx, "extension-manager", "/v1/hooks/dispatch", map[string]any{
+		"event":   event,
+		"payload": payload,
+	}, req)
+	return err
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decision RouteDecision) (string, lifecycleResponse) {
 	status := "completed"
 	lifecycle := lifecycleResponse{
@@ -379,12 +397,11 @@ func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decis
 	}
 	var memory, code []byte
 	var reply agentReply
-	if strings.TrimSpace(os.Getenv("SCOS_EXTENSION_MANAGER_URL")) != "" {
-		if _, err := c.callService(ctx, "extension-manager", "/v1/hooks/dispatch", map[string]any{
-			"event": "pre_turn", "payload": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
-		}, req); err != nil {
-			return "degraded", lifecycle
-		}
+	if err := c.dispatchHook(ctx, "pre_turn", map[string]any{"interaction_id": req.InteractionID, "input": req.Input}, req); err != nil {
+		return "degraded", lifecycle
+	}
+	if err := c.dispatchHook(ctx, "on_turn_start", map[string]any{"interaction_id": req.InteractionID}, req); err != nil {
+		return "degraded", lifecycle
 	}
 	for _, step := range decision.SelectedPlan {
 		stage := stageState{Order: step.Order, System: step.System, Action: step.Action, Required: step.Required, Status: "running", StartedAt: time.Now().UTC()}
@@ -398,62 +415,89 @@ func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decis
 			})
 		}
 		var err error
-		switch step.System {
-		case "journal", "autonomous-control-plane", "capability-router", "consolidation":
-			// These stages are owned by this transaction; their completion is
-			// recorded with the lifecycle rather than delegated over HTTP.
-		case "memory-gateway":
-			memory, err = c.callService(ctx, step.System, "/v1/retrieve", map[string]any{
-				"tenant_id": req.TenantID, "principal_id": req.ActorID, "query": req.Input,
-				"agent_id": req.AgentID, "session_id": req.SessionID, "include_recent": true, "include_session": true,
-			}, req)
-		case "code-intelligence":
-			code, err = c.callService(ctx, step.System, "/v1/code/query", map[string]any{
-				"intent": "implementation_search", "query": req.Input, "path": req.RepositoryPath, "max_results": 10,
-			}, req)
-		case "context-optimisation":
-			parts := []string{req.Input, string(memory), string(code)}
-			// Sensitivity and risk travel with the request so the optimiser can
-			// apply its §18 profile floor; a hardcoded "balanced" here would
-			// silently compress high-impact work.
-			_, err = c.callService(ctx, step.System, "/v1/context/compile", map[string]any{
-				"input": strings.Join(parts, "\n\n"), "task_type": contextTaskType(decision),
-				"profile": "", "token_budget": 8000,
-				"risk_class": decision.RiskClass, "sensitivity": req.DataClassification,
-			}, req)
-		case "tool-governance":
-			if strings.TrimSpace(req.ProposedTool) == "" {
-				err = errors.New("proposed_tool is required for governance")
-			} else {
-				_, err = c.callService(ctx, step.System, "/v1/operations/start", map[string]any{
-					"tool_id": req.ProposedTool, "input": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
+		if step.System == "agent-router" {
+			err = c.dispatchHook(ctx, "on_before_model", map[string]any{"interaction_id": req.InteractionID, "input": req.Input}, req)
+		}
+		if step.System == "tool-governance" || step.System == "adaptive-execution-proxy" {
+			err = c.dispatchHook(ctx, "on_before_tool", map[string]any{"interaction_id": req.InteractionID, "tool": req.ProposedTool}, req)
+		}
+		if err != nil {
+			stage.Status = "degraded"
+		}
+		if err == nil {
+			switch step.System {
+			case "journal", "autonomous-control-plane", "capability-router", "consolidation":
+				// These stages are owned by this transaction; their completion is
+				// recorded with the lifecycle rather than delegated over HTTP.
+			case "memory-gateway":
+				memory, err = c.callService(ctx, step.System, "/v1/retrieve", map[string]any{
+					"tenant_id": req.TenantID, "principal_id": req.ActorID, "query": req.Input,
+					"agent_id": req.AgentID, "session_id": req.SessionID, "include_recent": true, "include_session": true,
 				}, req)
-			}
-		case "adaptive-execution-proxy":
-			_, err = c.callService(ctx, step.System, "/v1/proxy/execute", map[string]any{
-				"tenant_id": req.TenantID, "principal_id": req.ActorID, "agent_id": req.AgentID,
-				"operation_id": req.InteractionID, "command": req.ProposedTool, "working_directory": req.RepositoryPath,
-				"confirmed": !decision.ConfirmationRequired,
-			}, req)
-		case "agent-router":
-			reply, err = c.dispatchAgent(ctx, agentRequest{InteractionID: req.InteractionID, TenantID: req.TenantID, PrincipalID: req.ActorID, AgentID: req.AgentID, Input: req.Input, Context: strings.Join([]string{string(memory), string(code)}, "\n\n")})
-		case "turn-coordinator":
-			if strings.TrimSpace(reply.Content) == "" {
-				err = errors.New("agent reply was not captured")
-			}
-			if err == nil {
-				var receipt turnCommitReceipt
-				receipt, err = c.commitReply(ctx, req, reply)
-				if err == nil {
-					lifecycle.Checkpoint = checkpointState{Status: "completed", ID: receipt.CheckpointID}
-					lifecycle.Outbox = outboxState{Status: "completed"}
+			case "code-intelligence":
+				code, err = c.callService(ctx, step.System, "/v1/code/query", map[string]any{
+					"intent": "implementation_search", "query": req.Input, "path": req.RepositoryPath, "max_results": 10,
+				}, req)
+			case "context-optimisation":
+				parts := []string{req.Input, string(memory), string(code)}
+				// Sensitivity and risk travel with the request so the optimiser can
+				// apply its §18 profile floor; a hardcoded "balanced" here would
+				// silently compress high-impact work.
+				_, err = c.callService(ctx, step.System, "/v1/context/compile", map[string]any{
+					"input": strings.Join(parts, "\n\n"), "task_type": contextTaskType(decision),
+					"profile": "", "token_budget": 8000,
+					"risk_class": decision.RiskClass, "sensitivity": req.DataClassification,
+				}, req)
+			case "tool-governance":
+				if strings.TrimSpace(req.ProposedTool) == "" {
+					err = errors.New("proposed_tool is required for governance")
+				} else {
+					_, err = c.callService(ctx, step.System, "/v1/operations/start", map[string]any{
+						"tool_id": req.ProposedTool, "input": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
+					}, req)
 				}
+			case "adaptive-execution-proxy":
+				_, err = c.callService(ctx, step.System, "/v1/proxy/execute", map[string]any{
+					"tenant_id": req.TenantID, "principal_id": req.ActorID, "agent_id": req.AgentID,
+					"operation_id": req.InteractionID, "command": req.ProposedTool, "working_directory": req.RepositoryPath,
+					"confirmed": !decision.ConfirmationRequired,
+				}, req)
+			case "agent-router":
+				reply, err = c.dispatchAgent(ctx, agentRequest{InteractionID: req.InteractionID, TenantID: req.TenantID, PrincipalID: req.ActorID, AgentID: req.AgentID, Input: req.Input, Context: strings.Join([]string{string(memory), string(code)}, "\n\n")})
+			case "turn-coordinator":
+				if strings.TrimSpace(reply.Content) == "" {
+					err = errors.New("agent reply was not captured")
+				}
+				if err == nil {
+					var receipt turnCommitReceipt
+					receipt, err = c.commitReply(ctx, req, reply)
+					if err == nil {
+						lifecycle.Checkpoint = checkpointState{Status: "completed", ID: receipt.CheckpointID}
+						lifecycle.Outbox = outboxState{Status: "completed"}
+					}
+				}
+				if err == nil {
+					lifecycle.Reply = replyState{Status: "completed", Content: reply.Content}
+				}
+			default:
+				err = errors.New("service URL is not configured")
 			}
+		}
+		if step.System == "agent-router" && err == nil {
+			err = c.dispatchHook(ctx, "on_after_model", map[string]any{"interaction_id": req.InteractionID, "reply": reply.Content}, req)
+		}
+		if step.System == "tool-governance" || step.System == "adaptive-execution-proxy" {
+			hookEvent := "on_after_tool"
+			if err != nil {
+				hookEvent = "on_tool_error"
+			}
+			hookErr := c.dispatchHook(ctx, hookEvent, map[string]any{"interaction_id": req.InteractionID, "tool": req.ProposedTool, "error": errorText(err)}, req)
 			if err == nil {
-				lifecycle.Reply = replyState{Status: "completed", Content: reply.Content}
+				err = hookErr
 			}
-		default:
-			err = errors.New("service URL is not configured")
+		}
+		if step.System == "turn-coordinator" && err == nil {
+			err = c.dispatchHook(ctx, "on_checkpoint", map[string]any{"interaction_id": req.InteractionID, "checkpoint_id": lifecycle.Checkpoint.ID}, req)
 		}
 		stage.Status, stage.EndedAt = "completed", time.Now().UTC()
 		if err != nil {
@@ -480,13 +524,9 @@ func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decis
 			}
 		}
 	}
-	if strings.TrimSpace(os.Getenv("SCOS_EXTENSION_MANAGER_URL")) != "" {
-		if _, err := c.callService(ctx, "extension-manager", "/v1/hooks/dispatch", map[string]any{
-			"event": "post_turn", "payload": map[string]any{"interaction_id": req.InteractionID, "reply": reply.Content},
-		}, req); err != nil && status == "completed" {
-			status = "degraded"
-			lifecycle.Status = status
-		}
+	if err := c.dispatchHook(ctx, "post_turn", map[string]any{"interaction_id": req.InteractionID, "reply": reply.Content}, req); err != nil && status == "completed" {
+		status = "degraded"
+		lifecycle.Status = status
 	}
 	if c.store != nil {
 		return status, c.lifecycle(ctx, req.TenantID, req.ActorID, req.InteractionID, decision)

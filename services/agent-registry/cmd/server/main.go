@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/services/readiness"
@@ -331,9 +332,12 @@ func (s *agentRegistryServer) handleAgentRegister(w http.ResponseWriter, r *http
 }
 
 // validateAgentRegistration enforces GOVERNANCE.md §29: every agent SHALL
-// register identity, version, maintainer, model provider, cost policy and
-// health endpoint. Tool/memory permissions and max classification may
-// legitimately be absent or defaulted, so they are not required here.
+// register identity, version, maintainer, capabilities, inputs, outputs,
+// model provider, cost policy and health endpoint. Tool/memory permissions
+// and max classification may legitimately be absent or defaulted (an agent
+// with no tool access is still a valid agent), so they are not required
+// here, but capabilities/inputs/outputs describe what the agent *is* and
+// are as mandatory as name/version/maintainer.
 func validateAgentRegistration(reg AgentRegistration) error {
 	var missing []string
 	if reg.Name == "" {
@@ -344,6 +348,15 @@ func validateAgentRegistration(reg AgentRegistration) error {
 	}
 	if reg.Maintainer == "" {
 		missing = append(missing, "maintainer")
+	}
+	if len(reg.Capabilities) == 0 {
+		missing = append(missing, "capabilities")
+	}
+	if len(reg.Inputs) == 0 {
+		missing = append(missing, "inputs")
+	}
+	if len(reg.Outputs) == 0 {
+		missing = append(missing, "outputs")
 	}
 	if reg.ModelProvider == "" {
 		missing = append(missing, "model_provider")
@@ -418,6 +431,38 @@ func (s *agentRegistryServer) handleAgentHeartbeat(w http.ResponseWriter, r *htt
 // queryAgents runs a SELECT over agent_registrations with the given WHERE
 // clause (always tenant-scoped by the caller) and decodes each row back into
 // the public AgentRegistration shape.
+// agentStalenessWindow bounds how long a registered agent may go without a
+// heartbeat before it is still truthfully reportable as "active". Without
+// this, a row's persisted status='active' (set once at registration or the
+// last heartbeat) would be echoed back forever even if the agent crashed
+// years ago -- an unconditional, unverified claim of health, which is the
+// same ss42 fabrication class already fixed for compatibility-gateway's
+// adapter HealthStatus.
+const agentStalenessWindow = 24 * time.Hour
+
+// agentEffectiveStatus derives the status actually reported to callers from
+// the persisted status plus real elapsed time since last_seen_at, rather
+// than trusting the stored value indefinitely. Non-"active" statuses (e.g.
+// an operator explicitly marking an agent "degraded") are passed through
+// unchanged. An unparseable last_seen_at fails open to the stored value
+// rather than fabricating a claim in either direction.
+func agentEffectiveStatus(dbStatus, lastSeen string, now time.Time) string {
+	if dbStatus != "active" {
+		return dbStatus
+	}
+	seen, err := time.Parse(time.RFC3339, lastSeen)
+	if err != nil {
+		seen, err = time.Parse(time.RFC3339Nano, lastSeen)
+	}
+	if err != nil {
+		return dbStatus
+	}
+	if now.Sub(seen) > agentStalenessWindow {
+		return "inactive"
+	}
+	return dbStatus
+}
+
 func queryAgents(ctx context.Context, tx *sql.Tx, where string, args ...any) ([]*AgentRegistration, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, tenant_id, name, version, maintainer, capabilities, inputs, outputs,
@@ -443,6 +488,7 @@ func queryAgents(ctx context.Context, tx *sql.Tx, where string, args ...any) ([]
 		_ = json.Unmarshal(outputs, &a.Outputs)
 		_ = json.Unmarshal(toolPerms, &a.ToolPermissions)
 		_ = json.Unmarshal(memPerms, &a.MemoryPermissions)
+		a.Status = agentEffectiveStatus(a.Status, a.LastSeen, time.Now())
 		agents = append(agents, &a)
 	}
 	return agents, rows.Err()

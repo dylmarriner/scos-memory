@@ -244,26 +244,35 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		log.Printf("vector search error: %v", err)
 	}
 
-	// ── 7. Recent session state ─────────────────────────────────────
+	// ── 7. Relation expansion ───────────────────────────────────────
+	relationResults, err := s.relationExpansion(ctx, req, namespaces, sensitivityFilter, append(append(exactResults, ftsResults...), vectorResults...), maxResults)
+	if err != nil {
+		log.Printf("relation expansion error: %v", err)
+	}
+
+	// ── 8. Recent session state ─────────────────────────────────────
 	var sessionResults []RetrievalResult
 	if req.IncludeSession && req.SessionID != "" {
 		sessionResults, _ = s.recentSessionState(ctx, req, namespaces, maxResults)
 	}
 
-	// ── 8. Fusion via RRF ───────────────────────────────────────────
-	fused := fuseResults(rrfK, exactResults, ftsResults, vectorResults, sessionResults)
+	// ── 9. Fusion via RRF ───────────────────────────────────────────
+	fused := fuseResults(rrfK, exactResults, ftsResults, vectorResults, relationResults, sessionResults)
 
-	// ── 9. Dedup by memory_id ───────────────────────────────────────
+	// ── 10. Dedup by memory_id ──────────────────────────────────────
 	deduped := deduplicateResults(fused)
 
-	// ── 10. Apply token budget ─────────────────────────────────────
+	// ── 11. Apply token budget ──────────────────────────────────────
 	allocated := allocateByTokenBudget(deduped, tokenBudget)
 
-	// ── 11. Assemble into sections per §17 ─────────────────────────
+	// ── 12. Assemble into sections per §17 ─────────────────────────
 	sections := assembleSections(allocated)
 
-	// ── 12. Record retrieval run ────────────────────────────────────
-	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, int(time.Since(start).Milliseconds()))
+	// ── 13. Record retrieval run ────────────────────────────────────
+	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, map[string]int{
+		"exact": len(exactResults), "fulltext": len(ftsResults), "vector": len(vectorResults), "session_state": len(sessionResults),
+		"relation": len(relationResults),
+	}, int(time.Since(start).Milliseconds()))
 	if err != nil {
 		log.Printf("record retrieval run: %v", err)
 	}
@@ -543,6 +552,56 @@ func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, na
 	return results, rows.Err()
 }
 
+// relationExpansion follows authorised memory relations from lexical and
+// semantic candidates. It is deliberately bounded and applies the same
+// tenant, membership, validity and sensitivity predicates as primary search.
+func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, candidates []RetrievalResult, limit int) ([]RetrievalResult, error) {
+	ids := make([]string, 0, len(candidates))
+	seen := make(map[string]bool)
+	for _, candidate := range candidates {
+		if candidate.MemoryID != "" && !seen[candidate.MemoryID] {
+			seen[candidate.MemoryID] = true
+			ids = append(ids, candidate.MemoryID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
+		       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb),
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb)
+		FROM memory_relations rel
+		JOIN memory_items mi ON mi.id=rel.target_memory_id
+		LEFT JOIN memory_versions mv ON mv.id=mi.current_version_id
+		JOIN namespaces n ON n.id=mi.namespace_id
+		JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read=true
+		WHERE mi.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
+		  AND mi.sensitivity <= $4 AND (mi.valid_from IS NULL OR mi.valid_from <= now())
+		  AND (mi.valid_until IS NULL OR mi.valid_until > now()) AND (mi.expires_at IS NULL OR mi.expires_at > now())
+		  AND n.canonical_name=ANY($5::text[]) LIMIT $6`, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []RetrievalResult
+	for rows.Next() {
+		var r RetrievalResult
+		var content, sensitivity string
+		var evidence, conflicts []byte
+		if err := rows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content, &r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity, &r.NamespaceID, &evidence, &conflicts); err != nil {
+			return nil, err
+		}
+		r.Sensitivity = sensitivity
+		r.Content = truncate(content, 2000)
+		r.Provenance = "relation"
+		decodeResultJSON(&r, evidence, conflicts)
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 // ── query helper ─────────────────────────────────────────────────────────
 
 func (s *server) queryResults(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int, query string, queryParam string, provenance string) ([]RetrievalResult, error) {
@@ -654,7 +713,7 @@ type scoredResult struct {
 
 func fuseResults(k float64, sets ...[]RetrievalResult) []RetrievalResult {
 	seen := make(map[string]*scoredResult)
-	allSources := []string{"exact", "fulltext", "semantic", "session_state"}
+	allSources := []string{"exact", "fulltext", "semantic", "relation", "session_state"}
 
 	for sourceIdx, results := range sets {
 		sourceName := allSources[sourceIdx]
@@ -788,7 +847,7 @@ func assembleSections(results []RetrievalResult) []ContextSection {
 
 // ── persistence ──────────────────────────────────────────────────────────
 
-func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, queryHash string, namespaces []string, sections []ContextSection, latencyMs int) (string, error) {
+func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, queryHash string, namespaces []string, sections []ContextSection, candidateCounts map[string]int, latencyMs int) (string, error) {
 	// Persist exactly the results that survived fusion and token allocation.
 	var selectedIDs []string
 	var selected []RetrievalResult
@@ -805,12 +864,14 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 		INSERT INTO retrieval_runs
 			(tenant_id, principal_id, agent_id, session_id, turn_id,
 			 query_hash, namespaces, filters, ranking_config, selected_memory_ids,
-			 latency_ms)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			 latency_ms, candidate_counts, token_estimate, model_versions)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		RETURNING id
 	`, req.TenantID, req.PrincipalID, req.AgentID, req.SessionID, req.TurnID,
 		queryHash, toJSONB(namespaces), toJSONB(req.Filters),
-		`{"fusion":"rrf","k":60}`, selectedJSON, latencyMs).Scan(&runID)
+		`{"fusion":"rrf","k":60,"reranker":"none"}`, selectedJSON, latencyMs,
+		toJSONB(candidateCounts), estimateSectionsTokens(sections),
+		toJSONB(map[string]string{"embedding": "request-supplied-or-none", "reranker": "none"})).Scan(&runID)
 	if err != nil {
 		return "", err
 	}
@@ -830,6 +891,16 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 	}
 
 	return runID, nil
+}
+
+func estimateSectionsTokens(sections []ContextSection) int {
+	total := 0
+	for _, section := range sections {
+		for _, item := range section.Items {
+			total += estimateTokens(item.Content)
+		}
+	}
+	return total
 }
 
 // ── utility functions ────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -74,6 +75,22 @@ func TestHookDispatchInvokesEndpointAndPropagatesIdentity(t *testing.T) {
 	case <-called:
 	case <-time.After(time.Second):
 		t.Fatal("hook endpoint was not invoked")
+	}
+}
+
+func TestHookDispatchRejectsUnknownFields(t *testing.T) {
+	srv := newExtServer()
+	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/dispatch", bytes.NewBufferString(`{
+		"event":"turn.completed",
+		"tenant_id":"tenant-a",
+		"principal_id":"principal-a",
+		"payload":{},
+		"unexpected":true
+	}`))
+	res := httptest.NewRecorder()
+	srv.handleHookDispatch(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected unknown hook-dispatch fields to be rejected, got %d: %s", res.Code, res.Body.String())
 	}
 }
 
@@ -513,5 +530,240 @@ func TestJSONRoundTripSkill(t *testing.T) {
 	}
 	if decoded.ID != "skill-memory" {
 		t.Fatal("roundtrip failed")
+	}
+}
+
+// TestHookDispatchOrderingIsDeterministic covers §22.6: hook ordering SHALL
+// be deterministic. Registration order is the ordering contract; repeated
+// dispatches against the same registered set must invoke hooks in the same
+// sequence every time.
+func TestHookDispatchOrderingIsDeterministic(t *testing.T) {
+	var mu sync.Mutex
+	var callOrder []string
+	makeHook := func(id string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			callOrder = append(callOrder, id)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		}))
+	}
+	first := makeHook("ext-a")
+	defer first.Close()
+	second := makeHook("ext-b")
+	defer second.Close()
+	third := makeHook("ext-c")
+	defer third.Close()
+
+	srv := newExtServer()
+	srv.hooks["on_turn_start"] = []*Hook{
+		{Event: "on_turn_start", ExtensionID: "ext-a", Endpoint: first.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
+		{Event: "on_turn_start", ExtensionID: "ext-b", Endpoint: second.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
+		{Event: "on_turn_start", ExtensionID: "ext-c", Endpoint: third.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
+	}
+
+	var previousOrder []string
+	for i := 0; i < 5; i++ {
+		mu.Lock()
+		callOrder = nil
+		mu.Unlock()
+		results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{
+			Event: "on_turn_start", TenantID: "tenant-a", PrincipalID: "principal-a", Payload: map[string]any{},
+		})
+		if err != nil {
+			t.Fatalf("dispatch %d failed: %v", i, err)
+		}
+		gotOrder := make([]string, len(results))
+		for j, r := range results {
+			gotOrder[j] = r.ExtensionID
+		}
+		wantOrder := []string{"ext-a", "ext-b", "ext-c"}
+		if strings.Join(gotOrder, ",") != strings.Join(wantOrder, ",") {
+			t.Fatalf("dispatch %d result order = %v, want %v", i, gotOrder, wantOrder)
+		}
+		mu.Lock()
+		callOrderCopy := append([]string(nil), callOrder...)
+		mu.Unlock()
+		if previousOrder != nil && strings.Join(callOrderCopy, ",") != strings.Join(previousOrder, ",") {
+			t.Fatalf("dispatch %d invocation order = %v, previous = %v: ordering is not deterministic", i, callOrderCopy, previousOrder)
+		}
+		previousOrder = callOrderCopy
+	}
+}
+
+// TestHookDispatchTimeoutFallsBackToContinue covers §22.6/§22.7: a hook that
+// exceeds its declared timeout SHALL be visibly reported as failed and, for
+// a "continue" fallback policy, SHALL NOT block the remaining hooks or the
+// dispatch call itself.
+func TestHookDispatchTimeoutFallsBackToContinue(t *testing.T) {
+	// Release the handler once the client has definitely given up (its own
+	// request context cancelling) or, failing that, after a bounded fallback
+	// so httptest.Server.Close() below can never hang waiting on this
+	// connection — Close() blocks until in-flight handlers return.
+	release := make(chan struct{})
+	fallback := time.AfterFunc(3*time.Second, func() { close(release) })
+	defer fallback.Stop()
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer slow.Close()
+
+	srv := newExtServer()
+	srv.hooks["on_before_tool"] = []*Hook{{
+		Event: "on_before_tool", ExtensionID: "slow-ext", Endpoint: slow.URL,
+		TimeoutMs: 50, FallbackPolicy: "continue",
+	}}
+
+	start := time.Now()
+	results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{
+		Event: "on_before_tool", TenantID: "tenant-a", PrincipalID: "principal-a", Payload: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("dispatch should not fail dispatch-wide on a continue-policy timeout: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("dispatch took %v, timeout was not enforced", elapsed)
+	}
+	if len(results) != 1 || results[0].Status != "failed" {
+		t.Fatalf("expected a visible failed result for the timed-out hook, got %#v", results)
+	}
+}
+
+// TestHookDispatchCircuitBreakerOpensAfterConsecutiveFailures covers §22.7:
+// critical hooks SHALL have circuit-breaker policies.
+func TestHookDispatchCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+
+	srv := newExtServer()
+	hook := &Hook{Event: "on_after_tool", ExtensionID: "flaky-ext", Endpoint: failing.URL, TimeoutMs: 1000, FallbackPolicy: "continue"}
+	srv.hooks["on_after_tool"] = []*Hook{hook}
+
+	for i := 0; i < 3; i++ {
+		results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{
+			Event: "on_after_tool", TenantID: "tenant-a", PrincipalID: "principal-a", Payload: map[string]any{},
+		})
+		if err != nil {
+			t.Fatalf("dispatch %d failed: %v", i, err)
+		}
+		if results[0].Status != "failed" {
+			t.Fatalf("dispatch %d expected failed status, got %#v", i, results[0])
+		}
+	}
+
+	// A 4th dispatch after 3 consecutive failures SHALL find the circuit open
+	// rather than calling the endpoint again.
+	results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{
+		Event: "on_after_tool", TenantID: "tenant-a", PrincipalID: "principal-a", Payload: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("dispatch after circuit trip failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "circuit_open" {
+		t.Fatalf("expected circuit_open status once the breaker trips, got %#v", results)
+	}
+}
+
+// TestHookDispatchFailsClosedOnUndeclaredEndpoint covers §22.6/§22.7: a
+// critical (fail_closed) hook that has no declared endpoint SHALL NOT be
+// silently skipped — it SHALL fail the dispatch closed.
+func TestHookDispatchFailsClosedOnUndeclaredEndpoint(t *testing.T) {
+	srv := newExtServer()
+	srv.hooks["on_checkpoint"] = []*Hook{{
+		Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: "", FallbackPolicy: "fail_closed",
+	}}
+
+	_, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{
+		Event: "on_checkpoint", TenantID: "tenant-a", PrincipalID: "principal-a", Payload: map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected dispatch to fail closed when a fail_closed hook has no declared endpoint")
+	}
+}
+
+// TestHookDispatchSkipsUndeclaredEndpointWhenNotCritical covers §22.6: a
+// non-critical hook without a declared endpoint SHALL be visibly skipped
+// rather than silently dropped, and SHALL NOT block dispatch.
+func TestHookDispatchSkipsUndeclaredEndpointWhenNotCritical(t *testing.T) {
+	srv := newExtServer()
+	srv.hooks["on_memory_candidate"] = []*Hook{{
+		Event: "on_memory_candidate", ExtensionID: "optional-ext", Endpoint: "", FallbackPolicy: "continue",
+	}}
+
+	results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{
+		Event: "on_memory_candidate", TenantID: "tenant-a", PrincipalID: "principal-a", Payload: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("dispatch should not fail dispatch-wide for a non-critical undeclared endpoint: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != "skipped" {
+		t.Fatalf("expected skipped status, got %#v", results)
+	}
+}
+
+// TestAllRequiredLifecycleHooksAreRegistrable covers §22.6: every one of the
+// 31 required lifecycle hooks SHALL be declarable via hooks_subscribed and
+// dispatchable through /v1/hooks/dispatch. This does not require production
+// endpoints for each — it proves the hook plumbing has no allowlist gap that
+// would silently drop a governance-required event.
+func TestAllRequiredLifecycleHooksAreRegistrable(t *testing.T) {
+	requiredHooks := []string{
+		"on_install", "on_enable", "on_disable", "on_uninstall",
+		"on_agent_start", "on_agent_stop",
+		"on_session_start", "on_session_switch", "on_session_end",
+		"on_turn_received", "on_turn_start",
+		"on_before_retrieval", "on_after_retrieval",
+		"on_before_context_compile", "on_after_context_compile",
+		"on_before_model", "on_after_model",
+		"on_before_tool", "on_after_tool", "on_tool_error",
+		"on_memory_candidate", "on_memory_promoted", "on_memory_corrected", "on_memory_revoked",
+		"on_pre_compress", "on_post_compress",
+		"on_delegation_start", "on_delegation_end",
+		"on_checkpoint", "on_recovery",
+		"on_policy_change", "on_index_change", "on_user_model_change",
+	}
+	if len(requiredHooks) != 33 {
+		// §22.6 lists on_policy_change, on_index_change and on_user_model_change
+		// alongside the 31 turn/lifecycle hooks; keep this count self-checking
+		// so a future edit to the list can't silently drop an entry.
+		t.Fatalf("expected 33 governance-listed hook events in this test's fixture, got %d", len(requiredHooks))
+	}
+
+	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
+	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))
+	srv := newExtServer()
+
+	endpoints := make(map[string]string)
+	for _, hookEvent := range requiredHooks {
+		endpoints[hookEvent] = "http://127.0.0.1:9/unused"
+	}
+	manifest := ExtensionManifest{
+		SchemaVersion: "1.0", PackageID: "full.lifecycle.ext", Name: "Full Lifecycle", Version: "1.0.0",
+		Publisher: "Test", License: "MIT", ExtensionTypes: []string{"hook"}, RequiredCoreVersion: "^0.1.0",
+		ContentHash: "hash", Isolation: "in_process_trusted", HooksSubscribed: requiredHooks,
+		HookEndpoints: endpoints,
+		RollbackPlan:  "uninstall and restore previous package version",
+	}
+	manifest.Signature = signManifest(t, manifest, privateKey)
+
+	res := httptest.NewRecorder()
+	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
+	if res.Code != http.StatusOK {
+		t.Fatalf("install with full lifecycle hook set returned %d: %s", res.Code, res.Body.String())
+	}
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	for _, hookEvent := range requiredHooks {
+		hooks, ok := srv.hooks[hookEvent]
+		if ok && len(hooks) == 1 && hooks[0].ExtensionID == "full.lifecycle.ext" {
+			continue
+		}
+		t.Fatal("hook event " + hookEvent + " was not registered by installation: " + hookEvent)
 	}
 }

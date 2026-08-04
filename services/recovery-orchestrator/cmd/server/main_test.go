@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -236,5 +240,112 @@ func TestReadyChecksDependency(t *testing.T) {
 	s.handleReady(rec, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected ready database, got %d", rec.Code)
+	}
+}
+
+func TestRecoveryHandlersRejectUnknownJSONFields(t *testing.T) {
+	s := newRecoveryServer()
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		body    string
+	}{
+		{name: "start", handler: s.handleRecoveryStart, body: `{"service_id":"svc","unexpected":true}`},
+		{name: "checklist", handler: s.handleChecklistUpdate, body: `{"service_id":"svc","step":1,"status":"ok","unexpected":true}`},
+		{name: "complete", handler: s.handleRecoveryComplete, body: `{"service_id":"svc","unexpected":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(tc.body))
+			rec := httptest.NewRecorder()
+			tc.handler(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestRecoveryStartFailsCleanlyWhenDiscoveryIsKilledMidFlight exercises §39's
+// "process kills during ... consolidation" scenario against this service's
+// own real discovery path: a process kill mid-recovery-discovery must be
+// recorded as a clean, single failed status rather than a panic, a hang, or
+// a partially-applied recovery run.
+func TestRecoveryStartFailsCleanlyWhenDiscoveryIsKilledMidFlight(t *testing.T) {
+	s := newRecoveryServer()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate the process/dependency being killed before discovery returns
+	s.discover = func(ctx context.Context) (recoveryFindings, error) {
+		if err := ctx.Err(); err != nil {
+			return recoveryFindings{}, err
+		}
+		t.Fatal("discover must observe the canceled context, not a fresh one")
+		return recoveryFindings{}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/recovery/start", bytes.NewBufferString(`{"service_id":"killed-mid-flight"}`))
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	s.handleRecoveryStart(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected recovery start to record failure rather than error out, got %d", rec.Code)
+	}
+	var status RecoveryStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Phase != "failed" {
+		t.Fatalf("expected failed phase on a killed discovery pass, got %q", status.Phase)
+	}
+	if status.Checklist[0].Status != "failed" {
+		t.Fatalf("expected step 1 marked failed, got %+v", status.Checklist[0])
+	}
+
+	s.mu.RLock()
+	stored, ok := s.statuses["killed-mid-flight"]
+	s.mu.RUnlock()
+	if !ok || stored.Phase != "failed" {
+		t.Fatalf("expected exactly one stored failed status after the kill, got %+v", stored)
+	}
+}
+
+// TestRecoveryStartConcurrentRetriesDoNotDuplicateSideEffects exercises §39's
+// "duplicate outbox jobs/events" and "altered idempotency retries" scenarios:
+// concurrent recovery-start retries for the same service id (as a naive
+// retrying caller would produce after a timeout) must each run discovery
+// independently but must never corrupt or duplicate the stored recovery
+// status for that service.
+func TestRecoveryStartConcurrentRetriesDoNotDuplicateSideEffects(t *testing.T) {
+	s := newRecoveryServer()
+	var discoverCalls int32
+	s.discover = func(ctx context.Context) (recoveryFindings, error) {
+		atomic.AddInt32(&discoverCalls, 1)
+		return recoveryFindings{pendingOutbox: 1}, nil
+	}
+
+	const attempts = 8
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/v1/recovery/start", bytes.NewBufferString(`{"service_id":"idempotent-retry"}`))
+			rec := httptest.NewRecorder()
+			s.handleRecoveryStart(rec, req)
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&discoverCalls); got != attempts {
+		t.Fatalf("expected discover invoked once per retry attempt, got %d", got)
+	}
+	s.mu.RLock()
+	stored, ok := s.statuses["idempotent-retry"]
+	s.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected exactly one status entry stored for repeated retries of the same service id")
+	}
+	if stored.Phase != "recovery" {
+		t.Fatalf("expected the last-applied retry outcome recorded without corruption, got %q", stored.Phase)
 	}
 }

@@ -194,7 +194,9 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 		Manifest ExtensionManifest `json:"manifest"`
 		Scope    CanaryScope       `json:"scope"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -261,7 +263,9 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 
 func (s *extServer) canaryResolve(w http.ResponseWriter, r *http.Request, packageID string) {
 	var c CanaryContext
-	if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}

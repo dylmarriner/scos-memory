@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 type identityKey struct{}
@@ -19,10 +21,43 @@ type claimsKey struct{}
 type bearerKey struct{}
 
 type Claims struct {
-	TenantID    string
-	PrincipalID string
-	AgentID     string
-	Subject     string
+	TenantID           string
+	PrincipalID        string
+	AgentID            string
+	Subject            string
+	DelegatedAuthority string
+	ExpiresAt          time.Time
+	TraceID            string
+}
+
+// InstructionSource makes the prompt-injection boundary explicit to callers.
+// Retrieved material and tool output are data, never authority.  Services
+// may render these values into a model context, but must not use them as a
+// capability grant or policy replacement.
+type InstructionSource string
+
+const (
+	SourceSystemPolicy       InstructionSource = "system_policy"
+	SourceUserInstruction    InstructionSource = "user_instruction"
+	SourceApprovedMemory     InstructionSource = "approved_memory"
+	SourceToolData           InstructionSource = "tool_data"
+	SourceRetrievedUntrusted InstructionSource = "retrieved_untrusted"
+)
+
+type InstructionEnvelope struct {
+	Source         InstructionSource `json:"source"`
+	Content        string            `json:"content"`
+	ToolAuthorised bool              `json:"tool_authorised"`
+}
+
+// UntrustedRetrievedInstruction is deliberately incapable of carrying tool
+// authority, even if an attacker embeds an instruction in retrieved text.
+func UntrustedRetrievedInstruction(content string) InstructionEnvelope {
+	return InstructionEnvelope{Source: SourceRetrievedUntrusted, Content: content, ToolAuthorised: false}
+}
+
+func CanAuthoriseTools(e InstructionEnvelope) bool {
+	return e.ToolAuthorised && (e.Source == SourceSystemPolicy || e.Source == SourceUserInstruction)
 }
 
 // Identity returns the authenticated service identity attached by Middleware.
@@ -154,11 +189,14 @@ func validateClaims(token, secret string) (Claims, error) {
 		return Claims{}, err
 	}
 	var raw struct {
-		TenantID    string `json:"tenant_id"`
-		Tenant      string `json:"tenant"`
-		PrincipalID string `json:"principal_id"`
-		Subject     string `json:"sub"`
-		AgentID     string `json:"agent_id"`
+		TenantID           string `json:"tenant_id"`
+		Tenant             string `json:"tenant"`
+		PrincipalID        string `json:"principal_id"`
+		Subject            string `json:"sub"`
+		AgentID            string `json:"agent_id"`
+		DelegatedAuthority string `json:"delegated_authority"`
+		Exp                int64  `json:"exp"`
+		TraceID            string `json:"trace_id"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return Claims{}, err
@@ -172,7 +210,19 @@ func validateClaims(token, secret string) (Claims, error) {
 	if strings.TrimSpace(raw.TenantID) == "" || strings.TrimSpace(raw.PrincipalID) == "" {
 		return Claims{}, fmt.Errorf("tenant_id and principal_id claims are required")
 	}
-	return Claims{TenantID: raw.TenantID, PrincipalID: raw.PrincipalID, AgentID: raw.AgentID, Subject: raw.Subject}, nil
+	if raw.Exp > 0 && !time.Now().UTC().Before(time.Unix(raw.Exp, 0)) {
+		return Claims{}, fmt.Errorf("expired bearer claims")
+	}
+	if raw.TraceID == "" {
+		digest := sha256.Sum256(payload)
+		raw.TraceID = hex.EncodeToString(digest[:])
+	}
+	expiresAt := time.Now().UTC().Add(5 * time.Minute)
+	if raw.Exp > 0 {
+		expiresAt = time.Unix(raw.Exp, 0).UTC()
+	}
+	return Claims{TenantID: raw.TenantID, PrincipalID: raw.PrincipalID, AgentID: raw.AgentID, Subject: raw.Subject,
+		DelegatedAuthority: raw.DelegatedAuthority, ExpiresAt: expiresAt, TraceID: raw.TraceID}, nil
 }
 
 func unauthorized(w http.ResponseWriter) {

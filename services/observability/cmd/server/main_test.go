@@ -279,6 +279,61 @@ func TestBenchmarksRejectsNonGet(t *testing.T) {
 	}
 }
 
+// TestBenchmarksAreReproducibleAcrossRuns exercises §39's "benchmark
+// reproducibility" scenario against this service's real benchmark endpoint:
+// repeated runs over the same frozen case set must yield identical suite
+// identity, identical retrieved IDs and identical scores every time, since a
+// governance quality baseline that drifts between runs cannot be trusted.
+func TestBenchmarksAreReproducibleAcrossRuns(t *testing.T) {
+	run := func() benchmarkSummary {
+		w := httptest.NewRecorder()
+		handleBenchmarks(w, httptest.NewRequest(http.MethodGet, "/v1/benchmarks", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("benchmark status = %d, want %d", w.Code, http.StatusOK)
+		}
+		var result benchmarkSummary
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	first := run()
+	for i := 0; i < 4; i++ {
+		next := run()
+		if next.Suite != first.Suite || next.Version != first.Version || next.TotalCases != first.TotalCases {
+			t.Fatalf("benchmark suite identity drifted across runs: %#v vs %#v", first, next)
+		}
+		if len(next.Results) != len(first.Results) {
+			t.Fatalf("benchmark result count drifted across runs: %d vs %d", len(next.Results), len(first.Results))
+		}
+		for j, res := range first.Results {
+			got := next.Results[j]
+			if got.CaseID != res.CaseID {
+				t.Fatalf("case order drifted at index %d: %q vs %q", j, res.CaseID, got.CaseID)
+			}
+			if len(got.RetrievedIDs) != len(res.RetrievedIDs) {
+				t.Fatalf("retrieved IDs drifted for case %q: %v vs %v", res.CaseID, res.RetrievedIDs, got.RetrievedIDs)
+			}
+			for k, id := range res.RetrievedIDs {
+				if got.RetrievedIDs[k] != id {
+					t.Fatalf("retrieved ID drifted for case %q at position %d: %q vs %q", res.CaseID, k, id, got.RetrievedIDs[k])
+				}
+			}
+			for metric, score := range res.Scores {
+				if got.Scores[metric] != score {
+					t.Fatalf("score %q drifted for case %q: %v vs %v", metric, res.CaseID, score, got.Scores[metric])
+				}
+			}
+		}
+		for metric, score := range first.AverageScores {
+			if next.AverageScores[metric] != score {
+				t.Fatalf("average score %q drifted across runs: %v vs %v", metric, score, next.AverageScores[metric])
+			}
+		}
+	}
+}
+
 func TestOTLPExporterEmitsStandardJSONEnvelopes(t *testing.T) {
 	var payloads = make(map[string]map[string]any)
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -359,7 +414,7 @@ func TestTraceparentPropagatesIntoDurableTelemetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.store.close()
-	req := httptest.NewRequest(http.MethodPost, "/v1/logs/ingest", strings.NewReader(`[{
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs/ingest", strings.NewReader(`[{ 
         "level":"info","service":"gateway","message":"done"
     }]`))
 	req.Header.Set("traceparent", "00-00112233445566778899aabbccddeeff-0011223344556677-01")
@@ -378,5 +433,27 @@ func TestTraceparentPropagatesIntoDurableTelemetry(t *testing.T) {
 	defer recovered.store.close()
 	if recovered.logs[0].TraceID != s.logs[0].TraceID || recovered.logs[0].SpanID != s.logs[0].SpanID {
 		t.Fatalf("correlation not durable: %#v", recovered.logs[0])
+	}
+}
+
+func TestSignalIngestRejectsUnknownFields(t *testing.T) {
+	s := newObservabilityServer()
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		body    string
+	}{
+		{name: "metrics", handler: s.handleMetricsIngest, body: `[{"name":"requests","value":1,"unexpected":true}]`},
+		{name: "traces", handler: s.handleTraceIngest, body: `[{"trace_id":"trace-1","name":"op","unexpected":true}]`},
+		{name: "logs", handler: s.handleLogIngest, body: `[{"level":"info","service":"gateway","message":"ok","unexpected":true}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(tc.body))
+			rec := httptest.NewRecorder()
+			tc.handler(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

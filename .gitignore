@@ -32,3 +32,11 @@ backups/
 dist/
 build/
 /server
+
+# Node
+node_modules/
+package-lock.json
+
+# Runtime artifacts
+audit-log.jsonl
+.atlas-gate/

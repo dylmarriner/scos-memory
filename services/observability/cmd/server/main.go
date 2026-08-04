@@ -493,7 +493,9 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 		return
 	}
 	var points []MetricPoint
-	if err := json.NewDecoder(r.Body).Decode(&points); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&points); err != nil {
 		http.Error(w, "invalid metrics: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -579,7 +581,9 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 		return
 	}
 	var spans []TraceSpan
-	if err := json.NewDecoder(r.Body).Decode(&spans); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&spans); err != nil {
 		http.Error(w, "invalid traces: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -674,7 +678,9 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var entries []LogEntry
-	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&entries); err != nil {
 		http.Error(w, "invalid logs: "+err.Error(), http.StatusBadRequest)
 		return
 	}

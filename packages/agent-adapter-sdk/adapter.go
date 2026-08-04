@@ -22,10 +22,10 @@ const (
 
 // AdapterConfig holds configuration for registering an agent adapter.
 type AdapterConfig struct {
-	AgentID      string        `json:"agent_id"`
-	Boundary     AgentBoundary `json:"boundary"`
-	GatewayURL   string        `json:"gateway_url"`
-	HTTPClient   *http.Client
+	AgentID    string        `json:"agent_id"`
+	Boundary   AgentBoundary `json:"boundary"`
+	GatewayURL string        `json:"gateway_url"`
+	HTTPClient *http.Client
 }
 
 // Client defines standard agent adapter client (§23.4).
@@ -35,14 +35,14 @@ type Client struct {
 
 // PortableEnvelope represents portable context envelope (§23.5).
 type PortableEnvelope struct {
-	EnvelopeID    string            `json:"envelope_id"`
-	SessionID     string            `json:"session_id"`
-	TenantID      string            `json:"tenant_id"`
-	AgentID       string            `json:"agent_id"`
-	ContextItems  []string          `json:"context_items"`
-	Permissions   []string          `json:"permissions"`
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	GeneratedAt   time.Time         `json:"generated_at"`
+	EnvelopeID   string            `json:"envelope_id"`
+	SessionID    string            `json:"session_id"`
+	TenantID     string            `json:"tenant_id"`
+	AgentID      string            `json:"agent_id"`
+	ContextItems []string          `json:"context_items"`
+	Permissions  []string          `json:"permissions"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	GeneratedAt  time.Time         `json:"generated_at"`
 }
 
 // NewClient initializes an agent adapter client.
@@ -76,17 +76,12 @@ func (c *Client) RenderEnvelope(ctx context.Context, sessionID, tenantID string)
 
 	resp, err := c.cfg.HTTPClient.Do(req)
 	if err != nil {
-		// Return deterministic client-rendered fallback envelope if offline
-		return &PortableEnvelope{
-			EnvelopeID:  fmt.Sprintf("env-local-%d", time.Now().UnixNano()),
-			SessionID:   sessionID,
-			TenantID:    tenantID,
-			AgentID:     c.cfg.AgentID,
-			Permissions: []string{"read", "execute"},
-			GeneratedAt: time.Now().UTC(),
-		}, nil
+		return nil, fmt.Errorf("render governed envelope: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("gateway returned %s", resp.Status)
+	}
 
 	var env PortableEnvelope
 	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {

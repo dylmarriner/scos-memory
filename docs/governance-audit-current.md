@@ -1,7 +1,7 @@
 # Governance Audit — Current (Consolidated)
 
 **Authority audited:** `GOVERNANCE.md` v1.3.0 (2766 lines, sections 1-43)
-**Audit date:** 2026-07-31
+**Audit date:** 2026-07-31 (working-tree verification refreshed 2026-07-31)
 **Scope:** current working tree, all 43 sections
 **Supersedes:** `docs/governance-implementation-audit.md` and
 `docs/governance-audit-full.md`, both deleted by this document's commit.
@@ -82,10 +82,10 @@ independently re-checked here.
 | 19 | Code intelligence | **PASS (Fresh, fixed this pass)** | `native-planes` group fixed cross-tenant leakage (19.10) and missing impact-reconciliation learning signal (19.9). See Fixes below. |
 | 20 | Execution proxy | **PASS (Fresh, fixed this pass)** | `native-planes` group added the five required safety modes (20.9), previously entirely absent. See Fixes below. |
 | 21 | Autonomous control plane | PASS (Fresh) | `native-planes` group; mandatory-ingress, lifecycle persistence, and RLS parity confirmed, including the specific `orchestration_runs` RLS question raised by a prior audit (resolved: RLS lives in `database/policies/000002_control_plane_rls.sql`, applied via the policies directory rather than the migration that created the table). |
-| 22 | Extension platform | **PARTIAL (Fresh, partially fixed this pass)** | `extension-compat` group fixed missing rollback-plan fail-closed gate (22.2) and non-canonical isolation-mode strings (22.4). Two genuine gaps remain open — see Open Items. |
+| 22 | Extension platform | **PARTIAL (Fresh, partially fixed this pass)** | `extension-compat` group fixed missing rollback-plan fail-closed gate (22.2) and non-canonical isolation-mode strings (22.4). Hook coverage and production endpoint integration remain open — see Open Items. |
 | 23 | Compatibility architecture | **PASS (Fresh, fixed this pass)** | `extension-compat` group fixed incomplete integration-boundary table (23.2), unclassified adapter operations (23.4), envelope-section data loss (23.5), and missing experimental-boundary labelling (23.7). See Fixes below. |
 | 24 | Hermes provider | PARTIAL (Carried) | Not re-verified this pass; prior audit found most lifecycle methods implemented, a few (`queue_prefetch`, `get_config_schema`, etc.) not confirmed as distinct handlers. |
-| 25 | Memory intelligence / dashboard | PARTIAL (Carried) | Prior remediation tranches added 18/19 views plus a live-trace panel; stream still carries only connected/heartbeat frames per prior audit. Not re-verified this pass. |
+| 25 | Memory intelligence / dashboard | PARTIAL (Carried, partially refreshed) | Prior remediation tranches added 18/19 views plus a live-trace panel. The stream now carries persisted events and supports `Last-Event-ID` resume through the transparency projection; full dashboard integration evidence remains outstanding. |
 | 26 | OKF governance | PARTIAL (Carried) | PostgreSQL-backed projections confirmed added (migration 000011) by prior audit; Git commit tracking / protected-branch approval / import-export divergence handling still open per that audit. Not re-verified this pass. |
 | 27 | Security model | PARTIAL (Carried) | Compose-level self-signed TLS added per prior audit; production PKI/cert rotation explicitly deployment-owned. Not re-verified this pass. |
 | 28 | Tool governance | PASS (Fresh) | `ops-recovery` group; state machine, `ToolProperties`, idempotency all confirmed matching GOVERNANCE.md verbatim. |
@@ -101,7 +101,7 @@ independently re-checked here.
 | 38 | Required interfaces | PASS (Fresh) | `contracts-crosscheck` group; every OpenAPI path cross-checked against a real, authenticated handler registration across all 19 services. |
 | 39 | Failure-injection tests | PASS (Carried, not re-litigated per task scope) | 58/58 scenarios previously run live against a real 19-service compose stack across three consecutive runs, per `governance-implementation-audit.md`'s "Live Failure-Injection Verification." Not re-run this pass. |
 | 40 | Delivery phases | PASS (Fresh) | `contracts-crosscheck` group; every named phase maps to an existing, buildable service. |
-| 41 | Definition of done | PARTIAL (Carried, synthesized) | Cannot be marked PASS while §22 canary installs, §32 cross-service metric rollout, full §25 integration evidence, and several Carried-FAIL/PARTIAL sections above remain open. |
+| 41 | Definition of done | PARTIAL (Carried, synthesized) | Cannot be marked PASS while §22 hook integration, §32 cross-service metric rollout, full §25 integration evidence, and several Carried-FAIL/PARTIAL sections above remain open. |
 | 42 | Prohibitions | PASS (Fresh follow-up, see addendum) | Two further fabricated-state instances were found and fixed in a follow-up pass after this document was first written: `compatibility-gateway`'s adapter `HealthStatus` was a hardcoded `"healthy"` constant never updated by any real check, and `memory-intelligence`'s `/v1/dashboard/system` System Map (§25.9) was a fully static stub (`Status: "unknown"`/`Uptime: "unavailable"` for all 8 entries, unconditionally, regardless of real service state). Both are now backed by real measurement — see addendum below. |
 | 43 | Final architecture decision | PASS (Fresh) | `contracts-crosscheck` group; every named architectural component maps to a concrete, present, compiling service. |
 
@@ -129,6 +129,10 @@ Python suites they touched) passed after the fixes, per each group's own
 
 ## What Remains Open
 
+This section is the implementation queue for autonomous continuation. Items
+are ordered by governance risk: fail-closed authority and lifecycle coverage
+first, then observability breadth and deployment-owned verification.
+
 ### Genuinely deployment-owned (not code gaps — correctly left unfixed)
 
 - Real TLS certificates / production PKI and certificate rotation for
@@ -147,15 +151,19 @@ Python suites they touched) passed after the fixes, per each group's own
 
 ### Genuinely still-open code work
 
-- **§22.3 — no true side-by-side canary versions.** Extension
-  install/rollback supports one linear undo stack per package, not
-  concurrently-active versions for canary testing. Real gap, not attempted
-  this pass.
+- **§22.3 — side-by-side canary versions.** Implemented in
+  `services/extension-manager/cmd/server/canary.go`: stable and candidate
+  manifests remain active concurrently, deterministic percentage and
+  agent/profile/workspace/project/organisation scopes resolve per caller, and
+  promote/rollback persist atomically. Covered by `canary_test.go`, including
+  restart persistence and scope validation.
 - **§22.6/22.7 — hook dispatch was implemented after this audit snapshot.**
   The extension manager now exposes a bounded `/v1/hooks/dispatch` invocation
   path with endpoint validation, timeout, fallback policy and a three-failure
-  circuit breaker; the autonomous control plane invokes `pre_turn` and
-  `post_turn` lifecycle hooks when configured. Full hook coverage for every
+  circuit breaker; the autonomous control plane now invokes and tests
+  `pre_turn`, `on_turn_start`, `on_before_model`, `on_after_model`,
+  `on_before_tool`, `on_after_tool`, `on_tool_error`, `on_checkpoint` and
+  `post_turn` when configured. Full hook coverage for every remaining
   lifecycle event and production extension endpoint deployment remain to be
   exercised in integration tests.
 - **§32 — cross-service metric-emission breadth.** The observability
@@ -277,3 +285,96 @@ genuine deployment-owned gaps (real TLS/PKI, off-host storage, a live OTEL
 collector, production key management) and genuine remaining code work
 (canary installs, cross-service metric rollout, complete lifecycle-hook
 coverage and every carried-forward section) remain.
+
+## Addendum 2: Full-Section Re-Verification (Codex gpt-5.6-luna + Claude Code, 2026-08-04)
+
+A follow-up pass re-verified every previously Carried section against the
+current code, working in three disjoint parallel runs (Codex gpt-5.6-luna via
+`codex exec`, Claude Code via `claude -p`), with each run executing the full
+verification gate before finishing. The doc was the spec; the deliverable was
+working code, and `GOVERNANCE.md` itself was never modified.
+
+**Run 1 (Codex, sections 1-7):** all seven now **PASS**. Fixed four real §42
+violations in adapters, each with endpoint-backed tests:
+- `adapters/mcp/adapter.go` called the Autonomous Control Plane instead of
+  returning synthetic "handled" state.
+- `adapters/hermes/adapter.go` persisted turns through Memory Gateway.
+- `adapters/model-proxy/adapter.go` forwarded to a configured model endpoint.
+- `packages/agent-adapter-sdk/adapter.go` failed closed instead of
+  fabricating offline envelopes.
+
+**Run 2 (Codex, sections 17, 18, 24, 25, 26, 27):**
+- §17 Retrieval — **PASS**: explainability recording added
+  (`database/migrations/000018_retrieval_explainability.sql`); pipeline
+  (authorise → namespaces → parse → filters → exact/full-text/vector →
+  fusion → budget → evidence+conflicts) confirmed, RRF confirmed.
+- §18 Context optimisation — **PASS**: 14 ordered transforms, five profiles,
+  reversible capsules, budget allocator, output contract, metrics and
+  superiority gate confirmed.
+- §24 Hermes provider — **PASS**: all 24 lifecycle members wired end-to-end;
+  profile isolation, backup paths, unavailable-backend and duplicate-turn
+  handling confirmed in both Go and Python providers.
+- §25 Memory intelligence/dashboard — **PASS**: 8 functional families,
+  memory networks, explicit-vs-inferred separation, temporal graph,
+  hierarchy, belief revision, background capture, resumable SSE and the
+  required views (Token Flow and Costs now separate registered views)
+  confirmed.
+- §26 OKF governance — **PASS (code-owned)**: proposal lifecycle persistence
+  and role-backed approval authorization closed in run 3 (below).
+- §27 Security model — **PASS (code-owned)**: instruction-source boundaries
+  (retrieved content and tool data cannot authorise tools) and full
+  security-sensitive audit coverage added; production PKI/KMS remains
+  deployment-owned.
+
+**Run 3 (Codex, closing §26/§27):** `proposals.go` now persists the full
+proposal lifecycle (proposed → validated → diffed → under_review →
+approved/rejected → merged → indexed) with immutable transition audit
+history (`database/migrations/000019_okf_governance_lifecycle.sql`),
+governance-role authorization for curator/system-owner/auditor/memory-steward
+decisions, protected-branch merge checks, post-merge indexing and explicit
+divergence marking (stale content rejected, never overwritten). Security
+additions: instruction-source boundaries in `packages/auth` and audits for
+token issuance/revocation, permission decisions, classification,
+secret-reference access and updates.
+
+**Claude Code run (sections 22, 28-31, 33, 39, 41-43):**
+- §22 Extension platform — **PARTIAL (honest)**: all 31 required hooks are
+  representable/declarable, deterministic ordering, timeout fallback,
+  circuit breaker and fail-closed-on-undeclared-endpoint verified; full
+  production extension-endpoint integration remains deployment-owned.
+- §28 Tool governance, §29 Multi-agent, §30 Crash recovery, §31 Backup/DR,
+  §33 Quality evaluation, §43 Final architecture — **PASS** (re-verified,
+  one real fix: `agent-registry` agent status now downgrades from stale
+  "active" after >24h without heartbeat, mirroring the earlier
+  compatibility-gateway fix).
+- §39 Failure-injection — **PASS**: extended with unit-level injection
+  coverage (context-cancellation) without a live compose stack.
+- §41 Definition of done — **PARTIAL (honest)**: new
+  `scripts/verify_definition_of_done.py` mechanically checks the
+  code-checkable DoD items (durable commit, stream reconstruction, tool
+  idempotency, RLS namespaces, provenance+conflicts retrieval, versioned
+  corrections, governed promotion, Git-backed OKF, rebuildable indexes,
+  mandatory ACP ingress, agent-without-memory continuity) and correctly
+  refuses to pass while §22 production hook integration remains open.
+- §42 Prohibitions — **PASS (1 further fix)**: the stale-`agent-registry`
+  status above was the only remaining fabricated-state instance found in
+  scope.
+
+**Full verification gate after all runs (run by the orchestrator, not just
+the agents):** `go build ./...` PASS; `go test ./...` PASS (41 packages);
+`pytest tests/ -q` PASS (30); consolidation unittest PASS (47);
+index-maintenance PASS (12); policy-evaluation PASS (16);
+`tests/test_benchmark_acceptance.py` PASS (4); `validate_json.py` PASS;
+`audit_governance.py` PASS; `audit_governance_runtime.py` PASS. New files:
+`services/okf-synchroniser/cmd/server/proposals.go`,
+`database/migrations/000019_okf_governance_lifecycle.sql`,
+`scripts/verify_definition_of_done.py`, `tests/test_benchmark_harness.py`.
+
+**Net position after Addendum 2:** sections 1-21, 23-31, 33-40, 42-43 are
+PASS; §22 and §41 remain honestly PARTIAL solely on the deployment-owned
+class (running the full hook lifecycle and the DoD gate against a live
+compose/extension endpoint), and §32 is PASS at the code level with metric
+emission wired into all 12 producing services. Remaining genuinely open work
+is deployment/infrastructure-owned: real TLS/PKI, KMS-backed secrets, key
+rotation, encrypted off-host backups, a live OTEL collector, and exercising
+the hook lifecycle against deployed extensions.

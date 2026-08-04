@@ -769,3 +769,67 @@ func TestUnknownBranchReturnsNothing(t *testing.T) {
 		t.Fatalf("unknown branch returned %d results", len(results))
 	}
 }
+
+func TestReindexReplacesPreviousGenerationForRepository(t *testing.T) {
+	store := newCodeStore()
+	registerDefaultAdapters(store)
+	store.repos["repo-1"] = &Repository{ID: "repo-1", TenantID: "tenant-1", CanonicalPath: "/repo", Branch: "main"}
+	srv := &server{store: store}
+
+	first := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"commit-1","files":["main.go","app.py"]}`))
+	first.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	firstResp := httptest.NewRecorder()
+	srv.handleIndex(firstResp, first)
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first index: expected 200, got %d: %s", firstResp.Code, firstResp.Body.String())
+	}
+	if got := store.generations["repo-1"].FileCount; got != 2 {
+		t.Fatalf("expected first generation file count 2, got %d", got)
+	}
+
+	second := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"commit-2","files":["main.go"]}`))
+	second.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	secondResp := httptest.NewRecorder()
+	srv.handleIndex(secondResp, second)
+	if secondResp.Code != http.StatusOK {
+		t.Fatalf("second index: expected 200, got %d: %s", secondResp.Code, secondResp.Body.String())
+	}
+	if got := store.generations["repo-1"].FileCount; got != 1 {
+		t.Fatalf("expected replacement generation file count 1, got %d", got)
+	}
+	for _, sym := range store.symbols {
+		if sym.RepoID == "repo-1" && sym.Language == "python" {
+			t.Fatalf("stale symbol from previous generation survived reindex: %+v", sym)
+		}
+	}
+}
+
+func TestIndexCreatesConfigurationSymbols(t *testing.T) {
+	store := newCodeStore()
+	registerDefaultAdapters(store)
+	store.repos["repo-1"] = &Repository{ID: "repo-1", TenantID: "tenant-1", CanonicalPath: "/repo", Branch: "main"}
+	srv := &server{store: store}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"commit-1","files":["config/app.yaml","config/settings.json"]}`))
+	request.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	response := httptest.NewRecorder()
+	srv.handleIndex(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("index config files: expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	results := srv.executeQuery(CodeQuery{Intent: "configuration_lookup", Query: "settings.json", RepoID: "repo-1", MaxResults: 10})
+	if len(results) == 0 {
+		t.Fatal("expected configuration lookup to return indexed configuration symbol")
+	}
+	found := false
+	for _, result := range results {
+		if result.Symbol.Kind == "configuration" && result.Symbol.Path == "config/settings.json" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("configuration lookup did not surface the indexed config symbol: %+v", results)
+	}
+}

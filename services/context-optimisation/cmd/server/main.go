@@ -106,6 +106,7 @@ type ContextCapsule struct {
 	SemanticInvariants       []string            `json:"semantic_invariants"`
 	Validation               ValidationResults   `json:"validation"`
 	RestorationHandles       []RestorationHandle `json:"restoration_handles"`
+	Transformations          []string            `json:"transformations"`
 }
 
 type SourceObjectRef struct {
@@ -743,9 +744,15 @@ func compressSegments(segments []Segment, profile string, allocation BudgetAlloc
 				totalUsed += estimateTokens(summary)
 			}
 
-		default: // adaptive — uses balanced as default
-			compressed = append(compressed, seg)
-			totalUsed += seg.OriginalTokens
+		default: // adaptive — bounded deterministic policy selection per segment
+			if seg.OriginalTokens > 250 {
+				summary := summarise(seg.Content, seg.Class)
+				compressed = append(compressed, Segment{Class: seg.Class, Content: summary, OriginalTokens: seg.OriginalTokens, CompiledTokens: estimateTokens(summary), Droppable: true})
+				totalUsed += estimateTokens(summary)
+			} else {
+				compressed = append(compressed, seg)
+				totalUsed += seg.OriginalTokens
+			}
 		}
 	}
 
@@ -915,6 +922,7 @@ func buildCapsule(original, profile string, segments, compiled []Segment, alloca
 		SemanticInvariants:       extractExactValues(original),
 		Validation:               ValidationResults{Valid: valid, Checks: checks},
 		RestorationHandles:       []RestorationHandle{{HandleID: "restore-" + contentHash[:32], ObjectID: objectID, ContentHash: contentHash}},
+		Transformations:          []string{"canonicalisation", "exact_deduplication", "semantic_deduplication", "delta_context", "instruction_factoring", "task_state_compilation", "progressive_disclosure", "relevance_allocation", "code_aware_slicing", "tool_schema_routing", "cache_aware_ordering", "tokenizer_accounting", "local_semantic_compression", "invariant_validation"},
 	}
 }
 
