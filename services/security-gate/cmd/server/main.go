@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -800,14 +801,16 @@ func (s *securityServer) resolveSecretValue(w http.ResponseWriter, r *http.Reque
 		"credential_type": secret.CredentialType,
 		"auth_scheme":     secret.AuthScheme,
 		"value":           secret.Value,
-		"version":         secret.Version,
+		"version":         secretVersionString(secret.Version),
 	})
 }
 
 // ── securestore client ───────────────────────────────────────────────────
 
 // securestoreSecret mirrors the response shape of Securestore's
-// GET /v1/secrets/:credentialId.
+// GET /v1/secrets/:credentialId. Version arrives as a JSON number
+// (Securestore's currentVersion), so it is decoded flexibly and normalised
+// to string for the SCOS response.
 type securestoreSecret struct {
 	CredentialID   string         `json:"credentialId"`
 	Provider       string         `json:"provider"`
@@ -815,8 +818,23 @@ type securestoreSecret struct {
 	AuthScheme     string         `json:"authScheme"`
 	Value          string         `json:"value"`
 	Metadata       map[string]any `json:"metadata"`
-	Version        string         `json:"version"`
+	Version        any            `json:"version"`
 	Status         string         `json:"status"` // e.g. "approval_required"
+}
+
+func secretVersionString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case json.Number:
+		return t.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }
 
 type securestoreClient struct {
