@@ -54,6 +54,12 @@ services:
         openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
           -keyout /etc/scos/tls/tls.key -out /etc/scos/tls/tls.crt \
           -subj "/O=scos-internal-dev" -addext "subjectAltName=$$SAN"
+        # Services run as the unprivileged `scos` user (uid 100 / gid 101 in
+        # the alpine service images). A root-owned 600 key is unreadable by
+        # them, so every TLS listener fails at startup with "permission
+        # denied". Keep the key 600 but hand it to the scos uid/gid, matching
+        # the postgres-tls-certs generator's chown pattern below.
+        chown 100:101 /etc/scos/tls/tls.key /etc/scos/tls/tls.crt
         chmod 600 /etc/scos/tls/tls.key
         chmod 644 /etc/scos/tls/tls.crt
         echo "tls-certs: generated a self-signed development certificate"
