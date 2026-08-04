@@ -1,4 +1,7 @@
-.PHONY: fmt test integration-test failure-injection validate audit audit-runtime compose-up compose-down db-shell
+.PHONY: fmt test integration-test failure-injection validate audit audit-runtime code-index compose-up compose-down db-shell
+
+code-index:
+	python3 scripts/generate_code_index.py
 
 fmt:
 	gofmt -w $$(find services -name '*.go' -type f)
