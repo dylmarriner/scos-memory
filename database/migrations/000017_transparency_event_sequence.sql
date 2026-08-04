@@ -13,8 +13,8 @@ WHERE stream_sequence IS NULL;
 
 SELECT setval(
     'event_stream_sequence',
-    COALESCE((SELECT MAX(stream_sequence) FROM events), 0),
-    true
+    GREATEST(COALESCE((SELECT MAX(stream_sequence) FROM events), 1), 1),
+    (SELECT COUNT(*) FROM events) > 0
 );
 
 ALTER TABLE events
