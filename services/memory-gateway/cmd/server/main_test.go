@@ -6,7 +6,33 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
+
+func TestParseTurnLimit(t *testing.T) {
+	tests := []struct {
+		name, value string
+		want        int
+		wantErr     bool
+	}{
+		{name: "default", want: 50},
+		{name: "requested", value: "12", want: 12},
+		{name: "bounded", value: "1000", want: 100},
+		{name: "invalid", value: "0", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseTurnLimit(tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("got %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestLive(t *testing.T) {
 	s := server{version: "test", dialTimeout: time.Second}
@@ -16,6 +42,16 @@ func TestLive(t *testing.T) {
 	s.routes().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("expected %d, got %d", http.StatusOK, res.Code)
+	}
+}
+
+func TestRoutesRejectUnauthenticatedAPIRequests(t *testing.T) {
+	handler := auth.AuthenticatedHandler((server{version: "test"}).routes(), auth.Config{Token: "secret"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/version", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected %d, got %d", http.StatusUnauthorized, res.Code)
 	}
 }
 

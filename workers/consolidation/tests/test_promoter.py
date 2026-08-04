@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -109,6 +110,17 @@ class PromoterTests(unittest.TestCase):
         version = build_memory_version(c, item["id"])
         self.assertEqual(version["version_number"], 1)
         self.assertEqual(version["memory_id"], item["id"])
+
+    def test_build_memory_version_hashes_content(self):
+        c = _candidate(content="Hash this content")
+
+        version = build_memory_version(c, c.candidate_id)
+
+        self.assertEqual(
+            version["content_hash"],
+            sha256(c.content.encode("utf-8")).hexdigest(),
+        )
+        self.assertNotEqual(version["content_hash"], c.content)
 
 
 if __name__ == "__main__":

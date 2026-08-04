@@ -1,9 +1,13 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -14,18 +18,53 @@ import (
 )
 
 type projectionServer struct {
-	upstream string
-	client   *http.Client
+	upstream  string // primary dependency (memory-intelligence), used for readiness
+	upstreams map[string]string
+	client    *http.Client
+}
+
+// upstreamDefault names an environment variable and its fallback base URL for
+// a service this projection aggregates read-only views from.
+type upstreamDefault struct {
+	name     string
+	envVar   string
+	fallback string
+}
+
+var upstreamDefaults = []upstreamDefault{
+	{"memory_intelligence", "SCOS_MEMORY_INTELLIGENCE_URL", "http://memory-intelligence:8089"},
+	{"agent_registry", "SCOS_AGENT_REGISTRY_URL", "http://agent-registry:8093"},
+	{"tool_governance", "SCOS_TOOL_GOVERNANCE_URL", "http://tool-governance:8092"},
+	{"extension_manager", "SCOS_EXTENSION_MANAGER_URL", "http://extension-manager:8086"},
+	{"code_intelligence", "SCOS_CODE_INTELLIGENCE_URL", "http://code-intelligence:8084"},
+	{"autonomous_control_plane", "SCOS_AUTONOMOUS_CONTROL_PLANE_URL", "http://autonomous-control-plane:8081"},
+	{"recovery_orchestrator", "SCOS_RECOVERY_ORCHESTRATOR_URL", "http://recovery-orchestrator:8094"},
+	{"security_gate", "SCOS_SECURITY_GATE_URL", "http://security-gate:8091"},
+	{"observability", "SCOS_OBSERVABILITY_URL", "http://observability:8096"},
+}
+
+func resolveUpstreams() map[string]string {
+	resolved := make(map[string]string, len(upstreamDefaults))
+	for _, d := range upstreamDefaults {
+		base := strings.TrimRight(os.Getenv(d.envVar), "/")
+		if base == "" {
+			base = d.fallback
+		}
+		resolved[d.name] = base
+	}
+	return resolved
 }
 
 func main() {
-	upstream := strings.TrimRight(os.Getenv("SCOS_MEMORY_INTELLIGENCE_URL"), "/")
-	if upstream == "" {
-		upstream = "http://memory-intelligence:8089"
+	upstreams := resolveUpstreams()
+	client, err := tlsserve.TrustedClient(10 * time.Second)
+	if err != nil {
+		log.Fatalf("configure internal TLS client: %v", err)
 	}
 	s := &projectionServer{
-		upstream: upstream,
-		client:   &http.Client{Timeout: 10 * time.Second},
+		upstream:  upstreams["memory_intelligence"],
+		upstreams: upstreams,
+		client:    client,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", s.live)
@@ -33,13 +72,31 @@ func main() {
 	mux.HandleFunc("/v1/transparency/snapshot", s.snapshot)
 	mux.HandleFunc("/v1/transparency/events", s.events)
 	mux.HandleFunc("/v1/transparency/stream", s.events)
+	authenticated := auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
+
+	// The dashboard shell carries no authoritative data of its own: every
+	// value it renders comes from an authenticated fetch the browser makes
+	// against the routes above. Serving the static shell itself follows the
+	// same unauthenticated exception already made for the health probes.
+	dashboardPath := os.Getenv("SCOS_DASHBOARD_PATH")
+	if dashboardPath == "" {
+		dashboardPath = "/usr/local/share/scos/dashboard/index.html"
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
+			http.ServeFile(w, r, dashboardPath)
+			return
+		}
+		authenticated.ServeHTTP(w, r)
+	})
 
 	addr := os.Getenv("SCOS_TRANSPARENCY_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8097"
 	}
-	log.Printf("transparency projection listening on %s, upstream=%s", addr, upstream)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	log.Printf("transparency projection listening on %s, upstream=%s", addr, s.upstream)
+	if err := tlsserve.ListenAndServe(addr, handler); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -69,34 +126,58 @@ func (s *projectionServer) ready(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
+type viewSource struct {
+	base string
+	path string
+}
+
 func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	paths := map[string]string{
-		"system":     "/v1/dashboard/system",
-		"memory":     "/v1/dashboard/memory-graph",
-		"user_model": "/v1/dashboard/user-model",
-		"timeline":   "/v1/dashboard/timeline",
+	views := map[string]viewSource{
+		"system":               {s.upstream, "/v1/dashboard/system"},
+		"memory":               {s.upstream, "/v1/dashboard/memory-graph"},
+		"user_model":           {s.upstream, "/v1/dashboard/user-model"},
+		"timeline":             {s.upstream, "/v1/dashboard/timeline"},
+		"learnings":            {s.upstream, "/v1/dashboard/learnings"},
+		"contradictions":       {s.upstream, "/v1/dashboard/contradictions"},
+		"facts":                {s.upstream, "/v1/dashboard/facts"},
+		"diary":                {s.upstream, "/v1/diary"},
+		"agents":               {s.upstreams["agent_registry"], "/v1/agents"},
+		"tool_operations":      {s.upstreams["tool_governance"], "/v1/operations"},
+		"plugins":              {s.upstreams["extension_manager"], "/v1/extensions"},
+		"skills":               {s.upstreams["extension_manager"], "/v1/skills"},
+		"hooks":                {s.upstreams["extension_manager"], "/v1/hooks"},
+		"code_intelligence":    {s.upstreams["code_intelligence"], "/v1/index/status"},
+		"routing":              {s.upstreams["autonomous_control_plane"], "/v1/control/decisions"},
+		"recovery":             {s.upstreams["recovery_orchestrator"], "/v1/recovery/status"},
+		"security":             {s.upstreams["security_gate"], "/v1/audit"},
+		"costs_and_token_flow": {s.upstreams["observability"], "/v1/metrics"},
 	}
-	result := make(map[string]json.RawMessage, len(paths))
-	for name, path := range paths {
-		body, status, err := s.fetch(r, path)
+	result := make(map[string]json.RawMessage, len(views))
+	errored := make(map[string]string)
+	for name, view := range views {
+		body, status, err := s.fetch(r, view.base, view.path)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error(), "source": path})
-			return
+			errored[name] = err.Error()
+			continue
 		}
 		if status/100 != 2 {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "upstream projection failed", "source": path, "status": status})
-			return
+			errored[name] = fmt.Sprintf("upstream returned status %d", status)
+			continue
 		}
 		result[name] = body
 	}
+	if len(result) == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "no transparency views were available", "unavailable": errored})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"source":    "memory-intelligence",
-		"generated": time.Now().UTC().Format(time.RFC3339Nano),
-		"views":     result,
+		"generated":   time.Now().UTC().Format(time.RFC3339Nano),
+		"views":       result,
+		"unavailable": errored,
 	})
 }
 
@@ -144,8 +225,8 @@ func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *projectionServer) fetch(r *http.Request, path string) (json.RawMessage, int, error) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, s.upstream+path, nil)
+func (s *projectionServer) fetch(r *http.Request, base, path string) (json.RawMessage, int, error) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, base+path, nil)
 	if err != nil {
 		return nil, 0, err
 	}

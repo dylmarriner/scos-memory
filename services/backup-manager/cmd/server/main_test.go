@@ -1,7 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewBackupServer(t *testing.T) {
@@ -12,17 +19,179 @@ func TestNewBackupServer(t *testing.T) {
 }
 
 func TestDefaultBackupPlan(t *testing.T) {
+	t.Setenv("SCOS_BACKUP_PROVIDER", "local")
+	t.Setenv("SCOS_BACKUP_PROVIDER_VERIFIED", "false")
+	t.Setenv("SCOS_BACKUP_OFF_HOST_VERIFIED", "false")
 	s := newBackupServer()
-	if !s.plan.PostgreSQLWAL {
-		t.Fatal("expected WAL archiving enabled")
+	if s.plan.PostgreSQLWAL {
+		t.Fatal("WAL archiving must not be advertised without a configured provider")
 	}
 	if !s.plan.BaseBackups {
 		t.Fatal("expected base backups enabled")
 	}
-	if !s.plan.EncryptedOffHost {
-		t.Fatal("expected encrypted off-host enabled")
+	if s.plan.EncryptedOffHost {
+		t.Fatal("off-host copies must not be advertised without a configured provider")
+	}
+	if s.plan.PITRConfigured || s.plan.RemoteVerified {
+		t.Fatal("PITR and remote coverage must not be advertised without verification")
 	}
 }
+
+func TestTLSDatabaseURLIsRequired(t *testing.T) {
+	for _, raw := range []string{
+		"postgres://user:pass@db/scos?sslmode=disable",
+		"postgres://user:pass@db/scos",
+	} {
+		if err := requireTLSDatabaseURL(raw); err == nil {
+			t.Fatalf("expected TLS validation failure for %q", raw)
+		}
+	}
+	if err := requireTLSDatabaseURL("postgres://user:pass@db/scos?sslmode=require"); err != nil {
+		t.Fatalf("expected TLS URL to pass: %v", err)
+	}
+}
+
+func TestProductionReadinessRequiresProviderVerificationAndPITR(t *testing.T) {
+	t.Setenv("SCOS_BACKUP_PROVIDER", "filesystem")
+	t.Setenv("SCOS_BACKUP_DESTINATION", t.TempDir())
+	t.Setenv("SCOS_BACKUP_DATABASE_URL", "postgres://user:pass@db/scos?sslmode=require")
+	t.Setenv("SCOS_BACKUP_ENCRYPTION_KEY", strings.Repeat("k", 32))
+	t.Setenv("SCOS_SECRET_MANAGER", "vault")
+	t.Setenv("SCOS_BACKUP_ENCRYPTION_KEY_REF", "secret/scos/backup-key")
+	s := newBackupServerWithDir(t.TempDir())
+	if err := s.productionConfigError(); err == nil || !strings.Contains(err.Error(), "PROVIDER_VERIFIED") {
+		t.Fatalf("expected provider verification failure, got %v", err)
+	}
+	t.Setenv("SCOS_BACKUP_PROVIDER_VERIFIED", "true")
+	t.Setenv("SCOS_BACKUP_OFF_HOST_VERIFIED", "true")
+	s.config = loadBackupConfig()
+	if err := s.productionConfigError(); err == nil || !strings.Contains(err.Error(), "PITR") {
+		t.Fatalf("expected PITR failure, got %v", err)
+	}
+	t.Setenv("SCOS_WAL_ARCHIVE_DESTINATION", "s3://scos-wal-archive")
+	t.Setenv("SCOS_PITR_ENABLED", "true")
+	s.config = loadBackupConfig()
+	if err := s.productionConfigError(); err == nil || !strings.Contains(err.Error(), "GIT_MIRROR") {
+		t.Fatalf("expected git mirror failure, got %v", err)
+	}
+	t.Setenv("SCOS_OKF_GIT_MIRROR_REMOTE", "git@example.com:scos/okf-mirror.git")
+	t.Setenv("SCOS_OKF_GIT_MIRROR_VERIFIED", "true")
+	s.config = loadBackupConfig()
+	if err := s.productionConfigError(); err != nil && strings.Contains(err.Error(), "GIT_MIRROR") {
+		t.Fatalf("expected git mirror requirement satisfied, got %v", err)
+	}
+}
+
+func TestGitMirrorPlanRequiresRemoteAndVerification(t *testing.T) {
+	t.Setenv("SCOS_BACKUP_PROVIDER", "local")
+	s := newBackupServer()
+	if s.plan.GitMirrors {
+		t.Fatal("git mirrors must not be advertised without a configured remote")
+	}
+	t.Setenv("SCOS_OKF_GIT_MIRROR_REMOTE", "git@example.com:scos/okf-mirror.git")
+	s.config = loadBackupConfig()
+	s.plan = backupPlan(s.config)
+	if s.plan.GitMirrors {
+		t.Fatal("git mirrors must not be advertised without verification")
+	}
+	t.Setenv("SCOS_OKF_GIT_MIRROR_VERIFIED", "true")
+	s.config = loadBackupConfig()
+	s.plan = backupPlan(s.config)
+	if !s.plan.GitMirrors {
+		t.Fatal("expected git mirrors advertised once remote is configured and verified")
+	}
+}
+
+func TestLocalBackupArtifactLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	s := newBackupServerWithDir(dir)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/backups/start", stringsReader(`{"type":"base_backup"}`))
+	start := httptest.NewRecorder()
+	s.handleBackupStart(start, req)
+	if start.Code != http.StatusOK {
+		t.Fatalf("start status = %d", start.Code)
+	}
+	var started BackupRecord
+	if err := json.NewDecoder(start.Body).Decode(&started); err != nil {
+		t.Fatal(err)
+	}
+	if started.Status != "running" || started.Location == "" {
+		t.Fatalf("unexpected start record: %+v", started)
+	}
+	if _, err := os.Stat(started.Location); err != nil {
+		t.Fatalf("artifact was not created: %v", err)
+	}
+
+	complete := httptest.NewRecorder()
+	s.handleBackupComplete(complete, httptest.NewRequest(http.MethodPost, "/v1/backups/complete", stringsReader(`{"backup_id":"`+started.ID+`","status":"completed","size_bytes":999}`)))
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete status = %d: %s", complete.Code, complete.Body.String())
+	}
+	var completed BackupRecord
+	if err := json.NewDecoder(complete.Body).Decode(&completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != "completed" || completed.SizeBytes == 999 || completed.VerifiedAt == "" {
+		t.Fatalf("completion trusted caller metadata: %+v", completed)
+	}
+}
+
+func TestTamperedArtifactFailsRestore(t *testing.T) {
+	s := newBackupServerWithDir(t.TempDir())
+	artifact := backupArtifact{Manifest: backupManifest{ID: "backup-tampered", Type: "base_backup", Format: "scos-local-v1", ContentHash: hashString("original"), SizeBytes: 8}, Payload: "tampered"}
+	data, _ := json.Marshal(artifact)
+	if err := os.WriteFile(filepath.Join(s.backupDir, "backup-tampered.backup.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	s.handleRestore(rec, httptest.NewRequest(http.MethodPost, "/v1/backups/backup-tampered/restore", nil), "backup-tampered")
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("restore status = %d", rec.Code)
+	}
+}
+
+func TestReadyChecksBackupStorage(t *testing.T) {
+	s := newBackupServerWithDir(filepath.Join(t.TempDir(), "missing"))
+	rec := httptest.NewRecorder()
+	s.handleReady(rec, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ready status = %d", rec.Code)
+	}
+}
+
+func TestRetentionCleanupRemovesExpiredArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	s := newBackupServerWithDir(dir)
+	s.retention.WALAndDaily = 1
+	artifact := backupArtifact{Manifest: backupManifest{ID: "backup-old", Type: "base_backup", Format: "scos-local-v1", ContentHash: hashString("old"), SizeBytes: 3}, Payload: "old"}
+	data, _ := json.Marshal(artifact)
+	path := filepath.Join(dir, "backup-old.backup.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := s.cleanupRetention(time.Now())
+	if err != nil || removed != 1 {
+		t.Fatalf("cleanup removed=%d err=%v", removed, err)
+	}
+}
+
+func TestUnsupportedProviderIsUnavailable(t *testing.T) {
+	s := newBackupServerWithDir(t.TempDir())
+	s.provider = "s3"
+	rec := httptest.NewRecorder()
+	s.handleBackupStart(rec, httptest.NewRequest(http.MethodPost, "/v1/backups/start", stringsReader(`{}`)))
+	if rec.Code != http.StatusServiceUnavailable || !contains(rec.Body.String(), "unavailable") {
+		t.Fatalf("unexpected unsupported provider response: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func stringsReader(v string) *strings.Reader { return strings.NewReader(v) }
+func contains(s, v string) bool              { return strings.Contains(s, v) }
 
 func TestDefaultRetention(t *testing.T) {
 	s := newBackupServer()
@@ -152,5 +321,35 @@ func TestEmptyRestoreTestsList(t *testing.T) {
 	s.mu.RUnlock()
 	if count != 0 {
 		t.Fatal("expected empty restore tests")
+	}
+}
+
+func TestProductionEncryptionRoundTrip(t *testing.T) {
+	key := strings.Repeat("k", 32)
+	ciphertext, err := encryptBackup([]byte(key), []byte("postgres dump"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ciphertext) == "postgres dump" {
+		t.Fatal("backup payload must not be stored in plaintext")
+	}
+	plaintext, err := decryptBackup([]byte(key), ciphertext)
+	if err != nil || string(plaintext) != "postgres dump" {
+		t.Fatalf("decrypt result = %q, err = %v", plaintext, err)
+	}
+	ciphertext[len(ciphertext)-1] ^= 1
+	if _, err := decryptBackup([]byte(key), ciphertext); err == nil {
+		t.Fatal("tampered encrypted backup was accepted")
+	}
+}
+
+func TestProductionRestoreDrillRequiresTemporaryDatabase(t *testing.T) {
+	t.Setenv("SCOS_BACKUP_PROVIDER", "filesystem")
+	t.Setenv("SCOS_BACKUP_DESTINATION", t.TempDir())
+	t.Setenv("SCOS_BACKUP_ENCRYPTION_KEY", strings.Repeat("k", 32))
+	t.Setenv("SCOS_BACKUP_DATABASE_URL", "postgres://example/db")
+	s := newBackupServerWithDir(t.TempDir())
+	if err := s.restoreProduction("missing"); err == nil || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("expected unavailable restore source, got %v", err)
 	}
 }

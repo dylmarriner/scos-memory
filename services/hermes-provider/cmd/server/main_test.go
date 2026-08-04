@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -31,82 +34,49 @@ func TestProviderStatus(t *testing.T) {
 	}
 }
 
+func TestHandleStatusReflectsRealReadiness(t *testing.T) {
+	// A server with no DATABASE_URL/postgres dependency configured must
+	// report itself unhealthy, not a hardcoded true.
+	srv := newHermesServer()
+	req := httptest.NewRequest(http.MethodGet, "/v1/provider/status", nil)
+	rec := httptest.NewRecorder()
+	srv.handleStatus(rec, req)
+
+	var status ProviderStatus
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if status.Healthy || status.IsAvailable {
+		t.Fatalf("expected unhealthy status without a configured postgres dependency, got %+v", status)
+	}
+}
+
 func TestInitialize(t *testing.T) {
 	srv := newHermesServer()
-	initReq := struct {
-		ProfilePath string `json:"profile_path"`
-		TenantID    string `json:"tenant_id"`
-	}{
-		ProfilePath: "/home/user/.hermes/profiles/default",
-		TenantID:    "tenant-1",
+	body, _ := json.Marshal(map[string]string{
+		"profile_path": "/home/user/.hermes/profiles/default",
+		"tenant_id":    "tenant-1",
+	})
+	r := httptest.NewRequest(http.MethodPost, "/v1/provider/initialize", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleInit(w, r)
+	var out map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
 	}
-
-	srv.mu.Lock()
-	srv.profilePaths["session-1"] = initReq.ProfilePath
-	srv.mu.Unlock()
-
-	srv.mu.RLock()
-	path, ok := srv.profilePaths["session-1"]
-	srv.mu.RUnlock()
-	if !ok || path != "/home/user/.hermes/profiles/default" {
-		t.Fatal("profile path should be stored")
-	}
-}
-
-func TestPrefetch(t *testing.T) {
-	srv := newHermesServer()
-	req := PrefetchRequest{
-		SessionID:   "session-1",
-		ProfilePath: "/profiles/default",
-	}
-
-	srv.mu.Lock()
-	if _, ok := srv.sessions[req.SessionID]; !ok {
-		srv.sessions[req.SessionID] = map[string]any{
-			"prefetch_count": float64(1),
-			"last_seen":      "now",
-		}
-	}
-	srv.profilePaths[req.SessionID] = req.ProfilePath
-	srv.mu.Unlock()
-
-	srv.mu.RLock()
-	session, ok := srv.sessions["session-1"]
-	srv.mu.RUnlock()
-	if !ok {
-		t.Fatal("session should exist")
-	}
-	if session["prefetch_count"].(float64) != 1 {
-		t.Fatal("prefetch count should be 1")
-	}
-}
-
-func TestSyncTurn(t *testing.T) {
-	srv := newHermesServer()
-	srv.mu.Lock()
-	srv.turnCount++
-	srv.sessions["session-1"] = map[string]any{
-		"last_turn":  "turn-1",
-		"turn_count": srv.turnCount,
-	}
-	srv.mu.Unlock()
-
-	srv.mu.RLock()
-	session, ok := srv.sessions["session-1"]
-	srv.mu.RUnlock()
-	if !ok {
-		t.Fatal("session should exist")
-	}
-	if session["last_turn"] != "turn-1" {
-		t.Fatal("turn ID mismatch")
+	if out["status"] != "initialized" || out["profile_path"] != "/home/user/.hermes/profiles/default" {
+		t.Fatalf("unexpected init response: %#v", out)
 	}
 }
 
 func TestToolSchemas(t *testing.T) {
-	tools := []map[string]any{
-		{"name": "scos_recall"},
-		{"name": "scos_status"},
-		{"name": "scos_forget"},
+	srv := newHermesServer()
+	r := httptest.NewRequest(http.MethodGet, "/v1/provider/tool_schemas", nil)
+	w := httptest.NewRecorder()
+	srv.handleToolSchemas(w, r)
+	var tools []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&tools); err != nil {
+		t.Fatalf("decode response: %v", err)
 	}
 	if len(tools) != 3 {
 		t.Fatalf("expected 3 tools, got %d", len(tools))
@@ -122,28 +92,14 @@ func TestToolSchemas(t *testing.T) {
 	}
 }
 
-func TestSessionSwitchLineage(t *testing.T) {
-	srv := newHermesServer()
-	srv.mu.Lock()
-	srv.profilePaths["session-new"] = "/profiles/new"
-	srv.mu.Unlock()
-
-	srv.mu.RLock()
-	path, ok := srv.profilePaths["session-new"]
-	srv.mu.RUnlock()
-	if !ok || path != "/profiles/new" {
-		t.Fatal("profile path should be preserved after switch")
-	}
-}
-
-func TestMemoryWriteMirroring(t *testing.T) {
+func TestMemoryWriteRequestShape(t *testing.T) {
 	req := MemoryWriteRequest{
-		Key:    "user.name",
-		Value:  "Alice",
-		Scope:  "user",
-		Source: "user_message",
+		Key:         "user.name",
+		Value:       "Alice",
+		Scope:       "user",
+		Source:      "user_message",
+		NamespaceID: "00000000-0000-4000-8000-000000000000",
 	}
-
 	if req.Scope != "user" {
 		t.Fatal("scope mismatch")
 	}
@@ -152,17 +108,23 @@ func TestMemoryWriteMirroring(t *testing.T) {
 	}
 }
 
-func TestDelegationCapture(t *testing.T) {
-	srv := newHermesServer()
-	srv.mu.Lock()
-	srv.turnCount++
-	srv.mu.Unlock()
-
-	srv.mu.RLock()
-	count := srv.turnCount
-	srv.mu.RUnlock()
-	if count != 1 {
-		t.Fatalf("expected turn count 1, got %d", count)
+func TestClassifyMemoryScope(t *testing.T) {
+	cases := map[string]struct {
+		memoryType string
+		authority  int
+	}{
+		"governing":  {"governing", 100},
+		"procedural": {"procedural", 70},
+		"episodic":   {"episodic", 40},
+		"user":       {"semantic", 60},
+		"":           {"working", 30},
+		"unknown":    {"working", 30},
+	}
+	for scope, want := range cases {
+		gotType, gotAuthority := classifyMemoryScope(scope)
+		if gotType != want.memoryType || gotAuthority != want.authority {
+			t.Fatalf("classifyMemoryScope(%q) = (%s,%d), want (%s,%d)", scope, gotType, gotAuthority, want.memoryType, want.authority)
+		}
 	}
 }
 
@@ -187,27 +149,16 @@ func TestProviderStatusJSON(t *testing.T) {
 	}
 }
 
-func TestGetInt(t *testing.T) {
-	m := map[string]any{"count": float64(42)}
-	result := getInt(m, "count")
-	if result != 42 {
-		t.Fatalf("expected 42, got %d", result)
-	}
-
-	result = getInt(nil, "count")
-	if result != 0 {
-		t.Fatalf("expected 0 for nil map, got %d", result)
-	}
-
-	result = getInt(m, "missing")
-	if result != 0 {
-		t.Fatalf("expected 0 for missing key, got %d", result)
-	}
-}
-
 func TestSystemPromptBlock(t *testing.T) {
-	block := "You have access to SCOS Nexus memory (scos-nexus v0.1.0)."
-	if !contains(block, "SCOS Nexus") {
+	srv := newHermesServer()
+	r := httptest.NewRequest(http.MethodPost, "/v1/provider/system_prompt", nil)
+	w := httptest.NewRecorder()
+	srv.handleSystemPrompt(w, r)
+	var out map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(out["system_prompt_block"], "SCOS Nexus") {
 		t.Fatal("prompt should mention SCOS Nexus")
 	}
 }
@@ -221,21 +172,34 @@ func contains(s, substr string) bool {
 	return false
 }
 
-func TestPreCompressPreservation(t *testing.T) {
-	s := newHermesServer()
-	s.mu.Lock()
-	s.sessions["session-1"] = map[string]any{
-		"durable": true,
+func TestIsUUID(t *testing.T) {
+	if !isUUID("123e4567-e89b-12d3-a456-426614174000") {
+		t.Fatal("expected valid UUID to be recognised")
 	}
-	s.mu.Unlock()
+	for _, bad := range []string{"", "session-1", "s1", "123e4567e89b12d3a456426614174000"} {
+		if isUUID(bad) {
+			t.Fatalf("expected %q to be rejected as a UUID", bad)
+		}
+	}
+}
 
-	s.mu.RLock()
-	session, ok := s.sessions["session-1"]
-	s.mu.RUnlock()
-	if !ok {
-		t.Fatal("session should exist after pre-compress")
+func TestResolveIdentityRequiresTenantAndPrincipal(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/provider/prefetch", nil)
+	_, status, _ := resolveIdentity(r, "", "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without tenant/principal, got %d", status)
 	}
-	if session["durable"] != true {
-		t.Fatal("durable insights should be preserved")
+}
+
+func TestResolveIdentityFromHeaders(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/provider/prefetch", nil)
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	r.Header.Set("X-SCOS-Principal-ID", "principal-1")
+	identity, status, _ := resolveIdentity(r, "", "")
+	if status != 0 {
+		t.Fatalf("expected success, got status %d", status)
+	}
+	if identity.TenantID != "tenant-1" || identity.PrincipalID != "principal-1" {
+		t.Fatalf("unexpected identity: %+v", identity)
 	}
 }

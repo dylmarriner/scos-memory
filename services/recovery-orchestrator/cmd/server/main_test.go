@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -149,5 +153,88 @@ func TestMultipleRecoveryStatuses(t *testing.T) {
 
 	if len(s.statuses) != 2 {
 		t.Fatal("expected 2 statuses")
+	}
+}
+
+func TestApplyFindingsIsDependencyAware(t *testing.T) {
+	status := &RecoveryStatus{Checklist: RecoveryChecklist{
+		{Step: 1}, {Step: 2}, {Step: 3}, {Step: 4}, {Step: 5}, {Step: 6}, {Step: 7}, {Step: 8}, {Step: 9}, {Step: 10},
+	}}
+	applyFindings(status, recoveryFindings{
+		interruptedTurns: []string{"00000000-0000-0000-0000-000000000001"},
+		openOperations:   []string{"00000000-0000-0000-0000-000000000002"},
+		pendingOutbox:    2,
+	})
+	if status.Phase != "recovery" || status.Checklist[0].Status != "ok" {
+		t.Fatalf("expected database-backed recovery phase, got %q", status.Phase)
+	}
+	if status.Checklist[4].Status != "verifying" || status.Checklist[6].Detail != "2 pending outbox jobs discovered" {
+		t.Fatalf("expected discovered work in checklist: %+v", status.Checklist)
+	}
+	if checklistReady(status.Checklist) {
+		t.Fatal("recovery with unresolved work must not be ready")
+	}
+}
+
+func TestApplyFindingsResolvesOKFCheckpointsAndLeases(t *testing.T) {
+	status := &RecoveryStatus{Checklist: RecoveryChecklist{
+		{Step: 1}, {Step: 2}, {Step: 3}, {Step: 4}, {Step: 5}, {Step: 6}, {Step: 7}, {Step: 8}, {Step: 9}, {Step: 10},
+	}}
+	applyFindings(status, recoveryFindings{
+		okfOK:            true,
+		okfDetail:        "OKF repository synced at commit abc123",
+		checkpointDetail: "3 checkpoint(s) loaded, latest at 2026-01-01T00:00:00Z",
+		leasesReset:      2,
+	})
+	if status.Checklist[2].Status != "ok" || status.Checklist[2].Detail != "OKF repository synced at commit abc123" {
+		t.Fatalf("expected OKF step resolved, got %+v", status.Checklist[2])
+	}
+	if status.Checklist[3].Status != "ok" {
+		t.Fatalf("expected checkpoint step resolved, got %+v", status.Checklist[3])
+	}
+	if status.Checklist[7].Detail != "2 abandoned leases reset" {
+		t.Fatalf("expected lease reset detail, got %+v", status.Checklist[7])
+	}
+	if status.Checklist[1].Status != "skipped" || status.Checklist[8].Status != "skipped" {
+		t.Fatalf("expected steps 2 and 9 to remain deployment-owned skips, got %+v", status.Checklist)
+	}
+}
+
+func TestApplyFindingsFailsOnOKFSyncErrors(t *testing.T) {
+	status := &RecoveryStatus{Checklist: RecoveryChecklist{
+		{Step: 1}, {Step: 2}, {Step: 3}, {Step: 4}, {Step: 5}, {Step: 6}, {Step: 7}, {Step: 8}, {Step: 9}, {Step: 10},
+	}}
+	applyFindings(status, recoveryFindings{okfOK: false, okfDetail: "OKF repository sync at commit abc123 reported 1 error(s)"})
+	if status.Checklist[2].Status != "failed" {
+		t.Fatalf("expected OKF step failed, got %+v", status.Checklist[2])
+	}
+	if checklistReady(status.Checklist) {
+		t.Fatal("recovery must not be ready while OKF state is unconfirmed")
+	}
+}
+
+func TestReadyRequiresPostgres(t *testing.T) {
+	s := newRecoveryServer()
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	rec := httptest.NewRecorder()
+	s.handleReady(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected unavailable without database, got %d", rec.Code)
+	}
+}
+
+func TestReadyChecksDependency(t *testing.T) {
+	s := newRecoveryServer()
+	s.readyCheck = func(context.Context) error { return errors.New("database down") }
+	rec := httptest.NewRecorder()
+	s.handleReady(rec, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected unavailable database, got %d", rec.Code)
+	}
+	s.readyCheck = func(context.Context) error { return nil }
+	rec = httptest.NewRecorder()
+	s.handleReady(rec, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected ready database, got %d", rec.Code)
 	}
 }

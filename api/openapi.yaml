@@ -86,6 +86,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MessageReceipt'
+  /v1/turns/{turnID}/chunks:
+    post:
+      operationId: appendResponseChunk
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: turnID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppendChunkRequest'
+      responses:
+        '201':
+          description: Response chunk durably journaled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChunkReceipt'
+  /v1/turns/{turnID}/response:
+    post:
+      operationId: startAssistantResponse
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: turnID
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '201':
+          description: Assistant response message allocated for streaming.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartResponseReceipt'
   /v1/turns/{turnID}/complete:
     post:
       operationId: completeTurn
@@ -110,6 +152,41 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CompletionReceipt'
+  /v1/turns:
+    get:
+      operationId: listTurns
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      responses:
+        '200':
+          description: Permission-scoped journal turns.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnList'
+  /v1/memory:
+    get:
+      operationId: queryMemory
+      responses:
+        '200': {description: Current memory facts view}
+    post:
+      operationId: retainMemory
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Memory fact accepted by the current memory intelligence service}
+  /v1/okf:
+    get:
+      operationId: okfStatus
+      responses:
+        '200': {description: Current OKF documents discovered by the synchroniser}
   /v1/operations:
     post:
       operationId: prepareOperation
@@ -139,6 +216,72 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Explainable route decision}
+  /v1/control/ingest:
+    post:
+      operationId: controlIngest
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Persisted control-plane route decision}
+  /v1/control/decisions:
+    get:
+      operationId: listControlDecisions
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - name: interaction_id
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Route decision for the requested interaction}
+        '404': {description: Route decision not found}
+  /v1/control/replay:
+    post:
+      operationId: controlReplay
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Persisted decision read and validated; no execution is performed}
+  /v1/control/recover:
+    post:
+      operationId: controlRecover
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '202': {description: Recovery state transition accepted}
+  /v1/control/status:
+    get:
+      operationId: getControlLifecycleStatus
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - name: interaction_id
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Truthful persisted lifecycle, reply, checkpoint, and outbox status}
+        '404': {description: Interaction not found}
+  /v1/control/status/{interactionID}:
+    get:
+      operationId: getControlLifecycleStatusByInteraction
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - $ref: '#/components/parameters/PrincipalID'
+        - name: interactionID
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Truthful persisted lifecycle, reply, checkpoint, and outbox status}
+        '404': {description: Interaction not found}
   /v1/control/decisions/{interactionID}:
     get:
       operationId: getRouteDecision
@@ -170,6 +313,24 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Restored authoritative context}
+  /v1/context/evaluate:
+    post:
+      operationId: evaluateContext
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Context invariant evaluation metrics}
+  /v1/code/index:
+    post:
+      operationId: indexCode
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Code index generation result}
   /v1/code/query:
     post:
       operationId: queryCode
@@ -197,6 +358,25 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Audited execution result}
+  /v1/proxy/restore:
+    get:
+      operationId: proxyRestoreByQuery
+      parameters:
+        - name: restoration_handle
+          in: query
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+      responses:
+        '200': {description: Restored raw execution result}
+  /v1/proxy/explain:
+    post:
+      operationId: proxyExplain
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
+      responses:
+        '200': {description: Command plan and applicable rewrite explanations}
   /v1/extensions/install:
     post:
       operationId: installExtension
@@ -221,86 +401,55 @@ paths:
           schema: {type: string}
       responses:
         '200': {description: Versioned user knowledge ledger}
-  /v1/turns:
-    get:
-      operationId: listTurns
-      responses:
-        '200': {description: List of committed turn records}
-  /v1/memory:
-    get:
-      operationId: queryMemory
-      responses:
-        '200': {description: Scoped memory items and provenance}
-  /v1/okf:
-    get:
-      operationId: okfStatus
-      responses:
-        '200': {description: Open Knowledge Fabric repository status}
   /v1/audit:
     get:
       operationId: getAuditLogs
       responses:
         '200': {description: Immutable security audit entries}
-  /v1/retrieval-runs:
-    get:
-      operationId: getRetrievalRuns
-      responses:
-        '200': {description: Traceability data for past retrieval runs}
-  /v1/control/ingest:
-    post:
-      operationId: controlIngest
-      responses:
-        '200': {description: Control plane event ingestion receipt}
-  /v1/control/decisions:
-    get:
-      operationId: listControlDecisions
-      responses:
-        '200': {description: History of autonomous control routing decisions}
-  /v1/control/replay:
-    post:
-      operationId: controlReplay
-      responses:
-        '200': {description: Replay execution result for decision audit}
-  /v1/control/recover:
-    post:
-      operationId: controlRecover
-      responses:
-        '200': {description: Rebuild and recovery trigger receipt}
   /v1/capabilities:
     get:
       operationId: listCapabilities
       responses:
         '200': {description: Capability registry entries}
   /v1/triggers:
-    get:
-      operationId: listTriggers
-      responses:
-        '200': {description: Registered event triggers}
-  /v1/context/evaluate:
     post:
-      operationId: evaluateContext
+      operationId: triggerControlIngress
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
       responses:
-        '200': {description: Evaluation metric scores for compiled context}
-  /v1/code/index:
+        '200': {description: Trigger represented as a control-plane route ingestion request}
+  /v1/retrieval-runs:
     post:
-      operationId: indexCode
+      operationId: createRetrievalRun
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object}}
       responses:
-        '200': {description: Code indexing trigger receipt}
-  /v1/proxy/restore:
-    post:
-      operationId: proxyRestore
-      responses:
-        '200': {description: Restored tool state result}
-  /v1/proxy/explain:
-    get:
-      operationId: proxyExplain
-      responses:
-        '200': {description: Explanation of command rewriting decisions}
+        '200': {description: Retrieval result with source and timing metadata}
   /v1/benchmarks:
     get:
       operationId: runBenchmarks
       responses:
-        '200': {description: Benchmark harness evaluation report}
+        '200':
+          description: Measured results from the frozen governance quality benchmark suite.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BenchmarkSummary'
+        '405': {description: Method not allowed}
+  /v1/proxy/restore/{restorationHandle}:
+    get:
+      operationId: proxyRestore
+      parameters:
+        - name: restorationHandle
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+      responses:
+        '200': {description: Restored raw execution result}
   /v1/extensions:
     get:
       operationId: listExtensions
@@ -329,7 +478,7 @@ paths:
       operationId: rollbackExtension
       parameters: [{name: package_id, in: path, required: true, schema: {type: string}}]
       responses:
-        '200': {description: Extension rolled back status}
+        '200': {description: Extension rolled back to the most recent retained manifest}
   /v1/skills:
     get:
       operationId: listSkills
@@ -365,12 +514,12 @@ paths:
       operationId: getEntityRepresentation
       parameters: [{name: entity_id, in: path, required: true, schema: {type: string}}]
       responses:
-        '200': {description: Structured entity representation}
+        '200': {description: Entity and its currently associated facts}
   /v1/memory/graph:
     get:
       operationId: getMemoryGraph
       responses:
-        '200': {description: Temporal knowledge graph representation}
+        '200': {description: Current in-memory facts, entities, and relations graph}
   /v1/beliefs:
     get:
       operationId: listBeliefs
@@ -380,12 +529,12 @@ paths:
     get:
       operationId: listLearnings
       responses:
-        '200': {description: Governed learning signals}
+        '200': {description: Current learning dashboard view}
   /v1/diary:
     get:
       operationId: getDiary
       responses:
-        '200': {description: Personal user memory diary summary}
+        '200': {description: Current diary view; empty when no diary entries are persisted}
   /v1/transparency/snapshot:
     get:
       operationId: getTransparencySnapshot
@@ -424,8 +573,8 @@ components:
           type: string
         checks:
           type: object
-            additionalProperties:
-              type: string
+          additionalProperties:
+            type: string
     CreateSessionRequest:
       type: object
       required: [namespace_id]
@@ -442,6 +591,27 @@ components:
       properties:
         role: {type: string, enum: [user, assistant, tool]}
         content: {type: string, minLength: 1}
+    AppendChunkRequest:
+      type: object
+      required: [message_id, chunk_sequence, content]
+      properties:
+        message_id: {type: string, format: uuid}
+        chunk_sequence: {type: integer, minimum: 0}
+        content: {type: string, minLength: 1}
+    ChunkReceipt:
+      type: object
+      required: [turn_id, message_id, chunk_sequence]
+      properties:
+        turn_id: {type: string, format: uuid}
+        message_id: {type: string, format: uuid}
+        chunk_sequence: {type: integer, minimum: 0}
+    StartResponseReceipt:
+      type: object
+      required: [turn_id, message_id, status]
+      properties:
+        turn_id: {type: string, format: uuid}
+        message_id: {type: string, format: uuid}
+        status: {type: string, enum: [running]}
     MessageReceipt:
       type: object
       required: [turn_id, message_id, sequence]
@@ -449,6 +619,27 @@ components:
         turn_id: {type: string, format: uuid}
         message_id: {type: string, format: uuid}
         sequence: {type: integer, format: int64}
+    TurnList:
+      type: object
+      required: [turns, limit]
+      properties:
+        turns:
+          type: array
+          items: {$ref: '#/components/schemas/Turn'}
+        limit: {type: integer, minimum: 1, maximum: 100}
+    Turn:
+      type: object
+      required: [id, session_id, sequence, status, actor_id, accepted_at, agent_id, started_at, completed_at]
+      properties:
+        id: {type: string, format: uuid}
+        session_id: {type: string, format: uuid}
+        sequence: {type: integer, format: int64}
+        status: {type: string}
+        actor_id: {type: string, format: uuid}
+        agent_id: {type: [string, 'null'], format: uuid}
+        accepted_at: {type: string, format: date-time}
+        started_at: {type: [string, 'null'], format: date-time}
+        completed_at: {type: [string, 'null'], format: date-time}
     CompleteTurnRequest:
       type: object
       required: [content]
@@ -478,3 +669,30 @@ components:
       properties:
         operation_id: {type: string, format: uuid}
         status: {type: string, enum: [prepared]}
+    BenchmarkSummary:
+      type: object
+      required: [suite, version, total_cases, average_scores, total_latency_ms, avg_latency_ms, results]
+      properties:
+        suite: {type: string}
+        version: {type: string}
+        total_cases: {type: integer, minimum: 1}
+        average_scores:
+          type: object
+          additionalProperties: {type: number, minimum: 0, maximum: 1}
+        total_latency_ms: {type: number, minimum: 0}
+        avg_latency_ms: {type: number, minimum: 0}
+        results:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [case_id, retrieved_ids, latency_ms, scores]
+            properties:
+              case_id: {type: string}
+              retrieved_ids:
+                type: array
+                items: {type: string}
+              latency_ms: {type: number, minimum: 0}
+              scores:
+                type: object
+                additionalProperties: {type: number, minimum: 0, maximum: 1}

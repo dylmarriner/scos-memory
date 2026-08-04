@@ -27,3 +27,48 @@ Autonomous routing does not expand authority. Confirmation-gated and high-impact
 - Capability contracts and health become first-class platform data.
 - All adapters must emit the same canonical ingress envelope.
 - Agents become replaceable workers rather than owners of durable state.
+
+## Compatibility
+
+Every ingress adapter (HTTP, SDK, MCP host, A2A, CLI, IDE, scheduled
+workflow, event/filesystem trigger, recovery replay) must translate into
+the same canonical ingress event before submission (GOVERNANCE.md §21.2).
+Adapters are additive: a new adapter cannot change the shape the control
+plane already commits to the journal, only add a new producer of it.
+
+## Migration
+
+The control plane's route-decision and capability-registry schemas
+(`route_decisions`, `capability_graph` tables) evolve additively per
+GOVERNANCE.md §12. A capability registry generation bump
+(`registry_generation`) is the migration unit for routing policy changes —
+old and new generations can coexist so in-flight routes keep replaying
+against the policy version they were decided under.
+
+## Rollback
+
+Route-policy and capability-registry changes are versioned
+(`policy_version`, `registry_generation`) and promoted through the
+GOVERNANCE.md §21.15 sequence (offline replay → adversarial tests → shadow
+→ canary → rollback validation). Rollback is reverting to the previous
+`policy_version`/`registry_generation` value; because every decision
+record pins the version it was made under, no historical decision becomes
+unexplainable after a rollback.
+
+## Index rebuild
+
+The capability registry is rebuilt from live health checks, deployment
+manifests and verified outcome telemetry (GOVERNANCE.md §21.6) — it is a
+derived projection, never hand-edited authoritative state. A full rebuild
+re-registers every service's declared capability record and re-runs health
+checks; no route decision history is lost because decisions reference the
+registry generation, not live registry rows.
+
+## Verification
+
+Autonomy acceptance is gated on the §21.18 thresholds (100% ingress
+interception, 100% pre-dispatch journalling, zero direct-database bypass,
+≥98% routing precision/recall on the frozen benchmark suite). Failure
+injection (`tests/failure-injection`) covers direct-path bypass attempts,
+missing capability health, conflicting route labels, and interrupted route
+recovery.

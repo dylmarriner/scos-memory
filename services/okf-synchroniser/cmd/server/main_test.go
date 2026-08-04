@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -197,4 +201,76 @@ func TestOKFDocumentJSON(t *testing.T) {
 	if decoded.ID != "okf-1" {
 		t.Fatal("roundtrip failed")
 	}
+}
+
+func TestGitCommitReadsRepositoryHead(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	if err := os.WriteFile(filepath.Join(root, "doc.md"), []byte("# Document\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "doc.md")
+	runGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	want := strings.TrimSpace(string(runGit(t, root, "rev-parse", "HEAD")))
+	if got := gitCommit(root); got != want {
+		t.Fatalf("gitCommit() = %q, want %q", got, want)
+	}
+}
+
+func TestSynchronisePersistsProjectionCommit(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "projections.json")
+	runGit(t, root, "init")
+	if err := os.WriteFile(filepath.Join(root, "doc.md"), []byte("# Document\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "doc.md")
+	runGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+
+	s := &okfServer{documents: make(map[string]*OKFDocument), projections: make(map[string]*IndexProjection), okfRoot: root, statePath: statePath}
+	s.synchronise(context.Background())
+	loaded := &okfServer{documents: make(map[string]*OKFDocument), projections: make(map[string]*IndexProjection), okfRoot: root, statePath: statePath}
+	if err := loaded.loadProjections(); err != nil {
+		t.Fatal(err)
+	}
+	projection := loaded.projections[filepath.Join(root, "doc.md")]
+	if projection == nil || projection.CommitHash == "" || projection.ImportStatus != "synced" {
+		t.Fatalf("projection was not persisted accurately: %#v", projection)
+	}
+}
+
+func TestSynchroniseRejectsDocumentOverwrite(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "projections.json")
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("repository"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &okfServer{documents: map[string]*OKFDocument{"id": {ID: "id", Path: path, ContentHash: sha256Hex([]byte("indexed")), Content: "indexed"}}, projections: map[string]*IndexProjection{path: {Path: path, ContentHash: sha256Hex([]byte("old")), ImportStatus: "synced"}}, okfRoot: root, statePath: statePath}
+	result := s.synchronise(context.Background())
+	if len(result.Diverged) != 1 || s.documents["id"].Content != "indexed" {
+		t.Fatalf("expected overwrite rejection, result=%#v doc=%#v", result, s.documents["id"])
+	}
+}
+
+func TestSynchroniseRejectsDocumentDeletion(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "projections.json")
+	path := filepath.Join(root, "deleted.md")
+	hash := sha256Hex([]byte("indexed"))
+	s := &okfServer{documents: map[string]*OKFDocument{"id": {ID: "id", Path: path, ContentHash: hash, Content: "indexed"}}, projections: map[string]*IndexProjection{path: {Path: path, ContentHash: hash, ImportStatus: "synced"}}, okfRoot: root, statePath: statePath}
+	result := s.synchronise(context.Background())
+	if len(result.Diverged) != 1 || s.documents["id"] == nil || s.documents["id"].Status != "diverged" {
+		t.Fatalf("expected deletion rejection, result=%#v doc=%#v", result, s.documents["id"])
+	}
+}
+
+func runGit(t *testing.T, root string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+	return output
 }

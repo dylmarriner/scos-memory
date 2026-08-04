@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+database_url=${SCOS_DATABASE_URL:-}
+if [ -n "$database_url" ]; then
+  psql_cmd() { psql "$database_url" -v ON_ERROR_STOP=1 "$@"; }
+else
+  psql_cmd() { psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 "$@"; }
+fi
+psql_cmd <<'SQL'
+CREATE TABLE IF NOT EXISTS scos_schema_migrations (
+    version text PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+SQL
+
+# An untracked non-empty database needs an operator-supplied inventory because
+# the old init-only bootstrap did not record which files had run.
+count=$(psql_cmd -Atqc "SELECT count(*) FROM scos_schema_migrations")
+if [ "$count" = 0 ]; then
+  has_schema=$(psql_cmd -Atqc "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relkind IN ('r','p') AND relname = 'tenants')")
+  if [ "$has_schema" = "t" ]; then
+    baseline=${SCOS_MIGRATIONS_BASELINE:-}
+    [ -n "$baseline" ] || {
+      echo "SCOS_MIGRATIONS_BASELINE is required for an existing untracked database" >&2
+      exit 1
+    }
+    old_ifs=$IFS
+    IFS=,
+    for version in $baseline; do
+      version=$(printf '%s' "$version" | tr -d '[:space:]')
+      [ -n "$version" ] || continue
+      psql_cmd -c "INSERT INTO scos_schema_migrations(version) VALUES ('$version') ON CONFLICT DO NOTHING"
+    done
+    IFS=$old_ifs
+  fi
+fi
+
+for file in /scos-database/migrations/*.sql /scos-database/policies/*.sql; do
+  version=$(basename "$file" .sql)
+  applied=$(psql_cmd -Atqc "SELECT EXISTS (SELECT 1 FROM scos_schema_migrations WHERE version = '$version')")
+  if [ "$applied" = "f" ]; then
+    psql_cmd -f "$file"
+    psql_cmd -c "INSERT INTO scos_schema_migrations(version) VALUES ('$version')"
+  fi
+done

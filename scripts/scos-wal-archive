@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+source_path=$1
+wal_name=$2
+destination=${SCOS_WAL_ARCHIVE_DESTINATION:?SCOS_WAL_ARCHIVE_DESTINATION is required when WAL archiving is enabled}
+
+case "$destination" in
+  file://*) destination=${destination#file://} ;;
+  /*) ;;
+  *) echo "only an explicitly mounted file:// WAL destination is implemented" >&2; exit 1 ;;
+esac
+mkdir -p "$destination"
+install -m 0600 "$source_path" "$destination/$wal_name"

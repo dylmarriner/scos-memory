@@ -1,20 +1,43 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/services/readiness"
 )
 
 // ── configuration ────────────────────────────────────────────────────────
 
 const version = "0.1.0"
+
+var startTime = time.Now()
+
+func handleVersion(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":         "ok",
+		"version":        version,
+		"uptime_seconds": int(time.Since(startTime).Seconds()),
+	})
+}
+
+func readinessCheck() error {
+	return readiness.WritableDir(os.TempDir())
+}
 
 // ── request / response types ─────────────────────────────────────────────
 
@@ -55,16 +78,51 @@ type BudgetAllocation struct {
 }
 
 type ContextCapsule struct {
-	CapsuleID         string           `json:"capsule_id"`
-	Profile           string           `json:"compression_profile"`
-	SourceContentHash string           `json:"source_content_hash"`
-	OriginalTokens    int              `json:"original_token_count"`
-	CompiledTokens    int              `json:"compiled_token_count"`
-	Reduction         float64          `json:"reduction_ratio"`
-	Segments          []Segment        `json:"segments"`
-	Allocation        BudgetAllocation `json:"allocation"`
-	CompilerVersion   string           `json:"compiler_version"`
-	CreatedAt         string           `json:"created_at"`
+	CapsuleID                string              `json:"capsule_id"`
+	Profile                  string              `json:"compression_profile"`
+	SourceContentHash        string              `json:"source_content_hash"`
+	OriginalTokens           int                 `json:"original_token_count"`
+	CompiledTokens           int                 `json:"compiled_token_count"`
+	Reduction                float64             `json:"reduction_ratio"`
+	Segments                 []Segment           `json:"segments"`
+	Allocation               BudgetAllocation    `json:"allocation"`
+	CompilerVersion          string              `json:"compiler_version"`
+	CreatedAt                string              `json:"created_at"`
+	SourceObjects            []SourceObjectRef   `json:"source_objects"`
+	IncludedRanges           []ContextRange      `json:"included_ranges"`
+	ExcludedRanges           []ContextRange      `json:"excluded_ranges"`
+	CompressionPolicyVersion string              `json:"compression_policy_version"`
+	CompressionPolicyHash    string              `json:"compression_policy_hash"`
+	TokenAccounting          TokenAccounting     `json:"token_accounting"`
+	SemanticInvariants       []string            `json:"semantic_invariants"`
+	Validation               ValidationResults   `json:"validation"`
+	RestorationHandles       []RestorationHandle `json:"restoration_handles"`
+}
+
+type SourceObjectRef struct {
+	ObjectID    string `json:"object_id"`
+	Version     string `json:"version"`
+	ContentHash string `json:"content_hash"`
+}
+type ContextRange struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+type TokenAccounting struct {
+	Method     string `json:"method"`
+	Original   int    `json:"original"`
+	Compressed int    `json:"compressed"`
+	Included   int    `json:"included"`
+	Excluded   int    `json:"excluded"`
+}
+type ValidationResults struct {
+	Valid  bool            `json:"valid"`
+	Checks map[string]bool `json:"checks"`
+}
+type RestorationHandle struct {
+	HandleID    string `json:"handle_id"`
+	ObjectID    string `json:"object_id"`
+	ContentHash string `json:"content_hash"`
 }
 
 type InputOptimiseResponse struct {
@@ -91,27 +149,126 @@ type OutputOptimiseResponse struct {
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", healthOK)
+	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
+		return readinessCheck()
+	}))
+	mux.HandleFunc("/v1/version", handleVersion)
 	mux.HandleFunc("/v1/optimize/input", handleInputOptimise)
 	mux.HandleFunc("/v1/optimize/output", handleOutputOptimise)
 	// Governing names. The legacy optimise paths remain supported for clients
 	// that adopted the initial service contract.
 	mux.HandleFunc("/v1/context/compile", handleInputOptimise)
 	mux.HandleFunc("/v1/context/restore", handleContextRestore)
+	mux.HandleFunc("/v1/context/evaluate", handleContextEvaluate)
 
 	addr := os.Getenv("SCOS_CONTEXT_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8083"
 	}
 	log.Printf("context optimisation layer listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
 }
 
 type contextRestoreRequest struct {
-	Capsule       ContextCapsule `json:"capsule"`
-	SourceContent string         `json:"source_content"`
+	Capsule ContextCapsule `json:"capsule"`
+}
+
+// SourceStore is the authority for content referenced by a capsule. Callers
+// cannot provide replacement content during restoration.
+type SourceStore interface {
+	Put(objectID, version, contentHash, content string) error
+	Get(objectID, version string) (string, error)
+}
+
+type fileSourceStore struct {
+	root string
+	mu   sync.RWMutex
+}
+
+func newFileSourceStore(root string) *fileSourceStore { return &fileSourceStore{root: root} }
+func (s *fileSourceStore) path(objectID, version string) string {
+	return filepath.Join(s.root, objectID+"-"+version+".source")
+}
+func (s *fileSourceStore) Put(objectID, version, contentHash, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.MkdirAll(s.root, 0700); err != nil {
+		return err
+	}
+	if sha256Hex([]byte(content)) != contentHash {
+		return fmt.Errorf("source hash does not match content")
+	}
+	return os.WriteFile(s.path(objectID, version), []byte(content), 0600)
+}
+func (s *fileSourceStore) Get(objectID, version string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, err := os.ReadFile(s.path(objectID, version))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func defaultSourceStore() SourceStore {
+	root := os.Getenv("SCOS_CONTEXT_SOURCE_STORE")
+	if root == "" {
+		root = filepath.Join(os.TempDir(), "scos-context-sources")
+	}
+	return newFileSourceStore(root)
+}
+
+var authoritativeSourceStore SourceStore = defaultSourceStore()
+
+type contextEvaluateRequest struct {
+	Input        string          `json:"input"`
+	CompiledText string          `json:"compiled_text"`
+	Capsule      *ContextCapsule `json:"capsule,omitempty"`
+	Hints        []string        `json:"non_droppable_hints,omitempty"`
+}
+
+func handleContextEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req contextEvaluateRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Input) == "" || strings.TrimSpace(req.CompiledText) == "" {
+		http.Error(w, "input and compiled_text are required", http.StatusBadRequest)
+		return
+	}
+
+	originalTokens := estimateTokens(req.Input)
+	compiledTokens := estimateTokens(req.CompiledText)
+	valid := validateInvariants(req.Input, req.CompiledText, req.Hints)
+	if req.Capsule != nil {
+		if req.Capsule.SourceContentHash == "" || sha256Hex([]byte(req.Input)) != req.Capsule.SourceContentHash {
+			http.Error(w, "input does not match capsule", http.StatusConflict)
+			return
+		}
+		if req.Capsule.CompiledTokens > 0 && req.Capsule.CompiledTokens != compiledTokens {
+			valid = false
+		}
+	}
+	reduction := 0.0
+	if originalTokens > 0 {
+		reduction = 1 - float64(compiledTokens)/float64(originalTokens)
+	}
+	writeJSON(w, map[string]any{
+		"valid":               valid,
+		"source_content_hash": sha256Hex([]byte(req.Input)),
+		"original_tokens":     originalTokens,
+		"compiled_tokens":     compiledTokens,
+		"reduction_ratio":     reduction,
+	})
 }
 
 func handleContextRestore(w http.ResponseWriter, r *http.Request) {
@@ -122,19 +279,43 @@ func handleContextRestore(w http.ResponseWriter, r *http.Request) {
 	var req contextRestoreRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || req.SourceContent == "" {
-		http.Error(w, "capsule and source_content are required", http.StatusBadRequest)
+	if err := dec.Decode(&req); err != nil || req.Capsule.CapsuleID == "" || len(req.Capsule.SourceObjects) == 0 {
+		http.Error(w, "capsule with source_objects is required", http.StatusBadRequest)
 		return
 	}
-	if sha256Hex([]byte(req.SourceContent)) != req.Capsule.SourceContentHash {
-		http.Error(w, "source content does not match capsule", http.StatusConflict)
-		return
+	var restored strings.Builder
+	for _, source := range req.Capsule.SourceObjects {
+		if !validSourceRef(source) {
+			http.Error(w, "invalid source reference", http.StatusBadRequest)
+			return
+		}
+		content, err := authoritativeSourceStore.Get(source.ObjectID, source.Version)
+		if err != nil {
+			http.Error(w, "authoritative source is missing", http.StatusNotFound)
+			return
+		}
+		if sha256Hex([]byte(content)) != source.ContentHash {
+			http.Error(w, "authoritative source failed integrity validation", http.StatusConflict)
+			return
+		}
+		restored.WriteString(content)
 	}
 	writeJSON(w, map[string]any{
 		"capsule_id": req.Capsule.CapsuleID,
 		"restored":   true,
-		"content":    req.SourceContent,
+		"content":    restored.String(),
 	})
+}
+
+func validSourceRef(source SourceObjectRef) bool {
+	if source.ObjectID == "" || source.Version == "" || len(source.ContentHash) != 64 {
+		return false
+	}
+	if strings.ContainsAny(source.ObjectID, `/\\`) || strings.ContainsAny(source.Version, `/\\`) {
+		return false
+	}
+	_, err := hex.DecodeString(source.ContentHash)
+	return err == nil
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {
@@ -191,7 +372,13 @@ func handleInputOptimise(w http.ResponseWriter, r *http.Request) {
 	validated := validateInvariants(req.Input, compiled, req.NonDroppableHints)
 
 	// ── 7. Build capsule ────────────────────────────────────────────
-	capsule := buildCapsule(req.Input, profile, segments, compiledSegments, allocation)
+	capsule := buildCapsule(req.Input, profile, segments, compiledSegments, allocation, validated)
+	for _, source := range capsule.SourceObjects {
+		if err := authoritativeSourceStore.Put(source.ObjectID, source.Version, source.ContentHash, req.Input); err != nil {
+			http.Error(w, "failed to persist authoritative source", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	resp := InputOptimiseResponse{
 		Capsule:      capsule,
@@ -644,7 +831,7 @@ func compactOutput(raw string) string {
 
 // ── capsule ──────────────────────────────────────────────────────────────
 
-func buildCapsule(original, profile string, segments, compiled []Segment, allocation BudgetAllocation) ContextCapsule {
+func buildCapsule(original, profile string, segments, compiled []Segment, allocation BudgetAllocation, validation ...bool) ContextCapsule {
 	origTokens := 0
 	for _, s := range segments {
 		origTokens += s.OriginalTokens
@@ -662,17 +849,38 @@ func buildCapsule(original, profile string, segments, compiled []Segment, alloca
 		reduction = 1.0 - float64(compiledTokens)/float64(origTokens)
 	}
 
+	contentHash := sha256Hex([]byte(original))
+	objectID := "source-" + contentHash[:32]
+	policyVersion := "context-policy-1"
+	policyHash := sha256Hex([]byte(policyVersion + ":" + profile))
+	valid := true
+	if len(validation) > 0 {
+		valid = validation[0]
+	}
+	checks := map[string]bool{
+		"semantic_invariants":  valid,
+		"source_hash_recorded": true,
+	}
 	return ContextCapsule{
-		CapsuleID:         newCapsuleID(),
-		Profile:           profile,
-		SourceContentHash: sha256Hex([]byte(original)),
-		OriginalTokens:    origTokens,
-		CompiledTokens:    compiledTokens,
-		Reduction:         reduction,
-		Segments:          compiled,
-		Allocation:        allocation,
-		CompilerVersion:   version,
-		CreatedAt:         time.Now().UTC().Format(time.RFC3339),
+		CapsuleID:                newCapsuleID(),
+		Profile:                  profile,
+		SourceContentHash:        contentHash,
+		OriginalTokens:           origTokens,
+		CompiledTokens:           compiledTokens,
+		Reduction:                reduction,
+		Segments:                 compiled,
+		Allocation:               allocation,
+		CompilerVersion:          version,
+		CreatedAt:                time.Now().UTC().Format(time.RFC3339),
+		SourceObjects:            []SourceObjectRef{{ObjectID: objectID, Version: "1", ContentHash: contentHash}},
+		IncludedRanges:           []ContextRange{{Start: 0, End: len(original)}},
+		ExcludedRanges:           []ContextRange{},
+		CompressionPolicyVersion: policyVersion,
+		CompressionPolicyHash:    policyHash,
+		TokenAccounting:          TokenAccounting{Method: "utf8_bytes_div_4", Original: origTokens, Compressed: compiledTokens, Included: origTokens, Excluded: 0},
+		SemanticInvariants:       extractExactValues(original),
+		Validation:               ValidationResults{Valid: valid, Checks: checks},
+		RestorationHandles:       []RestorationHandle{{HandleID: "restore-" + contentHash[:32], ObjectID: objectID, ContentHash: contentHash}},
 	}
 }
 

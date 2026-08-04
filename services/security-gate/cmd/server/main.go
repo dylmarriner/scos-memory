@@ -1,16 +1,26 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
+	"crypto/subtle"
+	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/services/readiness"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const version = "0.1.0"
@@ -96,25 +106,48 @@ type AuthResult struct {
 // ── server ───────────────────────────────────────────────────────────────
 
 type securityServer struct {
-	mu       sync.RWMutex
-	auditLog []*AuditRecord
-	secrets  map[string]*SecretReference
-	tokens   map[string]*AuthToken
+	db           *sql.DB
+	issuerSecret string
 }
 
 func newSecurityServer() *securityServer {
-	return &securityServer{
-		auditLog: make([]*AuditRecord, 0),
-		secrets:  make(map[string]*SecretReference),
-		tokens:   make(map[string]*AuthToken),
+	return &securityServer{issuerSecret: os.Getenv("SCOS_SECURITY_ISSUER_SECRET")}
+}
+
+func (s *securityServer) ready() error {
+	if strings.TrimSpace(s.issuerSecret) == "" {
+		return fmt.Errorf("SCOS_SECURITY_ISSUER_SECRET must be configured")
 	}
+	if s.db == nil {
+		return fmt.Errorf("postgres dependency is not configured")
+	}
+	return s.db.Ping()
 }
 
 func main() {
+	issuerSecret := os.Getenv("SCOS_SECURITY_ISSUER_SECRET")
+	if issuerSecret == "" {
+		log.Fatal("SCOS_SECURITY_ISSUER_SECRET must be configured")
+	}
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+	if err := database.RequireTLS(databaseURL); err != nil {
+		log.Fatal(err)
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		log.Fatalf("connect to database: %v", err)
+	}
+	defer db.Close()
+
 	s := newSecurityServer()
+	s.db = db
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", healthOK)
+	mux.HandleFunc("/health/ready", readiness.Handler(s.ready))
 
 	// Auth
 	mux.HandleFunc("/v1/auth/validate", s.handleAuthValidate)
@@ -139,7 +172,7 @@ func main() {
 		addr = ":8091"
 	}
 	log.Printf("security gate listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -156,6 +189,10 @@ func (s *securityServer) handleAuthIssue(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.validIssuerSecret(r.Header.Get("X-SCOS-Issuer-Secret")) {
+		http.Error(w, "issuer authentication required", http.StatusUnauthorized)
+		return
+	}
 	var req struct {
 		Principal string    `json:"principal"`
 		AgentID   string    `json:"agent_id"`
@@ -168,8 +205,12 @@ func (s *securityServer) handleAuthIssue(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Principal == "" {
-		http.Error(w, "principal required", http.StatusBadRequest)
+	if !isUUID(req.Principal) {
+		http.Error(w, "principal must be a principal UUID", http.StatusBadRequest)
+		return
+	}
+	if !isUUID(req.Tenant) {
+		http.Error(w, "tenant must be a tenant UUID", http.StatusBadRequest)
 		return
 	}
 	if req.DataClass == "" {
@@ -179,28 +220,82 @@ func (s *securityServer) handleAuthIssue(w http.ResponseWriter, r *http.Request)
 		req.ExpiresIn = 3600
 	}
 
-	tokenBytes := sha256.Sum256([]byte(fmt.Sprintf("%s-%s-%d", req.Principal, req.Tenant, time.Now().UnixNano())))
-	tokenID := hex.EncodeToString(tokenBytes[:16])
-
-	expiresAt := time.Now().UTC().Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339)
-
-	s.mu.Lock()
-	s.tokens[tokenID] = &AuthToken{
-		Token:     tokenID,
-		Principal: req.Principal,
-		AgentID:   req.AgentID,
-		Tenant:    req.Tenant,
-		SessionID: req.SessionID,
-		ExpiresAt: expiresAt,
-		DataClass: req.DataClass,
+	tokenID, err := s.newTokenID()
+	if err != nil {
+		http.Error(w, "unable to issue token", http.StatusInternalServerError)
+		return
 	}
-	s.mu.Unlock()
+	expiresAt := time.Now().UTC().Add(time.Duration(req.ExpiresIn) * time.Second)
+	identity := requestIdentity{TenantID: req.Tenant, PrincipalID: req.Principal}
+	if err := insertToken(r.Context(), s.db, identity, tokenPublicPart(tokenID), req.AgentID, req.SessionID, req.DataClass, expiresAt); err != nil {
+		http.Error(w, "unable to persist token", http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, map[string]any{
 		"token":      tokenID,
 		"principal":  req.Principal,
-		"expires_at": expiresAt,
+		"expires_at": expiresAt.Format(time.RFC3339),
 	})
+}
+
+func (s *securityServer) validIssuerSecret(provided string) bool {
+	expected := sha256.Sum256([]byte(s.issuerSecret))
+	actual := sha256.Sum256([]byte(provided))
+	return subtle.ConstantTimeCompare(expected[:], actual[:]) == 1 && s.issuerSecret != ""
+}
+
+// newTokenID mints a fresh bearer token: a random public identifier plus an
+// HMAC signature over that identifier under the issuer secret. Validation
+// re-derives the signature rather than storing it, so the database never
+// holds anything an attacker could use without also knowing the issuer
+// secret.
+func (s *securityServer) newTokenID() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	id := base64.RawURLEncoding.EncodeToString(raw)
+	mac := hmac.New(sha256.New, []byte(s.issuerSecret))
+	_, _ = mac.Write([]byte(id))
+	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return id + "." + signature, nil
+}
+
+func tokenPublicPart(token string) string {
+	parts := strings.SplitN(token, ".", 2)
+	return parts[0]
+}
+
+func (s *securityServer) validToken(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || s.issuerSecret == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(s.issuerSecret))
+	_, _ = mac.Write([]byte(parts[0]))
+	expected, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(expected, mac.Sum(nil))
+}
+
+func (s *securityServer) authenticatedToken(r *http.Request) (*AuthToken, bool) {
+	const prefix = "Bearer "
+	authorization := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authorization, prefix) {
+		return nil, false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(authorization, prefix))
+	if !s.validToken(token) {
+		return nil, false
+	}
+	authToken, ok, err := lookupToken(r.Context(), s.db, tokenPublicPart(token))
+	if err != nil || !ok {
+		return nil, false
+	}
+	return &authToken, true
 }
 
 func (s *securityServer) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
@@ -215,24 +310,19 @@ func (s *securityServer) handleAuthValidate(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.mu.RLock()
-	authToken, ok := s.tokens[req.Token]
-	s.mu.RUnlock()
-
+	if !s.validToken(req.Token) {
+		writeJSON(w, AuthResult{Valid: false, Reason: "invalid token"})
+		return
+	}
+	authToken, ok, err := lookupToken(r.Context(), s.db, tokenPublicPart(req.Token))
+	if err != nil {
+		http.Error(w, "unable to validate token", http.StatusInternalServerError)
+		return
+	}
 	if !ok {
-		writeJSON(w, AuthResult{Valid: false, Reason: "token not found"})
+		writeJSON(w, AuthResult{Valid: false, Reason: "token not found or expired"})
 		return
 	}
-
-	expiresAt, err := time.Parse(time.RFC3339, authToken.ExpiresAt)
-	if err != nil || time.Now().UTC().After(expiresAt) {
-		s.mu.Lock()
-		delete(s.tokens, req.Token)
-		s.mu.Unlock()
-		writeJSON(w, AuthResult{Valid: false, Reason: "token expired"})
-		return
-	}
-
 	writeJSON(w, AuthResult{
 		Valid:     true,
 		Principal: authToken.Principal,
@@ -255,9 +345,10 @@ func (s *securityServer) handleAuthRevoke(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.mu.Lock()
-	delete(s.tokens, req.Token)
-	s.mu.Unlock()
+	if _, err := revokeToken(r.Context(), s.db, tokenPublicPart(req.Token)); err != nil {
+		http.Error(w, "unable to revoke token", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{"revoked": true})
 }
 
@@ -273,22 +364,43 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Permission identity comes from the authenticated token, not the request body.
+	authToken, ok := s.authenticatedToken(r)
+	if !ok {
+		http.Error(w, "valid bearer token required", http.StatusUnauthorized)
+		return
+	}
+	if check.Principal != "" && check.Principal != authToken.Principal {
+		http.Error(w, "principal does not match token", http.StatusForbidden)
+		return
+	}
+	if check.Tenant != "" && check.Tenant != authToken.Tenant {
+		http.Error(w, "tenant does not match token", http.StatusForbidden)
+		return
+	}
+	check.Principal = authToken.Principal
+	check.Tenant = authToken.Tenant
 	if check.DataClass == "" {
 		check.DataClass = ClassPublic
 	}
+	if classRank(check.DataClass) > classRank(authToken.DataClass) {
+		writeJSON(w, PermissionResult{Allowed: false, Reason: "requested data class exceeds token authorisation"})
+		return
+	}
 	allowed := evaluatePermission(&check)
 
-	auditID := ""
-	s.mu.Lock()
-	s.nextAuditID()
-	auditID = fmt.Sprintf("aud-%d", len(s.auditLog)+1)
-	s.auditLog = append(s.auditLog, &AuditRecord{
-		ID: auditID, Action: check.Action, Principal: check.Principal,
+	identity := requestIdentity{TenantID: authToken.Tenant, PrincipalID: authToken.Principal}
+	record := &AuditRecord{
+		Action: check.Action, Principal: check.Principal,
 		Resource: check.Resource, DataClass: check.DataClass,
 		Tenant: check.Tenant, Result: map[bool]string{true: "allowed", false: "denied"}[allowed],
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	})
-	s.mu.Unlock()
+	}
+	auditID, err := insertAuditEntry(r.Context(), s.db, identity, record)
+	if err != nil {
+		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, PermissionResult{
 		Allowed: allowed,
@@ -302,6 +414,23 @@ func evaluatePermission(check *PermissionCheck) bool {
 		return false // requires specific elevated grant
 	}
 	return true // basic policy: allow up to restricted
+}
+
+func classRank(class DataClass) int {
+	switch class {
+	case ClassPublic:
+		return 0
+	case ClassInternal:
+		return 1
+	case ClassConfidential:
+		return 2
+	case ClassRestricted:
+		return 3
+	case ClassSecret:
+		return 4
+	default:
+		return -1
+	}
 }
 
 func (s *securityServer) handleClassifyData(w http.ResponseWriter, r *http.Request) {
@@ -341,24 +470,36 @@ func classifyContent(content string) DataClass {
 // ── audit ────────────────────────────────────────────────────────────────
 
 func (s *securityServer) handleAudit(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	logs := s.auditLog
-	s.mu.RUnlock()
+	identity, status, msg := resolveIdentity(r, "", "")
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	logs, err := listAuditEntries(r.Context(), s.db, identity)
+	if err != nil {
+		http.Error(w, "unable to read audit log", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, logs)
 }
 
 func (s *securityServer) handleAuditByID(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/audit/")
-	s.mu.RLock()
-	for _, a := range s.auditLog {
-		if a.ID == id {
-			s.mu.RUnlock()
-			writeJSON(w, a)
-			return
-		}
+	identity, status, msg := resolveIdentity(r, "", "")
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
 	}
-	s.mu.RUnlock()
-	http.Error(w, "not found", http.StatusNotFound)
+	id := strings.TrimPrefix(r.URL.Path, "/v1/audit/")
+	record, err := getAuditEntry(r.Context(), s.db, identity, id)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "unable to read audit entry", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, record)
 }
 
 func (s *securityServer) handleAuditRecord(w http.ResponseWriter, r *http.Request) {
@@ -371,42 +512,78 @@ func (s *securityServer) handleAuditRecord(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.mu.Lock()
-	s.nextAuditID()
-	record.ID = fmt.Sprintf("aud-%d", len(s.auditLog)+1)
+	identity, status, msg := resolveIdentity(r, record.Tenant, record.Principal)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 	if record.Timestamp == "" {
 		record.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
-	s.auditLog = append(s.auditLog, &record)
-	s.mu.Unlock()
-	writeJSON(w, map[string]any{"audit_id": record.ID})
+	auditID, err := insertAuditEntry(r.Context(), s.db, identity, &record)
+	if err != nil {
+		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"audit_id": auditID})
 }
-
-func (s *securityServer) nextAuditID() {}
 
 // ── secrets ──────────────────────────────────────────────────────────────
 
 func (s *securityServer) handleSecrets(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var ref SecretReference
+		if err := json.NewDecoder(r.Body).Decode(&ref); err != nil {
+			http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if ref.ID == "" || ref.Name == "" || ref.Provider == "" || ref.Ref == "" {
+			http.Error(w, "id, name, provider, and ref required", http.StatusBadRequest)
+			return
+		}
+		identity, status, msg := resolveIdentity(r, "", "")
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
+		if err := upsertSecretReference(r.Context(), s.db, identity, &ref); err != nil {
+			http.Error(w, "unable to persist secret reference", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, ref)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	s.mu.RLock()
-	var refs []*SecretReference
-	for _, ref := range s.secrets {
-		refs = append(refs, ref)
+	identity, status, msg := resolveIdentity(r, "", "")
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
 	}
-	s.mu.RUnlock()
+	refs, err := listSecretReferences(r.Context(), s.db, identity)
+	if err != nil {
+		http.Error(w, "unable to list secret references", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, refs)
 }
 
 func (s *securityServer) handleSecretByID(w http.ResponseWriter, r *http.Request) {
+	identity, status, msg := resolveIdentity(r, "", "")
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/secrets/")
-	s.mu.RLock()
-	ref, ok := s.secrets[id]
-	s.mu.RUnlock()
-	if !ok {
+	ref, err := getSecretReference(r.Context(), s.db, identity, id)
+	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "unable to read secret reference", http.StatusInternalServerError)
 		return
 	}
 	// Never return the actual secret value

@@ -3,7 +3,9 @@ BEGIN;
 -- The gateway sets these transaction-local values after authenticating the request.
 -- Policies deliberately fail closed when either value is absent.
 CREATE POLICY namespaces_tenant_read ON namespaces
-    FOR SELECT USING (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid);
+    FOR SELECT USING (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid
+        AND (owner_principal_id = NULLIF(current_setting('scos.principal_id', true), '')::uuid
+            OR EXISTS (SELECT 1 FROM namespace_memberships m WHERE m.namespace_id = namespaces.id AND m.principal_id = NULLIF(current_setting('scos.principal_id', true), '')::uuid AND (m.can_read OR m.can_administer))));
 CREATE POLICY namespaces_member_write ON namespaces
     FOR ALL USING (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid
         AND (owner_principal_id = NULLIF(current_setting('scos.principal_id', true), '')::uuid
@@ -25,6 +27,7 @@ CREATE POLICY messages_tenant_access ON messages
 
 CREATE POLICY memory_items_namespace_access ON memory_items
     FOR SELECT USING (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid
+        AND sensitivity <= (SELECT n.sensitivity_ceiling FROM namespaces n WHERE n.id = memory_items.namespace_id)
         AND EXISTS (SELECT 1 FROM namespace_memberships m WHERE m.namespace_id = memory_items.namespace_id AND m.principal_id = NULLIF(current_setting('scos.principal_id', true), '')::uuid AND m.can_read));
 CREATE POLICY memory_items_candidate_write ON memory_items
     FOR INSERT WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid
@@ -42,8 +45,10 @@ CREATE POLICY retrieval_runs_principal_access ON retrieval_runs
     WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid AND principal_id = NULLIF(current_setting('scos.principal_id', true), '')::uuid);
 
 CREATE POLICY retrieval_results_run_access ON retrieval_results
-    FOR ALL USING (EXISTS (SELECT 1 FROM retrieval_runs r WHERE r.id = retrieval_results.retrieval_run_id))
-    WITH CHECK (EXISTS (SELECT 1 FROM retrieval_runs r WHERE r.id = retrieval_results.retrieval_run_id));
+    FOR ALL USING (EXISTS (SELECT 1 FROM retrieval_runs r WHERE r.id = retrieval_results.retrieval_run_id)
+        AND (memory_id IS NULL OR EXISTS (SELECT 1 FROM memory_items i WHERE i.id = retrieval_results.memory_id)))
+    WITH CHECK (EXISTS (SELECT 1 FROM retrieval_runs r WHERE r.id = retrieval_results.retrieval_run_id)
+        AND (memory_id IS NULL OR EXISTS (SELECT 1 FROM memory_items i WHERE i.id = retrieval_results.memory_id)));
 
 ALTER TABLE turns ENABLE ROW LEVEL SECURITY;
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;

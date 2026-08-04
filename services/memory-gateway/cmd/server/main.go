@@ -1,5 +1,8 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
 	"context"
 	"database/sql"
@@ -10,8 +13,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
+	"github.com/dylmarriner/scos-memory/packages/database"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -20,6 +25,7 @@ type server struct {
 	databaseURL string
 	dialTimeout time.Duration
 	db          *sql.DB
+	validator   *eventValidator
 }
 
 type statusResponse struct {
@@ -36,6 +42,16 @@ func main() {
 		dialTimeout: 2 * time.Second,
 	}
 	if s.databaseURL != "" {
+		if err := database.RequireTLS(s.databaseURL); err != nil {
+			log.Fatal(err)
+		}
+	}
+	validator, err := newEventValidator(os.Getenv("SCOS_SCHEMA_DIR"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	s.validator = validator
+	if s.databaseURL != "" {
 		db, err := sql.Open("pgx", s.databaseURL)
 		if err != nil {
 			log.Fatal(err)
@@ -43,10 +59,14 @@ func main() {
 		s.db = db
 		defer db.Close()
 	}
+	authConfig, err := auth.FromEnvironment()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           s.routes(),
+		Handler:           auth.ControlPlaneHandler(s.routes(), authConfig),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -54,10 +74,12 @@ func main() {
 	}
 
 	log.Printf("memory gateway listening on %s", addr)
-	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := tlsserve.Serve(httpServer); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
+
+func (s server) journal() journalStore { return journalStore{db: s.db, validator: s.validator} }
 
 func (s server) routes() http.Handler {
 	mux := http.NewServeMux()
@@ -66,12 +88,59 @@ func (s server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/version", s.handleVersion)
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
 	mux.HandleFunc("POST /v1/sessions/{sessionID}/messages", s.handleAppendMessage)
+	mux.HandleFunc("POST /v1/turns/{turnID}/chunks", s.handleAppendChunk)
+	mux.HandleFunc("POST /v1/turns/{turnID}/response", s.handleStartResponse)
+	mux.HandleFunc("GET /v1/turns", s.handleListTurns)
 	mux.HandleFunc("POST /v1/turns/{turnID}/complete", s.handleCompleteTurn)
 	mux.HandleFunc("POST /v1/operations", s.handlePrepareOperation)
 	return requestLogging(mux)
 }
 
+func (s server) handleListTurns(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "not_ready"})
+		return
+	}
+	rc, err := s.journalContext(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	limit, err := parseTurnLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := s.journal().listTurns(r.Context(), rc, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list turns"})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func parseTurnLimit(value string) (int, error) {
+	const defaultLimit, maxLimit = 50, 100
+	if value == "" {
+		return defaultLimit, nil
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit < 1 {
+		return 0, errors.New("limit must be a positive integer")
+	}
+	if limit > maxLimit {
+		return maxLimit, nil
+	}
+	return limit, nil
+}
+
 func (s server) journalContext(r *http.Request) (requestContext, error) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		return requestContext{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, nil
+	}
+	if auth.Identity(r.Context()) != "" {
+		return requestContext{}, errors.New("authenticated token has no tenant and principal claims")
+	}
 	tenant, principal := r.Header.Get("X-SCOS-Tenant-ID"), r.Header.Get("X-SCOS-Principal-ID")
 	if tenant == "" || principal == "" {
 		return requestContext{}, errors.New("X-SCOS-Tenant-ID and X-SCOS-Principal-ID are required")
@@ -95,7 +164,7 @@ func (s server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON or request too large"})
 		return
 	}
-	result, err := (journalStore{s.db}).createSession(r.Context(), rc, r.Header.Get("Idempotency-Key"), req)
+	result, err := s.journal().createSession(r.Context(), rc, r.Header.Get("Idempotency-Key"), req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -119,7 +188,31 @@ func (s server) handleAppendMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON or request too large"})
 		return
 	}
-	result, err := (journalStore{s.db}).appendMessage(r.Context(), rc, r.PathValue("sessionID"), r.Header.Get("Idempotency-Key"), req)
+	result, err := s.journal().appendMessage(r.Context(), rc, r.PathValue("sessionID"), r.Header.Get("Idempotency-Key"), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s server) handleAppendChunk(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "not_ready"})
+		return
+	}
+	rc, err := s.journalContext(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	defer r.Body.Close()
+	var req appendChunkRequest
+	if err = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON or request too large"})
+		return
+	}
+	result, err := s.journal().appendChunk(r.Context(), rc, r.PathValue("turnID"), r.Header.Get("Idempotency-Key"), req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -143,7 +236,25 @@ func (s server) handleCompleteTurn(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON or request too large"})
 		return
 	}
-	result, err := (journalStore{s.db}).completeTurn(r.Context(), rc, r.PathValue("turnID"), r.Header.Get("Idempotency-Key"), req)
+	result, err := s.journal().completeTurn(r.Context(), rc, r.PathValue("turnID"), r.Header.Get("Idempotency-Key"), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s server) handleStartResponse(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "not_ready"})
+		return
+	}
+	rc, err := s.journalContext(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := s.journal().startResponse(r.Context(), rc, r.PathValue("turnID"), r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -167,7 +278,7 @@ func (s server) handlePrepareOperation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON or request too large"})
 		return
 	}
-	result, err := (journalStore{s.db}).prepareOperation(r.Context(), rc, r.Header.Get("Idempotency-Key"), req)
+	result, err := s.journal().prepareOperation(r.Context(), rc, r.Header.Get("Idempotency-Key"), req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

@@ -1,16 +1,27 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"sync"
+	"strings"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/services/readiness"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const version = "0.1.0"
 const providerName = "scos-nexus"
+const recallLimit = 20
 
 // ── Hermes MemoryProvider lifecycle types ───────────────────────────────
 
@@ -24,12 +35,18 @@ type ProviderStatus struct {
 }
 
 type PrefetchRequest struct {
+	TenantID    string `json:"tenant_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
+	NamespaceID string `json:"namespace_id"`
 	SessionID   string `json:"session_id"`
 	ProfilePath string `json:"profile_path"`
 	LastCapsule string `json:"last_capsule_id,omitempty"`
 }
 
 type SyncTurnRequest struct {
+	TenantID    string `json:"tenant_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
+	NamespaceID string `json:"namespace_id"`
 	SessionID   string `json:"session_id"`
 	TurnID      string `json:"turn_id"`
 	Messages    []any  `json:"messages"`
@@ -38,44 +55,110 @@ type SyncTurnRequest struct {
 }
 
 type MemoryWriteRequest struct {
-	Key    string `json:"key"`
-	Value  string `json:"value"`
-	Scope  string `json:"scope"`
-	Source string `json:"source"`
+	TenantID    string `json:"tenant_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
+	NamespaceID string `json:"namespace_id"`
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	Scope       string `json:"scope"`
+	Source      string `json:"source"`
+	ProfilePath string `json:"profile_path,omitempty"`
 }
 
 type DelegationEvent struct {
+	TenantID        string `json:"tenant_id,omitempty"`
+	PrincipalID     string `json:"principal_id,omitempty"`
 	ParentSessionID string `json:"parent_session_id"`
 	SubAgentID      string `json:"sub_agent_id"`
 	Task            string `json:"task"`
 	Result          string `json:"result,omitempty"`
 }
 
+type StoredTurn struct {
+	SessionID string `json:"session_id"`
+	TurnID    string `json:"turn_id"`
+	Messages  []any  `json:"messages"`
+	ToolCalls []any  `json:"tool_calls,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
 // ── server state ─────────────────────────────────────────────────────────
 
 type hermesServer struct {
-	mu           sync.RWMutex
-	startTime    time.Time
-	sessions     map[string]map[string]any // session_id -> metadata
-	turnCount    int
-	profilePaths map[string]string // session_id -> profile_path
+	startTime time.Time
+	db        *sql.DB
+}
+
+func (s *hermesServer) readinessCheck() error {
+	if os.Getenv("DATABASE_URL") == "" {
+		return fmt.Errorf("DATABASE_URL is required")
+	}
+	if s.db == nil {
+		return fmt.Errorf("postgres dependency is not configured")
+	}
+	return s.db.PingContext(context.Background())
 }
 
 func newHermesServer() *hermesServer {
-	return &hermesServer{
-		startTime:    time.Now(),
-		sessions:     make(map[string]map[string]any),
-		profilePaths: make(map[string]string),
+	return &hermesServer{startTime: time.Now()}
+}
+
+// ── identity resolution ──────────────────────────────────────────────────
+
+// resolveIdentity determines the tenant/principal a request acts as. Claims
+// carried on an authenticated bearer token take precedence; internal
+// SCOS-Tenant/Principal headers are the fallback used by direct
+// service-to-service calls and by tests that invoke handlers without the
+// auth middleware in front of them. A caller-supplied tenant/principal on
+// the JSON body must agree with whichever identity was authenticated.
+func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (requestIdentity, int, string) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		if (bodyTenant != "" && bodyTenant != claims.TenantID) || (bodyPrincipal != "" && bodyPrincipal != claims.PrincipalID) {
+			return requestIdentity{}, http.StatusForbidden, "request identity does not match authenticated identity"
+		}
+		return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
 	}
+	if auth.Identity(r.Context()) != "" {
+		return requestIdentity{}, http.StatusUnauthorized, "authenticated token has no tenant and principal claims"
+	}
+	tenantID := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
+	principalID := strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
+	if tenantID == "" {
+		tenantID = bodyTenant
+	}
+	if principalID == "" {
+		principalID = bodyPrincipal
+	}
+	if tenantID == "" || principalID == "" {
+		return requestIdentity{}, http.StatusUnauthorized, "tenant_id and principal_id are required"
+	}
+	return requestIdentity{TenantID: tenantID, PrincipalID: principalID}, 0, ""
 }
 
 // ── main ─────────────────────────────────────────────────────────────────
 
 func main() {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+	if err := database.RequireTLS(databaseURL); err != nil {
+		log.Fatal(err)
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		log.Fatalf("connect to database: %v", err)
+	}
+	defer db.Close()
+
 	srv := newHermesServer()
+	srv.db = db
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", healthOK)
+	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
+		return srv.readinessCheck()
+	}))
 
 	// Hermes MemoryProvider lifecycle
 	mux.HandleFunc("/v1/provider/status", srv.handleStatus)
@@ -95,7 +178,7 @@ func main() {
 		addr = ":8088"
 	}
 	log.Printf("hermes memory provider (%s) listening on %s", providerName, addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -108,11 +191,12 @@ func healthOK(w http.ResponseWriter, _ *http.Request) {
 // ── lifecycle endpoints ─────────────────────────────────────────────────
 
 func (s *hermesServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	healthy := s.readinessCheck() == nil
 	writeJSON(w, ProviderStatus{
 		Name:        providerName,
 		Version:     version,
-		IsAvailable: true,
-		Healthy:     true,
+		IsAvailable: healthy,
+		Healthy:     healthy,
 		Uptime:      time.Since(s.startTime).Round(time.Second).String(),
 	})
 }
@@ -146,7 +230,6 @@ func (s *hermesServer) handleSystemPrompt(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Return system prompt block for memory awareness
 	writeJSON(w, map[string]string{
 		"system_prompt_block": "You have access to SCOS Nexus memory (" + providerName + " v" + version + "). " +
 			"Memory operations are automatic. Use scos_recall tools for explicit retrieval if needed.",
@@ -163,22 +246,50 @@ func (s *hermesServer) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	s.mu.Lock()
-	s.sessions[req.SessionID] = map[string]any{
-		"last_seen":      time.Now().UTC().Format(time.RFC3339),
-		"prefetch_count": getInt(s.sessions[req.SessionID], "prefetch_count") + 1,
+	if req.SessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
 	}
-	if req.ProfilePath != "" {
-		s.profilePaths[req.SessionID] = req.ProfilePath
+	if !isUUID(req.SessionID) {
+		http.Error(w, "session_id must be a UUID", http.StatusBadRequest)
+		return
 	}
-	s.mu.Unlock()
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 
-	// Return cached recall context
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
+		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	recall, err := recentTurns(ctx, s.db, identity.TenantID, req.SessionID, recallLimit)
+	if err != nil {
+		http.Error(w, "load recall: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	writeJSON(w, map[string]any{
 		"prefetched": true,
 		"session_id": req.SessionID,
-		"recall":     []map[string]any{},
+		"recall":     recall,
 		"cache_hit":  req.LastCapsule != "",
 	})
 }
@@ -193,25 +304,83 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	s.mu.Lock()
-	s.turnCount++
-	s.sessions[req.SessionID] = map[string]any{
-		"last_turn":  req.TurnID,
-		"turn_count": s.turnCount,
+	if req.SessionID == "" || req.TurnID == "" {
+		http.Error(w, "session_id and turn_id are required", http.StatusBadRequest)
+		return
 	}
-	s.mu.Unlock()
+	if !isUUID(req.SessionID) {
+		http.Error(w, "session_id must be a UUID", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 
-	writeJSON(w, map[string]any{
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	idemKey := "hermes_sync_turn:" + req.SessionID + ":" + req.TurnID
+	requestHash := sha256Hex(req.SessionID, req.TurnID)
+	var replayed map[string]any
+	found, err := idempotentReplay(ctx, tx, identity, idemKey, requestHash, &replayed)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if found {
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		replayed["duplicate"] = true
+		writeJSON(w, replayed)
+		return
+	}
+
+	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
+		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	generatedTurnID, err := newID()
+	if err != nil {
+		http.Error(w, "generate turn id: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	result := map[string]any{
 		"synced":     true,
 		"session_id": req.SessionID,
 		"turn_id":    req.TurnID,
-		"async":      true,
-	})
+		"async":      false,
+		"duplicate":  false,
+	}
+	if err := recordIdempotent(ctx, tx, identity, idemKey, "hermes_sync_turn", requestHash, result); err != nil {
+		http.Error(w, "record idempotency: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, result)
 }
 
 func (s *hermesServer) handleToolSchemas(w http.ResponseWriter, r *http.Request) {
-	// Supplemental tools per §24.5
 	tools := []map[string]any{
 		{
 			"name":        "scos_recall",
@@ -254,6 +423,9 @@ func (s *hermesServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req struct {
+		TenantID      string `json:"tenant_id,omitempty"`
+		PrincipalID   string `json:"principal_id,omitempty"`
+		NamespaceID   string `json:"namespace_id"`
 		FromSessionID string `json:"from_session_id"`
 		ToSessionID   string `json:"to_session_id"`
 		ProfilePath   string `json:"profile_path"`
@@ -262,10 +434,46 @@ func (s *hermesServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.ToSessionID == "" {
+		http.Error(w, "to_session_id is required", http.StatusBadRequest)
+		return
+	}
+	if !isUUID(req.ToSessionID) {
+		http.Error(w, "to_session_id must be a UUID", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 
-	s.mu.Lock()
-	s.profilePaths[req.ToSessionID] = req.ProfilePath
-	s.mu.Unlock()
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.ensureSession(ctx, tx, identity, req.ToSessionID, req.NamespaceID); err != nil {
+		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.FromSessionID != "" {
+		if err := appendEvent(ctx, tx, identity.TenantID, req.ToSessionID, "session.switched", "session/"+req.ToSessionID, identity.PrincipalID,
+			map[string]string{"from_session_id": req.FromSessionID, "to_session_id": req.ToSessionID}); err != nil {
+			http.Error(w, "record switch event: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, map[string]any{
 		"switched":  true,
@@ -280,17 +488,68 @@ func (s *hermesServer) handlePreCompress(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		SessionID string `json:"session_id"`
-		Messages  []any  `json:"messages"`
+		TenantID    string `json:"tenant_id,omitempty"`
+		PrincipalID string `json:"principal_id,omitempty"`
+		NamespaceID string `json:"namespace_id"`
+		SessionID   string `json:"session_id"`
+		Messages    []any  `json:"messages"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.SessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	if !isUUID(req.SessionID) {
+		http.Error(w, "session_id must be a UUID", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
+		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	generatedTurnID, err := newID()
+	if err != nil {
+		http.Error(w, "generate turn id: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	insightID := generatedTurnID
+	if err := appendEvent(ctx, tx, identity.TenantID, req.SessionID, "session.pre_compress_insight", "session/"+req.SessionID, identity.PrincipalID,
+		map[string]string{"turn_id": insightID}); err != nil {
+		http.Error(w, "record insight event: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, map[string]any{
 		"preserved":        true,
-		"durable_insights": []string{},
+		"durable_insights": []string{insightID},
 		"session_id":       req.SessionID,
 	})
 }
@@ -305,12 +564,44 @@ func (s *hermesServer) handleMemoryWrite(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.Key == "" || req.NamespaceID == "" {
+		http.Error(w, "key and namespace_id are required", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	memoryID, versionNumber, err := upsertMemory(ctx, tx, identity, req.NamespaceID, req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, map[string]any{
-		"mirrored":   true,
-		"key":        req.Key,
-		"scope":      req.Scope,
-		"provenance": providerName,
+		"mirrored":       true,
+		"key":            req.Key,
+		"scope":          req.Scope,
+		"provenance":     providerName,
+		"memory_id":      memoryID,
+		"version_number": versionNumber,
 	})
 }
 
@@ -324,10 +615,45 @@ func (s *hermesServer) handleDelegation(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.ParentSessionID == "" || req.SubAgentID == "" {
+		http.Error(w, "parent_session_id and sub_agent_id are required", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 
-	s.mu.Lock()
-	s.turnCount++
-	s.mu.Unlock()
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	aggregateID := req.ParentSessionID
+	if !isUUID(aggregateID) {
+		generated, genErr := newID()
+		if genErr != nil {
+			http.Error(w, "generate aggregate id: "+genErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		aggregateID = generated
+	}
+	if err := appendEvent(ctx, tx, identity.TenantID, aggregateID, "session.delegation", "session/"+req.ParentSessionID, identity.PrincipalID,
+		map[string]string{"parent_session_id": req.ParentSessionID, "sub_agent_id": req.SubAgentID, "task": req.Task, "result": req.Result}); err != nil {
+		http.Error(w, "record delegation event: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, map[string]any{
 		"captured":       true,
@@ -342,30 +668,34 @@ func (s *hermesServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
+	flushed := s.readinessCheck() == nil
 	writeJSON(w, map[string]any{
 		"status":     "shutting_down",
 		"provider":   providerName,
-		"flushed":    true,
+		"flushed":    flushed,
 		"replayable": true,
 	})
 }
 
 // ── utility ──────────────────────────────────────────────────────────────
 
-func getInt(m map[string]any, key string) int {
-	if m == nil {
-		return 0
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
 	}
-	v, ok := m[key]
-	if !ok {
-		return 0
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
 	}
-	f, ok := v.(float64)
-	if !ok {
-		return 0
-	}
-	return int(f)
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

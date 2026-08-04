@@ -4,7 +4,7 @@ Polls ``outbox_jobs`` for ``turn.completed`` events, runs extraction,
 dedup, conflict detection, promotion, and persists results atomically.
 
 Usage:
-    SCOS_DATABASE_URL=postgres://scos:change-me@localhost:5432/scos_memory \\
+    SCOS_DATABASE_URL="${SCOS_DATABASE_URL:?set a TLS-enabled database URL first}" \
     python -m scos_consolidation.worker
 """
 
@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -42,6 +43,13 @@ DATABASE_URL = os.environ.get(
 )
 
 
+def require_tls_database_url(value: str) -> None:
+    parsed = urlparse(value)
+    sslmodes = parse_qs(parsed.query).get("sslmode", [])
+    if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname or len(sslmodes) != 1 or sslmodes[0].lower() not in {"require", "verify-ca", "verify-full"}:
+        raise SystemExit("SCOS_DATABASE_URL must be a PostgreSQL URL with sslmode=require, verify-ca, or verify-full")
+
+
 # ── main loop ─────────────────────────────────────────────────────────────
 
 
@@ -53,6 +61,7 @@ def main() -> None:
 
     if not DATABASE_URL:
         raise SystemExit("SCOS_DATABASE_URL or DATABASE_URL must be set")
+    require_tls_database_url(DATABASE_URL)
 
     logger.info("consolidation worker starting, poll_interval=%ds", POLL_INTERVAL_SECONDS)
     while True:
@@ -320,9 +329,18 @@ def _promote_candidate(
     candidate: MemoryCandidate,
     promotion: Any,
 ) -> None:
-    """Insert into memory_items and memory_versions atomically."""
+    """Insert a promoted memory and its governance records atomically."""
     item = build_memory_item(candidate, promotion)
     version = build_memory_version(candidate, candidate.candidate_id)
+    review = apply_review(
+        candidate_id=candidate.candidate_id,
+        decision="approved",
+        rationale=promotion.reason,
+    )
+
+    # The candidate row is the parent of review records and may not have been
+    # written yet for candidates that pass directly to promotion.
+    _write_candidate(conn, candidate, status="pending")
 
     with conn.cursor() as cur:
         # Insert memory_item
@@ -366,6 +384,34 @@ def _promote_candidate(
         cur.execute(
             "UPDATE memory_items SET current_version_id = %s WHERE id = %s",
             (version["id"], item["id"]),
+        )
+
+        # Preserve each source reference as durable provenance for the memory.
+        for evidence in candidate.evidence:
+            cur.execute(
+                """
+                INSERT INTO memory_evidence
+                    (memory_id, evidence_kind, reference_id, content_hash)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    item["id"], evidence.kind, evidence.reference_id,
+                    evidence.content_hash,
+                ),
+            )
+
+        # Automatic promotion is itself an auditable approval decision. Human
+        # review remains separate and is persisted by its review workflow.
+        cur.execute(
+            """
+            INSERT INTO memory_reviews
+                (id, candidate_id, reviewer_id, decision, rationale, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                review.review_id, review.candidate_id, review.reviewer_id,
+                review.decision, review.rationale, review.created_at,
+            ),
         )
 
         # Also update the candidate status

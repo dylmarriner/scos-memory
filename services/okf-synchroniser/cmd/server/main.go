@@ -1,6 +1,10 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,11 +12,16 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/services/readiness"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const version = "0.1.0"
@@ -55,14 +64,37 @@ type okfServer struct {
 	documents   map[string]*OKFDocument
 	projections map[string]*IndexProjection // path -> projection
 	okfRoot     string
+	statePath   string
+	db          *pgxpool.Pool
+}
+
+func (s *okfServer) readinessCheck() error {
+	if err := readiness.WritableDir(s.okfRoot); err != nil {
+		return err
+	}
+	if err := readiness.WritableDir(filepath.Dir(s.statePath)); err != nil {
+		return err
+	}
+	if s.db == nil {
+		return fmt.Errorf("postgres dependency is not configured")
+	}
+	return s.db.Ping(context.Background())
 }
 
 func newOKFServer() *okfServer {
-	return &okfServer{
+	root := findOKFRoot()
+	statePath := os.Getenv("SCOS_OKF_SYNCHRONISER_STATE_PATH")
+	if statePath == "" {
+		statePath = filepath.Join(filepath.Dir(root), ".okf-projections.json")
+	}
+	s := &okfServer{
 		documents:   make(map[string]*OKFDocument),
 		projections: make(map[string]*IndexProjection),
-		okfRoot:     findOKFRoot(),
+		okfRoot:     root,
+		statePath:   statePath,
 	}
+	_ = s.loadProjections()
+	return s
 }
 
 func findOKFRoot() string {
@@ -79,12 +111,36 @@ func findOKFRoot() string {
 
 func main() {
 	srv := newOKFServer()
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+	if err := database.RequireTLS(databaseURL); err != nil {
+		log.Fatal(err)
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		log.Fatalf("connect to database: %v", err)
+	}
+	config.ConnConfig.RuntimeParams["scos.service_id"] = "okf-synchroniser"
+	db, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		log.Fatalf("connect to database: %v", err)
+	}
+	defer db.Close()
+	srv.db = db
+	if err := srv.loadConceptsFromDB(context.Background()); err != nil {
+		log.Fatalf("load okf concepts: %v", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", healthOK)
+	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
+		return srv.readinessCheck()
+	}))
 
 	mux.HandleFunc("/v1/sync", srv.handleSync)
 	mux.HandleFunc("/v1/documents", srv.handleDocuments)
+	mux.HandleFunc("/v1/okf", srv.handleDocuments)
 	mux.HandleFunc("/v1/documents/", srv.handleDocumentByID)
 	mux.HandleFunc("/v1/projections", srv.handleProjections)
 	mux.HandleFunc("/v1/divergence", srv.handleDivergence)
@@ -94,7 +150,7 @@ func main() {
 		addr = ":8090"
 	}
 	log.Printf("okf synchroniser listening on %s (root: %s)", addr, srv.okfRoot)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -112,11 +168,11 @@ func (s *okfServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := s.synchronise()
+	result := s.synchronise(r.Context())
 	writeJSON(w, result)
 }
 
-func (s *okfServer) synchronise() SyncResult {
+func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 	result := SyncResult{}
 
 	// Walk the OKF directory
@@ -124,6 +180,10 @@ func (s *okfServer) synchronise() SyncResult {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.statePath == "" {
+		s.statePath = filepath.Join(filepath.Dir(s.okfRoot), ".okf-projections.json")
+	}
+	commitHash := gitCommit(s.okfRoot)
 
 	// Track seen paths
 	seen := make(map[string]bool)
@@ -151,6 +211,7 @@ func (s *okfServer) synchronise() SyncResult {
 				Category:    category,
 				Title:       extractTitle(content),
 				ContentHash: contentHash,
+				CommitID:    commitHash,
 				Status:      "current",
 				ImportedAt:  time.Now().UTC().Format(time.RFC3339),
 				UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
@@ -158,39 +219,61 @@ func (s *okfServer) synchronise() SyncResult {
 			}
 			s.documents[id] = doc
 			s.projections[file] = &IndexProjection{
+				CommitHash:   commitHash,
 				Path:         file,
 				ContentHash:  contentHash,
 				ImportStatus: "synced",
 			}
 			result.Added = append(result.Added, file)
+		} else if doc := s.documentForPath(file); doc != nil && doc.ContentHash != existing.ContentHash {
+			// The indexed document changed independently of its last imported projection.
+			// Keep both versions and require an explicit review.
+			doc.Status = "diverged"
+			existing.ImportStatus = "diverged"
+			result.Diverged = appendUnique(result.Diverged, file)
 		} else if existing.ContentHash != contentHash {
 			// Changed - update
-			for _, doc := range s.documents {
-				if doc.Path == file {
-					doc.ContentHash = contentHash
-					doc.Content = string(content)
-					doc.Status = "changed"
-					doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-					break
-				}
+			doc := s.documentForPath(file)
+			if doc == nil {
+				id := fmt.Sprintf("okf-%d", len(s.documents)+1)
+				doc = &OKFDocument{ID: id, Path: file, Category: category, ImportedAt: time.Now().UTC().Format(time.RFC3339)}
+				s.documents[id] = doc
 			}
+			doc.ContentHash = contentHash
+			doc.CommitID = commitHash
+			doc.Content = string(content)
+			doc.Title = extractTitle(content)
+			doc.Status = "changed"
+			doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			existing.ContentHash = contentHash
+			existing.CommitHash = commitHash
 			existing.ImportStatus = "synced"
 			result.Updated = append(result.Updated, file)
+		} else {
+			existing.CommitHash = commitHash
+			existing.ImportStatus = "synced"
+			doc := s.documentForPath(file)
+			if doc == nil {
+				id := fmt.Sprintf("okf-%d", len(s.documents)+1)
+				doc = &OKFDocument{ID: id, Path: file, Category: category, Title: extractTitle(content), ContentHash: contentHash, CommitID: commitHash, Status: "current", ImportedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339), Content: string(content)}
+				s.documents[id] = doc
+			} else {
+				doc.CommitID = commitHash
+				doc.Status = "current"
+			}
 		}
 	}
 
 	// Detect removed files
 	for path := range s.projections {
 		if !seen[path] {
-			result.Removed = append(result.Removed, path)
-			for id, doc := range s.documents {
-				if doc.Path == path {
-					delete(s.documents, id)
-					break
-				}
+			// A missing repository file is a destructive change. Preserve the
+			// indexed record until an explicit governance action resolves it.
+			if doc := s.documentForPath(path); doc != nil {
+				doc.Status = "diverged"
 			}
-			delete(s.projections, path)
+			s.projections[path].ImportStatus = "diverged"
+			result.Diverged = appendUnique(result.Diverged, path)
 		}
 	}
 
@@ -199,8 +282,18 @@ func (s *okfServer) synchronise() SyncResult {
 		proj, ok := s.projections[doc.Path]
 		if ok && doc.ContentHash != proj.ContentHash {
 			doc.Status = "diverged"
-			result.Diverged = append(result.Diverged, doc.Path)
+			proj.ImportStatus = "diverged"
+			result.Diverged = appendUnique(result.Diverged, doc.Path)
 		}
+	}
+	if err := s.persistProjections(); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("persist projections: %v", err))
+	}
+	if err := s.persistConceptsToDB(ctx); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("persist okf concepts: %v", err))
+	}
+	if err := s.recordBundle(ctx, commitHash, result); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("record okf bundle: %v", err))
 	}
 
 	return result
@@ -263,6 +356,180 @@ func (s *okfServer) handleDivergence(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
+
+func (s *okfServer) documentForPath(path string) *OKFDocument {
+	for _, doc := range s.documents {
+		if doc.Path == path {
+			return doc
+		}
+	}
+	return nil
+}
+
+// loadConceptsFromDB hydrates in-memory documents and projections from the
+// PostgreSQL-indexed okf_concepts table at startup. It must be called before
+// the server begins accepting requests.
+func (s *okfServer) loadConceptsFromDB(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT id, path, category, title, content, content_hash, commit_hash, import_status, status, imported_at, updated_at FROM okf_concepts`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	documents := make(map[string]*OKFDocument)
+	projections := make(map[string]*IndexProjection)
+	for rows.Next() {
+		var (
+			doc          OKFDocument
+			commitHash   string
+			importStatus string
+			importedAt   time.Time
+			updatedAt    time.Time
+		)
+		if err := rows.Scan(&doc.ID, &doc.Path, &doc.Category, &doc.Title, &doc.Content, &doc.ContentHash, &commitHash, &importStatus, &doc.Status, &importedAt, &updatedAt); err != nil {
+			return err
+		}
+		doc.CommitID = commitHash
+		doc.ImportedAt = importedAt.UTC().Format(time.RFC3339)
+		doc.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+		documents[doc.ID] = &doc
+		projections[doc.Path] = &IndexProjection{CommitHash: commitHash, Path: doc.Path, ContentHash: doc.ContentHash, ImportStatus: importStatus}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if len(documents) > 0 {
+		s.documents = documents
+		s.projections = projections
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// persistConceptsToDB writes the current in-memory documents/projections to
+// the indexed okf_concepts table. Callers must already hold s.mu.
+func (s *okfServer) persistConceptsToDB(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	for _, doc := range s.documents {
+		proj := s.projections[doc.Path]
+		importStatus := "synced"
+		if proj != nil {
+			importStatus = proj.ImportStatus
+		}
+		if _, err := s.db.Exec(ctx, `INSERT INTO okf_concepts (id, path, category, title, content, content_hash, commit_hash, import_status, status, imported_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
+			ON CONFLICT (path) DO UPDATE SET
+				category=EXCLUDED.category,
+				title=EXCLUDED.title,
+				content=EXCLUDED.content,
+				content_hash=EXCLUDED.content_hash,
+				commit_hash=EXCLUDED.commit_hash,
+				import_status=EXCLUDED.import_status,
+				status=EXCLUDED.status,
+				updated_at=now()`,
+			doc.ID, doc.Path, doc.Category, doc.Title, doc.Content, doc.ContentHash, doc.CommitID, importStatus, doc.Status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordBundle appends an audit record of this sync run to okf_bundles.
+// Callers must already hold s.mu.
+func (s *okfServer) recordBundle(ctx context.Context, commitHash string, result SyncResult) error {
+	if s.db == nil {
+		return nil
+	}
+	added, err := json.Marshal(result.Added)
+	if err != nil {
+		return err
+	}
+	updated, err := json.Marshal(result.Updated)
+	if err != nil {
+		return err
+	}
+	removed, err := json.Marshal(result.Removed)
+	if err != nil {
+		return err
+	}
+	diverged, err := json.Marshal(result.Diverged)
+	if err != nil {
+		return err
+	}
+	errorsJSON, err := json.Marshal(result.Errors)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ctx, `INSERT INTO okf_bundles (commit_hash, added_count, updated_count, removed_count, diverged_count, added_paths, updated_paths, removed_paths, diverged_paths, errors)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		commitHash, len(result.Added), len(result.Updated), len(result.Removed), len(result.Diverged), added, updated, removed, diverged, errorsJSON)
+	return err
+}
+
+func gitCommit(root string) string {
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--verify", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func (s *okfServer) loadProjections() error {
+	data, err := os.ReadFile(s.statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var projections map[string]*IndexProjection
+	if err := json.Unmarshal(data, &projections); err != nil {
+		return err
+	}
+	for path, projection := range projections {
+		if projection != nil && projection.Path == "" {
+			projection.Path = path
+		}
+	}
+	s.projections = projections
+	return nil
+}
+
+func (s *okfServer) persistProjections() error {
+	data, err := json.MarshalIndent(s.projections, "", "  ")
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(s.statePath); dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	tmp := s.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.statePath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
 
 func (s *okfServer) walkOKFDir() []string {
 	var files []string

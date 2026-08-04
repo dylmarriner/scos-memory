@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from hashlib import sha256
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -213,7 +214,7 @@ def build_memory_version(
             "title": candidate.title,
             "evidence": [ev.model_dump() for ev in candidate.evidence],
         }),
-        "content_hash": candidate.content,
+        "content_hash": sha256(candidate.content.encode("utf-8")).hexdigest(),
         "change_reason": "initial consolidation",
         "created_by": candidate.metadata.get("actor_id", UUID("00000000-0000-0000-0000-000000000000")),
         "created_at": now,

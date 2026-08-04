@@ -6,7 +6,8 @@ COPY workers/consolidation/src/ src/
 RUN python -m build --wheel --outdir /dist
 
 FROM python:3.12-slim
-RUN addgroup --system scos && adduser --system --ingroup scos scos && \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* && \
+    addgroup --system scos && adduser --system --ingroup scos scos && \
     pip install --no-cache-dir "psycopg[binary]>=3.2,<4" "pydantic>=2.10,<3"
 COPY --from=builder /dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl

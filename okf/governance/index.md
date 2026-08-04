@@ -10,3 +10,6 @@ status: active
 The authoritative governing document is [`GOVERNANCE.md`](../../GOVERNANCE.md).
 
 Core rule: persist every interaction, promote only durable knowledge.
+
+See [Roles](roles.md) for the auditable assignment of the eight logical
+governance roles (§34) to named principals.

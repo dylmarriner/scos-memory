@@ -29,10 +29,23 @@ PostgreSQL is authoritative. OKF/Git is authoritative for approved curated knowl
 
 ## Start development services
 
+Compose requires six deployment values and does not provide secret defaults.
+Copy the example, set `SCOS_INTERNAL_SERVICE_TOKEN`, `SCOS_CONTROL_PLANE_TOKEN`,
+`SCOS_SECURITY_ISSUER_SECRET`, `POSTGRES_PASSWORD`, `SCOS_DATABASE_URL` (with
+`sslmode=require`, `verify-ca`, or `verify-full`), and `SCOS_AGENT_ENDPOINT` in
+`.env`, then validate and start the stack:
+
 ```bash
 cp .env.example .env
+${EDITOR:-vi} .env
+set -a; . ./.env; set +a
+docker compose -f deploy/compose/docker-compose.yml config >/dev/null
 docker compose -f deploy/compose/docker-compose.yml up --build
 ```
+
+Use `openssl rand -base64 32` for each bearer or issuer secret. Backup keys are
+not configured in the base Compose file; configure the deployment secret manager
+and `SCOS_BACKUP_ENCRYPTION_KEY_REF` when backups are enabled.
 
 Gateway endpoints:
 
@@ -50,6 +63,26 @@ make test
 make validate
 make audit
 ```
+
+## Failure-injection acceptance probes
+
+These are integration probes, not unit simulations. Start the complete compose
+stack and source the same environment used by Compose:
+
+```bash
+cp .env.example .env
+# Set SCOS_INTERNAL_SERVICE_TOKEN, SCOS_CONTROL_PLANE_TOKEN, and
+# SCOS_SECURITY_ISSUER_SECRET in .env.
+set -a; . ./.env; set +a
+docker compose -f deploy/compose/docker-compose.yml up --build -d
+make failure-injection
+```
+
+The runner executes all 58 cases against live HTTP services, terminates and
+restarts compose services for crash cases, and performs duplicate/idempotency
+assertions directly through the PostgreSQL container. It exits non-zero and
+reports the missing dependency when the stack or service token is absent; no
+case is replaced by a local or synthetic success.
 
 ## Repository map
 

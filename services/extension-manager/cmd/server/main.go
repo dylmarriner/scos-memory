@@ -1,44 +1,77 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const version = "0.1.0"
 
+var startTime = time.Now()
+
+func handleVersion(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":         "ok",
+		"version":        version,
+		"uptime_seconds": int(time.Since(startTime).Seconds()),
+	})
+}
+
 // ── types ────────────────────────────────────────────────────────────────
 
 type ExtensionManifest struct {
-	SchemaVersion        string   `json:"schema_version"`
-	PackageID            string   `json:"package_id"`
-	Name                 string   `json:"name"`
-	Version              string   `json:"version"`
-	Publisher            string   `json:"publisher"`
-	License              string   `json:"license"`
-	ExtensionTypes       []string `json:"extension_types"` // plugin, skill, hook, agent_adapter, provider, ui_extension
-	SupportedPlatforms   []string `json:"supported_platforms"`
-	RequiredCoreVersion  string   `json:"required_core_version"`
-	CapabilitiesProvided []string `json:"capabilities_provided"`
-	CapabilitiesConsumed []string `json:"capabilities_consumed"`
-	HooksSubscribed      []string `json:"hooks_subscribed"`
-	SkillsExported       []string `json:"skills_exported"`
-	Permissions          []string `json:"permissions"`
-	ConfigurationSchema  string   `json:"configuration_schema,omitempty"`
-	ContentHash          string   `json:"content_hash"`
-	Signature            string   `json:"signature,omitempty"`
+	SchemaVersion        string                `json:"schema_version"`
+	PackageID            string                `json:"package_id"`
+	Name                 string                `json:"name"`
+	Version              string                `json:"version"`
+	Publisher            string                `json:"publisher"`
+	License              string                `json:"license"`
+	ExtensionTypes       []string              `json:"extension_types"` // plugin, skill, hook, agent_adapter, provider, ui_extension
+	SupportedPlatforms   []string              `json:"supported_platforms"`
+	RequiredCoreVersion  string                `json:"required_core_version"`
+	Dependencies         []ExtensionDependency `json:"dependencies"`
+	Isolation            string                `json:"isolation"`
+	CapabilitiesProvided []string              `json:"capabilities_provided"`
+	CapabilitiesConsumed []string              `json:"capabilities_consumed"`
+	HooksSubscribed      []string              `json:"hooks_subscribed"`
+	HookEndpoints        map[string]string     `json:"hook_endpoints,omitempty"`
+	HookFallbackPolicies map[string]string     `json:"hook_fallback_policies,omitempty"`
+	SkillsExported       []string              `json:"skills_exported"`
+	Permissions          []string              `json:"permissions"`
+	ConfigurationSchema  string                `json:"configuration_schema,omitempty"`
+	MigrationPlan        string                `json:"migration_plan,omitempty"`
+	RollbackPlan         string                `json:"rollback_plan"`
+	ContentHash          string                `json:"content_hash"`
+	Signature            string                `json:"signature,omitempty"`
+}
+
+type ExtensionDependency struct {
+	PackageID string `json:"package_id"`
+	Version   string `json:"version"`
 }
 
 type Extension struct {
@@ -76,12 +109,16 @@ type Skill struct {
 }
 
 type Hook struct {
-	Event       string `json:"event"`
-	ExtensionID string `json:"extension_id"`
-	Type        string `json:"type"` // synchronous, asynchronous, blocking, mutating
-	Retryable   bool   `json:"retryable"`
-	Idempotent  bool   `json:"idempotent"`
-	TimeoutMs   int    `json:"timeout_ms"`
+	Event               string `json:"event"`
+	ExtensionID         string `json:"extension_id"`
+	Type                string `json:"type"` // synchronous, asynchronous, blocking, mutating
+	Retryable           bool   `json:"retryable"`
+	Idempotent          bool   `json:"idempotent"`
+	TimeoutMs           int    `json:"timeout_ms"`
+	Endpoint            string `json:"endpoint,omitempty"`
+	FallbackPolicy      string `json:"fallback_policy"`
+	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
+	CircuitOpenUntil    string `json:"circuit_open_until,omitempty"`
 }
 
 // ── server state ─────────────────────────────────────────────────────────
@@ -92,24 +129,47 @@ type extServer struct {
 	skills     map[string]*Skill
 	hooks      map[string][]*Hook // event -> hooks
 	receipts   []*InstallationReceipt
+	history    map[string][]ExtensionManifest
 	nextID     int
 	db         *pgxpool.Pool
+	storePath  string
+}
+
+func (s *extServer) readinessCheck() error {
+	if os.Getenv("DATABASE_URL") == "" {
+		return fmt.Errorf("DATABASE_URL is required")
+	}
+	if s.db == nil {
+		return fmt.Errorf("postgres dependency is not configured")
+	}
+	return s.db.Ping(context.Background())
 }
 
 type persistedExtensionState struct {
-	Extensions map[string]*Extension  `json:"extensions"`
-	Skills     map[string]*Skill      `json:"skills"`
-	Hooks      map[string][]*Hook     `json:"hooks"`
-	Receipts   []*InstallationReceipt `json:"receipts"`
-	NextID     int                    `json:"next_id"`
+	Extensions map[string]*Extension          `json:"extensions"`
+	Skills     map[string]*Skill              `json:"skills"`
+	Hooks      map[string][]*Hook             `json:"hooks"`
+	Receipts   []*InstallationReceipt         `json:"receipts"`
+	History    map[string][]ExtensionManifest `json:"history"`
+	NextID     int                            `json:"next_id"`
 }
 
 func newExtServer() *extServer {
-	return &extServer{
+	// Production startup requires PostgreSQL; local state is only available
+	// through newExtServerAt for isolated unit tests.
+	return newExtServerAt("")
+}
+
+func newExtServerAt(storePath string) *extServer {
+	s := &extServer{
 		extensions: make(map[string]*Extension),
 		skills:     make(map[string]*Skill),
 		hooks:      make(map[string][]*Hook),
+		history:    make(map[string][]ExtensionManifest),
+		storePath:  storePath,
 	}
+	s.loadLocalState()
+	return s
 }
 
 // ── main ─────────────────────────────────────────────────────────────────
@@ -120,7 +180,15 @@ func main() {
 	if databaseURL == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
-	db, err := pgxpool.New(context.Background(), databaseURL)
+	if err := database.RequireTLS(databaseURL); err != nil {
+		log.Fatal(err)
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		log.Fatalf("connect to database: %v", err)
+	}
+	config.ConnConfig.RuntimeParams["scos.service_id"] = "extension-manager"
+	db, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
@@ -129,9 +197,13 @@ func main() {
 	if err := srv.loadState(context.Background()); err != nil {
 		log.Fatalf("load extension state: %v", err)
 	}
+	srv.loadLocalState()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", healthOK)
+	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
+		return srv.readinessCheck()
+	}))
+	mux.HandleFunc("/v1/version", handleVersion)
 
 	// Extensions
 	mux.HandleFunc("/v1/extensions", srv.handleExtensions)
@@ -143,6 +215,7 @@ func main() {
 
 	// Hooks
 	mux.HandleFunc("/v1/hooks", srv.handleHooks)
+	mux.HandleFunc("/v1/hooks/dispatch", srv.handleHookDispatch)
 	mux.HandleFunc("/v1/hooks/", srv.handleHookByEvent)
 
 	// Installation
@@ -159,9 +232,49 @@ func main() {
 		addr = ":8086"
 	}
 	log.Printf("extension manager listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (s *extServer) loadLocalState() {
+	if s.storePath == "" {
+		return
+	}
+	raw, err := os.ReadFile(s.storePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("extension manager local store read failed: %v", err)
+		}
+		return
+	}
+	var state persistedExtensionState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		log.Printf("extension manager local store decode failed: %v", err)
+		return
+	}
+	s.applyState(state)
+}
+
+func (s *extServer) applyState(state persistedExtensionState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state.Extensions != nil {
+		s.extensions = state.Extensions
+	}
+	if state.Skills != nil {
+		s.skills = state.Skills
+	}
+	if state.Hooks != nil {
+		s.hooks = state.Hooks
+	}
+	if state.Receipts != nil {
+		s.receipts = state.Receipts
+	}
+	if state.History != nil {
+		s.history = state.History
+	}
+	s.nextID = state.NextID
 }
 
 func (s *extServer) loadState(ctx context.Context) error {
@@ -193,6 +306,9 @@ func (s *extServer) loadState(ctx context.Context) error {
 	if state.Receipts != nil {
 		s.receipts = state.Receipts
 	}
+	if state.History != nil {
+		s.history = state.History
+	}
 	s.nextID = state.NextID
 	s.mu.Unlock()
 	return nil
@@ -200,7 +316,9 @@ func (s *extServer) loadState(ctx context.Context) error {
 
 func (s *extServer) persist(ctx context.Context) error {
 	if s.db == nil {
-		return nil
+		if s.storePath == "" {
+			return nil
+		}
 	}
 	s.mu.RLock()
 	state := persistedExtensionState{
@@ -208,6 +326,7 @@ func (s *extServer) persist(ctx context.Context) error {
 		Skills:     s.skills,
 		Hooks:      s.hooks,
 		Receipts:   s.receipts,
+		History:    s.history,
 		NextID:     s.nextID,
 	}
 	raw, err := json.Marshal(state)
@@ -215,7 +334,37 @@ func (s *extServer) persist(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(ctx, `INSERT INTO extension_manager_state (id,state,updated_at) VALUES (true,$1,now()) ON CONFLICT (id) DO UPDATE SET state=EXCLUDED.state, updated_at=EXCLUDED.updated_at`, raw)
+	if s.storePath != "" {
+		dir := filepath.Dir(s.storePath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+		tmp, err := os.CreateTemp(dir, ".extension-manager-*.tmp")
+		if err != nil {
+			return err
+		}
+		tmpName := tmp.Name()
+		defer os.Remove(tmpName)
+		err = tmp.Chmod(0600)
+		if err == nil {
+			_, err = tmp.Write(raw)
+		}
+		if err == nil {
+			err = tmp.Sync()
+		}
+		if closeErr := tmp.Close(); err == nil {
+			err = closeErr
+		}
+		if err == nil {
+			err = os.Rename(tmpName, s.storePath)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if s.db != nil {
+		_, err = s.db.Exec(ctx, `INSERT INTO extension_manager_state (id,state,updated_at) VALUES (true,$1,now()) ON CONFLICT (id) DO UPDATE SET state=EXCLUDED.state, updated_at=EXCLUDED.updated_at`, raw)
+	}
 	return err
 }
 
@@ -244,6 +393,11 @@ func (s *extServer) handleExtensions(w http.ResponseWriter, r *http.Request) {
 
 func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/extensions/")
+	parts := strings.Split(strings.Trim(id, "/"), "/")
+	if len(parts) == 2 {
+		s.handleExtensionAction(w, r, parts[0], parts[1])
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.mu.RLock()
@@ -312,6 +466,55 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request, id, action string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	ext, ok := s.extensions[id]
+	if !ok {
+		s.mu.Unlock()
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	switch action {
+	case "enable":
+		ext.Status = "enabled"
+	case "disable":
+		ext.Status = "disabled"
+	case "rollback":
+		versions := s.history[id]
+		if len(versions) == 0 {
+			s.mu.Unlock()
+			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "package_id": id, "error": "no prior manifest is available for rollback"})
+			return
+		}
+		s.removeExtensionRegistrationsLocked(id)
+		ext.Manifest = versions[len(versions)-1]
+		s.history[id] = versions[:len(versions)-1]
+		ext.Isolation = s.determineIsolation(ext.Manifest)
+		s.registerExtensionLocked(ext.Manifest)
+		ext.Status = "enabled"
+	default:
+		s.mu.Unlock()
+		http.Error(w, "unknown extension action", http.StatusNotFound)
+		return
+	}
+	ext.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	result := *ext
+	s.mu.Unlock()
+	if err := s.persist(r.Context()); err != nil {
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "persist extension state: " + err.Error()})
+		return
+	}
+	status := action + "d"
+	if action == "rollback" {
+		status = "rolled_back"
+	}
+	writeJSON(w, map[string]any{"status": status, "extension": result})
 }
 
 // ── skills ───────────────────────────────────────────────────────────────
@@ -418,6 +621,114 @@ func (s *extServer) handleHookByEvent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, hooks)
 }
 
+type hookDispatchRequest struct {
+	Event       string         `json:"event"`
+	TenantID    string         `json:"tenant_id"`
+	PrincipalID string         `json:"principal_id"`
+	Payload     map[string]any `json:"payload"`
+}
+
+type hookDispatchResult struct {
+	ExtensionID string `json:"extension_id"`
+	Status      string `json:"status"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req hookDispatchRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid hook dispatch: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Event) == "" || strings.TrimSpace(req.TenantID) == "" || strings.TrimSpace(req.PrincipalID) == "" {
+		http.Error(w, "event, tenant_id and principal_id are required", http.StatusBadRequest)
+		return
+	}
+	results, err := s.dispatchHooks(r.Context(), req)
+	if err != nil {
+		http.Error(w, "hook dispatch failed: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, map[string]any{"event": req.Event, "results": results})
+}
+
+func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchRequest) ([]hookDispatchResult, error) {
+	s.mu.RLock()
+	hooks := append([]*Hook(nil), s.hooks[req.Event]...)
+	s.mu.RUnlock()
+	results := make([]hookDispatchResult, 0, len(hooks))
+	for _, hook := range hooks {
+		if hook.Endpoint == "" {
+			results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "skipped", Reason: "hook endpoint is not declared"})
+			continue
+		}
+		if hook.CircuitOpenUntil != "" {
+			if until, err := time.Parse(time.RFC3339, hook.CircuitOpenUntil); err == nil && time.Now().UTC().Before(until) {
+				results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "circuit_open", Reason: "hook circuit breaker is open"})
+				continue
+			}
+		}
+		parsed, err := url.Parse(hook.Endpoint)
+		if err != nil || (parsed.Scheme != "https" && !(parsed.Scheme == "http" && (parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost"))) {
+			return nil, fmt.Errorf("hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID)
+		}
+		body, err := json.Marshal(map[string]any{"event": req.Event, "tenant_id": req.TenantID, "principal_id": req.PrincipalID, "payload": req.Payload})
+		if err != nil {
+			return nil, err
+		}
+		timeout := time.Duration(hook.TimeoutMs) * time.Millisecond
+		if timeout <= 0 || timeout > 30*time.Second {
+			timeout = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		hookReq, err := http.NewRequestWithContext(ctx, http.MethodPost, hook.Endpoint, bytes.NewReader(body))
+		if err == nil {
+			hookReq.Header.Set("Content-Type", "application/json")
+			hookReq.Header.Set("X-SCOS-Tenant-ID", req.TenantID)
+			hookReq.Header.Set("X-SCOS-Principal-ID", req.PrincipalID)
+			if token := strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN")); token != "" {
+				hookReq.Header.Set("Authorization", "Bearer "+token)
+			}
+		}
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		response, callErr := (&http.Client{Timeout: timeout}).Do(hookReq)
+		if response != nil {
+			response.Body.Close()
+		}
+		cancel()
+		if callErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+			s.mu.Lock()
+			hook.ConsecutiveFailures = 0
+			hook.CircuitOpenUntil = ""
+			s.mu.Unlock()
+			results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "succeeded"})
+			continue
+		}
+		s.mu.Lock()
+		hook.ConsecutiveFailures++
+		if hook.ConsecutiveFailures >= 3 {
+			hook.CircuitOpenUntil = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+		}
+		fallback := hook.FallbackPolicy
+		s.mu.Unlock()
+		if fallback == "fail_closed" {
+			return nil, fmt.Errorf("critical hook %s failed", hook.ExtensionID)
+		}
+		results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})
+	}
+	if err := s.persist(parent); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // ── installation ─────────────────────────────────────────────────────────
 
 func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
@@ -435,23 +746,18 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "package_id and version required", http.StatusBadRequest)
 		return
 	}
-	if manifest.Signature == "" {
-		http.Error(w, "signed manifests are required", http.StatusForbidden)
+	if err := s.validateInstallManifest(manifest); err != nil {
+		http.Error(w, "manifest rejected: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	if manifest.ContentHash == "" {
-		http.Error(w, "content_hash is required", http.StatusBadRequest)
-		return
-	}
-
-	warnings := s.validateManifest(manifest)
-	if len(warnings) > 0 {
-		writeJSON(w, map[string]any{"status": "rejected", "warnings": warnings})
-		return
-	}
+	warnings := []string{}
 
 	s.mu.Lock()
 	now := time.Now().UTC().Format(time.RFC3339)
+	if previous, exists := s.extensions[manifest.PackageID]; exists {
+		s.history[manifest.PackageID] = append(s.history[manifest.PackageID], previous.Manifest)
+		s.removeExtensionRegistrationsLocked(manifest.PackageID)
+	}
 	ext := &Extension{
 		Manifest:    manifest,
 		Status:      "enabled",
@@ -461,30 +767,7 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:   now,
 	}
 
-	// Register hooks
-	for _, hookEvent := range manifest.HooksSubscribed {
-		h := &Hook{
-			Event:       hookEvent,
-			ExtensionID: manifest.PackageID,
-			Type:        "asynchronous",
-			Retryable:   true,
-			Idempotent:  true,
-			TimeoutMs:   30000,
-		}
-		s.hooks[hookEvent] = append(s.hooks[hookEvent], h)
-	}
-
-	// Register skills
-	for _, skillName := range manifest.SkillsExported {
-		skill := &Skill{
-			ID:           manifest.PackageID + "/" + skillName,
-			Name:         skillName,
-			Version:      manifest.Version,
-			Capabilities: manifest.CapabilitiesProvided,
-			Status:       "active",
-		}
-		s.skills[skill.ID] = skill
-	}
+	s.registerExtensionLocked(manifest)
 
 	s.extensions[manifest.PackageID] = ext
 
@@ -508,6 +791,41 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		"version":    manifest.Version,
 		"warnings":   warnings,
 	})
+}
+
+func (s *extServer) removeExtensionRegistrationsLocked(packageID string) {
+	for event, hooks := range s.hooks {
+		filtered := hooks[:0]
+		for _, hook := range hooks {
+			if hook.ExtensionID != packageID {
+				filtered = append(filtered, hook)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(s.hooks, event)
+		} else {
+			s.hooks[event] = filtered
+		}
+	}
+	for skillID := range s.skills {
+		if strings.HasPrefix(skillID, packageID+"/") {
+			delete(s.skills, skillID)
+		}
+	}
+}
+
+func (s *extServer) registerExtensionLocked(manifest ExtensionManifest) {
+	for _, hookEvent := range manifest.HooksSubscribed {
+		fallback := manifest.HookFallbackPolicies[hookEvent]
+		if fallback == "" {
+			fallback = "continue"
+		}
+		s.hooks[hookEvent] = append(s.hooks[hookEvent], &Hook{Event: hookEvent, ExtensionID: manifest.PackageID, Type: "asynchronous", Retryable: true, Idempotent: true, TimeoutMs: 30000, Endpoint: manifest.HookEndpoints[hookEvent], FallbackPolicy: fallback})
+	}
+	for _, skillName := range manifest.SkillsExported {
+		id := manifest.PackageID + "/" + skillName
+		s.skills[id] = &Skill{ID: id, Name: skillName, Version: manifest.Version, Capabilities: manifest.CapabilitiesProvided, Status: "active"}
+	}
 }
 
 func (s *extServer) handleInstallDryRun(w http.ResponseWriter, r *http.Request) {
@@ -602,8 +920,27 @@ func (s *extServer) validateManifest(m ExtensionManifest) []string {
 	if len(m.ExtensionTypes) == 0 {
 		warnings = append(warnings, "must declare at least one extension_type")
 	}
+	for _, extensionType := range m.ExtensionTypes {
+		if !contains([]string{"plugin", "skill", "hook", "agent_adapter", "provider", "ui_extension"}, extensionType) {
+			warnings = append(warnings, "unsupported extension_type "+extensionType)
+		}
+	}
 	if m.ContentHash == "" {
 		warnings = append(warnings, "missing content_hash")
+	}
+	if m.RequiredCoreVersion == "" {
+		warnings = append(warnings, "missing required_core_version")
+	}
+	if m.Isolation == "" {
+		warnings = append(warnings, "missing isolation")
+	}
+	if m.RollbackPlan == "" {
+		warnings = append(warnings, "missing rollback_plan")
+	}
+	for _, event := range m.HooksSubscribed {
+		if strings.TrimSpace(m.HookEndpoints[event]) == "" {
+			warnings = append(warnings, "missing hook endpoint for "+event)
+		}
 	}
 	if len(m.Permissions) > 5 {
 		warnings = append(warnings, fmt.Sprintf("declares %d permissions (consider minimising)", len(m.Permissions)))
@@ -612,14 +949,98 @@ func (s *extServer) validateManifest(m ExtensionManifest) []string {
 	return warnings
 }
 
+func (s *extServer) validateInstallManifest(m ExtensionManifest) error {
+	if warnings := s.validateManifest(m); len(warnings) != 0 {
+		return fmt.Errorf("%s", strings.Join(warnings, ", "))
+	}
+	if !s.verifySignature(m) {
+		return fmt.Errorf("invalid signature")
+	}
+	if m.Isolation != s.determineIsolation(m) {
+		return fmt.Errorf("unsupported isolation %q for declared extension types", m.Isolation)
+	}
+	if !compatibleVersion(version, m.RequiredCoreVersion) {
+		return fmt.Errorf("required_core_version %q is incompatible with core %q", m.RequiredCoreVersion, version)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, dep := range m.Dependencies {
+		installed, ok := s.extensions[dep.PackageID]
+		if !ok || installed.Status != "enabled" || !compatibleVersion(installed.Manifest.Version, dep.Version) {
+			return fmt.Errorf("dependency %s %q is not satisfied", dep.PackageID, dep.Version)
+		}
+	}
+	return nil
+}
+
+func (s *extServer) verifySignature(m ExtensionManifest) bool {
+	keyText := strings.TrimSpace(os.Getenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY"))
+	key, err := base64.StdEncoding.DecodeString(keyText)
+	if err != nil || len(key) != ed25519.PublicKeySize || m.Signature == "" {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(m.Signature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	unsigned := m
+	unsigned.Signature = ""
+	payload, err := json.Marshal(unsigned)
+	if err != nil {
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(key), payload, sig)
+}
+
+func compatibleVersion(actual, constraint string) bool {
+	constraint = strings.TrimSpace(constraint)
+	if constraint == "" || constraint == "*" {
+		return true
+	}
+	if strings.HasPrefix(constraint, ">=") {
+		return compareVersions(actual, strings.TrimSpace(strings.TrimPrefix(constraint, ">="))) >= 0
+	}
+	if strings.HasPrefix(constraint, "^") {
+		base := strings.TrimPrefix(constraint, "^")
+		return compareVersions(actual, base) >= 0 && strings.Split(actual, ".")[0] == strings.Split(base, ".")[0]
+	}
+	return compareVersions(actual, constraint) == 0
+}
+
+func compareVersions(a, b string) int {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		av, bv := 0, 0
+		if i < len(pa) {
+			_, _ = fmt.Sscanf(pa[i], "%d", &av)
+		}
+		if i < len(pb) {
+			_, _ = fmt.Sscanf(pb[i], "%d", &bv)
+		}
+		if av != bv {
+			if av < bv {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// determineIsolation maps declared extension types to one of the five
+// isolation modes required by governance ss22.4: in_process_trusted,
+// separate_process, container, wasm_sandbox, remote_endpoint.
 func (s *extServer) determineIsolation(m ExtensionManifest) string {
 	if contains(m.ExtensionTypes, "plugin") || contains(m.ExtensionTypes, "provider") {
 		return "separate_process"
 	}
-	if contains(m.ExtensionTypes, "ui_extension") {
-		return "wasm"
+	if contains(m.ExtensionTypes, "agent_adapter") {
+		return "remote_endpoint"
 	}
-	return "in_process"
+	if contains(m.ExtensionTypes, "ui_extension") {
+		return "wasm_sandbox"
+	}
+	return "in_process_trusted"
 }
 
 // ── utility ──────────────────────────────────────────────────────────────
@@ -640,6 +1061,14 @@ func sha256Hex(data []byte) string {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("encode response: %v", err)
+	}
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("encode response: %v", err)
 	}

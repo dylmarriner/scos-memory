@@ -5,28 +5,188 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SCOS Transparency</title>
   <style>
-    body { font: 16px system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; background: #101318; color: #edf2f7; }
-    pre { white-space: pre-wrap; background: #1b222c; padding: 1rem; border-radius: .5rem; overflow: auto; }
-    .status { color: #9ae6b4; }
+    :root { color-scheme: dark; }
+    body { font: 15px/1.4 system-ui, sans-serif; max-width: 1400px; margin: 0 auto; padding: 1.5rem; background: #101318; color: #edf2f7; }
+    h1 { margin: 0 0 .25rem; font-size: 1.4rem; }
+    .status { color: #9ae6b4; margin: 0 0 1.25rem; font-size: .9rem; }
+    .status.error { color: #feb2b2; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+    .panel { background: #171d26; border: 1px solid #232c38; border-radius: .6rem; padding: .9rem 1rem; min-width: 0; }
+    .panel h2 { margin: 0 0 .5rem; font-size: .95rem; color: #90cdf4; display: flex; justify-content: space-between; align-items: baseline; }
+    .panel h2 small { color: #718096; font-weight: normal; font-size: .75rem; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #0d1117; padding: .6rem; border-radius: .4rem; overflow: auto; max-height: 320px; margin: 0; font-size: .78rem; }
+    .missing { color: #718096; font-style: italic; }
+    .trace-panel { grid-column: 1 / -1; }
+    #trace-log { max-height: 220px; }
+    .trace-line { color: #a0aec0; }
+    .trace-line .event { color: #f6ad55; }
   </style>
 </head>
 <body>
   <h1>SCOS Transparency</h1>
-  <p class="status" id="status">Loading authorised operational state…</p>
-  <pre id="snapshot">Waiting for projection…</pre>
+  <p class="status" id="status">Loading authorised operational state&hellip;</p>
+  <div class="grid" id="panels"></div>
+
   <script>
-    const endpoint = window.SCOS_TRANSPARENCY_ENDPOINT || '/v1/transparency/snapshot';
-    async function refresh() {
-      const response = await fetch(endpoint, { credentials: 'same-origin' });
-      if (!response.ok) throw new Error(`projection returned ${response.status}`);
-      document.getElementById('snapshot').textContent = JSON.stringify(await response.json(), null, 2);
-      document.getElementById('status').textContent = `Live projection refreshed ${new Date().toISOString()}`;
+    const snapshotEndpoint = window.SCOS_TRANSPARENCY_ENDPOINT || '/v1/transparency/snapshot';
+    const streamEndpoint = window.SCOS_TRANSPARENCY_STREAM_ENDPOINT || '/v1/transparency/stream';
+
+    // Every route except this static shell requires a signed bearer token
+    // (packages/auth.AuthenticatedHandler). The token is held only in
+    // sessionStorage for this tab's lifetime; it is never sent anywhere but
+    // this origin's own API routes.
+    function authHeaders() {
+      let token = sessionStorage.getItem('scos_dashboard_token');
+      if (!token) {
+        token = window.prompt('SCOS API bearer token (kept only in this tab):') || '';
+        sessionStorage.setItem('scos_dashboard_token', token);
+      }
+      return token ? { Authorization: `Bearer ${token}` } : {};
     }
-    refresh().catch(error => {
-      document.getElementById('status').textContent = `Projection unavailable: ${error.message}`;
-      document.getElementById('status').style.color = '#feb2b2';
-    });
-    setInterval(() => refresh().catch(() => {}), 15000);
+
+    // Panel labels are illustrative only; every value rendered comes from an
+    // authoritative backend projection. A view that the backend could not
+    // reach is shown as explicitly missing, never filled with fabricated data.
+    const PANELS = [
+      { key: 'system', title: 'System Map' },
+      { key: 'memory', title: 'Memory Graph' },
+      { key: 'user_model', title: 'User Model' },
+      { key: 'facts', title: 'Facts' },
+      { key: 'learnings', title: 'Learnings' },
+      { key: 'contradictions', title: 'Contradictions' },
+      { key: 'timeline', title: 'Timeline' },
+      { key: 'diary', title: 'Diary' },
+      { key: 'agents', title: 'Agents' },
+      { key: 'tool_operations', title: 'Tool Operations' },
+      { key: 'plugins', title: 'Plugins' },
+      { key: 'skills', title: 'Skills' },
+      { key: 'hooks', title: 'Hooks' },
+      { key: 'code_intelligence', title: 'Code Intelligence' },
+      { key: 'routing', title: 'Routing' },
+      { key: 'recovery', title: 'Recovery' },
+      { key: 'security', title: 'Security' },
+      { key: 'costs_and_token_flow', title: 'Costs / Token Flow' },
+    ];
+
+    const panelsEl = document.getElementById('panels');
+    const statusEl = document.getElementById('status');
+    const panelBodies = new Map();
+
+    for (const panel of PANELS) {
+      const el = document.createElement('div');
+      el.className = 'panel';
+      el.innerHTML = `<h2>${panel.title} <small data-role="meta"></small></h2><pre data-role="body">Waiting for projection&hellip;</pre>`;
+      panelsEl.appendChild(el);
+      panelBodies.set(panel.key, el.querySelector('[data-role="body"]'));
+      panelBodies.get(panel.key).metaEl = el.querySelector('[data-role="meta"]');
+    }
+
+    const tracePanel = document.createElement('div');
+    tracePanel.className = 'panel trace-panel';
+    tracePanel.innerHTML = '<h2>Live Trace <small id="trace-meta">connecting&hellip;</small></h2><pre id="trace-log"></pre>';
+    panelsEl.appendChild(tracePanel);
+    const traceLog = document.getElementById('trace-log');
+    const traceMeta = document.getElementById('trace-meta');
+
+    function setStatus(text, isError) {
+      statusEl.textContent = text;
+      statusEl.className = isError ? 'status error' : 'status';
+    }
+
+    async function refreshSnapshot() {
+      const response = await fetch(snapshotEndpoint, { credentials: 'same-origin', headers: authHeaders() });
+      if (response.status === 401) {
+        sessionStorage.removeItem('scos_dashboard_token');
+        throw new Error('unauthorized (token cleared, reload to re-enter it)');
+      }
+      if (!response.ok) throw new Error(`projection returned ${response.status}`);
+      const payload = await response.json();
+      const views = payload.views || {};
+      const unavailable = payload.unavailable || {};
+      for (const panel of PANELS) {
+        const body = panelBodies.get(panel.key);
+        if (panel.key in views) {
+          body.textContent = JSON.stringify(views[panel.key], null, 2);
+          body.classList.remove('missing');
+          body.metaEl.textContent = '';
+        } else {
+          body.textContent = unavailable[panel.key] ? `unavailable: ${unavailable[panel.key]}` : 'no data reported';
+          body.classList.add('missing');
+          body.metaEl.textContent = 'unavailable';
+        }
+      }
+      setStatus(`Live projection refreshed ${new Date().toISOString()}`, false);
+    }
+
+    function appendTraceLine(eventName, data) {
+      const line = document.createElement('div');
+      line.className = 'trace-line';
+      line.textContent = `[${new Date().toISOString()}] `;
+      const eventLabel = document.createElement('span');
+      eventLabel.className = 'event';
+      eventLabel.textContent = eventName;
+      line.appendChild(eventLabel);
+      line.append(' ' + data);
+      traceLog.appendChild(line);
+      while (traceLog.childElementCount > 200) {
+        traceLog.removeChild(traceLog.firstChild);
+      }
+      traceLog.scrollTop = traceLog.scrollHeight;
+    }
+
+    // The stream endpoint requires the same bearer token as every other API
+    // route, but the browser EventSource API cannot send custom headers.
+    // Read the authenticated text/event-stream response manually instead.
+    function parseSSEFrame(frame) {
+      let eventName = 'message';
+      const dataLines = [];
+      for (const rawLine of frame.split('\n')) {
+        if (rawLine.startsWith('event:')) eventName = rawLine.slice(6).trim();
+        else if (rawLine.startsWith('data:')) dataLines.push(rawLine.slice(5).trim());
+      }
+      return { eventName, data: dataLines.join('\n') };
+    }
+
+    async function connectTrace() {
+      if (typeof fetch === 'undefined' || !window.ReadableStream) {
+        traceMeta.textContent = 'unsupported by this browser';
+        return;
+      }
+      try {
+        const response = await fetch(streamEndpoint, { headers: authHeaders(), credentials: 'same-origin' });
+        if (response.status === 401) {
+          sessionStorage.removeItem('scos_dashboard_token');
+          throw new Error('unauthorized');
+        }
+        if (!response.ok || !response.body) throw new Error(`stream returned ${response.status}`);
+        traceMeta.textContent = 'connected';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary;
+          while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            if (!frame.trim()) continue;
+            const { eventName, data } = parseSSEFrame(frame);
+            appendTraceLine(eventName, data);
+          }
+        }
+        throw new Error('stream closed');
+      } catch (error) {
+        traceMeta.textContent = `reconnecting… (${error.message})`;
+      } finally {
+        setTimeout(connectTrace, 5000);
+      }
+    }
+
+    refreshSnapshot().catch((error) => setStatus(`Projection unavailable: ${error.message}`, true));
+    setInterval(() => refreshSnapshot().catch((error) => setStatus(`Projection unavailable: ${error.message}`, true)), 15000);
+    connectTrace();
   </script>
 </body>
 </html>

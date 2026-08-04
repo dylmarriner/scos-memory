@@ -43,6 +43,7 @@
     },
     "dataschema": {
       "type": "string",
+      "format": "uri",
       "minLength": 1
     },
     "tenantid": {

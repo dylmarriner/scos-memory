@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 
-	executionadapters "github.com/dylanmarriner/scos-memory-fabric/packages/execution-adapters"
+	executionadapters "github.com/dylmarriner/scos-memory/packages/execution-adapters"
 )
 
 // Wrapper executes shell CLI commands wrapped with adaptive execution proxy safety (§20.6).

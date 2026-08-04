@@ -1,11 +1,32 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type testGovernance struct {
+	prepared   bool
+	authorized bool
+	operation  GovernedOperation
+	outcomes   []string
+}
+
+func (g *testGovernance) AuthorizeAndPrepare(_ context.Context, _ ExecuteRequest, _ CommandPlan) (GovernedOperation, error) {
+	return g.operation, nil
+}
+
+func (g *testGovernance) Reconcile(_ context.Context, _ GovernedOperation, outcome string, _ *ExecutionResult) error {
+	g.outcomes = append(g.outcomes, outcome)
+	return nil
+}
 
 func TestClassifyRiskRead(t *testing.T) {
 	commands := []string{"ls -la", "cat file.txt", "grep foo bar", "git log", "find ."}
@@ -99,6 +120,57 @@ func TestPlanCommandExactTolerance(t *testing.T) {
 	plan := srv.planCommand(req)
 	if !plan.PassThrough {
 		t.Fatal("exact tolerance should force passthrough")
+	}
+}
+
+func TestEffectiveModeDefaultsDestructiveToForensic(t *testing.T) {
+	srv := newProxyServer()
+	plan := srv.planCommand(ExecuteRequest{Command: "rm -rf /tmp/data", AllowRewrite: true})
+	if plan.Mode != modeForensic {
+		t.Fatalf("expected destructive command to default to forensic mode, got %q", plan.Mode)
+	}
+}
+
+func TestEffectiveModeDefaultsReadToAdaptive(t *testing.T) {
+	srv := newProxyServer()
+	plan := srv.planCommand(ExecuteRequest{Command: "ls -la", AllowRewrite: true})
+	if plan.Mode != modeAdaptive {
+		t.Fatalf("expected read command to default to adaptive mode, got %q", plan.Mode)
+	}
+}
+
+func TestModeBypassForcesPassthrough(t *testing.T) {
+	srv := newProxyServer()
+	plan := srv.planCommand(ExecuteRequest{Command: "ls -la", AllowRewrite: true, Mode: modeBypass})
+	if !plan.PassThrough || plan.ExecutedRequest != "ls -la" {
+		t.Fatalf("bypass mode must not rewrite, got plan=%+v", plan)
+	}
+}
+
+func TestModeSafeRestrictsToLosslessRules(t *testing.T) {
+	srv := newProxyServer()
+	// "go test ... -v" rewrite rule is classified "test", not "read", so
+	// safe mode must not apply it.
+	plan := srv.planCommand(ExecuteRequest{Command: "go test ./... -v", AllowRewrite: true, Mode: modeSafe})
+	if plan.ExecutedRequest != "go test ./... -v" {
+		t.Fatalf("safe mode must only apply lossless (read) rules, got %q", plan.ExecutedRequest)
+	}
+	// "cat" rewrite rule is classified "read", so safe mode may apply it.
+	plan = srv.planCommand(ExecuteRequest{Command: "cat file.txt", AllowRewrite: true, Mode: modeSafe})
+	if plan.ExecutedRequest == "cat file.txt" {
+		t.Fatal("safe mode should still apply lossless read-only rewrites")
+	}
+}
+
+func TestModeRejectedWhenInvalid(t *testing.T) {
+	req := ExecuteRequest{
+		TenantID: "t", PrincipalID: "p", Command: "ls", Mode: "not-a-real-mode",
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/execute", nil)
+	r.Header.Set("X-SCOS-Tenant-ID", "t")
+	r.Header.Set("X-SCOS-Principal-ID", "p")
+	if err := validateExecutionRequest(r, req); err == nil {
+		t.Fatal("expected invalid mode to be rejected")
 	}
 }
 
@@ -312,5 +384,149 @@ func TestJSONRoundTripResult(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "op-1") {
 		t.Fatal("JSON should contain operation ID")
+	}
+}
+
+func TestHandleExplainReturnsApplicableRules(t *testing.T) {
+	srv := newProxyServer()
+	r := httptest.NewRequest(http.MethodPost, "/v1/proxy/explain", bytes.NewBufferString(`{"command":"ls -la","tenant_id":"tenant","principal_id":"principal"}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "principal")
+	w := httptest.NewRecorder()
+	srv.handleExplain(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Explanations []string `json:"explanations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Explanations) == 0 {
+		t.Fatal("expected an explanation for ls")
+	}
+}
+
+func TestHandleRestoreAcceptsBaseRouteQuery(t *testing.T) {
+	dir := t.TempDir()
+	handle := strings.Repeat("a", 64)
+	if err := os.WriteFile(filepath.Join(dir, handle+".json"), []byte(`{"stdout":"ok","stderr":""}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv := &proxyServer{rawDir: dir}
+	r := httptest.NewRequest(http.MethodGet, "/v1/proxy/restore?restoration_handle="+handle, nil)
+	w := httptest.NewRecorder()
+	srv.handleRestore(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"stdout":"ok"`) {
+		t.Fatalf("expected restored artifact, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleExplainRequiresIdentityHeaders(t *testing.T) {
+	srv := newProxyServer()
+	r := httptest.NewRequest(http.MethodPost, "/v1/proxy/explain", bytes.NewBufferString(`{"command":"ls","tenant_id":"tenant","principal_id":"principal"}`))
+	w := httptest.NewRecorder()
+	srv.handleExplain(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestExecutionProxyRestoresResultsAfterRestart(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "proxy.json")
+	rawDir := t.TempDir()
+	t.Setenv("SCOS_PROXY_RAW_DIR", rawDir)
+	s := newProxyServerAtWithGovernance(storePath, &testGovernance{operation: GovernedOperation{OperationID: "durable-op", Prepared: true, Authorized: true}})
+	req := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"tenant","principal_id":"principal","operation_id":"durable-op","command":"printf 'durable'"}`))
+	req.Header.Set("X-SCOS-Tenant-ID", "tenant")
+	req.Header.Set("X-SCOS-Principal-ID", "principal")
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("execute failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var result ExecutionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.RestorationHandle == "" {
+		t.Fatal("expected restoration handle")
+	}
+
+	restarted := newProxyServerAt(storePath)
+	resultRec := httptest.NewRecorder()
+	restarted.handleResult(resultRec, httptest.NewRequest(http.MethodGet, "/v1/results/"+result.OperationID, nil))
+	if resultRec.Code != http.StatusOK || !strings.Contains(resultRec.Body.String(), result.OperationID) {
+		t.Fatalf("result was not restored: %d %s", resultRec.Code, resultRec.Body.String())
+	}
+	restoreRec := httptest.NewRecorder()
+	restarted.handleRestore(restoreRec, httptest.NewRequest(http.MethodGet, "/v1/proxy/restore/"+result.RestorationHandle, nil))
+	if restoreRec.Code != http.StatusOK || !strings.Contains(restoreRec.Body.String(), "durable") {
+		t.Fatalf("raw output was not restored: %d %s", restoreRec.Code, restoreRec.Body.String())
+	}
+	if restarted.ready() != nil {
+		t.Fatal("expected configured storage to be ready")
+	}
+}
+
+func TestExecuteRejectsDirectProxyRequestWithoutPreparedAuthorization(t *testing.T) {
+	s := newProxyServerAt(filepath.Join(t.TempDir(), "proxy.json"))
+	r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"tenant","principal_id":"principal","operation_id":"caller-op","command":"printf blocked"}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "principal")
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected direct proxy request to fail closed, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExecuteRejectsGovernanceOperationMissingPreparation(t *testing.T) {
+	governance := &testGovernance{operation: GovernedOperation{OperationID: "unprepared", Authorized: true}}
+	s := newProxyServerAtWithGovernance(filepath.Join(t.TempDir(), "proxy.json"), governance)
+	r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"tenant","principal_id":"principal","command":"ls"}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "principal")
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected unprepared operation to fail closed, got %d", rec.Code)
+	}
+}
+
+func TestExecuteReadOnlyUsesInjectedGovernanceAndReconciles(t *testing.T) {
+	t.Setenv("SCOS_PROXY_RAW_DIR", t.TempDir())
+	governance := &testGovernance{operation: GovernedOperation{OperationID: "read-op", Prepared: true, Authorized: true}}
+	s := newProxyServerAtWithGovernance(filepath.Join(t.TempDir(), "proxy.json"), governance)
+	r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"tenant","principal_id":"principal","command":"ls"}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "principal")
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, r)
+	if rec.Code != http.StatusOK || len(governance.outcomes) != 1 || governance.outcomes[0] != "succeeded" {
+		t.Fatalf("expected governed read-only execution and reconciliation, got %d %v", rec.Code, governance.outcomes)
+	}
+}
+
+func TestExecuteUnknownSideEffectIsReconciled(t *testing.T) {
+	t.Setenv("SCOS_EXECUTION_TIMEOUT", "1ms")
+	t.Setenv("SCOS_PROXY_RAW_DIR", t.TempDir())
+	governance := &testGovernance{operation: GovernedOperation{OperationID: "unknown-op", Prepared: true, Authorized: true}}
+	s := newProxyServerAtWithGovernance(filepath.Join(t.TempDir(), "proxy.json"), governance)
+	r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"tenant","principal_id":"principal","command":"sleep 1"}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "principal")
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, r)
+	if len(governance.outcomes) != 1 || governance.outcomes[0] != "unknown" {
+		t.Fatalf("expected unknown outcome to be reconciled, got %v", governance.outcomes)
+	}
+}
+
+func TestExecutionProxyReadinessRequiresStore(t *testing.T) {
+	s := newProxyServerAt("")
+	if s.ready() == nil {
+		t.Fatal("expected readiness failure without a store path")
 	}
 }

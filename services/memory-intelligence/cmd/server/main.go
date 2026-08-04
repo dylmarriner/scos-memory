@@ -1,15 +1,25 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/services/readiness"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const version = "0.1.0"
@@ -44,6 +54,14 @@ type Fact struct {
 	Inferred     bool          `json:"inferred"`
 	Derivation   string        `json:"derivation,omitempty"`
 	Revision     int           `json:"revision"`
+
+	// Identity/placement fields. These carry no meaning in the historical
+	// in-memory shape but are required to satisfy the relational schema's
+	// tenant isolation and namespace membership rules (database/policies);
+	// see resolveIdentity.
+	TenantID    string `json:"tenant_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
+	NamespaceID string `json:"namespace_id,omitempty"`
 }
 
 type Entity struct {
@@ -55,6 +73,9 @@ type Entity struct {
 	Goals       []string          `json:"goals,omitempty"`
 	Traits      map[string]string `json:"traits,omitempty"`
 	Scope       string            `json:"scope"`
+
+	TenantID    string `json:"tenant_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
 }
 
 type Belief struct {
@@ -65,6 +86,9 @@ type Belief struct {
 	Evidence   []string `json:"evidence_ids"`
 	RevisedBy  string   `json:"revised_by,omitempty"`
 	CreatedAt  string   `json:"created_at"`
+
+	TenantID    string `json:"tenant_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
 }
 
 type TemporalRelation struct {
@@ -97,6 +121,9 @@ type HierarchyNode struct {
 	Summary   string          `json:"summary,omitempty"`
 	FactCount int             `json:"fact_count"`
 	UpdatedAt string          `json:"updated_at"`
+
+	TenantID    string `json:"tenant_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
 }
 
 // ── Dashboard types (§25.9) ─────────────────────────────────────────────
@@ -117,37 +144,146 @@ type SystemMapEntry struct {
 
 // ── server state ─────────────────────────────────────────────────────────
 
+// engineServer holds no domain data in memory: every fact, entity, belief,
+// relation, hierarchy node and diary entry is read from and written to
+// PostgreSQL on every request (see store.go). The only in-memory state left
+// is operational (start time, HTTP client, peer addresses for the system
+// map).
 type engineServer struct {
-	mu        sync.RWMutex
-	facts     map[string]*Fact
-	entities  map[string]*Entity
-	beliefs   map[string]*Belief
-	relations []*TemporalRelation
-	hierarchy map[string]*HierarchyNode
-	startTime time.Time
-	nextID    int
+	mu         sync.RWMutex
+	startTime  time.Time
+	db         *sql.DB
+	httpClient *http.Client
+	peers      map[string]string // service name -> base URL, for the real system map (§25.9)
+}
+
+// peerDefault names an environment variable and its fallback base URL for a
+// service reported in the real-time system map.
+type peerDefault struct {
+	name     string
+	envVar   string
+	fallback string
+}
+
+var peerDefaults = []peerDefault{
+	{"memory-gateway", "SCOS_MEMORY_GATEWAY_URL", "https://memory-gateway:8080"},
+	{"retrieval-orchestrator", "SCOS_RETRIEVAL_ORCHESTRATOR_URL", "https://retrieval-orchestrator:8082"},
+	{"context-optimisation", "SCOS_CONTEXT_OPTIMISATION_URL", "https://context-optimisation:8083"},
+	{"code-intelligence", "SCOS_CODE_INTELLIGENCE_URL", "https://code-intelligence:8084"},
+	{"execution-proxy", "SCOS_EXECUTION_PROXY_URL", "https://execution-proxy:8085"},
+	{"extension-manager", "SCOS_EXTENSION_MANAGER_URL", "https://extension-manager:8086"},
+	{"compatibility-gateway", "SCOS_COMPATIBILITY_GATEWAY_URL", "https://compatibility-gateway:8087"},
+}
+
+func resolvePeers() map[string]string {
+	resolved := make(map[string]string, len(peerDefaults))
+	for _, d := range peerDefaults {
+		base := strings.TrimRight(os.Getenv(d.envVar), "/")
+		if base == "" {
+			base = d.fallback
+		}
+		resolved[d.name] = base
+	}
+	return resolved
+}
+
+func (s *engineServer) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	uptime := time.Since(s.startTime)
+	s.mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(versionInfo{
+		Status:        "ok",
+		Version:       version,
+		UptimeSeconds: int(uptime.Seconds()),
+	})
+}
+
+func (s *engineServer) readinessCheck() error {
+	if s.db == nil {
+		return fmt.Errorf("postgres dependency is not configured")
+	}
+	return s.db.PingContext(context.Background())
 }
 
 func newEngineServer() *engineServer {
-	return &engineServer{
-		facts:     make(map[string]*Fact),
-		entities:  make(map[string]*Entity),
-		beliefs:   make(map[string]*Belief),
-		hierarchy: make(map[string]*HierarchyNode),
-		startTime: time.Now(),
+	return &engineServer{startTime: time.Now()}
+}
+
+// ── identity resolution ──────────────────────────────────────────────────
+
+// resolveIdentity determines the tenant/principal a request acts as. Claims
+// carried on an authenticated bearer token take precedence; internal
+// SCOS-Tenant/Principal headers are the fallback used by direct
+// service-to-service calls and by tests that invoke handlers without the
+// auth middleware in front of them. A caller-supplied tenant/principal on
+// the JSON body must agree with whichever identity was authenticated. This
+// mirrors the convention established by hermes-provider.
+func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (requestIdentity, int, string) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		if (bodyTenant != "" && bodyTenant != claims.TenantID) || (bodyPrincipal != "" && bodyPrincipal != claims.PrincipalID) {
+			return requestIdentity{}, http.StatusForbidden, "request identity does not match authenticated identity"
+		}
+		return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
 	}
+	if auth.Identity(r.Context()) != "" {
+		return requestIdentity{}, http.StatusUnauthorized, "authenticated token has no tenant and principal claims"
+	}
+	tenantID := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
+	principalID := strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
+	if tenantID == "" {
+		tenantID = bodyTenant
+	}
+	if principalID == "" {
+		principalID = bodyPrincipal
+	}
+	if tenantID == "" || principalID == "" {
+		return requestIdentity{}, http.StatusUnauthorized, "tenant_id and principal_id are required"
+	}
+	return requestIdentity{TenantID: tenantID, PrincipalID: principalID}, 0, ""
+}
+
+// resolveIdentityFromRequest resolves identity for read-only endpoints that
+// carry no request body to cross-check against (dashboard/list views).
+func resolveIdentityFromRequest(r *http.Request) (requestIdentity, int, string) {
+	return resolveIdentity(r, "", "")
 }
 
 // ── main ─────────────────────────────────────────────────────────────────
 
 func main() {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+	if err := database.RequireTLS(databaseURL); err != nil {
+		log.Fatal(err)
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		log.Fatalf("connect to database: %v", err)
+	}
+	defer db.Close()
+
 	srv := newEngineServer()
+	srv.db = db
+	client, err := tlsserve.TrustedClient(3 * time.Second)
+	if err != nil {
+		log.Fatalf("configure internal TLS client: %v", err)
+	}
+	srv.httpClient = client
+	srv.peers = resolvePeers()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", healthOK)
+	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
+		return srv.readinessCheck()
+	}))
+	mux.HandleFunc("/v1/version", srv.handleVersion)
 
 	// Memory networks
 	mux.HandleFunc("/v1/facts", srv.handleFacts)
+	mux.HandleFunc("/v1/memory", srv.handleFacts)
 	mux.HandleFunc("/v1/facts/", srv.handleFactByID)
 	mux.HandleFunc("/v1/entities", srv.handleEntities)
 	mux.HandleFunc("/v1/entities/", srv.handleEntityByID)
@@ -166,6 +302,9 @@ func main() {
 	mux.HandleFunc("/v1/dashboard/contradictions", srv.handleDashboardContradictions)
 	mux.HandleFunc("/v1/dashboard/timeline", srv.handleDashboardTimeline)
 	mux.HandleFunc("/v1/dashboard/user-model", srv.handleDashboardUserModel)
+	mux.HandleFunc("/v1/memory/graph", srv.handleDashboardMemoryGraph)
+	mux.HandleFunc("/v1/learnings", srv.handleDashboardLearnings)
+	mux.HandleFunc("/v1/diary", srv.handleDiary)
 	mux.HandleFunc("/v1/stream", srv.handleStream) // SSE
 	mux.HandleFunc("/v1/transparency/stream", srv.handleStream)
 	mux.HandleFunc("/v1/users/", srv.handleUserKnowledge)
@@ -175,14 +314,49 @@ func main() {
 		addr = ":8089"
 	}
 	log.Printf("memory intelligence engine listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (s *engineServer) handleEntityRepresentation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/v1/entities/")
+	id = strings.TrimSuffix(id, "/representation")
+	ctx := r.Context()
+	entity, err := getEntity(ctx, s.db, identity.TenantID, id)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "load entity: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	facts := make([]*Fact, 0, len(entity.Facts))
+	for _, factID := range entity.Facts {
+		if fact, err := getFact(ctx, s.db, identity.TenantID, factID); err == nil {
+			facts = append(facts, fact)
+		}
+	}
+	writeJSON(w, map[string]any{"entity": entity, "facts": facts})
 }
 
 func (s *engineServer) handleUserKnowledge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
 		return
 	}
 	userID := strings.TrimPrefix(r.URL.Path, "/v1/users/")
@@ -191,16 +365,18 @@ func (s *engineServer) handleUserKnowledge(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "user_id is required", http.StatusBadRequest)
 		return
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	entity, ok := s.entities[userID]
-	if !ok || entity.Type != "user" {
+	ctx := r.Context()
+	entity, err := getEntity(ctx, s.db, identity.TenantID, userID)
+	if err == sql.ErrNoRows || (err == nil && entity.Type != "user") {
 		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "load entity: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	facts := make([]*Fact, 0, len(entity.Facts))
 	for _, factID := range entity.Facts {
-		if fact, exists := s.facts[factID]; exists {
+		if fact, err := getFact(ctx, s.db, identity.TenantID, factID); err == nil {
 			facts = append(facts, fact)
 		}
 	}
@@ -221,12 +397,16 @@ func healthOK(w http.ResponseWriter, _ *http.Request) {
 func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
-		var facts []*Fact
-		for _, f := range s.facts {
-			facts = append(facts, f)
+		identity, status, msg := resolveIdentityFromRequest(r)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
 		}
-		s.mu.RUnlock()
+		facts, err := loadFacts(r.Context(), s.db, identity.TenantID, "")
+		if err != nil {
+			http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, facts)
 
 	case http.MethodPost:
@@ -239,30 +419,66 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "content required", http.StatusBadRequest)
 			return
 		}
-		s.mu.Lock()
-		s.nextID++
-		fact.ID = fmt.Sprintf("fact-%d", s.nextID)
-		fact.RecordedAt = time.Now().UTC().Format(time.RFC3339)
+		if fact.NamespaceID == "" {
+			http.Error(w, "namespace_id is required", http.StatusBadRequest)
+			return
+		}
+		identity, status, msg := resolveIdentity(r, fact.TenantID, fact.PrincipalID)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
 		if fact.Network == "" {
 			fact.Network = NetworkWorld
 		}
 		if fact.Scope == "" {
 			fact.Scope = "global"
 		}
-		// Detect contradictions
-		contradictions := s.detectContradictions(&fact)
-		if len(contradictions) > 0 {
-			for _, c := range contradictions {
-				s.relations = append(s.relations, &TemporalRelation{
-					SourceID:  fact.ID,
-					TargetID:  c,
-					Type:      "contradicts",
-					CreatedAt: fact.RecordedAt,
-				})
+		fact.RecordedAt = time.Now().UTC().Format(time.RFC3339)
+
+		ctx := r.Context()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+		if err := setPrincipalContext(ctx, tx, identity); err != nil {
+			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Detect contradictions against every existing fact in this tenant
+		// before inserting, exactly as the original in-memory implementation
+		// did, just sourced from the durable store instead of a map.
+		existing, err := loadFacts(ctx, s.db, identity.TenantID, "")
+		if err != nil {
+			http.Error(w, "load existing facts: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var contradictions []string
+		for _, other := range existing {
+			if isContradictory(&fact, other) {
+				contradictions = append(contradictions, other.ID)
 			}
 		}
-		s.facts[fact.ID] = &fact
-		s.mu.Unlock()
+
+		factID, err := insertFact(ctx, tx, identity, fact.NamespaceID, &fact)
+		if err != nil {
+			http.Error(w, "failed to persist fact: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fact.ID = factID
+		for _, c := range contradictions {
+			if err := insertRelation(ctx, tx, factID, c, "contradicts"); err != nil {
+				http.Error(w, "failed to persist contradiction: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, map[string]any{"fact": fact, "contradictions": contradictions})
 
 	default:
@@ -271,12 +487,18 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *engineServer) handleFactByID(w http.ResponseWriter, r *http.Request) {
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/facts/")
-	s.mu.RLock()
-	fact, ok := s.facts[id]
-	s.mu.RUnlock()
-	if !ok {
+	fact, err := getFact(r.Context(), s.db, identity.TenantID, id)
+	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "load fact: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, fact)
@@ -287,12 +509,16 @@ func (s *engineServer) handleFactByID(w http.ResponseWriter, r *http.Request) {
 func (s *engineServer) handleEntities(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
-		var entities []*Entity
-		for _, e := range s.entities {
-			entities = append(entities, e)
+		identity, status, msg := resolveIdentityFromRequest(r)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
 		}
-		s.mu.RUnlock()
+		entities, err := loadEntities(r.Context(), s.db, identity.TenantID)
+		if err != nil {
+			http.Error(w, "load entities: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, entities)
 
 	case http.MethodPost:
@@ -305,14 +531,36 @@ func (s *engineServer) handleEntities(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
-		s.mu.Lock()
-		s.nextID++
-		entity.ID = fmt.Sprintf("entity-%d", s.nextID)
+		identity, status, msg := resolveIdentity(r, entity.TenantID, entity.PrincipalID)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
 		if entity.Type == "" {
 			entity.Type = "user"
 		}
-		s.entities[entity.ID] = &entity
-		s.mu.Unlock()
+
+		ctx := r.Context()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+		if err := setPrincipalContext(ctx, tx, identity); err != nil {
+			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		entityID, err := insertEntity(ctx, tx, identity, &entity)
+		if err != nil {
+			http.Error(w, "failed to persist entity: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		entity.ID = entityID
 		writeJSON(w, entity)
 
 	default:
@@ -321,15 +569,46 @@ func (s *engineServer) handleEntities(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *engineServer) handleEntityByID(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/representation") {
+		s.handleEntityRepresentation(w, r)
+		return
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/entities/")
-	s.mu.RLock()
-	entity, ok := s.entities[id]
-	s.mu.RUnlock()
-	if !ok {
+	entity, err := getEntity(r.Context(), s.db, identity.TenantID, id)
+	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "load entity: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, entity)
+}
+
+func (s *engineServer) handleDiary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	entries, err := loadDiary(r.Context(), s.db, identity.TenantID)
+	if err != nil {
+		http.Error(w, "load diary: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, DashboardView{
+		Type: "diary", Entries: entries, TotalCount: len(entries),
+		LastUpdated: time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 // ── beliefs ──────────────────────────────────────────────────────────────
@@ -337,12 +616,16 @@ func (s *engineServer) handleEntityByID(w http.ResponseWriter, r *http.Request) 
 func (s *engineServer) handleBeliefs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
-		var beliefs []*Belief
-		for _, b := range s.beliefs {
-			beliefs = append(beliefs, b)
+		identity, status, msg := resolveIdentityFromRequest(r)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
 		}
-		s.mu.RUnlock()
+		beliefs, err := loadBeliefs(r.Context(), s.db, identity.TenantID)
+		if err != nil {
+			http.Error(w, "load beliefs: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, beliefs)
 
 	case http.MethodPost:
@@ -355,12 +638,44 @@ func (s *engineServer) handleBeliefs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "conclusion required", http.StatusBadRequest)
 			return
 		}
-		s.mu.Lock()
-		s.nextID++
-		belief.ID = fmt.Sprintf("belief-%d", s.nextID)
+		if len(belief.Evidence) == 0 {
+			http.Error(w, "evidence_ids required: a belief must cite at least one verifiable fact", http.StatusBadRequest)
+			return
+		}
+		identity, status, msg := resolveIdentity(r, belief.TenantID, belief.PrincipalID)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+		if err := setPrincipalContext(ctx, tx, identity); err != nil {
+			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, evidenceID := range belief.Evidence {
+			if _, err := getFact(ctx, s.db, identity.TenantID, evidenceID); err != nil {
+				http.Error(w, fmt.Sprintf("evidence_ids references unknown fact %q", evidenceID), http.StatusUnprocessableEntity)
+				return
+			}
+		}
 		belief.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-		s.beliefs[belief.ID] = &belief
-		s.mu.Unlock()
+		beliefID, err := insertBelief(ctx, tx, identity, &belief)
+		if err != nil {
+			http.Error(w, "failed to persist belief: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		belief.ID = beliefID
 		writeJSON(w, belief)
 
 	default:
@@ -371,11 +686,15 @@ func (s *engineServer) handleBeliefs(w http.ResponseWriter, r *http.Request) {
 // ── relations ────────────────────────────────────────────────────────────
 
 func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	relations := s.relations
-	s.mu.RUnlock()
-	if relations == nil {
-		relations = []*TemporalRelation{}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	relations, err := loadRelations(r.Context(), s.db, identity.TenantID)
+	if err != nil {
+		http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 	writeJSON(w, relations)
 }
@@ -385,12 +704,16 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 func (s *engineServer) handleHierarchy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
-		var nodes []*HierarchyNode
-		for _, n := range s.hierarchy {
-			nodes = append(nodes, n)
+		identity, status, msg := resolveIdentityFromRequest(r)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
 		}
-		s.mu.RUnlock()
+		nodes, err := loadHierarchy(r.Context(), s.db, identity.TenantID)
+		if err != nil {
+			http.Error(w, "load hierarchy: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, nodes)
 
 	case http.MethodPost:
@@ -403,15 +726,37 @@ func (s *engineServer) handleHierarchy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
-		s.mu.Lock()
-		s.nextID++
-		node.ID = fmt.Sprintf("hier-%d", s.nextID)
+		identity, status, msg := resolveIdentity(r, node.TenantID, node.PrincipalID)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
 		if node.Level == "" {
 			node.Level = LevelDrawer
 		}
+
+		ctx := r.Context()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+		if err := setPrincipalContext(ctx, tx, identity); err != nil {
+			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		nodeID, err := insertHierarchyNode(ctx, tx, identity.TenantID, &node)
+		if err != nil {
+			http.Error(w, "failed to persist hierarchy: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		node.ID = nodeID
 		node.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		s.hierarchy[node.ID] = &node
-		s.mu.Unlock()
 		writeJSON(w, node)
 
 	default:
@@ -428,9 +773,11 @@ func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Evidence   []string `json:"evidence_ids"`
-		Scope      string   `json:"scope,omitempty"`
-		MaxBeliefs int      `json:"max_beliefs,omitempty"`
+		Evidence    []string `json:"evidence_ids"`
+		Scope       string   `json:"scope,omitempty"`
+		MaxBeliefs  int      `json:"max_beliefs,omitempty"`
+		TenantID    string   `json:"tenant_id,omitempty"`
+		PrincipalID string   `json:"principal_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
@@ -439,17 +786,20 @@ func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 	if req.MaxBeliefs <= 0 {
 		req.MaxBeliefs = 5
 	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
 
-	s.mu.RLock()
-	// Gather evidence facts
+	ctx := r.Context()
 	var evidenceFacts []*Fact
 	for _, id := range req.Evidence {
-		if f, ok := s.facts[id]; ok {
+		if f, err := getFact(ctx, s.db, identity.TenantID, id); err == nil {
 			evidenceFacts = append(evidenceFacts, f)
 		}
 	}
 
-	// Find contradictions among evidence
 	var contradictions []map[string]any
 	for i, f1 := range evidenceFacts {
 		for j, f2 := range evidenceFacts {
@@ -466,13 +816,11 @@ func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Generate candidate beliefs from evidence
 	var candidates []Belief
 	for _, f := range evidenceFacts {
 		if f.Inferred {
 			continue
 		}
-		// Simple belief: claim with evidence
 		candidates = append(candidates, Belief{
 			Conclusion: f.Content,
 			Confidence: f.Confidence * 0.9,
@@ -483,16 +831,19 @@ func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check for prior beliefs that conflict
+	existingBeliefs, err := loadBeliefs(ctx, s.db, identity.TenantID)
+	if err != nil {
+		http.Error(w, "load beliefs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	var staleBeliefs []string
-	for _, b := range s.beliefs {
+	for _, b := range existingBeliefs {
 		for _, f := range evidenceFacts {
 			if strings.Contains(strings.ToLower(b.Conclusion), strings.ToLower(f.Content[:minInt(30, len(f.Content))])) {
 				staleBeliefs = append(staleBeliefs, b.ID)
 			}
 		}
 	}
-	s.mu.RUnlock()
 
 	writeJSON(w, map[string]any{
 		"evidence_analysed": len(evidenceFacts),
@@ -505,46 +856,155 @@ func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 
 // ── dashboard views ──────────────────────────────────────────────────────
 
+// versionInfo is the shape every governed service's GET /v1/version returns.
+type versionInfo struct {
+	Status        string `json:"status"`
+	Version       string `json:"version"`
+	UptimeSeconds int    `json:"uptime_seconds"`
+}
+
+// probePeer reports a real, freshly-measured status for one peer service: it
+// calls /health/ready to determine liveness and /v1/version for version and
+// uptime. A peer that cannot be reached is truthfully reported as
+// unreachable rather than defaulting to a fabricated healthy/unknown value
+// (ss42 prohibits fabricated operational state).
+func (s *engineServer) probePeer(ctx context.Context, name, base string) SystemMapEntry {
+	entry := SystemMapEntry{Service: name, Status: "unreachable", Version: "unknown", Uptime: "unknown"}
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 3 * time.Second}
+	}
+
+	readyReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health/ready", nil)
+	if err != nil {
+		return entry
+	}
+	readyResp, err := client.Do(readyReq)
+	if err != nil {
+		return entry
+	}
+	readyResp.Body.Close()
+	if readyResp.StatusCode == http.StatusOK {
+		entry.Status = "healthy"
+	} else {
+		entry.Status = "degraded"
+	}
+
+	versionReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/version", nil)
+	if err != nil {
+		return entry
+	}
+	versionResp, err := client.Do(versionReq)
+	if err != nil {
+		return entry
+	}
+	defer versionResp.Body.Close()
+	if versionResp.StatusCode == http.StatusOK {
+		var info versionInfo
+		if json.NewDecoder(versionResp.Body).Decode(&info) == nil {
+			if info.Version != "" {
+				entry.Version = info.Version
+			}
+			entry.Uptime = (time.Duration(info.UptimeSeconds) * time.Second).String()
+		}
+	}
+	return entry
+}
+
 func (s *engineServer) handleDashboardSystem(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	selfUptime := time.Since(s.startTime)
+	peers := s.peers
+	s.mu.RUnlock()
+	selfStatus := "healthy"
+	if err := s.readinessCheck(); err != nil {
+		selfStatus = "degraded"
+	}
+
+	entries := make([]any, 0, len(peerDefaults)+1)
+	entries = append(entries, SystemMapEntry{
+		Service: "memory-intelligence",
+		Status:  selfStatus,
+		Version: version,
+		Uptime:  selfUptime.String(),
+	})
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	type result struct {
+		index int
+		entry SystemMapEntry
+	}
+	resultsCh := make(chan result, len(peerDefaults))
+	for i, d := range peerDefaults {
+		base := peers[d.name]
+		if base == "" {
+			base = d.fallback
+		}
+		go func(i int, name, base string) {
+			resultsCh <- result{index: i, entry: s.probePeer(ctx, name, base)}
+		}(i, d.name, base)
+	}
+	ordered := make([]SystemMapEntry, len(peerDefaults))
+	for range peerDefaults {
+		r := <-resultsCh
+		ordered[r.index] = r.entry
+	}
+	for _, e := range ordered {
+		entries = append(entries, e)
+	}
+
 	writeJSON(w, DashboardView{
-		Type: "system_map",
-		Entries: []any{
-			SystemMapEntry{Service: "memory-gateway", Status: "healthy", Version: "0.1.0", Uptime: time.Since(s.startTime).Round(time.Second).String()},
-			SystemMapEntry{Service: "retrieval-orchestrator", Status: "healthy", Version: "0.1.0", Uptime: "12m"},
-			SystemMapEntry{Service: "context-optimisation", Status: "healthy", Version: "0.1.0", Uptime: "12m"},
-			SystemMapEntry{Service: "code-intelligence", Status: "healthy", Version: "0.1.0", Uptime: "10m"},
-			SystemMapEntry{Service: "execution-proxy", Status: "healthy", Version: "0.1.0", Uptime: "10m"},
-			SystemMapEntry{Service: "extension-manager", Status: "healthy", Version: "0.1.0", Uptime: "8m"},
-			SystemMapEntry{Service: "compatibility-gateway", Status: "healthy", Version: "0.1.0", Uptime: "8m"},
-			SystemMapEntry{Service: "memory-intelligence", Status: "healthy", Version: version, Uptime: time.Since(s.startTime).Round(time.Second).String()},
-		},
-		TotalCount:  8,
+		Type:        "system_map",
+		Entries:     entries,
+		TotalCount:  len(entries),
 		LastUpdated: time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
 func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	var nodes []map[string]any
-	for _, f := range s.facts {
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	ctx := r.Context()
+	facts, err := loadFacts(ctx, s.db, identity.TenantID, "")
+	if err != nil {
+		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	entities, err := loadEntities(ctx, s.db, identity.TenantID)
+	if err != nil {
+		http.Error(w, "load entities: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	relations, err := loadRelations(ctx, s.db, identity.TenantID)
+	if err != nil {
+		http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	nodes := make([]map[string]any, 0, len(facts)+len(entities))
+	for _, f := range facts {
 		nodes = append(nodes, map[string]any{
 			"id": f.ID, "label": truncate(f.Content, 60),
 			"type": "fact", "network": f.Network,
 		})
 	}
-	for _, e := range s.entities {
+	for _, e := range entities {
 		nodes = append(nodes, map[string]any{
 			"id": e.ID, "label": e.Name, "type": "entity",
 		})
 	}
-	var edges []map[string]any
-	for _, r := range s.relations {
+	edges := make([]map[string]any, 0, len(relations))
+	for _, rel := range relations {
 		edges = append(edges, map[string]any{
-			"source": r.SourceID, "target": r.TargetID,
-			"type": r.Type,
+			"source": rel.SourceID, "target": rel.TargetID,
+			"type": rel.Type,
 		})
 	}
-	s.mu.RUnlock()
 
 	writeJSON(w, map[string]any{
 		"type":  "memory_graph",
@@ -554,15 +1014,17 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 }
 
 func (s *engineServer) handleDashboardFacts(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	network := r.URL.Query().Get("network")
-	var facts []*Fact
-	for _, f := range s.facts {
-		if network == "" || string(f.Network) == network {
-			facts = append(facts, f)
-		}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
 	}
-	s.mu.RUnlock()
+	network := r.URL.Query().Get("network")
+	facts, err := loadFacts(r.Context(), s.db, identity.TenantID, network)
+	if err != nil {
+		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	sort.Slice(facts, func(i, j int) bool {
 		return facts[i].RecordedAt > facts[j].RecordedAt
 	})
@@ -575,12 +1037,16 @@ func (s *engineServer) handleDashboardFacts(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *engineServer) handleDashboardLearnings(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	var beliefs []*Belief
-	for _, b := range s.beliefs {
-		beliefs = append(beliefs, b)
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
 	}
-	s.mu.RUnlock()
+	beliefs, err := loadBeliefs(r.Context(), s.db, identity.TenantID)
+	if err != nil {
+		http.Error(w, "load beliefs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, DashboardView{
 		Type:        "learnings",
 		Entries:     toAnySlice(beliefs),
@@ -590,25 +1056,35 @@ func (s *engineServer) handleDashboardLearnings(w http.ResponseWriter, r *http.R
 }
 
 func (s *engineServer) handleDashboardContradictions(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	ctx := r.Context()
+	relations, err := loadRelations(ctx, s.db, identity.TenantID)
+	if err != nil {
+		http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	var contra []map[string]any
-	for _, rel := range s.relations {
-		if rel.Type == "contradicts" {
-			f1, ok1 := s.facts[rel.SourceID]
-			f2, ok2 := s.facts[rel.TargetID]
-			if ok1 && ok2 {
-				contra = append(contra, map[string]any{
-					"fact_a":       f1.Content,
-					"fact_b":       f2.Content,
-					"source_a":     f1.Source,
-					"source_b":     f2.Source,
-					"confidence_a": f1.Confidence,
-					"confidence_b": f2.Confidence,
-				})
-			}
+	for _, rel := range relations {
+		if rel.Type != "contradicts" {
+			continue
+		}
+		f1, err1 := getFact(ctx, s.db, identity.TenantID, rel.SourceID)
+		f2, err2 := getFact(ctx, s.db, identity.TenantID, rel.TargetID)
+		if err1 == nil && err2 == nil {
+			contra = append(contra, map[string]any{
+				"fact_a":       f1.Content,
+				"fact_b":       f2.Content,
+				"source_a":     f1.Source,
+				"source_b":     f2.Source,
+				"confidence_a": f1.Confidence,
+				"confidence_b": f2.Confidence,
+			})
 		}
 	}
-	s.mu.RUnlock()
 	writeJSON(w, DashboardView{
 		Type:        "contradictions",
 		Entries:     toAnySlice(contra),
@@ -618,16 +1094,24 @@ func (s *engineServer) handleDashboardContradictions(w http.ResponseWriter, r *h
 }
 
 func (s *engineServer) handleDashboardTimeline(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	facts, err := loadFacts(r.Context(), s.db, identity.TenantID, "")
+	if err != nil {
+		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	var entries []map[string]any
-	for _, f := range s.facts {
+	for _, f := range facts {
 		entries = append(entries, map[string]any{
 			"time": f.RecordedAt, "type": "fact",
 			"content": truncate(f.Content, 80),
 			"source":  f.Source,
 		})
 	}
-	s.mu.RUnlock()
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i]["time"].(string) > entries[j]["time"].(string)
 	})
@@ -643,25 +1127,31 @@ func (s *engineServer) handleDashboardTimeline(w http.ResponseWriter, r *http.Re
 }
 
 func (s *engineServer) handleDashboardUserModel(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	ctx := r.Context()
+	entities, err := loadEntities(ctx, s.db, identity.TenantID)
+	if err != nil {
+		http.Error(w, "load entities: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	var entityList []*Entity
-	for _, e := range s.entities {
+	for _, e := range entities {
 		if e.Type == "user" {
 			entityList = append(entityList, e)
 		}
 	}
-	// Also get user-related facts
-	var userFactIDs []string
-	for _, e := range entityList {
-		userFactIDs = append(userFactIDs, e.Facts...)
-	}
 	var userFacts []*Fact
-	for _, id := range userFactIDs {
-		if f, ok := s.facts[id]; ok {
-			userFacts = append(userFacts, f)
+	for _, e := range entityList {
+		for _, factID := range e.Facts {
+			if f, err := getFact(ctx, s.db, identity.TenantID, factID); err == nil {
+				userFacts = append(userFacts, f)
+			}
 		}
 	}
-	s.mu.RUnlock()
 
 	writeJSON(w, map[string]any{
 		"type":         "user_model",
@@ -675,28 +1165,65 @@ func (s *engineServer) handleDashboardUserModel(w http.ResponseWriter, r *http.R
 // ── SSE stream (§25.12) ──────────────────────────────────────────────────
 
 func (s *engineServer) handleStream(w http.ResponseWriter, r *http.Request) {
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	if s.db == nil {
+		http.Error(w, "event store unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
+	lastSequence := int64(0)
+	if raw := strings.TrimSpace(r.Header.Get("Last-Event-ID")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			http.Error(w, "Last-Event-ID must be a non-negative stream sequence", http.StatusBadRequest)
+			return
+		}
+		lastSequence = parsed
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	// Send initial heartbeat
-	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"live\",\"version\":\"%s\"}\n\n", version)
+	writeTransparencySSE(w, "connected", transparencyStreamFrame{
+		EventID: "0", Sequence: lastSequence, Timestamp: time.Now().UTC(),
+		Source: "scos.memory-intelligence", TenantID: identity.TenantID,
+		Scope: "tenant", ProjectionVersion: "events-v1", Data: map[string]any{"status": "live", "version": version},
+	})
 	flusher.Flush()
 
-	// Keep-alive
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+	poll := time.NewTicker(time.Second)
+	defer poll.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
-			fmt.Fprintf(w, "event: heartbeat\ndata: {\"time\":\"%s\"}\n\n", time.Now().UTC().Format(time.RFC3339))
+		case <-poll.C:
+			events, err := loadTransparencyEvents(r.Context(), s.db, identity.TenantID, lastSequence, 100)
+			if err != nil {
+				http.Error(w, "load transparency events: "+err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			for _, event := range events {
+				writeTransparencySSE(w, event.EventType, event.Frame)
+				lastSequence = event.Frame.Sequence
+			}
+			if len(events) == 0 {
+				writeTransparencySSE(w, "heartbeat", transparencyStreamFrame{
+					EventID: strconv.FormatInt(lastSequence, 10), Sequence: lastSequence,
+					Timestamp: time.Now().UTC(), Source: "scos.memory-intelligence",
+					TenantID: identity.TenantID, Scope: "tenant", ProjectionVersion: "events-v1",
+					Data: map[string]any{"status": "live"},
+				})
+			}
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
@@ -704,17 +1231,77 @@ func (s *engineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ── contradiction detection ──────────────────────────────────────────────
-
-func (s *engineServer) detectContradictions(fact *Fact) []string {
-	var contradictions []string
-	for _, existing := range s.facts {
-		if isContradictory(fact, existing) {
-			contradictions = append(contradictions, existing.ID)
-		}
-	}
-	return contradictions
+type transparencyStreamFrame struct {
+	EventID           string         `json:"event_id"`
+	Sequence          int64          `json:"sequence"`
+	Timestamp         time.Time      `json:"timestamp"`
+	Source            string         `json:"source"`
+	TenantID          string         `json:"tenant_id"`
+	Scope             string         `json:"scope"`
+	ProjectionVersion string         `json:"projection_version"`
+	Data              map[string]any `json:"data"`
 }
+
+type transparencyEvent struct {
+	EventType string
+	Frame     transparencyStreamFrame
+}
+
+func writeTransparencySSE(w http.ResponseWriter, eventType string, frame transparencyStreamFrame) {
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", frame.EventID, eventType, raw)
+}
+
+func loadTransparencyEvents(ctx context.Context, db *sql.DB, tenantID string, after int64, limit int) ([]transparencyEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true)`, tenantID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT stream_sequence, id::text, source, event_type, occurred_at,
+		       COALESCE(data->>'scope','tenant'), COALESCE(data->>'projection_version','events-v1'), data
+		FROM events
+		WHERE tenant_id=$1 AND stream_sequence>$2
+		ORDER BY stream_sequence
+		LIMIT $3
+	`, tenantID, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]transparencyEvent, 0)
+	for rows.Next() {
+		var sequence int64
+		var frame transparencyStreamFrame
+		var eventType string
+		var dataRaw []byte
+		if err := rows.Scan(&sequence, &frame.EventID, &frame.Source, &eventType, &frame.Timestamp, &frame.Scope, &frame.ProjectionVersion, &dataRaw); err != nil {
+			return nil, err
+		}
+		frame.Sequence = sequence
+		frame.TenantID = tenantID
+		if err := json.Unmarshal(dataRaw, &frame.Data); err != nil {
+			return nil, err
+		}
+		result = append(result, transparencyEvent{EventType: eventType, Frame: frame})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, tx.Commit()
+}
+
+// ── contradiction detection ──────────────────────────────────────────────
 
 func isContradictory(a, b *Fact) bool {
 	if a.Network != b.Network || a.Scope != b.Scope {
@@ -759,18 +1346,11 @@ func isContradictory(a, b *Fact) bool {
 
 // ── utility ──────────────────────────────────────────────────────────────
 
-func truncate(s string, n int) string {
+func truncateContent(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 	return s[:n] + "..."
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func toAnySlice[T any](items []T) []any {

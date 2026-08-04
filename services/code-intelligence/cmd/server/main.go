@@ -1,5 +1,8 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+
 import (
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,14 +16,28 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/services/readiness"
 )
 
 const version = "0.1.0"
+
+var startTime = time.Now()
+
+func handleVersion(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":         "ok",
+		"version":        version,
+		"uptime_seconds": int(time.Since(startTime).Seconds()),
+	})
+}
 
 // ── types ────────────────────────────────────────────────────────────────
 
 type Repository struct {
 	ID                string   `json:"repository_id"`
+	TenantID          string   `json:"tenant_id,omitempty"`
 	CanonicalPath     string   `json:"canonical_path"`
 	RemoteIdentity    string   `json:"remote_identity"`
 	Branch            string   `json:"branch_or_worktree"`
@@ -40,6 +57,7 @@ type LanguageAdapter struct {
 
 type Symbol struct {
 	ID                     string   `json:"symbol_id"`
+	RepoID                 string   `json:"repository_id,omitempty"`
 	FullyQualifiedName     string   `json:"fully_qualified_name"`
 	Kind                   string   `json:"kind"` // package, module, class, function, method, type, interface, variable, constant, schema
 	Signature              string   `json:"signature,omitempty"`
@@ -81,6 +99,7 @@ type Chunk struct {
 type CodeQuery struct {
 	Intent      string `json:"intent"`
 	Query       string `json:"query"`
+	TenantID    string `json:"tenant_id,omitempty"`
 	RepoID      string `json:"repository_id,omitempty"`
 	Path        string `json:"path,omitempty"`
 	SymbolName  string `json:"symbol_name,omitempty"`
@@ -116,20 +135,55 @@ type ChangeImpact struct {
 	RiskScore            float64  `json:"risk_score"`
 }
 
+// ImpactReconciliationRequest reconciles a previously predicted change
+// impact with observed build, test and runtime evidence (§19.9). Prediction
+// errors recorded here become learning signals for future risk scoring.
+type ImpactReconciliationRequest struct {
+	RepoID              string  `json:"repository_id"`
+	CommitID            string  `json:"commit_id"`
+	PredictedRiskScore  float64 `json:"predicted_risk_score"`
+	PredictedDependants int     `json:"predicted_dependants"`
+	BuildPassed         *bool   `json:"build_passed,omitempty"`
+	TestsPassed         *bool   `json:"tests_passed,omitempty"`
+	ActualDependants    int     `json:"actual_dependants"`
+}
+
+// ImpactReconciliation is the durable, versioned learning-signal record
+// produced by reconciling a prediction with reality.
+type ImpactReconciliation struct {
+	RepoID              string  `json:"repository_id"`
+	CommitID            string  `json:"commit_id"`
+	PredictedRiskScore  float64 `json:"predicted_risk_score"`
+	PredictedDependants int     `json:"predicted_dependants"`
+	ActualDependants    int     `json:"actual_dependants"`
+	BuildPassed         *bool   `json:"build_passed,omitempty"`
+	TestsPassed         *bool   `json:"tests_passed,omitempty"`
+	DependantCountError int     `json:"dependant_count_error"`
+	OutcomeMismatch     bool    `json:"outcome_mismatch"`
+	RecordedAt          string  `json:"recorded_at"`
+}
+
 // ── in-memory store ──────────────────────────────────────────────────────
 
 type codeStore struct {
-	mu          sync.RWMutex
-	repos       map[string]*Repository
-	symbols     map[string]*Symbol          // symbol_id -> symbol
-	chunks      map[string]*Chunk           // symbol_id -> chunk
-	generations map[string]*IndexGeneration // repo_id -> latest generation
-	adapters    map[string]*LanguageAdapter
-	relations   map[string][]string // symbol_id -> dependant symbol IDs
+	mu              sync.RWMutex
+	path            string
+	repos           map[string]*Repository
+	symbols         map[string]*Symbol          // symbol_id -> symbol
+	chunks          map[string]*Chunk           // symbol_id -> chunk
+	generations     map[string]*IndexGeneration // repo_id -> latest generation
+	adapters        map[string]*LanguageAdapter
+	relations       map[string][]string // symbol_id -> dependant symbol IDs
+	reconciliations []ImpactReconciliation
 }
 
 func newCodeStore() *codeStore {
+	return newCodeStoreAt("")
+}
+
+func newCodeStoreAt(path string) *codeStore {
 	return &codeStore{
+		path:        path,
 		repos:       make(map[string]*Repository),
 		symbols:     make(map[string]*Symbol),
 		chunks:      make(map[string]*Chunk),
@@ -137,6 +191,166 @@ func newCodeStore() *codeStore {
 		adapters:    make(map[string]*LanguageAdapter),
 		relations:   make(map[string][]string),
 	}
+}
+
+type persistedCodeStore struct {
+	Version         int                         `json:"version"`
+	Repositories    map[string]*Repository      `json:"repositories"`
+	Symbols         map[string]*Symbol          `json:"symbols"`
+	Chunks          map[string]*Chunk           `json:"chunks"`
+	Generations     map[string]*IndexGeneration `json:"generations"`
+	Relations       map[string][]string         `json:"relations"`
+	Reconciliations []ImpactReconciliation      `json:"reconciliations,omitempty"`
+}
+
+func (s *codeStore) snapshotLocked() persistedCodeStore {
+	return persistedCodeStore{
+		Version:         1,
+		Repositories:    cloneRepositories(s.repos),
+		Symbols:         cloneSymbols(s.symbols),
+		Chunks:          cloneChunks(s.chunks),
+		Generations:     cloneGenerations(s.generations),
+		Relations:       cloneRelations(s.relations),
+		Reconciliations: append([]ImpactReconciliation(nil), s.reconciliations...),
+	}
+}
+
+func (s *codeStore) load() error {
+	if s.path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(s.path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read code intelligence store: %w", err)
+	}
+	var persisted persistedCodeStore
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		return fmt.Errorf("decode code intelligence store: %w", err)
+	}
+	if persisted.Version != 1 {
+		return fmt.Errorf("unsupported code intelligence store version %d", persisted.Version)
+	}
+	if persisted.Repositories == nil || persisted.Symbols == nil || persisted.Chunks == nil || persisted.Generations == nil || persisted.Relations == nil {
+		return fmt.Errorf("incomplete code intelligence store")
+	}
+	for repoID, generation := range persisted.Generations {
+		if generation == nil || generation.Status != "active" {
+			return fmt.Errorf("incomplete generation state for repository %s", repoID)
+		}
+		repo := persisted.Repositories[repoID]
+		if repo == nil || repo.IndexGeneration != generation.Generation {
+			return fmt.Errorf("generation metadata mismatch for repository %s", repoID)
+		}
+	}
+	s.repos = persisted.Repositories
+	s.symbols = persisted.Symbols
+	s.chunks = persisted.Chunks
+	s.generations = persisted.Generations
+	s.relations = persisted.Relations
+	s.reconciliations = persisted.Reconciliations
+	return nil
+}
+
+func (s *codeStore) persistLocked() error {
+	if s.path == "" {
+		return nil
+	}
+	data, err := json.Marshal(s.snapshotLocked())
+	if err != nil {
+		return fmt.Errorf("encode code intelligence store: %w", err)
+	}
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return fmt.Errorf("create code intelligence store directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".code-intelligence-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create code intelligence store temporary file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set code intelligence store permissions: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write code intelligence store: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync code intelligence store: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close code intelligence store: %w", err)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return fmt.Errorf("commit code intelligence store: %w", err)
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open code intelligence store directory: %w", err)
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return fmt.Errorf("sync code intelligence store directory: %w", err)
+	}
+	if err := directory.Close(); err != nil {
+		return fmt.Errorf("close code intelligence store directory: %w", err)
+	}
+	return nil
+}
+
+func cloneRepositories(in map[string]*Repository) map[string]*Repository {
+	out := make(map[string]*Repository, len(in))
+	for id, value := range in {
+		copy := *value
+		copy.Languages = append([]string(nil), value.Languages...)
+		out[id] = &copy
+	}
+	return out
+}
+
+func cloneSymbols(in map[string]*Symbol) map[string]*Symbol {
+	out := make(map[string]*Symbol, len(in))
+	for id, value := range in {
+		copy := *value
+		copy.Imports = append([]string(nil), value.Imports...)
+		copy.OutboundRelations = append([]string(nil), value.OutboundRelations...)
+		copy.InboundRelationSummary = append([]string(nil), value.InboundRelationSummary...)
+		copy.Tests = append([]string(nil), value.Tests...)
+		out[id] = &copy
+	}
+	return out
+}
+
+func cloneChunks(in map[string]*Chunk) map[string]*Chunk {
+	out := make(map[string]*Chunk, len(in))
+	for id, value := range in {
+		copy := *value
+		out[id] = &copy
+	}
+	return out
+}
+
+func cloneGenerations(in map[string]*IndexGeneration) map[string]*IndexGeneration {
+	out := make(map[string]*IndexGeneration, len(in))
+	for id, value := range in {
+		copy := *value
+		out[id] = &copy
+	}
+	return out
+}
+
+func cloneRelations(in map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(in))
+	for id, values := range in {
+		out[id] = append([]string(nil), values...)
+	}
+	return out
 }
 
 // ── server ───────────────────────────────────────────────────────────────
@@ -147,13 +361,23 @@ type server struct {
 }
 
 func main() {
-	store := newCodeStore()
+	path := os.Getenv("SCOS_CODE_INTELLIGENCE_STORE_PATH")
+	store := newCodeStoreAt(path)
 	registerDefaultAdapters(store)
-	srv := &server{store: store}
+	if err := store.load(); err != nil {
+		log.Fatal(err)
+	}
+	srv := &server{store: store, nextID: nextRepositoryID(store.repos)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", healthOK)
+	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
+		if len(store.adapters) == 0 {
+			return fmt.Errorf("language adapters are not configured")
+		}
+		return nil
+	}))
+	mux.HandleFunc("/v1/version", handleVersion)
 
 	// Repository management
 	mux.HandleFunc("/v1/repos", srv.handleRepos)
@@ -161,6 +385,7 @@ func main() {
 
 	// Indexing
 	mux.HandleFunc("/v1/index", srv.handleIndex)
+	mux.HandleFunc("/v1/code/index", srv.handleIndex)
 	mux.HandleFunc("/v1/index/status", srv.handleIndexStatus)
 
 	// Querying
@@ -171,6 +396,7 @@ func main() {
 	// Change impact
 	mux.HandleFunc("/v1/impact", srv.handleImpact)
 	mux.HandleFunc("/v1/code/impact", srv.handleImpact)
+	mux.HandleFunc("/v1/impact/reconcile", srv.handleImpactReconcile)
 
 	// Adapters
 	mux.HandleFunc("/v1/adapters", srv.handleAdapters)
@@ -180,9 +406,18 @@ func main() {
 		addr = ":8084"
 	}
 	log.Printf("code intelligence layer listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// requireTenant enforces repository and namespace permissions before search
+// or mutation (§19.10): every network request must carry the caller's
+// authenticated tenant scope, and results are always confined to that
+// tenant's own repositories.
+func requireTenant(r *http.Request) (string, bool) {
+	tenant := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
+	return tenant, tenant != ""
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {
@@ -248,12 +483,19 @@ func registerDefaultAdapters(store *codeStore) {
 // ── repository endpoints ─────────────────────────────────────────────────
 
 func (s *server) handleRepos(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.store.mu.RLock()
 		var repos []*Repository
 		for _, repo := range s.store.repos {
-			repos = append(repos, repo)
+			if repo.TenantID == tenant {
+				repos = append(repos, repo)
+			}
 		}
 		s.store.mu.RUnlock()
 		writeJSON(w, repos)
@@ -268,13 +510,33 @@ func (s *server) handleRepos(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "canonical_path is required", http.StatusBadRequest)
 			return
 		}
+		// The owning tenant is always derived from the authenticated caller,
+		// never trusted from the request body, to prevent a caller from
+		// registering a repository into another tenant's namespace.
+		repo.TenantID = tenant
 		s.store.mu.Lock()
+		if current := nextRepositoryID(s.store.repos); current > s.nextID {
+			s.nextID = current
+		}
+		candidate := newCodeStoreAt(s.store.path)
+		candidate.repos = cloneRepositories(s.store.repos)
+		candidate.symbols = cloneSymbols(s.store.symbols)
+		candidate.chunks = cloneChunks(s.store.chunks)
+		candidate.generations = cloneGenerations(s.store.generations)
+		candidate.relations = cloneRelations(s.store.relations)
 		s.nextID++
 		repo.ID = fmt.Sprintf("repo-%d", s.nextID)
 		now := time.Now().UTC().Format(time.RFC3339)
 		repo.CreatedAt = now
 		repo.UpdatedAt = now
-		s.store.repos[repo.ID] = &repo
+		candidate.repos[repo.ID] = &repo
+		if err := candidate.persistLocked(); err != nil {
+			s.nextID--
+			s.store.mu.Unlock()
+			http.Error(w, "could not persist repository: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.store.repos = candidate.repos
 		s.store.mu.Unlock()
 		writeJSON(w, repo)
 
@@ -284,15 +546,20 @@ func (s *server) handleRepos(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleRepoByID(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/repos/")
 	if id == "" {
 		http.Error(w, "repository_id required", http.StatusBadRequest)
 		return
 	}
 	s.store.mu.RLock()
-	repo, ok := s.store.repos[id]
+	repo, found := s.store.repos[id]
 	s.store.mu.RUnlock()
-	if !ok {
+	if !found || repo.TenantID != tenant {
 		http.Error(w, "repository not found", http.StatusNotFound)
 		return
 	}
@@ -306,13 +573,20 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
 
 	var req struct {
 		RepoID   string   `json:"repository_id"`
 		CommitID string   `json:"commit_id"`
 		Files    []string `json:"files"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -320,14 +594,30 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repository_id and files are required", http.StatusBadRequest)
 		return
 	}
+	for _, file := range req.Files {
+		if strings.TrimSpace(file) == "" {
+			http.Error(w, "files must not contain empty paths", http.StatusBadRequest)
+			return
+		}
+	}
 
 	s.store.mu.Lock()
-	repo, ok := s.store.repos[req.RepoID]
-	if !ok {
+	repo, found := s.store.repos[req.RepoID]
+	if !found || repo.TenantID != tenant {
 		s.store.mu.Unlock()
 		http.Error(w, "repository not found", http.StatusNotFound)
 		return
 	}
+
+	// Build the complete next state separately. The live maps are replaced only
+	// after the atomic snapshot has been committed.
+	candidate := newCodeStoreAt(s.store.path)
+	candidate.repos = cloneRepositories(s.store.repos)
+	candidate.symbols = cloneSymbols(s.store.symbols)
+	candidate.chunks = cloneChunks(s.store.chunks)
+	candidate.generations = cloneGenerations(s.store.generations)
+	candidate.relations = cloneRelations(s.store.relations)
+	candidate.adapters = s.store.adapters
 
 	// Create new generation
 	gen := repo.IndexGeneration + 1
@@ -350,13 +640,13 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Extract symbols based on tier
-		symbols := extractSymbols(file, lang, tier)
+		symbols := extractSymbols(file, lang, tier, req.RepoID)
 		for _, sym := range symbols {
 			sym.CommitID = req.CommitID
-			s.store.symbols[sym.ID] = &sym
+			candidate.symbols[sym.ID] = &sym
 
 			// Create chunk for this symbol
-			s.store.chunks[sym.ID] = &Chunk{
+			candidate.chunks[sym.ID] = &Chunk{
 				SymbolID: sym.ID,
 				Content:  sym.Signature,
 				Path:     sym.Path,
@@ -365,18 +655,39 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	generation.SymbolCount = len(s.store.symbols)
+	generation.SymbolCount = len(candidate.symbols)
 	generation.FileCount = len(req.Files)
 	generation.Status = "active"
 	generation.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 
-	s.store.generations[req.RepoID] = generation
-	repo.IndexGeneration = gen
-	repo.CommitID = req.CommitID
-	repo.UpdatedAt = now
+	candidate.generations[req.RepoID] = generation
+	candidate.repos[req.RepoID].IndexGeneration = gen
+	candidate.repos[req.RepoID].CommitID = req.CommitID
+	candidate.repos[req.RepoID].UpdatedAt = now
+	if err := candidate.persistLocked(); err != nil {
+		s.store.mu.Unlock()
+		http.Error(w, "could not persist index generation: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.store.repos = candidate.repos
+	s.store.symbols = candidate.symbols
+	s.store.chunks = candidate.chunks
+	s.store.generations = candidate.generations
+	s.store.relations = candidate.relations
 	s.store.mu.Unlock()
 
 	writeJSON(w, generation)
+}
+
+func nextRepositoryID(repos map[string]*Repository) int {
+	max := 0
+	for id := range repos {
+		var number int
+		if _, err := fmt.Sscanf(id, "repo-%d", &number); err == nil && number > max {
+			max = number
+		}
+	}
+	return max
 }
 
 func (s *server) handleIndexStatus(w http.ResponseWriter, r *http.Request) {
@@ -396,6 +707,11 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
 
 	var q CodeQuery
 	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
@@ -409,6 +725,10 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if q.MaxResults <= 0 {
 		q.MaxResults = 10
 	}
+	// The tenant scope always comes from the authenticated caller, never a
+	// client-supplied field, so a query can never be widened to another
+	// tenant's repositories (§19.10).
+	q.TenantID = tenant
 
 	s.store.mu.RLock()
 	defer s.store.mu.RUnlock()
@@ -432,14 +752,42 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// scopedSymbols returns the subset of the index restricted to the requested
+// repository and, when a tenant is known (i.e. the request arrived through
+// the HTTP boundary rather than an internal unit test), to repositories
+// owned by that tenant. This prevents one repository's (or one branch's,
+// tracked as a distinct Repository row) symbols from leaking into another's
+// query results, and prevents cross-tenant leakage across the whole index
+// when no repository_id is given (§19.10).
+func (s *server) scopedSymbols(q CodeQuery) map[string]*Symbol {
+	if q.RepoID == "" && q.TenantID == "" {
+		return s.store.symbols
+	}
+	scoped := make(map[string]*Symbol, len(s.store.symbols))
+	for id, sym := range s.store.symbols {
+		if q.RepoID != "" && sym.RepoID != q.RepoID {
+			continue
+		}
+		if q.TenantID != "" {
+			repo, ok := s.store.repos[sym.RepoID]
+			if !ok || repo.TenantID != q.TenantID {
+				continue
+			}
+		}
+		scoped[id] = sym
+	}
+	return scoped
+}
+
 func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 	var results []CodeQueryResult
 	qLower := strings.ToLower(q.Query)
+	symbols := s.scopedSymbols(q)
 
 	switch q.Intent {
 	case "exact_lookup":
 		// Exact text match on paths and content
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			if strings.Contains(strings.ToLower(sym.Path), qLower) ||
 				strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) {
 				chunk := s.store.chunks[sym.ID]
@@ -456,7 +804,7 @@ func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 		}
 
 	case "symbol_lookup":
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			if strings.EqualFold(sym.FullyQualifiedName, q.Query) ||
 				strings.HasSuffix(strings.ToLower(sym.FullyQualifiedName), "."+qLower) {
 				chunk := s.store.chunks[sym.ID]
@@ -473,7 +821,7 @@ func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 		}
 
 	case "reference_search":
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			for _, imp := range sym.Imports {
 				if strings.Contains(strings.ToLower(imp), qLower) {
 					chunk := s.store.chunks[sym.ID]
@@ -492,7 +840,7 @@ func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 		}
 
 	case "implementation_search":
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			if sym.Kind == "class" || sym.Kind == "function" || sym.Kind == "method" {
 				if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) ||
 					strings.Contains(strings.ToLower(sym.Signature), qLower) {
@@ -512,7 +860,7 @@ func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 
 	case "architecture_question":
 		// Find packages/modules and their relations
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			if sym.Kind == "package" || sym.Kind == "module" || sym.Kind == "interface" {
 				if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) ||
 					strings.Contains(strings.ToLower(sym.DocComment), qLower) {
@@ -531,7 +879,7 @@ func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 		}
 
 	case "test_discovery":
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			if len(sym.Tests) > 0 {
 				if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) {
 					chunk := s.store.chunks[sym.ID]
@@ -548,7 +896,7 @@ func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 			}
 		}
 		// Also find test files
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			if strings.Contains(strings.ToLower(sym.Path), "_test") ||
 				strings.Contains(strings.ToLower(sym.Path), ".spec.") ||
 				strings.Contains(strings.ToLower(sym.Path), "/test_") {
@@ -569,7 +917,7 @@ func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 		}
 
 	case "configuration_lookup":
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			if sym.Kind == "configuration" || strings.HasSuffix(sym.Path, ".yaml") ||
 				strings.HasSuffix(sym.Path, ".yml") || strings.HasSuffix(sym.Path, ".toml") ||
 				strings.HasSuffix(sym.Path, ".json") || strings.HasSuffix(sym.Path, ".env") {
@@ -591,7 +939,7 @@ func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 
 	default: // structural_pattern, bug_localisation, history_question, security_review
 		// Broader fallback: search all symbols
-		for _, sym := range s.store.symbols {
+		for _, sym := range symbols {
 			if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) ||
 				strings.Contains(strings.ToLower(sym.Signature), qLower) ||
 				strings.Contains(strings.ToLower(sym.DocComment), qLower) {
@@ -652,6 +1000,11 @@ func (s *server) handleContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
 
 	var req struct {
 		Symbol         string `json:"symbol"`
@@ -676,9 +1029,13 @@ func (s *server) handleContext(w http.ResponseWriter, r *http.Request) {
 	s.store.mu.RLock()
 	defer s.store.mu.RUnlock()
 
+	// Every lookup below is confined to the caller's own tenant so that
+	// context assembly can never surface another tenant's symbols (§19.10).
+	tenantSymbols := s.scopedSymbols(CodeQuery{TenantID: tenant})
+
 	// Find the target symbol
 	var target *Symbol
-	for _, sym := range s.store.symbols {
+	for _, sym := range tenantSymbols {
 		if sym.FullyQualifiedName == req.Symbol || sym.ID == req.Symbol {
 			target = sym
 			break
@@ -706,7 +1063,7 @@ func (s *server) handleContext(w http.ResponseWriter, r *http.Request) {
 
 	// Find callers (inbound references)
 	if req.IncludeCallers {
-		for _, sym := range s.store.symbols {
+		for _, sym := range tenantSymbols {
 			for _, ref := range sym.OutboundRelations {
 				if ref == target.FullyQualifiedName {
 					ctx.Callers = append(ctx.Callers, *sym)
@@ -722,7 +1079,7 @@ func (s *server) handleContext(w http.ResponseWriter, r *http.Request) {
 	// Find callees (outbound references)
 	if req.IncludeCallees {
 		for _, ref := range target.OutboundRelations {
-			for _, sym := range s.store.symbols {
+			for _, sym := range tenantSymbols {
 				if sym.FullyQualifiedName == ref {
 					ctx.Callees = append(ctx.Callees, *sym)
 					break
@@ -737,7 +1094,7 @@ func (s *server) handleContext(w http.ResponseWriter, r *http.Request) {
 	// Attach test symbols
 	if req.IncludeTests {
 		for _, testName := range target.Tests {
-			for _, sym := range s.store.symbols {
+			for _, sym := range tenantSymbols {
 				if sym.ID == testName || sym.FullyQualifiedName == testName {
 					ctx.Tests = append(ctx.Tests, *sym)
 					break
@@ -756,6 +1113,11 @@ func (s *server) handleImpact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
 
 	var req ChangeImpactRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -770,6 +1132,14 @@ func (s *server) handleImpact(w http.ResponseWriter, r *http.Request) {
 	s.store.mu.RLock()
 	defer s.store.mu.RUnlock()
 
+	if repo, found := s.store.repos[req.RepoID]; !found || repo.TenantID != tenant {
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+	// Change-impact analysis only ever walks the caller's own tenant's
+	// symbols (§19.10).
+	tenantSymbols := s.scopedSymbols(CodeQuery{TenantID: tenant})
+
 	impact := ChangeImpact{
 		DirectModified: req.Symbols,
 	}
@@ -783,7 +1153,7 @@ func (s *server) handleImpact(w http.ResponseWriter, r *http.Request) {
 	directSet := make(map[string]bool)
 	transitiveSet := make(map[string]bool)
 
-	for _, sym := range s.store.symbols {
+	for _, sym := range tenantSymbols {
 		for _, ref := range sym.OutboundRelations {
 			if modifiedSet[strings.ToLower(ref)] {
 				directSet[sym.FullyQualifiedName] = true
@@ -796,7 +1166,7 @@ func (s *server) handleImpact(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for _, sym := range s.store.symbols {
+	for _, sym := range tenantSymbols {
 		if directSet[sym.FullyQualifiedName] {
 			continue
 		}
@@ -816,7 +1186,7 @@ func (s *server) handleImpact(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find test coverage for modified symbols
-	for _, sym := range s.store.symbols {
+	for _, sym := range tenantSymbols {
 		for _, modified := range req.Symbols {
 			for _, test := range sym.Tests {
 				if strings.Contains(strings.ToLower(test), strings.ToLower(modified)) {
@@ -844,6 +1214,81 @@ func (s *server) handleImpact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, impact)
 }
 
+// ── change-impact reconciliation endpoint (§19.9) ────────────────────────
+//
+// After a change, the layer SHALL reconcile the predicted impact with
+// build, test and runtime evidence, and prediction errors SHALL become
+// learning signals. This durably records each reconciliation so ranking
+// and risk-scoring improvements have verified evidence to learn from.
+func (s *server) handleImpactReconcile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+
+	var req ImpactReconciliationRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.RepoID == "" || req.CommitID == "" {
+		http.Error(w, "repository_id and commit_id are required", http.StatusBadRequest)
+		return
+	}
+
+	s.store.mu.Lock()
+	repo, found := s.store.repos[req.RepoID]
+	if !found || repo.TenantID != tenant {
+		s.store.mu.Unlock()
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	dependantError := req.ActualDependants - req.PredictedDependants
+	if dependantError < 0 {
+		dependantError = -dependantError
+	}
+	outcomeMismatch := false
+	if req.BuildPassed != nil && !*req.BuildPassed && req.PredictedRiskScore < 0.5 {
+		outcomeMismatch = true
+	}
+	if req.TestsPassed != nil && !*req.TestsPassed && req.PredictedRiskScore < 0.5 {
+		outcomeMismatch = true
+	}
+
+	record := ImpactReconciliation{
+		RepoID:              req.RepoID,
+		CommitID:            req.CommitID,
+		PredictedRiskScore:  req.PredictedRiskScore,
+		PredictedDependants: req.PredictedDependants,
+		ActualDependants:    req.ActualDependants,
+		BuildPassed:         req.BuildPassed,
+		TestsPassed:         req.TestsPassed,
+		DependantCountError: dependantError,
+		OutcomeMismatch:     outcomeMismatch,
+		RecordedAt:          time.Now().UTC().Format(time.RFC3339),
+	}
+
+	previous := s.store.reconciliations
+	s.store.reconciliations = append(s.store.reconciliations, record)
+	if err := s.store.persistLocked(); err != nil {
+		s.store.reconciliations = previous
+		s.store.mu.Unlock()
+		http.Error(w, "could not persist impact reconciliation: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.store.mu.Unlock()
+
+	writeJSON(w, record)
+}
+
 // ── adapters endpoint ────────────────────────────────────────────────────
 
 func (s *server) handleAdapters(w http.ResponseWriter, r *http.Request) {
@@ -861,15 +1306,24 @@ func (s *server) handleAdapters(w http.ResponseWriter, r *http.Request) {
 
 // ── symbol extraction ────────────────────────────────────────────────────
 
-func extractSymbols(path string, language string, tier int) []Symbol {
+// symbolScope salts a per-file hash with the owning repository ID so that
+// two repositories indexing the same relative path (e.g. two branches of the
+// same repo tracked as distinct Repository rows) never collide in the shared
+// global symbol/chunk maps.
+func symbolScope(repoID, discriminator string) string {
+	return sha256Hex([]byte(repoID + "\x00" + discriminator))
+}
+
+func extractSymbols(path string, language string, tier int, repoID string) []Symbol {
 	base := filepath.Base(path)
 	dir := filepath.Dir(path)
 	var symbols []Symbol
 
 	// Tier 0: file-level indexing
-	contentHash := sha256Hex([]byte(path))
+	contentHash := symbolScope(repoID, path)
 	symbols = append(symbols, Symbol{
 		ID:                 contentHash[:16],
+		RepoID:             repoID,
 		FullyQualifiedName: path,
 		Kind:               "file",
 		Path:               path,
@@ -885,26 +1339,27 @@ func extractSymbols(path string, language string, tier int) []Symbol {
 	// Extract common symbols by extension and naming conventions
 	switch language {
 	case "go":
-		symbols = append(symbols, extractGoSymbols(base, dir, path)...)
+		symbols = append(symbols, extractGoSymbols(base, dir, path, repoID)...)
 	case "python":
-		symbols = append(symbols, extractPythonSymbols(base, dir, path)...)
+		symbols = append(symbols, extractPythonSymbols(base, dir, path, repoID)...)
 	case "typescript", "javascript":
-		symbols = append(symbols, extractTSJSSymbols(base, dir, path, language)...)
+		symbols = append(symbols, extractTSJSSymbols(base, dir, path, language, repoID)...)
 	}
 
 	return symbols
 }
 
-func extractGoSymbols(base, dir, path string) []Symbol {
+func extractGoSymbols(base, dir, path, repoID string) []Symbol {
 	var symbols []Symbol
 	// Package
 	pkgName := filepath.Base(dir)
 	if pkgName == "." {
 		pkgName = "main"
 	}
-	pkgID := sha256Hex([]byte(dir))
+	pkgID := symbolScope(repoID, dir)
 	symbols = append(symbols, Symbol{
 		ID:                 "pkg:" + pkgID[:12],
+		RepoID:             repoID,
 		FullyQualifiedName: pkgName,
 		Kind:               "package",
 		Path:               path,
@@ -915,12 +1370,13 @@ func extractGoSymbols(base, dir, path string) []Symbol {
 	return symbols
 }
 
-func extractPythonSymbols(base, dir, path string) []Symbol {
+func extractPythonSymbols(base, dir, path, repoID string) []Symbol {
 	var symbols []Symbol
 	moduleName := strings.TrimSuffix(base, ".py")
-	modID := sha256Hex([]byte(path))
+	modID := symbolScope(repoID, path)
 	symbols = append(symbols, Symbol{
 		ID:                 "mod:" + modID[:12],
+		RepoID:             repoID,
 		FullyQualifiedName: moduleName,
 		Kind:               "module",
 		Path:               path,
@@ -931,15 +1387,16 @@ func extractPythonSymbols(base, dir, path string) []Symbol {
 	return symbols
 }
 
-func extractTSJSSymbols(base, dir, path, language string) []Symbol {
+func extractTSJSSymbols(base, dir, path, language, repoID string) []Symbol {
 	var symbols []Symbol
 	moduleName := strings.TrimSuffix(base, ".ts")
 	moduleName = strings.TrimSuffix(moduleName, ".tsx")
 	moduleName = strings.TrimSuffix(moduleName, ".js")
 	moduleName = strings.TrimSuffix(moduleName, ".jsx")
-	modID := sha256Hex([]byte(path))
+	modID := symbolScope(repoID, path)
 	symbols = append(symbols, Symbol{
 		ID:                 "ts:" + modID[:12],
+		RepoID:             repoID,
 		FullyQualifiedName: moduleName,
 		Kind:               "module",
 		Path:               path,

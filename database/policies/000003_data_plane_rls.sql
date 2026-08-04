@@ -11,11 +11,16 @@ ALTER TABLE memory_relations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_embeddings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_candidates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_reviews ENABLE ROW LEVEL SECURITY;
-ALTER TABLE okf_bundles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE okf_concepts ENABLE ROW LEVEL SECURITY;
+-- okf_bundles/okf_concepts are enabled and policed by
+-- migrations/000011_okf_projections.sql, which supersedes the tenant/bundle
+-- relational shape this file originally targeted (see that migration's
+-- header comment). Re-declaring RLS/policies here against columns that no
+-- longer exist on those tables would break this policies file.
 ALTER TABLE object_references ENABLE ROW LEVEL SECURITY;
 ALTER TABLE retention_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE service_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE extension_manager_state ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY message_chunks_session_access ON message_chunks
     FOR ALL USING (EXISTS (
@@ -82,16 +87,6 @@ CREATE POLICY memory_reviews_candidate_access ON memory_reviews
     WITH CHECK (EXISTS (SELECT 1 FROM memory_candidates c
                        WHERE c.id = memory_reviews.candidate_id
                          AND c.tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid));
-CREATE POLICY okf_bundles_tenant_access ON okf_bundles
-    FOR ALL USING (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid)
-    WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid);
-CREATE POLICY okf_concepts_bundle_access ON okf_concepts
-    FOR ALL USING (EXISTS (SELECT 1 FROM okf_bundles b
-                           WHERE b.id = okf_concepts.bundle_id
-                             AND b.tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid))
-    WITH CHECK (EXISTS (SELECT 1 FROM okf_bundles b
-                       WHERE b.id = okf_concepts.bundle_id
-                         AND b.tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid));
 CREATE POLICY object_references_tenant_access ON object_references
     FOR ALL USING (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid);
@@ -101,5 +96,11 @@ CREATE POLICY retention_rules_tenant_access ON retention_rules
 CREATE POLICY audit_entries_tenant_access ON audit_entries
     FOR ALL USING (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid);
+CREATE POLICY service_state_service_access ON service_state
+    FOR ALL USING (service = NULLIF(current_setting('scos.service_id', true), ''))
+    WITH CHECK (service = NULLIF(current_setting('scos.service_id', true), ''));
+CREATE POLICY extension_manager_service_access ON extension_manager_state
+    FOR ALL USING (NULLIF(current_setting('scos.service_id', true), '') = 'extension-manager')
+    WITH CHECK (NULLIF(current_setting('scos.service_id', true), '') = 'extension-manager');
 
 COMMIT;

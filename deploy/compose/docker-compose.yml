@@ -1,28 +1,140 @@
+x-service-auth-environment: &service-auth-environment
+  SCOS_INTERNAL_SERVICE_TOKEN: ${SCOS_INTERNAL_SERVICE_TOKEN:?SCOS_INTERNAL_SERVICE_TOKEN must be set}
+  SCOS_CONTROL_PLANE_TOKEN: ${SCOS_CONTROL_PLANE_TOKEN:?SCOS_CONTROL_PLANE_TOKEN must be set}
+  SCOS_SERVICE_IDENTITY: ${SCOS_SERVICE_IDENTITY_PREFIX:-scos-service}
+  # packages/auth.AuthenticatedHandler only populates claims (tenant_id,
+  # principal_id) on the request context when it can validate a claims-bearing
+  # bearer token against this secret. Several handlers (for example
+  # autonomous-control-plane's /v1/control/* routes, execution-proxy's
+  # /v1/plan) require those claims and have no working fallback once any
+  # identity has been authenticated -- without this var those routes are
+  # unreachable by any caller, not just probes, regardless of which headers
+  # are sent. It was previously wired only into security-gate, which issues
+  # the tokens but never needs to verify one of its own.
+  SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
+
+# Every governed HTTP service terminates TLS using a certificate shared from
+# the tls-certs volume (see the tls-certs service below). SCOS_TLS_REQUIRED
+# makes this fail closed: a service that cannot find its certificate refuses
+# to fall back to plaintext. The generated certificate is a self-signed dev
+# certificate valid for this compose network's internal hostnames only -- a
+# production deployment MUST replace the tls-certs service and volume with a
+# real certificate authority (e.g. cert-manager, ACME, or an operator-issued
+# certificate) rather than relying on this generator.
+x-service-tls-environment: &service-tls-environment
+  SCOS_TLS_REQUIRED: ${SCOS_TLS_REQUIRED:-true}
+  SCOS_TLS_CERT_FILE: ${SCOS_TLS_CERT_FILE:-/etc/scos/tls/tls.crt}
+  SCOS_TLS_KEY_FILE: ${SCOS_TLS_KEY_FILE:-/etc/scos/tls/tls.key}
+  SCOS_TLS_CA_FILE: ${SCOS_TLS_CA_FILE:-/etc/scos/tls/tls.crt}
+
 services:
+  tls-certs:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - tls-certs:/etc/scos/tls
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ -f /etc/scos/tls/tls.crt ] && [ -f /etc/scos/tls/tls.key ]; then
+          echo "tls-certs: existing certificate found, leaving it in place"
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        SAN="DNS:localhost,IP:127.0.0.1"
+        for svc in memory-gateway autonomous-control-plane retrieval-orchestrator \
+                   context-optimisation code-intelligence execution-proxy \
+                   extension-manager compatibility-gateway hermes-provider \
+                   memory-intelligence okf-synchroniser security-gate \
+                   tool-governance agent-registry recovery-orchestrator \
+                   backup-manager observability transparency-projection; do
+          SAN="$$SAN,DNS:$$svc"
+        done
+        openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+          -keyout /etc/scos/tls/tls.key -out /etc/scos/tls/tls.crt \
+          -subj "/O=scos-internal-dev" -addext "subjectAltName=$$SAN"
+        chmod 600 /etc/scos/tls/tls.key
+        chmod 644 /etc/scos/tls/tls.crt
+        echo "tls-certs: generated a self-signed development certificate"
+
+  # Every application DATABASE_URL in this file requires sslmode=require or
+  # stronger (packages/database.RequireTLS). PostgreSQL does not serve TLS
+  # by default, so without a server certificate every one of those
+  # connections fails closed with "server does not support SSL, but SSL
+  # was required" -- this generator makes the fail-closed application
+  # requirement actually satisfiable. Ownership must match the postgres
+  # image's postgres user (uid/gid 999) and the key must not be
+  # group/world readable, or the PostgreSQL server refuses to start.
+  postgres-tls-certs:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - postgres-tls-certs:/etc/postgresql-tls
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ -f /etc/postgresql-tls/server.crt ] && [ -f /etc/postgresql-tls/server.key ]; then
+          echo "postgres-tls-certs: existing certificate found, leaving it in place"
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+          -keyout /etc/postgresql-tls/server.key -out /etc/postgresql-tls/server.crt \
+          -subj "/O=scos-internal-dev" \
+          -addext "subjectAltName=DNS:postgres,DNS:localhost,IP:127.0.0.1"
+        chown 999:999 /etc/postgresql-tls/server.key /etc/postgresql-tls/server.crt
+        chmod 600 /etc/postgresql-tls/server.key
+        chmod 644 /etc/postgresql-tls/server.crt
+        echo "postgres-tls-certs: generated a self-signed development server certificate"
+
   postgres:
     image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-scos_memory}
       POSTGRES_USER: ${POSTGRES_USER:-scos}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be provided by the deployment secret manager}
+      SCOS_WAL_ARCHIVE_ENABLED: ${SCOS_WAL_ARCHIVE_ENABLED:-false}
+      SCOS_WAL_ARCHIVE_DESTINATION: ${SCOS_WAL_ARCHIVE_DESTINATION:-}
+    command: ["postgres", "-c", "wal_level=replica", "-c", "archive_mode=on", "-c", "archive_timeout=60s", "-c", "archive_command=if [ \"$$SCOS_WAL_ARCHIVE_ENABLED\" = \"true\" ]; then sh /usr/local/bin/scos-wal-archive %p %f; else exit 0; fi", "-c", "ssl=on", "-c", "ssl_cert_file=/etc/postgresql-tls/server.crt", "-c", "ssl_key_file=/etc/postgresql-tls/server.key"]
+    expose:
+      - "5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ../../database/migrations/000001_initial.sql:/docker-entrypoint-initdb.d/000001_initial.sql:ro
-      - ../../database/migrations/000002_governance_tables.sql:/docker-entrypoint-initdb.d/000002_governance_tables.sql:ro
-      - ../../database/migrations/000003_control_plane.sql:/docker-entrypoint-initdb.d/000003_control_plane.sql:ro
-      - ../../database/migrations/000004_autonomous_control_plane.sql:/docker-entrypoint-initdb.d/000004_autonomous_control_plane.sql:ro
-      - ../../database/migrations/000005_extension_state.sql:/docker-entrypoint-initdb.d/000005_extension_state.sql:ro
-      - ../../database/policies/000001_rls.sql:/docker-entrypoint-initdb.d/000005_rls.sql:ro
-      - ../../database/policies/000002_control_plane_rls.sql:/docker-entrypoint-initdb.d/000006_control_plane_rls.sql:ro
-      - ../../database/policies/000003_data_plane_rls.sql:/docker-entrypoint-initdb.d/000007_data_plane_rls.sql:ro
+      - ../../database/migrations:/scos-database/migrations:ro
+      - ../../database/policies:/scos-database/policies:ro
+      - ../../scripts/scos-wal-archive:/usr/local/bin/scos-wal-archive:ro
+      - postgres-wal-archive:/var/lib/scos/wal-archive
+      - postgres-tls-certs:/etc/postgresql-tls:ro
+    depends_on:
+      postgres-tls-certs:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 20
+
+  migrations:
+    image: pgvector/pgvector:pg17
+    restart: "no"
+    user: "0"
+    environment:
+      SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_MIGRATIONS_BASELINE: ${SCOS_MIGRATIONS_BASELINE:-}
+    volumes:
+      - ../../database/migrations:/scos-database/migrations:ro
+      - ../../database/policies:/scos-database/policies:ro
+      - ../../scripts/scos-migrate:/usr/local/bin/scos-migrate:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "/usr/local/bin/scos-migrate"]
+
+  # Shared internal bearer credential. The value must come from the deployment
+  # environment or a secret manager, never from this file.
 
   memory-gateway:
     build:
@@ -30,20 +142,27 @@ services:
       dockerfile: services/memory-gateway/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_HTTP_ADDR: ${SCOS_HTTP_ADDR:-:8080}
       SCOS_VERSION: ${SCOS_VERSION:-0.1.0-dev}
-      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
-    ports:
-      - "8080:8080"
+      SCOS_SCHEMA_DIR: ${SCOS_SCHEMA_DIR:-}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    expose:
+      - "8080"
     depends_on:
+      tls-certs:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8080/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
-
 
   autonomous-control-plane:
     build:
@@ -51,15 +170,32 @@ services:
       dockerfile: services/autonomous-control-plane/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_CONTROL_HTTP_ADDR: ${SCOS_CONTROL_HTTP_ADDR:-:8081}
-      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
-    ports:
-      - "8081:8081"
+      SCOS_CONTROL_PLANE_STATE_PATH: ${SCOS_CONTROL_PLANE_STATE_PATH:-/var/lib/scos/control-plane/state.json}
+      SCOS_RETRIEVAL_ORCHESTRATOR_URL: ${SCOS_RETRIEVAL_ORCHESTRATOR_URL:-https://retrieval-orchestrator:8082}
+      SCOS_CONTEXT_OPTIMISATION_URL: ${SCOS_CONTEXT_OPTIMISATION_URL:-https://context-optimisation:8083}
+      SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
+      SCOS_EXECUTION_PROXY_URL: ${SCOS_EXECUTION_PROXY_URL:-https://execution-proxy:8085}
+      SCOS_TOOL_GOVERNANCE_URL: ${SCOS_TOOL_GOVERNANCE_URL:-https://tool-governance:8092}
+      SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
+      SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
+      SCOS_AGENT_ENDPOINT: ${SCOS_AGENT_ENDPOINT:?SCOS_AGENT_ENDPOINT must be set}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - autonomous-control-plane-state:/var/lib/scos/control-plane
+    expose:
+      - "8081"
     depends_on:
+      tls-certs:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8081/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8081/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -70,7 +206,7 @@ services:
       dockerfile: workers/consolidation/Dockerfile
     restart: unless-stopped
     environment:
-      SCOS_DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
+      SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_CONSOLIDATION_POLL_SECONDS: ${SCOS_CONSOLIDATION_POLL_SECONDS:-5}
       SCOS_CONSOLIDATION_BATCH_SIZE: ${SCOS_CONSOLIDATION_BATCH_SIZE:-10}
       SCOS_LOG_LEVEL: ${SCOS_LOG_LEVEL:-info}
@@ -78,7 +214,9 @@ services:
       postgres:
         condition: service_healthy
       memory-gateway:
-        condition: service_started
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
 
   retrieval-orchestrator:
     build:
@@ -86,15 +224,22 @@ services:
       dockerfile: services/retrieval-orchestrator/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_RETRIEVAL_HTTP_ADDR: ${SCOS_RETRIEVAL_HTTP_ADDR:-:8082}
-      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
-    ports:
-      - "8082:8082"
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    expose:
+      - "8082"
     depends_on:
+      tls-certs:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8082/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8082/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -105,11 +250,19 @@ services:
       dockerfile: services/context-optimisation/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_CONTEXT_HTTP_ADDR: ${SCOS_CONTEXT_HTTP_ADDR:-:8083}
-    ports:
-      - "8083:8083"
+      SCOS_CONTEXT_SOURCE_STORE: ${SCOS_CONTEXT_SOURCE_STORE:-/var/lib/scos/context/sources}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - context-data:/var/lib/scos/context
+    expose:
+      - "8083"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8083/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8083/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -120,11 +273,19 @@ services:
       dockerfile: services/code-intelligence/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_CODE_INTELLIGENCE_HTTP_ADDR: ${SCOS_CODE_INTELLIGENCE_HTTP_ADDR:-:8084}
-    ports:
-      - "8084:8084"
+      SCOS_CODE_INTELLIGENCE_STORE_PATH: ${SCOS_CODE_INTELLIGENCE_STORE_PATH:-/var/lib/scos/code-intelligence/state.json}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - code-intelligence-data:/var/lib/scos/code-intelligence
+    expose:
+      - "8084"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8084/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8084/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -135,14 +296,26 @@ services:
       dockerfile: services/execution-proxy/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_EXECUTION_PROXY_HTTP_ADDR: ${SCOS_EXECUTION_PROXY_HTTP_ADDR:-:8085}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_EXECUTION_PROXY_STORE_PATH: ${SCOS_EXECUTION_PROXY_STORE_PATH:-/var/lib/scos/execution-proxy/state.json}
       SCOS_PROXY_RAW_DIR: ${SCOS_PROXY_RAW_DIR:-/var/lib/scos/execution-proxy/raw}
     volumes:
+      - tls-certs:/etc/scos/tls:ro
       - execution-proxy-raw:/var/lib/scos/execution-proxy/raw
-    ports:
-      - "8085:8085"
+      - execution-proxy-state:/var/lib/scos/execution-proxy/state
+    expose:
+      - "8085"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8085/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8085/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -153,15 +326,22 @@ services:
       dockerfile: services/extension-manager/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_EXTENSION_MANAGER_HTTP_ADDR: ${SCOS_EXTENSION_MANAGER_HTTP_ADDR:-:8086}
-      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
-    ports:
-      - "8086:8086"
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    expose:
+      - "8086"
     depends_on:
+      tls-certs:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8086/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8086/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -172,11 +352,22 @@ services:
       dockerfile: services/compatibility-gateway/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR: ${SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR:-:8087}
-    ports:
-      - "8087:8087"
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    expose:
+      - "8087"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8087/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8087/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -187,11 +378,22 @@ services:
       dockerfile: services/hermes-provider/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_HERMES_PROVIDER_HTTP_ADDR: ${SCOS_HERMES_PROVIDER_HTTP_ADDR:-:8088}
-    ports:
-      - "8088:8088"
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    expose:
+      - "8088"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8088/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8088/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -202,11 +404,29 @@ services:
       dockerfile: services/memory-intelligence/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR: ${SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR:-:8089}
-    ports:
-      - "8089:8089"
+      SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
+      SCOS_RETRIEVAL_ORCHESTRATOR_URL: ${SCOS_RETRIEVAL_ORCHESTRATOR_URL:-https://retrieval-orchestrator:8082}
+      SCOS_CONTEXT_OPTIMISATION_URL: ${SCOS_CONTEXT_OPTIMISATION_URL:-https://context-optimisation:8083}
+      SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
+      SCOS_EXECUTION_PROXY_URL: ${SCOS_EXECUTION_PROXY_URL:-https://execution-proxy:8085}
+      SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
+      SCOS_COMPATIBILITY_GATEWAY_URL: ${SCOS_COMPATIBILITY_GATEWAY_URL:-https://compatibility-gateway:8087}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    expose:
+      - "8089"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8089/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8089/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -217,11 +437,24 @@ services:
       dockerfile: services/okf-synchroniser/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_OKF_SYNCHRONISER_HTTP_ADDR: ${SCOS_OKF_SYNCHRONISER_HTTP_ADDR:-:8090}
-    ports:
-      - "8090:8090"
+      SCOS_OKF_SYNCHRONISER_STATE_PATH: ${SCOS_OKF_SYNCHRONISER_STATE_PATH:-/var/lib/scos/okf/projections.json}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - okf-data:/var/lib/scos/okf
+    expose:
+      - "8090"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8090/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8090/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -232,11 +465,25 @@ services:
       dockerfile: services/security-gate/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_SECURITY_GATE_HTTP_ADDR: ${SCOS_SECURITY_GATE_HTTP_ADDR:-:8091}
-    ports:
-      - "8091:8091"
+      SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
+      SCOS_SECURITY_GATE_STORE_PATH: ${SCOS_SECURITY_GATE_STORE_PATH:-/var/lib/scos/security-gate.json}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - security-gate-data:/var/lib/scos
+    expose:
+      - "8091"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8091/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8091/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -247,11 +494,24 @@ services:
       dockerfile: services/tool-governance/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_TOOL_GOVERNANCE_HTTP_ADDR: ${SCOS_TOOL_GOVERNANCE_HTTP_ADDR:-:8092}
-    ports:
-      - "8092:8092"
+      SCOS_TOOL_GOVERNANCE_STORE_PATH: ${SCOS_TOOL_GOVERNANCE_STORE_PATH:-/var/lib/scos/tool-governance.json}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - tool-governance-data:/var/lib/scos
+    expose:
+      - "8092"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8092/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8092/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -262,11 +522,24 @@ services:
       dockerfile: services/agent-registry/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_AGENT_REGISTRY_HTTP_ADDR: ${SCOS_AGENT_REGISTRY_HTTP_ADDR:-:8093}
-    ports:
-      - "8093:8093"
+      SCOS_AGENT_REGISTRY_STORE_PATH: ${SCOS_AGENT_REGISTRY_STORE_PATH:-/var/lib/scos/agent-registry/state.json}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - agent-registry-state:/var/lib/scos/agent-registry/state
+    expose:
+      - "8093"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8093/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8093/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -277,11 +550,22 @@ services:
       dockerfile: services/recovery-orchestrator/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR: ${SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR:-:8094}
-    ports:
-      - "8094:8094"
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    expose:
+      - "8094"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8094/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8094/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -292,11 +576,30 @@ services:
       dockerfile: services/backup-manager/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_BACKUP_MANAGER_HTTP_ADDR: ${SCOS_BACKUP_MANAGER_HTTP_ADDR:-:8095}
-    ports:
-      - "8095:8095"
+      SCOS_BACKUP_PROVIDER: ${SCOS_BACKUP_PROVIDER:-disabled}
+      SCOS_BACKUP_DESTINATION: ${SCOS_BACKUP_DESTINATION:-}
+      SCOS_BACKUP_PROVIDER_VERIFIED: ${SCOS_BACKUP_PROVIDER_VERIFIED:-false}
+      SCOS_BACKUP_OFF_HOST_VERIFIED: ${SCOS_BACKUP_OFF_HOST_VERIFIED:-false}
+      SCOS_SECRET_MANAGER: ${SCOS_SECRET_MANAGER:-}
+      SCOS_BACKUP_ENCRYPTION_KEY_REF: ${SCOS_BACKUP_ENCRYPTION_KEY_REF:-}
+      SCOS_PITR_ENABLED: ${SCOS_PITR_ENABLED:-false}
+      SCOS_BACKUP_DATABASE_URL: ${SCOS_BACKUP_DATABASE_URL:-}
+      SCOS_BACKUP_RESTORE_DATABASE_URL: ${SCOS_BACKUP_RESTORE_DATABASE_URL:-}
+      SCOS_BACKUP_DIR: ${SCOS_BACKUP_DIR:-/var/lib/scos/backups}
+      SCOS_WAL_ARCHIVE_DESTINATION: "${SCOS_WAL_ARCHIVE_DESTINATION:-file:///var/lib/scos/wal-archive}"
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - backup-data:/var/lib/scos/backups
+      - postgres-wal-archive:/var/lib/scos/wal-archive
+    expose:
+      - "8095"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8095/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8095/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -307,11 +610,27 @@ services:
       dockerfile: services/observability/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_OBSERVABILITY_HTTP_ADDR: ${SCOS_OBSERVABILITY_HTTP_ADDR:-:8096}
-    ports:
-      - "8096:8096"
+      SCOS_OBSERVABILITY_STORE_PATH: ${SCOS_OBSERVABILITY_STORE_PATH:-/var/lib/scos/observability/observability.jsonl}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-scos-observability}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - observability-data:/var/lib/scos/observability
+    expose:
+      - "8096"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8096/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8096/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -322,19 +641,63 @@ services:
       dockerfile: services/transparency-projection/Dockerfile
     restart: unless-stopped
     environment:
+      <<: [*service-auth-environment, *service-tls-environment]
       SCOS_TRANSPARENCY_HTTP_ADDR: ${SCOS_TRANSPARENCY_HTTP_ADDR:-:8097}
-      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-http://memory-intelligence:8089}
-    ports:
-      - "8097:8097"
+      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      SCOS_AGENT_REGISTRY_URL: ${SCOS_AGENT_REGISTRY_URL:-https://agent-registry:8093}
+      SCOS_TOOL_GOVERNANCE_URL: ${SCOS_TOOL_GOVERNANCE_URL:-https://tool-governance:8092}
+      SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
+      SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
+      SCOS_AUTONOMOUS_CONTROL_PLANE_URL: ${SCOS_AUTONOMOUS_CONTROL_PLANE_URL:-https://autonomous-control-plane:8081}
+      SCOS_RECOVERY_ORCHESTRATOR_URL: ${SCOS_RECOVERY_ORCHESTRATOR_URL:-https://recovery-orchestrator:8094}
+      SCOS_SECURITY_GATE_URL: ${SCOS_SECURITY_GATE_URL:-https://security-gate:8091}
+      SCOS_OBSERVABILITY_URL: ${SCOS_OBSERVABILITY_URL:-https://observability:8096}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    expose:
+      - "8097"
     depends_on:
+      tls-certs:
+        condition: service_completed_successfully
       memory-intelligence:
-        condition: service_started
+        condition: service_healthy
+      agent-registry:
+        condition: service_healthy
+      tool-governance:
+        condition: service_healthy
+      extension-manager:
+        condition: service_healthy
+      code-intelligence:
+        condition: service_healthy
+      autonomous-control-plane:
+        condition: service_healthy
+      recovery-orchestrator:
+        condition: service_healthy
+      security-gate:
+        condition: service_healthy
+      observability:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8097/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8097/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
 
 volumes:
+  tls-certs:
+  postgres-tls-certs:
   postgres-data:
   execution-proxy-raw:
+  execution-proxy-state:
+  agent-registry-state:
+  autonomous-control-plane-state:
+  security-gate-data:
+  tool-governance-data:
+  observability-data:
+  context-data:
+  code-intelligence-data:
+  okf-data:
+  backup-data:
+  postgres-wal-archive:

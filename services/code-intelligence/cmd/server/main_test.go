@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,7 +56,7 @@ func TestDetectLanguage(t *testing.T) {
 }
 
 func TestExtractSymbolsTier0(t *testing.T) {
-	symbols := extractSymbols("/path/to/file.txt", "unknown", 0)
+	symbols := extractSymbols("/path/to/file.txt", "unknown", 0, "repo-1")
 	if len(symbols) != 1 {
 		t.Fatalf("expected 1 symbol (file), got %d", len(symbols))
 	}
@@ -61,7 +66,7 @@ func TestExtractSymbolsTier0(t *testing.T) {
 }
 
 func TestExtractGoSymbols(t *testing.T) {
-	symbols := extractSymbols("/src/cmd/server/main.go", "go", 1)
+	symbols := extractSymbols("/src/cmd/server/main.go", "go", 1, "repo-1")
 	foundPkg := false
 	for _, s := range symbols {
 		if s.Kind == "package" {
@@ -75,7 +80,7 @@ func TestExtractGoSymbols(t *testing.T) {
 }
 
 func TestExtractPythonSymbols(t *testing.T) {
-	symbols := extractSymbols("/src/models.py", "python", 1)
+	symbols := extractSymbols("/src/models.py", "python", 1, "repo-1")
 	foundMod := false
 	for _, s := range symbols {
 		if s.Kind == "module" {
@@ -89,7 +94,7 @@ func TestExtractPythonSymbols(t *testing.T) {
 }
 
 func TestExtractTSJSSymbols(t *testing.T) {
-	symbols := extractSymbols("/src/app.tsx", "typescript", 1)
+	symbols := extractSymbols("/src/app.tsx", "typescript", 1, "repo-1")
 	foundMod := false
 	for _, s := range symbols {
 		if s.Kind == "module" {
@@ -281,7 +286,7 @@ func TestIndexFiles(t *testing.T) {
 	gen := &IndexGeneration{Generation: 1, RepoID: "repo-1", Status: "active"}
 	for _, file := range []string{"/test/repo/main.go", "/test/repo/app.py"} {
 		lang := detectLanguage(file)
-		symbols := extractSymbols(file, lang, 1)
+		symbols := extractSymbols(file, lang, 1, "repo-1")
 		for _, sym := range symbols {
 			store.symbols[sym.ID] = &sym
 			store.chunks[sym.ID] = &Chunk{SymbolID: sym.ID}
@@ -298,6 +303,119 @@ func TestIndexFiles(t *testing.T) {
 	}
 	if len(store.symbols) < 2 {
 		t.Fatalf("expected at least 2 symbols, got %d", len(store.symbols))
+	}
+}
+
+func TestExtractSymbolsRepoScoped(t *testing.T) {
+	// Two repositories indexing the identical relative path must not collide
+	// in the shared global symbol/chunk maps, and a scoped query must never
+	// return the other repository's symbols.
+	symbolsA := extractSymbols("/src/main.go", "go", 1, "repo-a")
+	symbolsB := extractSymbols("/src/main.go", "go", 1, "repo-b")
+	if len(symbolsA) != len(symbolsB) {
+		t.Fatalf("expected identical symbol counts, got %d vs %d", len(symbolsA), len(symbolsB))
+	}
+	for i := range symbolsA {
+		if symbolsA[i].ID == symbolsB[i].ID {
+			t.Fatalf("symbol ID collision across repos for identical path: %s", symbolsA[i].ID)
+		}
+		if symbolsA[i].RepoID != "repo-a" || symbolsB[i].RepoID != "repo-b" {
+			t.Fatalf("expected RepoID to be set to the owning repository, got %q and %q", symbolsA[i].RepoID, symbolsB[i].RepoID)
+		}
+	}
+
+	srv := &server{store: newCodeStore()}
+	for _, sym := range symbolsA {
+		sym.CommitID = "commit-a"
+		srv.store.symbols[sym.ID] = &sym
+	}
+	for _, sym := range symbolsB {
+		sym.CommitID = "commit-b"
+		srv.store.symbols[sym.ID] = &sym
+	}
+	for _, sym := range srv.store.symbols {
+		srv.store.chunks[sym.ID] = &Chunk{SymbolID: sym.ID, Path: sym.Path}
+	}
+
+	results := srv.executeQuery(CodeQuery{Intent: "exact_lookup", Query: "main.go", RepoID: "repo-a", MaxResults: 10})
+	if len(results) != len(symbolsA) {
+		t.Fatalf("expected %d scoped results for repo-a, got %d", len(symbolsA), len(results))
+	}
+	for _, r := range results {
+		if r.Symbol.CommitID != "commit-a" {
+			t.Fatalf("cross-repo leakage: repo-a query returned symbol from commit %q", r.Symbol.CommitID)
+		}
+	}
+}
+
+func TestHandleQueryPreventsCrossTenantLeakage(t *testing.T) {
+	// Two tenants each register a repository with an overlapping path. A
+	// query with no repository_id from tenant A must never surface tenant
+	// B's symbols (§19.10).
+	store := newCodeStore()
+	store.repos["repo-a"] = &Repository{ID: "repo-a", TenantID: "tenant-a", CanonicalPath: "/repo"}
+	store.repos["repo-b"] = &Repository{ID: "repo-b", TenantID: "tenant-b", CanonicalPath: "/repo"}
+	store.symbols["sym-a"] = &Symbol{ID: "sym-a", RepoID: "repo-a", FullyQualifiedName: "shared.Handler", Kind: "function", Path: "/repo/handler.go"}
+	store.symbols["sym-b"] = &Symbol{ID: "sym-b", RepoID: "repo-b", FullyQualifiedName: "shared.Handler", Kind: "function", Path: "/repo/handler.go"}
+	store.chunks["sym-a"] = &Chunk{SymbolID: "sym-a", Path: "/repo/handler.go"}
+	store.chunks["sym-b"] = &Chunk{SymbolID: "sym-b", Path: "/repo/handler.go"}
+	srv := &server{store: store}
+
+	body := `{"intent":"exact_lookup","query":"shared.Handler","max_results":10}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/code/query", bytes.NewBufferString(body))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-a")
+	w := httptest.NewRecorder()
+	srv.handleQuery(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Results []CodeQueryResult `json:"results"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Symbol.RepoID != "repo-a" {
+		t.Fatalf("expected only tenant-a's symbol, got %+v", resp.Results)
+	}
+}
+
+func TestHandleQueryRequiresTenant(t *testing.T) {
+	srv := &server{store: newCodeStore()}
+	body := `{"intent":"exact_lookup","query":"x"}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/code/query", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	srv.handleQuery(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without a tenant header, got %d", w.Code)
+	}
+}
+
+func TestHandleReposScopedToTenant(t *testing.T) {
+	store := newCodeStore()
+	store.repos["repo-a"] = &Repository{ID: "repo-a", TenantID: "tenant-a", CanonicalPath: "/a"}
+	store.repos["repo-b"] = &Repository{ID: "repo-b", TenantID: "tenant-b", CanonicalPath: "/b"}
+	srv := &server{store: store}
+
+	r := httptest.NewRequest(http.MethodGet, "/v1/repos", nil)
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-a")
+	w := httptest.NewRecorder()
+	srv.handleRepos(w, r)
+	var repos []*Repository
+	if err := json.Unmarshal(w.Body.Bytes(), &repos); err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 || repos[0].ID != "repo-a" {
+		t.Fatalf("expected only tenant-a's repository, got %+v", repos)
+	}
+
+	// tenant-b must not be able to fetch tenant-a's repository by ID.
+	byID := httptest.NewRequest(http.MethodGet, "/v1/repos/repo-a", nil)
+	byID.Header.Set("X-SCOS-Tenant-ID", "tenant-b")
+	byIDResp := httptest.NewRecorder()
+	srv.handleRepoByID(byIDResp, byID)
+	if byIDResp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-tenant repository lookup, got %d", byIDResp.Code)
 	}
 }
 
@@ -329,6 +447,59 @@ func TestHandleImpact(t *testing.T) {
 
 	if len(directDeps) != 1 || directDeps[0] != "A" {
 		t.Fatalf("expected A as direct dependant, got %v", directDeps)
+	}
+}
+
+func TestHandleImpactReconcile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "code-intelligence.json")
+	store := newCodeStoreAt(path)
+	registerDefaultAdapters(store)
+	store.repos["repo-1"] = &Repository{ID: "repo-1", TenantID: "tenant-1", CanonicalPath: "/repo"}
+	srv := &server{store: store}
+
+	body := `{"repository_id":"repo-1","commit_id":"abc","predicted_risk_score":0.1,"predicted_dependants":1,"actual_dependants":4,"build_passed":false,"tests_passed":false}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/impact/reconcile", bytes.NewBufferString(body))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	w := httptest.NewRecorder()
+	srv.handleImpactReconcile(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var record ImpactReconciliation
+	if err := json.Unmarshal(w.Body.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.DependantCountError != 3 {
+		t.Fatalf("expected dependant count error of 3, got %d", record.DependantCountError)
+	}
+	if !record.OutcomeMismatch {
+		t.Fatal("expected an under-predicted risk score with a failed build to be flagged as a mismatch")
+	}
+	if len(store.reconciliations) != 1 {
+		t.Fatalf("expected reconciliation to be recorded, got %d", len(store.reconciliations))
+	}
+
+	// The learning signal must survive a restart, like every other durable
+	// index generation.
+	restarted := newCodeStoreAt(path)
+	registerDefaultAdapters(restarted)
+	if err := restarted.load(); err != nil {
+		t.Fatalf("load after restart: %v", err)
+	}
+	if len(restarted.reconciliations) != 1 {
+		t.Fatalf("expected reconciliation to survive restart, got %d", len(restarted.reconciliations))
+	}
+}
+
+func TestHandleImpactReconcileRequiresTenant(t *testing.T) {
+	srv := &server{store: newCodeStore()}
+	body := `{"repository_id":"repo-1","commit_id":"abc"}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/impact/reconcile", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	srv.handleImpactReconcile(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without a tenant header, got %d", w.Code)
 	}
 }
 
@@ -419,5 +590,98 @@ func TestJSONRoundTripGeneration(t *testing.T) {
 	}
 	if decoded.SymbolCount != 100 {
 		t.Fatal("roundtrip failed")
+	}
+}
+
+func TestHandleIndexViaCodeRoute(t *testing.T) {
+	store := newCodeStore()
+	store.repos["repo-1"] = &Repository{ID: "repo-1", TenantID: "tenant-1", CanonicalPath: "/repo"}
+	srv := &server{store: store}
+	r := httptest.NewRequest(http.MethodPost, "/v1/code/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"abc","files":["main.go"]}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	w := httptest.NewRecorder()
+	srv.handleIndex(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if store.generations["repo-1"].Status != "active" {
+		t.Fatal("expected active index generation")
+	}
+}
+
+func TestHandleIndexRejectsEmptyFilePath(t *testing.T) {
+	store := newCodeStore()
+	store.repos["repo-1"] = &Repository{ID: "repo-1", TenantID: "tenant-1"}
+	srv := &server{store: store}
+	r := httptest.NewRequest(http.MethodPost, "/v1/code/index", bytes.NewBufferString(`{"repository_id":"repo-1","files":[""]}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	w := httptest.NewRecorder()
+	srv.handleIndex(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestCodeStoreRestoresRepositoriesAndGenerationsAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "code-intelligence.json")
+	store := newCodeStoreAt(path)
+	registerDefaultAdapters(store)
+	srv := &server{store: store}
+
+	create := httptest.NewRequest(http.MethodPost, "/v1/repos", bytes.NewBufferString(`{"canonical_path":"/repo","branch_or_worktree":"main"}`))
+	create.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	createResponse := httptest.NewRecorder()
+	srv.handleRepos(createResponse, create)
+	if createResponse.Code != http.StatusOK {
+		t.Fatalf("create repository: expected 200, got %d", createResponse.Code)
+	}
+
+	index := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"abc","files":["main.go"]}`))
+	index.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	indexResponse := httptest.NewRecorder()
+	srv.handleIndex(indexResponse, index)
+	if indexResponse.Code != http.StatusOK {
+		t.Fatalf("index repository: expected 200, got %d", indexResponse.Code)
+	}
+
+	restarted := newCodeStoreAt(path)
+	registerDefaultAdapters(restarted)
+	if err := restarted.load(); err != nil {
+		t.Fatalf("load after restart: %v", err)
+	}
+	if restarted.repos["repo-1"].IndexGeneration != 1 {
+		t.Fatalf("expected restored generation 1, got %d", restarted.repos["repo-1"].IndexGeneration)
+	}
+	if restarted.generations["repo-1"].Status != "active" {
+		t.Fatalf("expected restored active generation")
+	}
+	if len(restarted.symbols) == 0 || len(restarted.chunks) == 0 {
+		t.Fatal("expected indexed symbols and chunks after restart")
+	}
+}
+
+func TestIndexDoesNotPublishWhenAtomicStoreCommitFails(t *testing.T) {
+	dir := t.TempDir()
+	blockedParent := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blockedParent, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := newCodeStoreAt(filepath.Join(blockedParent, "store.json"))
+	registerDefaultAdapters(store)
+	store.repos["repo-1"] = &Repository{ID: "repo-1", TenantID: "tenant-1", CanonicalPath: "/repo"}
+	srv := &server{store: store}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"abc","files":["main.go"]}`))
+	request.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	response := httptest.NewRecorder()
+	srv.handleIndex(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("expected failed commit to return 500, got %d", response.Code)
+	}
+	if len(store.symbols) != 0 || len(store.chunks) != 0 || len(store.generations) != 0 {
+		t.Fatal("failed atomic commit published partial index state")
+	}
+	if store.repos["repo-1"].IndexGeneration != 0 {
+		t.Fatal("failed atomic commit changed repository metadata")
 	}
 }

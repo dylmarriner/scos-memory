@@ -1,48 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"testing"
-	"time"
 )
-
-func TestNewToolGovernanceServer(t *testing.T) {
-	s := newToolGovernanceServer()
-	if s == nil {
-		t.Fatal("expected non-nil server")
-	}
-}
-
-func TestRegisterTool(t *testing.T) {
-	s := newToolGovernanceServer()
-	s.mu.Lock()
-	tool := &ToolDefinition{
-		ID: "tool-1", Name: "read_file", Version: "1.0",
-		Props: ToolProperties{ReadOnly: true, Reconcilable: false},
-		State: StateProposed,
-	}
-	s.tools["tool-1"] = tool
-	s.mu.Unlock()
-
-	if tool.Name != "read_file" {
-		t.Fatal("name mismatch")
-	}
-}
-
-func TestToolTransitionValid(t *testing.T) {
-	s := newToolGovernanceServer()
-	s.mu.Lock()
-	s.tools["tool-1"] = &ToolDefinition{ID: "tool-1", Name: "test", State: StateProposed}
-	s.mu.Unlock()
-
-	s.mu.Lock()
-	tool := s.tools["tool-1"]
-	tool.State = StatePrepared
-	s.mu.Unlock()
-
-	if tool.State != StatePrepared {
-		t.Fatal("expected prepared state")
-	}
-}
 
 func TestCanTransition(t *testing.T) {
 	if !canTransition(StateProposed, StatePrepared) {
@@ -72,92 +35,6 @@ func TestToolTransitionInvalid(t *testing.T) {
 	}
 }
 
-func TestOperationLifecycle(t *testing.T) {
-	s := newToolGovernanceServer()
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.mu.Lock()
-	op := &ToolOperation{
-		ID: "op-1", ToolID: "tool-1",
-		State: StateExecuting, StartedAt: now,
-	}
-	s.operations["op-1"] = op
-	s.mu.Unlock()
-
-	if op.State != StateExecuting {
-		t.Fatal("expected executing state")
-	}
-
-	s.mu.Lock()
-	op.State = StateSucceeded
-	op.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-	s.mu.Unlock()
-
-	if op.State != StateSucceeded {
-		t.Fatal("expected succeeded state")
-	}
-}
-
-func TestOperationFailAndReconcile(t *testing.T) {
-	s := newToolGovernanceServer()
-	s.mu.Lock()
-	s.operations["op-2"] = &ToolOperation{
-		ID: "op-2", ToolID: "tool-2",
-		State: StateFailed, Error: "timeout",
-	}
-	s.mu.Unlock()
-
-	s.mu.Lock()
-	op := s.operations["op-2"]
-	op.State = StateReconciling
-	s.mu.Unlock()
-
-	if op.State != StateReconciling {
-		t.Fatal("expected reconciling state")
-	}
-
-	s.mu.Lock()
-	op.State = StateReconciled
-	s.mu.Unlock()
-
-	if op.State != StateReconciled {
-		t.Fatal("expected reconciled state")
-	}
-}
-
-func TestCancelledOperation(t *testing.T) {
-	s := newToolGovernanceServer()
-	s.mu.Lock()
-	s.tools["tool-c"] = &ToolDefinition{ID: "tool-c", Name: "cancel-test", State: StateCancelled}
-	s.mu.Unlock()
-
-	s.mu.RLock()
-	tool := s.tools["tool-c"]
-	s.mu.RUnlock()
-	if tool.State != StateCancelled {
-		t.Fatal("expected cancelled state")
-	}
-}
-
-func TestEmptyToolsList(t *testing.T) {
-	s := newToolGovernanceServer()
-	s.mu.RLock()
-	count := len(s.tools)
-	s.mu.RUnlock()
-	if count != 0 {
-		t.Fatal("expected empty tools list")
-	}
-}
-
-func TestEmptyOperationsList(t *testing.T) {
-	s := newToolGovernanceServer()
-	s.mu.RLock()
-	count := len(s.operations)
-	s.mu.RUnlock()
-	if count != 0 {
-		t.Fatal("expected empty operations list")
-	}
-}
-
 func TestAllToolStates(t *testing.T) {
 	states := []ToolState{
 		StateProposed, StatePrepared, StateAuthorised, StateExecuting,
@@ -166,5 +43,68 @@ func TestAllToolStates(t *testing.T) {
 	}
 	if len(states) != 10 {
 		t.Fatal("expected 10 states")
+	}
+}
+
+func TestToolDefinitionJSONRoundTrip(t *testing.T) {
+	req := ToolDefinition{
+		Name: "read_file", Version: "1.0",
+		Props: ToolProperties{ReadOnly: true, Reconcilable: false},
+		State: StateProposed,
+	}
+	if req.Name != "read_file" || req.State != StateProposed {
+		t.Fatal("unexpected tool definition shape")
+	}
+}
+
+func TestReadinessRequiresDatabase(t *testing.T) {
+	// A server with no *sql.DB configured must report itself unhealthy,
+	// not a hardcoded true.
+	s := &toolGovernanceServer{}
+	if err := s.readinessCheck(); err == nil {
+		t.Fatal("expected readiness check to fail without a configured database")
+	}
+}
+
+func TestMutationRequiresIdempotencyKey(t *testing.T) {
+	s := &toolGovernanceServer{}
+	r := httptest.NewRequest(http.MethodPost, "/v1/tools/register", bytes.NewBufferString(`{"name":"test"}`))
+	w := httptest.NewRecorder()
+	s.handleToolRegister(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected missing key to be rejected, got %d", w.Code)
+	}
+}
+
+func TestResolveIdentityRequiresTenantAndPrincipal(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/tools/register", nil)
+	_, status, _ := resolveIdentity(r, "", "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without tenant/principal, got %d", status)
+	}
+}
+
+func TestResolveIdentityFromHeaders(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/tools/register", nil)
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	r.Header.Set("X-SCOS-Principal-ID", "principal-1")
+	identity, status, _ := resolveIdentity(r, "", "")
+	if status != 0 {
+		t.Fatalf("expected success, got status %d", status)
+	}
+	if identity.TenantID != "tenant-1" || identity.PrincipalID != "principal-1" {
+		t.Fatalf("unexpected identity: %+v", identity)
+	}
+}
+
+func TestRequestFingerprintIsStableAndSensitiveToChange(t *testing.T) {
+	a := requestFingerprint(map[string]string{"name": "first"})
+	b := requestFingerprint(map[string]string{"name": "first"})
+	c := requestFingerprint(map[string]string{"name": "second"})
+	if a != b {
+		t.Fatal("expected identical input to produce identical fingerprint")
+	}
+	if a == c {
+		t.Fatal("expected different input to produce different fingerprint")
 	}
 }

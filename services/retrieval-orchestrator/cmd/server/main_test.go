@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -210,5 +212,46 @@ func TestToJSONB(t *testing.T) {
 	data := toJSONB(map[string]string{"key": "val"})
 	if !strings.Contains(string(data), "key") {
 		t.Fatal("JSON encoding should contain key")
+	}
+}
+
+func TestVectorLiteralBuildsPgvectorParameter(t *testing.T) {
+	if got := vectorLiteral([]float64{0.125, -2, 3.5}); got != "[0.125,-2,3.5]" {
+		t.Fatalf("unexpected vector literal %q", got)
+	}
+}
+
+func TestDecodeResultJSONLoadsEvidenceAndConflicts(t *testing.T) {
+	result := RetrievalResult{}
+	decodeResultJSON(&result,
+		[]byte(`[{"kind":"commit","reference_id":"abc"}]`),
+		[]byte(`[{"relation_type":"conflict","target_memory_id":"m2"}]`))
+	if len(result.Evidence) != 1 || len(result.Conflicts) != 1 {
+		t.Fatalf("expected evidence and conflict payloads, got %d and %d", len(result.Evidence), len(result.Conflicts))
+	}
+}
+
+func TestContainsAllNamespacesFailsClosedForUnauthorizedRequest(t *testing.T) {
+	if containsAllNamespaces([]string{"public", "restricted"}, []string{"public"}) {
+		t.Fatal("expected an unauthorized requested namespace to fail closed")
+	}
+}
+
+func TestContainsAllNamespacesAcceptsAuthorizedRequest(t *testing.T) {
+	if !containsAllNamespaces([]string{"public"}, []string{"public", "other"}) {
+		t.Fatal("expected an authorized namespace request to pass")
+	}
+}
+
+func TestRetrieveRequiresPrincipalContext(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(`{"tenant_id":"tenant","query":"secret"}`))
+	recorder := httptest.NewRecorder()
+	(&server{}).handleRetrieve(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "principal_id is required") {
+		t.Fatalf("expected principal context error, got %q", recorder.Body.String())
 	}
 }

@@ -21,3 +21,6 @@ This OKF-compatible bundle contains approved architecture, policy, procedures an
 - [Decisions](decisions/index.md)
 - [Procedures](procedures/index.md)
 - [Projects](projects/index.md)
+- [Infrastructure](infrastructure/index.md)
+- [Tools](tools/index.md)
+- [Glossary](glossary/index.md)

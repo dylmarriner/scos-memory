@@ -1,6 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -248,5 +254,105 @@ func TestBuildCapsule(t *testing.T) {
 	}
 	if capsule.CapsuleID == "" {
 		t.Fatal("expected capsule ID")
+	}
+}
+
+func TestHandleContextEvaluateValidatesCompiledContext(t *testing.T) {
+	body := `{"input":"Use PostgreSQL 16.2","compiled_text":"Use PostgreSQL 16.2","non_droppable_hints":["PostgreSQL"]}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/context/evaluate", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	handleContextEvaluate(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Valid bool `json:"valid"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Valid {
+		t.Fatal("expected compiled context to be valid")
+	}
+}
+
+func TestHandleContextEvaluateRequiresContent(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/context/evaluate", bytes.NewBufferString(`{"input":"only input"}`))
+	w := httptest.NewRecorder()
+	handleContextEvaluate(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestContextRestoreResolvesExactAuthoritativeSource(t *testing.T) {
+	previous := authoritativeSourceStore
+	authoritativeSourceStore = newFileSourceStore(t.TempDir())
+	t.Cleanup(func() { authoritativeSourceStore = previous })
+
+	input := "policy: preserve exact value 42\nversion 1.2.3"
+	requestBody, _ := json.Marshal(map[string]string{"input": input})
+	compile := httptest.NewRequest(http.MethodPost, "/v1/context/compile", bytes.NewReader(requestBody))
+	compiled := httptest.NewRecorder()
+	handleInputOptimise(compiled, compile)
+	if compiled.Code != http.StatusOK {
+		t.Fatalf("compile failed: %d %s", compiled.Code, compiled.Body.String())
+	}
+	var response InputOptimiseResponse
+	if err := json.Unmarshal(compiled.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(contextRestoreRequest{Capsule: response.Capsule})
+	restore := httptest.NewRecorder()
+	handleContextRestore(restore, httptest.NewRequest(http.MethodPost, "/v1/context/restore", bytes.NewReader(body)))
+	if restore.Code != http.StatusOK {
+		t.Fatalf("restore failed: %d %s", restore.Code, restore.Body.String())
+	}
+	var restored struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(restore.Body.Bytes(), &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Content != input {
+		t.Fatalf("restored content changed: %q", restored.Content)
+	}
+}
+
+func TestContextRestoreRejectsTamperedSource(t *testing.T) {
+	store := newFileSourceStore(t.TempDir())
+	previous := authoritativeSourceStore
+	authoritativeSourceStore = store
+	t.Cleanup(func() { authoritativeSourceStore = previous })
+	content := "authoritative content"
+	hash := sha256Hex([]byte(content))
+	objectID := "source-" + hash[:32]
+	if err := store.Put(objectID, "1", hash, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.root, objectID+"-1.source"), []byte("tampered"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	capsule := ContextCapsule{CapsuleID: "c1", SourceObjects: []SourceObjectRef{{ObjectID: objectID, Version: "1", ContentHash: hash}}}
+	body, _ := json.Marshal(contextRestoreRequest{Capsule: capsule})
+	w := httptest.NewRecorder()
+	handleContextRestore(w, httptest.NewRequest(http.MethodPost, "/v1/context/restore", bytes.NewReader(body)))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected tamper conflict, got %d", w.Code)
+	}
+}
+
+func TestContextRestoreRejectsMissingSource(t *testing.T) {
+	previous := authoritativeSourceStore
+	authoritativeSourceStore = newFileSourceStore(t.TempDir())
+	t.Cleanup(func() { authoritativeSourceStore = previous })
+	capsule := ContextCapsule{CapsuleID: "c1", SourceObjects: []SourceObjectRef{{ObjectID: "missing", Version: "1", ContentHash: strings.Repeat("a", 64)}}}
+	body, _ := json.Marshal(contextRestoreRequest{Capsule: capsule})
+	w := httptest.NewRecorder()
+	handleContextRestore(w, httptest.NewRequest(http.MethodPost, "/v1/context/restore", bytes.NewReader(body)))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected missing-source failure, got %d", w.Code)
 	}
 }
