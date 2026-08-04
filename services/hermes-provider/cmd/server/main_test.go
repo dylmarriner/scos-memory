@@ -78,17 +78,26 @@ func TestToolSchemas(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&tools); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(tools) != 3 {
-		t.Fatalf("expected 3 tools, got %d", len(tools))
-	}
-	found := false
+	// §24.5 names the complete supplemental tool set; all of it must be
+	// exposed, not a subset.
+	got := map[string]bool{}
 	for _, tool := range tools {
-		if tool["name"] == "scos_recall" {
-			found = true
+		name, _ := tool["name"].(string)
+		got[name] = true
+		if _, ok := tool["input_schema"]; !ok {
+			t.Errorf("tool %q has no input schema", name)
 		}
 	}
-	if !found {
-		t.Fatal("expected scos_recall tool")
+	for _, want := range []string{
+		"scos_recall", "scos_explain", "scos_user_model", "scos_memory_graph",
+		"scos_correct", "scos_forget", "scos_status",
+	} {
+		if !got[want] {
+			t.Errorf("missing governed tool: %s", want)
+		}
+	}
+	if len(tools) != 7 {
+		t.Fatalf("expected the 7 governed tools, got %d", len(tools))
 	}
 }
 

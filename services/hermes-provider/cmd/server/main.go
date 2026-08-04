@@ -87,6 +87,8 @@ type StoredTurn struct {
 type hermesServer struct {
 	startTime time.Time
 	db        *sql.DB
+	// prefetchQueue holds bounded pre-warm work for queue_prefetch (§24.3).
+	prefetchQueue prefetchQueue
 }
 
 func (s *hermesServer) readinessCheck() error {
@@ -172,6 +174,13 @@ func main() {
 	mux.HandleFunc("/v1/provider/memory_write", srv.handleMemoryWrite)
 	mux.HandleFunc("/v1/provider/delegation", srv.handleDelegation)
 	mux.HandleFunc("/v1/provider/shutdown", srv.handleShutdown)
+	mux.HandleFunc("/v1/provider/queue_prefetch", srv.handleQueuePrefetch)
+	mux.HandleFunc("/v1/provider/turn_start", srv.handleTurnStart)
+	mux.HandleFunc("/v1/provider/session_end", srv.handleSessionEnd)
+	mux.HandleFunc("/v1/provider/tool_call", srv.handleToolCall)
+	mux.HandleFunc("/v1/provider/backup_paths", srv.handleBackupPaths)
+	mux.HandleFunc("/v1/provider/config_schema", srv.handleConfigSchema)
+	mux.HandleFunc("/v1/provider/save_config", srv.handleSaveConfig)
 
 	addr := os.Getenv("SCOS_HERMES_PROVIDER_HTTP_ADDR")
 	if addr == "" {
@@ -411,6 +420,45 @@ func (s *hermesServer) handleToolSchemas(w http.ResponseWriter, r *http.Request)
 					"memory_id": map[string]any{"type": "string", "description": "Memory ID to forget"},
 				},
 				"required": []string{"memory_id"},
+			},
+		},
+		{
+			"name":        "scos_explain",
+			"description": "Explain why a memory is held and what evidence supports it",
+			"input_schema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_id": map[string]any{"type": "string", "description": "Memory ID to explain"},
+				},
+				"required": []string{"memory_id"},
+			},
+		},
+		{
+			"name":        "scos_user_model",
+			"description": "Inspect the stored user representation",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			"name":        "scos_memory_graph",
+			"description": "Inspect memory entities and their relationships",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			"name":        "scos_correct",
+			"description": "Correct a stored memory, preserving the superseded version",
+			"input_schema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_id": map[string]any{"type": "string", "description": "Memory ID to correct"},
+					"value":     map[string]any{"type": "string", "description": "Corrected value"},
+				},
+				"required": []string{"memory_id", "value"},
 			},
 		},
 	}
