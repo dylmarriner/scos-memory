@@ -2,6 +2,7 @@ package main
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+import capabilityregistry "github.com/dylmarriner/scos-memory/packages/capability-registry"
 
 import (
 	"bytes"
@@ -14,7 +15,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +38,14 @@ type RouteRequest struct {
 	ProposedTool      string `json:"proposed_tool,omitempty"`
 	RiskClass         string `json:"risk_class,omitempty"`
 	RequiresFreshData bool   `json:"requires_fresh_data,omitempty"`
+
+	// Structured client metadata and active task state. §21.5 requires these
+	// explicit signals to override weaker phrase-level guesses.
+	ArtifactID         string `json:"artifact_id,omitempty"`
+	TaskID             string `json:"task_id,omitempty"`
+	WorkflowState      string `json:"workflow_state,omitempty"`
+	OperationType      string `json:"operation_type,omitempty"`
+	DataClassification string `json:"data_classification,omitempty"`
 }
 
 type controlPlane struct {
@@ -783,18 +791,31 @@ type RouteStep struct {
 }
 
 type RouteDecision struct {
-	DecisionID           string      `json:"decision_id"`
-	InteractionID        string      `json:"interaction_id"`
-	IntentLabels         []string    `json:"intent_labels"`
+	DecisionID    string   `json:"decision_id"`
+	InteractionID string   `json:"interaction_id"`
+	IntentLabels  []string `json:"intent_labels"`
+	// ClassifiedLabels carries the confidence and evidence behind each applied
+	// label; AlternativeLabels carries the labels that were considered and not
+	// applied, so the classifier never hides uncertainty (§21.5).
+	ClassifiedLabels  []LabelScore `json:"classified_labels"`
+	AlternativeLabels []LabelScore `json:"alternative_labels"`
+
 	RiskClass            string      `json:"risk_class"`
 	FreshnessRequirement string      `json:"freshness_requirement"`
 	SelectedPlan         []RouteStep `json:"selected_plan"`
-	Confidence           float64     `json:"confidence"`
-	ConfirmationRequired bool        `json:"confirmation_required"`
-	PolicyVersion        string      `json:"policy_version"`
-	RegistryGeneration   int64       `json:"registry_generation"`
-	ReasonCodes          []string    `json:"reason_codes"`
-	CreatedAt            time.Time   `json:"created_at"`
+
+	// Capability selection outcome (§21.7 steps 7-8): what was chosen, what was
+	// rejected and why, and which safe fallbacks are held in reserve.
+	SelectedCapabilities []string                       `json:"selected_capabilities"`
+	RejectedCapabilities []capabilityregistry.Exclusion `json:"rejected_capabilities"`
+	ReservedFallbacks    []string                       `json:"reserved_fallbacks"`
+
+	Confidence           float64   `json:"confidence"`
+	ConfirmationRequired bool      `json:"confirmation_required"`
+	PolicyVersion        string    `json:"policy_version"`
+	RegistryGeneration   int64     `json:"registry_generation"`
+	ReasonCodes          []string  `json:"reason_codes"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 func newID() (string, error) {
@@ -980,35 +1001,33 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 		risk = "read_only"
 	}
 
-	labels := map[string]bool{"conversation": true, "memory_recall": true}
+	// Multi-label classification with confidence, evidence and alternatives
+	// (§21.5) replaces the previous single-pass keyword scan.
+	class := classifyIntent(req)
 	reasons := []string{"mandatory_interception", "automatic_memory_retrieval"}
 
-	codeIntent := req.RepositoryPath != "" || containsAny(req.Input,
-		"repository", "repo", "source code", "function", "class", "stack trace",
-		"compile", "build", "test failure", ".go", ".py", ".ts", ".tsx", ".js")
+	codeIntent := class.has("code_lookup") || class.has("repository_analysis") || class.has("code_change")
 	if codeIntent {
-		labels["repository_analysis"] = true
-		labels["code_lookup"] = true
 		reasons = append(reasons, "code_indicator_detected")
 	}
-
-	toolIntent := req.ProposedTool != "" || containsAny(req.Input,
-		"run command", "execute", "terminal", "shell", "deploy", "install", "restart service")
+	toolIntent := class.has("tool_operation") || class.has("command_execution")
 	if toolIntent {
-		labels["tool_operation"] = true
 		reasons = append(reasons, "tool_indicator_detected")
 	}
-
-	if req.RequiresFreshData || containsAny(req.Input, "current", "latest", "today", "right now", "real-time", "real time") {
-		labels["fresh_external_information"] = true
+	if class.has("fresh_external_information") {
 		reasons = append(reasons, "freshness_required")
 	}
 
-	confirmation := risk == "high" || risk == "critical" || containsAny(req.Input,
-		"delete", "remove access", "send email", "make payment", "production deploy", "permission")
+	confirmation := risk == "high" || risk == "critical" || class.has("high_impact_action")
 	if confirmation {
-		labels["high_impact_action"] = true
 		reasons = append(reasons, "confirmation_policy_applies")
+	}
+
+	// Capability selection runs against the registry rather than assuming a
+	// fixed system per intent (§21.6, §21.7).
+	selectedCaps, rejectedCaps, reservedFallbacks := selectCapabilities(routingRegistry, req, class, confirmation)
+	if len(rejectedCaps) > 0 {
+		reasons = append(reasons, "capabilities_excluded_by_policy")
 	}
 
 	steps := []RouteStep{
@@ -1019,8 +1038,14 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 	if codeIntent {
 		steps = append(steps, RouteStep{System: "code-intelligence", Action: "retrieve_minimal_sufficient_code_context", Required: true})
 	}
-	if labels["fresh_external_information"] {
+	if class.has("fresh_external_information") {
 		steps = append(steps, RouteStep{System: "capability-router", Action: "select_current_authoritative_source", Required: true})
+	}
+	if class.has("recovery") {
+		steps = append(steps, RouteStep{System: "recovery-orchestrator", Action: "rehydrate_checkpoint_and_reconcile", Required: true})
+	}
+	if class.has("monitoring") {
+		steps = append(steps, RouteStep{System: "observability", Action: "collect_operational_status", Required: false})
 	}
 	steps = append(steps, RouteStep{System: "context-optimisation", Action: "compile_and_validate_context", Required: true})
 	steps = append(steps, RouteStep{System: "agent-router", Action: "select_and_dispatch_agent", Required: true})
@@ -1038,20 +1063,18 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 		steps[i].Order = i + 1
 	}
 
-	intentLabels := make([]string, 0, len(labels))
-	for label := range labels {
-		intentLabels = append(intentLabels, label)
-	}
-	sort.Strings(intentLabels)
-
-	confidence := 0.94
+	confidence := class.Confidence
 	if req.ProjectID == "" && codeIntent && req.RepositoryPath == "" {
-		confidence = 0.78
+		// The repository was inferred from phrasing rather than declared, so
+		// the decision is materially less certain than its labels suggest.
+		if confidence > 0.78 {
+			confidence = 0.78
+		}
 		reasons = append(reasons, "repository_scope_inferred")
 	}
 
 	freshness := "none"
-	if labels["fresh_external_information"] {
+	if class.has("fresh_external_information") {
 		freshness = "current"
 	}
 
@@ -1062,14 +1085,19 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 	return RouteDecision{
 		DecisionID:           decisionID,
 		InteractionID:        req.InteractionID,
-		IntentLabels:         intentLabels,
+		IntentLabels:         class.labelNames(),
+		ClassifiedLabels:     class.Labels,
+		AlternativeLabels:    class.Alternatives,
 		RiskClass:            risk,
 		FreshnessRequirement: freshness,
 		SelectedPlan:         steps,
+		SelectedCapabilities: selectedCaps,
+		RejectedCapabilities: rejectedCaps,
+		ReservedFallbacks:    reservedFallbacks,
 		Confidence:           confidence,
 		ConfirmationRequired: confirmation,
-		PolicyVersion:        "1.0.0",
-		RegistryGeneration:   1,
+		PolicyVersion:        "1.1.0",
+		RegistryGeneration:   routingRegistry.Generation(),
 		ReasonCodes:          reasons,
 		CreatedAt:            time.Now().UTC(),
 	}, nil
