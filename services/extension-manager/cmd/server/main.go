@@ -135,9 +135,11 @@ type extServer struct {
 	hooks      map[string][]*Hook // event -> hooks
 	receipts   []*InstallationReceipt
 	history    map[string][]ExtensionManifest
-	nextID     int
-	db         *pgxpool.Pool
-	storePath  string
+	// canaries holds side-by-side candidate versions, one per package (§22.3).
+	canaries  map[string]*CanaryDeployment
+	nextID    int
+	db        *pgxpool.Pool
+	storePath string
 }
 
 func (s *extServer) readinessCheck() error {
@@ -156,6 +158,7 @@ type persistedExtensionState struct {
 	Hooks      map[string][]*Hook             `json:"hooks"`
 	Receipts   []*InstallationReceipt         `json:"receipts"`
 	History    map[string][]ExtensionManifest `json:"history"`
+	Canaries   map[string]*CanaryDeployment   `json:"canaries,omitempty"`
 	NextID     int                            `json:"next_id"`
 }
 
@@ -171,6 +174,7 @@ func newExtServerAt(storePath string) *extServer {
 		skills:     make(map[string]*Skill),
 		hooks:      make(map[string][]*Hook),
 		history:    make(map[string][]ExtensionManifest),
+		canaries:   make(map[string]*CanaryDeployment),
 		storePath:  storePath,
 	}
 	s.loadLocalState()
@@ -278,6 +282,9 @@ func (s *extServer) applyState(state persistedExtensionState) {
 	}
 	if state.History != nil {
 		s.history = state.History
+		if state.Canaries != nil {
+			s.canaries = state.Canaries
+		}
 	}
 	s.nextID = state.NextID
 }
@@ -313,6 +320,9 @@ func (s *extServer) loadState(ctx context.Context) error {
 	}
 	if state.History != nil {
 		s.history = state.History
+		if state.Canaries != nil {
+			s.canaries = state.Canaries
+		}
 	}
 	s.nextID = state.NextID
 	s.mu.Unlock()
@@ -332,6 +342,7 @@ func (s *extServer) persist(ctx context.Context) error {
 		Hooks:      s.hooks,
 		Receipts:   s.receipts,
 		History:    s.history,
+		Canaries:   s.canaries,
 		NextID:     s.nextID,
 	}
 	raw, err := json.Marshal(state)
@@ -399,6 +410,12 @@ func (s *extServer) handleExtensions(w http.ResponseWriter, r *http.Request) {
 func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/extensions/")
 	parts := strings.Split(strings.Trim(id, "/"), "/")
+	// Canary paths carry their own verbs and are routed before the generic
+	// two-segment action form (§22.3).
+	if len(parts) >= 2 && parts[1] == "canary" {
+		s.handleCanary(w, r)
+		return
+	}
 	if len(parts) == 2 {
 		s.handleExtensionAction(w, r, parts[0], parts[1])
 		return
