@@ -318,3 +318,22 @@ func dataClassificationFor(req RouteRequest) string {
 	}
 	return "confidential"
 }
+
+// contextTaskType maps the routing decision onto the task classes the context
+// optimiser recognises, so its §18 profile floor sees the real task class
+// rather than a fixed label.
+func contextTaskType(decision RouteDecision) string {
+	for _, label := range decision.IntentLabels {
+		switch label {
+		case "high_impact_action":
+			return "production_change"
+		case "code_change", "code_lookup", "repository_analysis":
+			return "coding"
+		case "planning":
+			return "planning"
+		case "recovery":
+			return "recovery"
+		}
+	}
+	return "conversation"
+}

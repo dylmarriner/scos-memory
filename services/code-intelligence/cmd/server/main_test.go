@@ -685,3 +685,87 @@ func TestIndexDoesNotPublishWhenAtomicStoreCommitFails(t *testing.T) {
 		t.Fatal("failed atomic commit changed repository metadata")
 	}
 }
+
+// seedTwoBranches indexes the same symbol name on two branches of two repos so
+// branch isolation can be asserted.
+func seedTwoBranches(t *testing.T) *server {
+	t.Helper()
+	s := &server{store: newCodeStore()}
+	s.store.repos["repo-main"] = &Repository{
+		ID: "repo-main", TenantID: "tenant-1", Branch: "main",
+		CommitID: "commit-main", IndexGeneration: 1,
+	}
+	s.store.repos["repo-feature"] = &Repository{
+		ID: "repo-feature", TenantID: "tenant-1", Branch: "feature-x",
+		CommitID: "commit-feature", IndexGeneration: 1,
+	}
+	for id, repo := range map[string]string{"sym-main": "repo-main", "sym-feature": "repo-feature"} {
+		s.store.symbols[id] = &Symbol{
+			ID: id, RepoID: repo, FullyQualifiedName: "pkg.Target",
+			Path: "pkg/target.go", Kind: "function",
+		}
+		s.store.chunks[id] = &Chunk{SymbolID: id, Content: "func Target() {}", Path: "pkg/target.go"}
+	}
+	return s
+}
+
+// TestQueryNeverCrossesBranches covers §19's prohibition on serving
+// cross-branch code: a query scoped to one branch must not return symbols
+// indexed from another.
+func TestQueryNeverCrossesBranches(t *testing.T) {
+	s := seedTwoBranches(t)
+
+	results := s.withProvenance(s.executeQuery(CodeQuery{
+		Intent: "symbol_lookup", Query: "pkg.Target", TenantID: "tenant-1", Branch: "main", MaxResults: 10,
+	}))
+	if len(results) == 0 {
+		t.Fatal("branch-scoped query returned nothing")
+	}
+	for _, r := range results {
+		if r.Branch != "main" {
+			t.Errorf("query scoped to main returned a %q result", r.Branch)
+		}
+	}
+
+	// The other branch resolves to its own symbol, not main's.
+	other := s.withProvenance(s.executeQuery(CodeQuery{
+		Intent: "symbol_lookup", Query: "pkg.Target", TenantID: "tenant-1", Branch: "feature-x", MaxResults: 10,
+	}))
+	for _, r := range other {
+		if r.Branch != "feature-x" {
+			t.Errorf("query scoped to feature-x returned a %q result", r.Branch)
+		}
+	}
+}
+
+// TestResultsCarryRepositoryBranchAndCommit covers §19's requirement that a
+// result identify the exact repository, branch and commit it represents.
+func TestResultsCarryRepositoryBranchAndCommit(t *testing.T) {
+	s := seedTwoBranches(t)
+	results := s.withProvenance(s.executeQuery(CodeQuery{
+		Intent: "symbol_lookup", Query: "pkg.Target", TenantID: "tenant-1", Branch: "main", MaxResults: 10,
+	}))
+	if len(results) == 0 {
+		t.Fatal("no results to check provenance on")
+	}
+	for _, r := range results {
+		if r.Repo == "" || r.Branch == "" || r.CommitID == "" {
+			t.Errorf("result is unattributable: repo=%q branch=%q commit=%q", r.Repo, r.Branch, r.CommitID)
+		}
+		if r.Chunk.Path == "" {
+			t.Error("result carries no source path")
+		}
+	}
+}
+
+// TestUnknownBranchReturnsNothing guards against a mistyped branch silently
+// falling back to the whole index.
+func TestUnknownBranchReturnsNothing(t *testing.T) {
+	s := seedTwoBranches(t)
+	results := s.executeQuery(CodeQuery{
+		Intent: "symbol_lookup", Query: "pkg.Target", TenantID: "tenant-1", Branch: "no-such-branch", MaxResults: 10,
+	})
+	if len(results) != 0 {
+		t.Fatalf("unknown branch returned %d results", len(results))
+	}
+}

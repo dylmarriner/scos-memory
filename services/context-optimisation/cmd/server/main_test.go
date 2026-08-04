@@ -356,3 +356,74 @@ func TestContextRestoreRejectsMissingSource(t *testing.T) {
 		t.Fatalf("expected missing-source failure, got %d", w.Code)
 	}
 }
+
+// TestHighImpactWorkCannotBeAggressivelyCompressed covers §18's rule that
+// high-impact or restricted tasks default to exact or conservative, and §42's
+// prohibition on dropping governing instructions or evidence during
+// compression -- a caller must not be able to opt out of that floor.
+func TestHighImpactWorkCannotBeAggressivelyCompressed(t *testing.T) {
+	cases := []struct {
+		name string
+		req  InputOptimiseRequest
+		want string
+	}{
+		{"governance task", InputOptimiseRequest{TaskType: "governance"}, "conservative"},
+		{"legal task", InputOptimiseRequest{TaskType: "legal"}, "conservative"},
+		{"security task", InputOptimiseRequest{TaskType: "security"}, "conservative"},
+		{"restricted data", InputOptimiseRequest{Sensitivity: "restricted"}, "conservative"},
+		{"secret data", InputOptimiseRequest{Sensitivity: "secret"}, "conservative"},
+		{"critical risk", InputOptimiseRequest{RiskClass: "critical"}, "conservative"},
+		{"high risk", InputOptimiseRequest{RiskClass: "high"}, "conservative"},
+		// An explicitly requested lossy profile is refused for such work.
+		{"aggressive refused", InputOptimiseRequest{TaskType: "legal", Profile: "aggressive"}, "conservative"},
+		{"balanced refused", InputOptimiseRequest{Sensitivity: "restricted", Profile: "balanced"}, "conservative"},
+		{"adaptive refused", InputOptimiseRequest{RiskClass: "high", Profile: "adaptive"}, "conservative"},
+		// exact is stricter than the floor and is honoured.
+		{"exact honoured", InputOptimiseRequest{TaskType: "governance", Profile: "exact"}, "exact"},
+		// Ordinary work is unaffected.
+		{"routine default", InputOptimiseRequest{TaskType: "conversation"}, "balanced"},
+		{"routine explicit", InputOptimiseRequest{TaskType: "conversation", Profile: "aggressive"}, "aggressive"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveProfile(tc.req); got != tc.want {
+				t.Fatalf("expected profile %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestLossyProfilesAreNeverSelectedForHighImpactWork(t *testing.T) {
+	// Exhaustive guard: no combination of high-impact marker and requested
+	// profile may resolve to a lossy profile.
+	markers := []InputOptimiseRequest{
+		{TaskType: "governance"}, {TaskType: "security"}, {TaskType: "financial"},
+		{Sensitivity: "restricted"}, {Sensitivity: "confidential"},
+		{RiskClass: "high"}, {RiskClass: "critical"},
+	}
+	for _, req := range markers {
+		for _, profile := range []string{"", "exact", "conservative", "balanced", "aggressive", "adaptive"} {
+			req.Profile = profile
+			if got := resolveProfile(req); lossyProfiles[got] {
+				t.Errorf("high-impact request %+v resolved to lossy profile %q", req, got)
+			}
+		}
+	}
+}
+
+// TestCompileAcceptsControlPlanePayload guards the wire contract between the
+// control plane and this service: the handler rejects unknown fields, so a
+// field the control plane sends must be declared here or every compile call
+// fails in production while unit tests stay green.
+func TestCompileAcceptsControlPlanePayload(t *testing.T) {
+	payload := []byte(`{"input":"hello","task_type":"production_change","profile":"","token_budget":8000,"risk_class":"critical","sensitivity":"restricted"}`)
+	var req InputOptimiseRequest
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		t.Fatalf("control-plane payload rejected: %v", err)
+	}
+	if got := resolveProfile(req); got != "conservative" {
+		t.Fatalf("critical/restricted request resolved to %q", got)
+	}
+}

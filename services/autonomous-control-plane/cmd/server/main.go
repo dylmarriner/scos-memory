@@ -413,8 +413,13 @@ func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decis
 			}, req)
 		case "context-optimisation":
 			parts := []string{req.Input, string(memory), string(code)}
+			// Sensitivity and risk travel with the request so the optimiser can
+			// apply its §18 profile floor; a hardcoded "balanced" here would
+			// silently compress high-impact work.
 			_, err = c.callService(ctx, step.System, "/v1/context/compile", map[string]any{
-				"input": strings.Join(parts, "\n\n"), "task_type": "conversation", "profile": "balanced", "token_budget": 8000,
+				"input": strings.Join(parts, "\n\n"), "task_type": contextTaskType(decision),
+				"profile": "", "token_budget": 8000,
+				"risk_class": decision.RiskClass, "sensitivity": req.DataClassification,
 			}, req)
 		case "tool-governance":
 			if strings.TrimSpace(req.ProposedTool) == "" {

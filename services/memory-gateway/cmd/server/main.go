@@ -99,6 +99,8 @@ func (s server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/turns", s.handleListTurns)
 	mux.HandleFunc("POST /v1/turns/{turnID}/complete", s.handleCompleteTurn)
 	mux.HandleFunc("POST /v1/operations", s.handlePrepareOperation)
+	mux.HandleFunc("GET /v1/outbox/status", s.handleOutboxStatus)
+	mux.HandleFunc("GET /v1/outbox/dead-letters", s.handleDeadLetters)
 	return requestLogging(mux)
 }
 

@@ -738,7 +738,7 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	s.store.mu.RLock()
 	defer s.store.mu.RUnlock()
 
-	results := s.executeQuery(q)
+	results := s.withProvenance(s.executeQuery(q))
 	if results == nil {
 		results = []CodeQueryResult{}
 	}
@@ -801,7 +801,7 @@ func estimateResultTokens(results []CodeQueryResult) int {
 // query results, and prevents cross-tenant leakage across the whole index
 // when no repository_id is given (§19.10).
 func (s *server) scopedSymbols(q CodeQuery) map[string]*Symbol {
-	if q.RepoID == "" && q.TenantID == "" {
+	if q.RepoID == "" && q.TenantID == "" && q.Branch == "" {
 		return s.store.symbols
 	}
 	scoped := make(map[string]*Symbol, len(s.store.symbols))
@@ -809,15 +809,45 @@ func (s *server) scopedSymbols(q CodeQuery) map[string]*Symbol {
 		if q.RepoID != "" && sym.RepoID != q.RepoID {
 			continue
 		}
+		repo, ok := s.store.repos[sym.RepoID]
 		if q.TenantID != "" {
-			repo, ok := s.store.repos[sym.RepoID]
 			if !ok || repo.TenantID != q.TenantID {
+				continue
+			}
+		}
+		// §19 forbids serving cross-branch results: a symbol indexed from one
+		// branch must never satisfy a query scoped to another.
+		if q.Branch != "" {
+			if !ok || !strings.EqualFold(repo.Branch, q.Branch) {
 				continue
 			}
 		}
 		scoped[id] = sym
 	}
 	return scoped
+}
+
+// withProvenance stamps each result with the repository, branch and commit it
+// came from. §19 requires a result to identify exactly that; the fields
+// existed on the result type but were previously left empty, which made every
+// result unattributable.
+func (s *server) withProvenance(results []CodeQueryResult) []CodeQueryResult {
+	for i := range results {
+		repo, ok := s.store.repos[results[i].Symbol.RepoID]
+		if !ok {
+			continue
+		}
+		results[i].Repo = repo.ID
+		results[i].Branch = repo.Branch
+		// The symbol records the commit it was indexed from, which may lag the
+		// repository head; prefer the symbol's own commit when it has one.
+		if results[i].Symbol.CommitID != "" {
+			results[i].CommitID = results[i].Symbol.CommitID
+		} else {
+			results[i].CommitID = repo.CommitID
+		}
+	}
+	return results
 }
 
 func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {

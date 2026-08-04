@@ -47,8 +47,12 @@ func readinessCheck() error {
 // ── request / response types ─────────────────────────────────────────────
 
 type InputOptimiseRequest struct {
-	Input             string      `json:"input"`
-	TaskType          string      `json:"task_type,omitempty"`
+	Input    string `json:"input"`
+	TaskType string `json:"task_type,omitempty"`
+	// Sensitivity and RiskClass drive the §18 profile floor: high-impact or
+	// restricted work may not be aggressively compressed.
+	Sensitivity       string      `json:"sensitivity,omitempty"`
+	RiskClass         string      `json:"risk_class,omitempty"`
 	Model             string      `json:"model,omitempty"`
 	Profile           string      `json:"profile,omitempty"`
 	TokenBudget       int         `json:"token_budget,omitempty"`
@@ -348,10 +352,7 @@ func handleInputOptimise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	profile := req.Profile
-	if profile == "" {
-		profile = "balanced"
-	}
+	profile := resolveProfile(req)
 
 	tokenBudget := req.TokenBudget
 	if tokenBudget <= 0 {
@@ -976,4 +977,56 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("encode response: %v", err)
 	}
+}
+
+// highImpactTaskTypes are the task classes §18 names as fragile: governance,
+// legal, security and similar work where lossy compression is unsafe.
+var highImpactTaskTypes = map[string]bool{
+	"governance": true, "legal": true, "security": true, "policy": true,
+	"compliance": true, "audit": true, "financial": true, "production_change": true,
+}
+
+// restrictedSensitivity are the classifications that force a lossless profile.
+var restrictedSensitivity = map[string]bool{
+	"restricted": true, "secret": true, "confidential": true,
+}
+
+// lossyProfiles are the profiles that may discard material. §18 forbids them
+// for high-impact or restricted work.
+var lossyProfiles = map[string]bool{
+	"balanced": true, "aggressive": true, "adaptive": true,
+}
+
+// isHighImpact reports whether §18's "high-impact or restricted" rule applies.
+func isHighImpact(req InputOptimiseRequest) bool {
+	if highImpactTaskTypes[strings.ToLower(strings.TrimSpace(req.TaskType))] {
+		return true
+	}
+	if restrictedSensitivity[strings.ToLower(strings.TrimSpace(req.Sensitivity))] {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(req.RiskClass)) {
+	case "high", "critical":
+		return true
+	}
+	return false
+}
+
+// resolveProfile applies the §18 compression profile rules. High-impact and
+// restricted tasks default to conservative, and an explicitly requested lossy
+// profile is refused for them rather than silently honoured: §42 forbids
+// dropping governing instructions, exact values or evidence during
+// compression, so the caller does not get to opt out of that floor.
+func resolveProfile(req InputOptimiseRequest) string {
+	requested := strings.ToLower(strings.TrimSpace(req.Profile))
+	if isHighImpact(req) {
+		if requested == "exact" || requested == "conservative" {
+			return requested
+		}
+		return "conservative"
+	}
+	if requested == "" {
+		return "balanced"
+	}
+	return requested
 }

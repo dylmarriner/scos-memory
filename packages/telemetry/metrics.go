@@ -87,6 +87,8 @@ var RequiredMetrics = map[string][]string{
 		MetricJournalLatency,
 		MetricTurnCompletionLatency,
 		MetricInterruptedTurns,
+		MetricOutboxBacklog,
+		MetricDeadLetters,
 	},
 	"retrieval-orchestrator": {
 		MetricRetrievalLatency,
@@ -103,10 +105,6 @@ var RequiredMetrics = map[string][]string{
 		MetricPromotionRate,
 		MetricDuplicateRate,
 		MetricConflictRate,
-	},
-	"outbox-dispatcher": {
-		MetricOutboxBacklog,
-		MetricDeadLetters,
 	},
 	"security-gate": {
 		MetricPermissionDenial,
