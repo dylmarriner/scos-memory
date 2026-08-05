@@ -40,3 +40,7 @@ package-lock.json
 # Runtime artifacts
 audit-log.jsonl
 .atlas-gate/
+tls-external/
+
+# Built Claude Desktop extension bundle (build with `mcpb pack`, see integrations/claude/desktop-extension/README.md)
+integrations/claude/desktop-extension/*.mcpb

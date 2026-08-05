@@ -96,6 +96,9 @@ services:
   memory-intelligence:
     ports:
       - "8089:8089"
+  mcp-gateway:
+    ports:
+      - "8098:8098"
   security-gate:
     ports:
       - "8091:8091"
