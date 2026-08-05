@@ -1,0 +1,63 @@
+{
+  "manifest_version": "0.3",
+  "name": "scos-memory-fabric",
+  "display_name": "SCOS Memory Fabric",
+  "version": "1.0.0",
+  "description": "Connects Claude Desktop to the SCOS Memory Fabric's mcp-gateway service over HTTPS.",
+  "long_description": "Bridges Claude Desktop (which only launches local stdio MCP servers) to the SCOS mcp-gateway's remote Streamable HTTP MCP endpoint. Exposes scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct and scos_forget against the same backend Claude Code connects to via docs/agent-connection-guide.md. Requires network reachability to the configured gateway URL (Tailscale by default) and the same tenant/bearer credentials issued for this fleet.",
+  "author": {
+    "name": "SCOS Core Team"
+  },
+  "homepage": "https://github.com/dylmarriner/scos-memory/blob/main/docs/agent-connection-guide.md",
+  "license": "UNLICENSED",
+  "keywords": ["scos", "memory", "mcp-gateway", "hermes"],
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "SCOS_GATEWAY_URL": "${user_config.gateway_url}",
+        "SCOS_BEARER_TOKEN": "${user_config.bearer_token}",
+        "SCOS_TENANT_ID": "${user_config.tenant_id}",
+        "SCOS_PRINCIPAL_ID": "${user_config.principal_id}"
+      }
+    }
+  },
+  "user_config": {
+    "gateway_url": {
+      "type": "string",
+      "title": "mcp-gateway URL",
+      "description": "Base MCP endpoint for the SCOS mcp-gateway service. Defaults to the rabuntu fleet deployment.",
+      "default": "https://rabuntu.tail2c15c8.ts.net:8098/mcp",
+      "required": true
+    },
+    "bearer_token": {
+      "type": "string",
+      "title": "SCOS bearer token",
+      "description": "Value of SCOS_HERMES_BEARER_TOKEN from ~/.hermes/scos.env on this machine, or your own issued service token.",
+      "sensitive": true,
+      "required": true
+    },
+    "tenant_id": {
+      "type": "string",
+      "title": "Tenant ID",
+      "description": "SCOS_TENANT_ID (UUID) from ~/.hermes/scos.env.",
+      "required": true
+    },
+    "principal_id": {
+      "type": "string",
+      "title": "Principal ID",
+      "description": "SCOS_PRINCIPAL_ID (UUID) from ~/.hermes/scos.env.",
+      "required": true
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "scos-memory-fabric-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "stdio-to-Streamable-HTTP relay bundled inside the SCOS Memory Fabric Claude Desktop extension",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

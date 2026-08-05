@@ -1,0 +1,20 @@
+{
+  "name": "scos-fabric-tools",
+  "interface": {
+    "displayName": "SCOS Fabric Tools (Codex)"
+  },
+  "plugins": [
+    {
+      "name": "scos-memory-fabric",
+      "source": {
+        "source": "local",
+        "path": "./plugins/scos-memory-fabric"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

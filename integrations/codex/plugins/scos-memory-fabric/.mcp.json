@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "scos": {
+      "cwd": ".",
+      "command": "python3",
+      "args": ["-E", "./scripts/scos-mcp-bridge.py"],
+      "env": {
+        "SCOS_AGENT_NAME": "codex"
+      }
+    }
+  }
+}

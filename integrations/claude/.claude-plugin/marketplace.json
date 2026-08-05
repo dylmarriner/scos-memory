@@ -1,0 +1,18 @@
+{
+  "name": "scos-fabric-tools",
+  "owner": {
+    "name": "SCOS Core Team"
+  },
+  "description": "Claude Code plugins for connecting agents to the SCOS Memory Fabric",
+  "plugins": [
+    {
+      "name": "scos-memory-fabric",
+      "source": "./plugins/scos-memory-fabric",
+      "description": "Connects Claude Code to the SCOS Memory Fabric's mcp-gateway (scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct, scos_forget), with slash commands, a skill, and a SessionStart hook",
+      "version": "1.1.0",
+      "author": {
+        "name": "SCOS Core Team"
+      }
+    }
+  ]
+}

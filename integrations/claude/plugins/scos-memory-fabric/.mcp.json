@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "scos": {
+      "type": "http",
+      "url": "${user_config.gateway_url}",
+      "headers": {
+        "Authorization": "Bearer ${user_config.bearer_token}",
+        "X-SCOS-Tenant-ID": "${user_config.tenant_id}",
+        "X-SCOS-Principal-ID": "${user_config.principal_id}"
+      }
+    }
+  }
+}

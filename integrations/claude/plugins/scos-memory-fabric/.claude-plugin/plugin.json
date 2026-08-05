@@ -1,0 +1,42 @@
+{
+  "name": "scos-memory-fabric",
+  "displayName": "SCOS Memory Fabric",
+  "description": "Connects Claude Code to the SCOS Memory Fabric via the mcp-gateway service, exposing scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct and scos_forget. Includes /scos-recall, /scos-status, /scos-explain commands, a scos-memory skill, and a SessionStart hook.",
+  "version": "1.1.0",
+  "author": {
+    "name": "SCOS Core Team"
+  },
+  "homepage": "https://github.com/dylmarriner/scos-memory/blob/main/docs/agent-connection-guide.md",
+  "license": "UNLICENSED",
+  "keywords": ["scos", "memory", "mcp-gateway", "hermes"],
+  "defaultEnabled": false,
+  "skills": ["./skills/"],
+  "userConfig": {
+    "gateway_url": {
+      "type": "string",
+      "title": "mcp-gateway URL",
+      "description": "Base MCP endpoint for the SCOS mcp-gateway service (services/mcp-gateway). Defaults to the rabuntu fleet deployment.",
+      "default": "https://rabuntu.tail2c15c8.ts.net:8098/mcp",
+      "required": true
+    },
+    "bearer_token": {
+      "type": "string",
+      "title": "SCOS bearer token",
+      "description": "Value of SCOS_HERMES_BEARER_TOKEN from ~/.hermes/scos.env on this machine, or your own issued service token.",
+      "sensitive": true,
+      "required": true
+    },
+    "tenant_id": {
+      "type": "string",
+      "title": "Tenant ID",
+      "description": "SCOS_TENANT_ID (UUID) from ~/.hermes/scos.env.",
+      "required": true
+    },
+    "principal_id": {
+      "type": "string",
+      "title": "Principal ID",
+      "description": "SCOS_PRINCIPAL_ID (UUID) from ~/.hermes/scos.env.",
+      "required": true
+    }
+  }
+}
