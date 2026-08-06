@@ -129,7 +129,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := database.NewPool(ctx, databaseURL)
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}

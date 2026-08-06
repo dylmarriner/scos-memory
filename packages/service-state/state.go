@@ -18,7 +18,7 @@ func New(ctx context.Context, databaseURL string) (*Repository, error) {
 	if err := database.RequireTLS(databaseURL); err != nil {
 		return nil, err
 	}
-	db, err := pgxpool.New(ctx, databaseURL)
+	db, err := database.NewPool(ctx, databaseURL)
 	if err != nil {
 		return nil, err
 	}

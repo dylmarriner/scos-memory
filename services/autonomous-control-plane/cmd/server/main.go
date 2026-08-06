@@ -1170,7 +1170,7 @@ func main() {
 		if err := database.RequireTLS(databaseURL); err != nil {
 			log.Fatal(err)
 		}
-		db, err = pgxpool.New(context.Background(), databaseURL)
+		db, err = database.NewPool(context.Background(), databaseURL)
 		if err != nil {
 			log.Fatalf("connect to database: %v", err)
 		}

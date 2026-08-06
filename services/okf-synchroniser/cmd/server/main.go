@@ -128,7 +128,7 @@ func main() {
 	// OKF is platform-scoped; the service identity is the authenticated
 	// principal for its RLS-gated governance projections.
 	config.ConnConfig.RuntimeParams["scos.principal_id"] = "okf-synchroniser"
-	db, err := pgxpool.NewWithConfig(context.Background(), config)
+	db, err := pgxpool.NewWithConfig(context.Background(), database.TunePoolConfig(config))
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}

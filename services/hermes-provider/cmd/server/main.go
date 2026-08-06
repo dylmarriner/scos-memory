@@ -151,6 +151,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
+	database.TuneSQLDB(db)
 	defer db.Close()
 
 	srv := newHermesServer()

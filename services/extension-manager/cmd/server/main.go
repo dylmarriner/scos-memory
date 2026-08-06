@@ -196,7 +196,7 @@ func main() {
 		log.Fatalf("connect to database: %v", err)
 	}
 	config.ConnConfig.RuntimeParams["scos.service_id"] = "extension-manager"
-	db, err := pgxpool.NewWithConfig(context.Background(), config)
+	db, err := pgxpool.NewWithConfig(context.Background(), database.TunePoolConfig(config))
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}

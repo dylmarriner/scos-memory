@@ -172,10 +172,25 @@ def audit() -> list[str]:
         if not path.is_file():
             errors.append(f"missing required file: {required_file}")
 
+    # Services no longer carry a Dockerfile each -- deploy/Dockerfile builds
+    # every binary into one image and compose selects between them with
+    # `command:`. The invariant worth auditing is unchanged, though: every
+    # required service must actually be built and shipped. That now means being
+    # named in that Dockerfile's SERVICES list.
+    fabric_dockerfile = ROOT / "deploy/Dockerfile"
+    built_services: set[str] = set()
+    if fabric_dockerfile.is_file():
+        text = fabric_dockerfile.read_text(encoding="utf-8")
+        match = re.search(r'ARG SERVICES="(?P<list>[^"]*)"', text)
+        if match:
+            built_services = set(match.group("list").split())
+    else:
+        errors.append("missing required file: deploy/Dockerfile")
+
     for service in sorted(REQUIRED_SERVICES):
         service_dir = ROOT / "services" / service
-        if not (service_dir / "Dockerfile").is_file():
-            errors.append(f"missing service Dockerfile: services/{service}")
+        if service not in built_services:
+            errors.append(f"service not built by deploy/Dockerfile: {service}")
         if not list((service_dir / "cmd").glob("**/*.go")):
             errors.append(f"missing service implementation: services/{service}")
 

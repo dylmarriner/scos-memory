@@ -27,6 +27,76 @@ x-service-tls-environment: &service-tls-environment
   SCOS_TLS_KEY_FILE: ${SCOS_TLS_KEY_FILE:-/etc/scos/tls/tls.key}
   SCOS_TLS_CA_FILE: ${SCOS_TLS_CA_FILE:-/etc/scos/tls/tls.crt}
 
+# Small-host runtime budget.
+#
+# The reference deployment is a single Raspberry Pi 5 (8 GB, 4 cores) running
+# ~20 Go services plus Postgres, and the stack is sized to fit inside ~4 GB so
+# the rest of the board stays available for page cache and whatever else the
+# operator runs. The binding constraint is the AGGREGATE idle footprint, not any
+# single service's working set, and every library default here is sized for a
+# server:
+#
+#   - GOMAXPROCS defaults to the core count, so each of twenty processes builds
+#     four per-P allocator caches and runs four GC workers -- for four cores
+#     total. These services are I/O bound on Postgres and on each other, so
+#     GOMAXPROCS=2 costs them no meaningful throughput and removes most of that
+#     duplication along with the scheduler contention of 80 runnable Ps.
+#   - GOGC=100 lets every heap double before collecting. GOGC=50 trades a small
+#     amount of CPU, which this box has spare, for RAM.
+#   - GOMEMLIMIT is a soft target: the runtime collects harder as the heap
+#     approaches it rather than failing, so a loaded service degrades in latency
+#     instead of being OOM-killed. mem_limit is the matching HARD ceiling, set
+#     well above GOMEMLIMIT so the kernel only intervenes on a genuine leak.
+#
+# Budget at these values: ~20 services at ~30-40 MB resident = ~700 MB, Postgres
+# ~900 MB including backends, ~2 GB of headroom inside the 4 GB target. Every
+# value scales through its environment variable -- raise SCOS_GOMEMLIMIT and
+# SCOS_SERVICE_MEM_LIMIT together if you want the stack to use more of the 8 GB.
+#
+# memswap_limit is pinned equal to mem_limit so a container can never swap. The
+# root device is an SSD behind a USB bridge -- fast for a Pi, but that bridge
+# adds latency to every page fault, and a service that quietly swaps is far
+# harder to diagnose than one that fails against a limit you set on purpose.
+x-service-runtime-environment: &service-runtime-environment
+  GOMAXPROCS: ${SCOS_GOMAXPROCS:-2}
+  GOGC: ${SCOS_GOGC:-50}
+  GOMEMLIMIT: ${SCOS_GOMEMLIMIT:-96MiB}
+  # Per-process Postgres connection budget (packages/database.PoolLimits).
+  # Each backend costs Postgres several megabytes of private memory, so this is
+  # a memory knob as much as a concurrency one. This is the floor for the many
+  # governance services that touch the database only occasionally; the three
+  # request-path services override it individually below, because splitting the
+  # budget evenly across a dozen services would starve the hot path to fund
+  # services that are idle. max_connections is sized against the sum.
+  SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS:-3}
+  SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS:-1}
+
+# Docker's default json-file driver keeps every line a container has ever
+# logged, forever, on the root device. Twenty chatty services will quietly fill
+# the SSD; capping and rotating bounds the whole stack at ~200 MB of logs.
+x-service-logging: &service-logging
+  driver: json-file
+  options:
+    max-size: ${SCOS_LOG_MAX_SIZE:-10m}
+    max-file: "${SCOS_LOG_MAX_FILE:-3}"
+
+# Every Go service runs the same image (deploy/Dockerfile), which carries all
+# nineteen binaries, and picks its own with `command:`. One build, one image to
+# store and pull, instead of nineteen that differ only by which binary they
+# contain. Set SCOS_IMAGE to a registry tag to deploy a prebuilt image and skip
+# building on the Pi entirely.
+x-fabric-image: &fabric-image
+  image: ${SCOS_IMAGE:-scos-fabric:local}
+  build:
+    context: ../..
+    dockerfile: deploy/Dockerfile
+
+x-service-limits: &service-limits
+  mem_limit: ${SCOS_SERVICE_MEM_LIMIT:-160m}
+  memswap_limit: ${SCOS_SERVICE_MEM_LIMIT:-160m}
+  cpus: ${SCOS_SERVICE_CPUS:-2}
+  logging: *service-logging
+
 services:
   tls-certs:
     image: alpine:3.21
@@ -104,7 +174,99 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be provided by the deployment secret manager}
       SCOS_WAL_ARCHIVE_ENABLED: ${SCOS_WAL_ARCHIVE_ENABLED:-false}
       SCOS_WAL_ARCHIVE_DESTINATION: ${SCOS_WAL_ARCHIVE_DESTINATION:-}
-    command: ["postgres", "-c", "wal_level=replica", "-c", "archive_mode=on", "-c", "archive_timeout=60s", "-c", "archive_command=if [ \"$$SCOS_WAL_ARCHIVE_ENABLED\" = \"true\" ]; then sh /usr/local/bin/scos-wal-archive %p %f; else exit 0; fi", "-c", "ssl=on", "-c", "ssl_cert_file=/etc/postgresql-tls/server.crt", "-c", "ssl_key_file=/etc/postgresql-tls/server.key"]
+    # Sized for the 4 GB budget described at the top of this file. Postgres
+    # ships defaults for a 1990s workstation (shared_buffers=128MB) and then
+    # sizes several structures off max_connections, so both matter here:
+    #
+    #   shared_buffers=512MB      the single biggest win; the working set of a
+    #                             memory fabric is index-heavy and benefits far
+    #                             more from cache than from the default 128MB.
+    #   effective_cache_size=1GB  a planner hint, not an allocation -- tells it
+    #                             index scans are cheap because the OS is also
+    #                             caching these files.
+    #   max_connections=75        60 application backends worst case (3
+    #                             request-path services x 8, 12 governance
+    #                             services x 3) plus the Python workers,
+    #                             migrations, and the slots Postgres reserves
+    #                             for superusers.
+    #                             Every slot Postgres reserves costs memory
+    #                             whether or not it is used, so this is
+    #                             deliberately not the default 100.
+    #   work_mem=4MB              per sort/hash node, so the true worst case is
+    #                             this times concurrent nodes across all 60
+    #                             connections -- it multiplies, keep it small.
+    #   random_page_cost=1.1      the Pi boots from flash, not a spinning disk;
+    #                             the default 4.0 pushes the planner into
+    #                             sequential scans that are not actually cheaper.
+    #   max_parallel_workers*     parallel query on 4 shared cores costs more in
+    #                             worker startup and memory than it returns.
+    #
+    # archive_mode stays on so WAL archiving can be enabled later without a
+    # restart, but the 60s archive_timeout it shipped with forced a 16 MB
+    # segment switch every minute there had been any write activity -- ~23 GB of
+    # writes a day at idle. On the SSD this deployment actually uses that is
+    # survivable rather than fatal, but it is still pure write amplification
+    # while SCOS_WAL_ARCHIVE_ENABLED is false, and it competes for the same USB
+    # bus as every real query. 5 minutes keeps the recovery-point guarantee
+    # meaningful at a fraction of the volume; lower SCOS_WAL_ARCHIVE_TIMEOUT if
+    # you turn archiving on and want a tighter bound.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_timeout=${SCOS_WAL_ARCHIVE_TIMEOUT:-300s}
+      - -c
+      - 'archive_command=if [ "$$SCOS_WAL_ARCHIVE_ENABLED" = "true" ]; then sh /usr/local/bin/scos-wal-archive %p %f; else exit 0; fi'
+      - -c
+      - wal_compression=on
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql-tls/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql-tls/server.key
+      - -c
+      - max_connections=${SCOS_PG_MAX_CONNECTIONS:-75}
+      - -c
+      - shared_buffers=${SCOS_PG_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${SCOS_PG_EFFECTIVE_CACHE_SIZE:-1GB}
+      - -c
+      - work_mem=${SCOS_PG_WORK_MEM:-4MB}
+      - -c
+      - maintenance_work_mem=${SCOS_PG_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=100
+      - -c
+      - max_worker_processes=4
+      - -c
+      - max_parallel_workers=2
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - max_parallel_maintenance_workers=1
+      - -c
+      - min_wal_size=128MB
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - checkpoint_completion_target=0.9
+    # shared_buffers (512MB) plus per-backend private memory plus the page cache
+    # for this cgroup. Sized with real headroom over shared_buffers: hitting a
+    # cgroup limit gets Postgres OOM-killed, not slowed down, so this ceiling is
+    # a runaway guard rather than a target to run against.
+    mem_limit: ${SCOS_PG_MEM_LIMIT:-1536m}
+    memswap_limit: ${SCOS_PG_MEM_LIMIT:-1536m}
+    # Docker caps /dev/shm at 64MB, which is where Postgres puts the dynamic
+    # shared memory segments used by parallel workers and by pgvector index
+    # builds. Undersized, an HNSW build fails outright rather than running slow.
+    shm_size: ${SCOS_PG_SHM_SIZE:-256m}
+    logging: *service-logging
     expose:
       - "5432"
     volumes:
@@ -143,13 +305,15 @@ services:
   # environment or a secret manager, never from this file.
 
   memory-gateway:
-    build:
-      context: ../..
-      dockerfile: services/memory-gateway/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["memory-gateway"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      # Above the shared default: the write path -- every memory ingest lands here.
+      SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
+      SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
       SCOS_HTTP_ADDR: ${SCOS_HTTP_ADDR:-:8080}
       SCOS_VERSION: ${SCOS_VERSION:-0.1.0-dev}
       SCOS_SCHEMA_DIR: ${SCOS_SCHEMA_DIR:-}
@@ -167,18 +331,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8080/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   autonomous-control-plane:
-    build:
-      context: ../..
-      dockerfile: services/autonomous-control-plane/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["autonomous-control-plane"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CONTROL_HTTP_ADDR: ${SCOS_CONTROL_HTTP_ADDR:-:8081}
       SCOS_CONTROL_PLANE_STATE_PATH: ${SCOS_CONTROL_PLANE_STATE_PATH:-/var/lib/scos/control-plane/state.json}
       SCOS_RETRIEVAL_ORCHESTRATOR_URL: ${SCOS_RETRIEVAL_ORCHESTRATOR_URL:-https://retrieval-orchestrator:8082}
@@ -204,11 +368,13 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8081/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   consolidation-worker:
+    <<: *service-limits
     build:
       context: ../..
       dockerfile: workers/consolidation/Dockerfile
@@ -227,13 +393,15 @@ services:
         condition: service_completed_successfully
 
   retrieval-orchestrator:
-    build:
-      context: ../..
-      dockerfile: services/retrieval-orchestrator/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["retrieval-orchestrator"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      # Above the shared default: the read path, and queryResults holds two connections per request.
+      SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
+      SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
       SCOS_RETRIEVAL_HTTP_ADDR: ${SCOS_RETRIEVAL_HTTP_ADDR:-:8082}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
@@ -249,18 +417,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8082/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   context-optimisation:
-    build:
-      context: ../..
-      dockerfile: services/context-optimisation/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["context-optimisation"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CONTEXT_HTTP_ADDR: ${SCOS_CONTEXT_HTTP_ADDR:-:8083}
       SCOS_CONTEXT_SOURCE_STORE: ${SCOS_CONTEXT_SOURCE_STORE:-/var/lib/scos/context/sources}
     volumes:
@@ -273,18 +441,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8083/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   code-intelligence:
-    build:
-      context: ../..
-      dockerfile: services/code-intelligence/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["code-intelligence"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CODE_INTELLIGENCE_HTTP_ADDR: ${SCOS_CODE_INTELLIGENCE_HTTP_ADDR:-:8084}
       SCOS_CODE_INTELLIGENCE_STORE_PATH: ${SCOS_CODE_INTELLIGENCE_STORE_PATH:-/var/lib/scos/code-intelligence/state.json}
     volumes:
@@ -297,18 +465,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8084/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   execution-proxy:
-    build:
-      context: ../..
-      dockerfile: services/execution-proxy/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["execution-proxy"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_EXECUTION_PROXY_HTTP_ADDR: ${SCOS_EXECUTION_PROXY_HTTP_ADDR:-:8085}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_EXECUTION_PROXY_STORE_PATH: ${SCOS_EXECUTION_PROXY_STORE_PATH:-/var/lib/scos/execution-proxy/state.json}
@@ -328,18 +496,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8085/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   extension-manager:
-    build:
-      context: ../..
-      dockerfile: services/extension-manager/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["extension-manager"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_EXTENSION_MANAGER_HTTP_ADDR: ${SCOS_EXTENSION_MANAGER_HTTP_ADDR:-:8086}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
@@ -355,18 +523,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8086/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   compatibility-gateway:
-    build:
-      context: ../..
-      dockerfile: services/compatibility-gateway/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["compatibility-gateway"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR: ${SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR:-:8087}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
@@ -382,17 +550,20 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8087/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   hermes-provider:
-    build:
-      context: ../..
-      dockerfile: services/hermes-provider/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["hermes-provider"]
     restart: unless-stopped
     environment:
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      # Above the shared default: serves agent MCP traffic directly.
+      SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
+      SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
       SCOS_HERMES_PROVIDER_HTTP_ADDR: ${SCOS_HERMES_PROVIDER_HTTP_ADDR:-:8088}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
@@ -408,18 +579,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8088/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   memory-intelligence:
-    build:
-      context: ../..
-      dockerfile: services/memory-intelligence/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["memory-intelligence"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR: ${SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR:-:8089}
       SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
       SCOS_RETRIEVAL_ORCHESTRATOR_URL: ${SCOS_RETRIEVAL_ORCHESTRATOR_URL:-https://retrieval-orchestrator:8082}
@@ -442,17 +613,17 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8089/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   mcp-gateway:
-    build:
-      context: ../..
-      dockerfile: services/mcp-gateway/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["mcp-gateway"]
     restart: unless-stopped
     environment:
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_MCP_GATEWAY_HTTP_ADDR: ${SCOS_MCP_GATEWAY_HTTP_ADDR:-:8098}
       SCOS_HERMES_PROVIDER_URL: ${SCOS_HERMES_PROVIDER_URL:-https://hermes-provider:8088}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
@@ -480,17 +651,17 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8098/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   okf-synchroniser:
-    build:
-      context: ../..
-      dockerfile: services/okf-synchroniser/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["okf-synchroniser"]
     restart: unless-stopped
     environment:
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_OKF_SYNCHRONISER_HTTP_ADDR: ${SCOS_OKF_SYNCHRONISER_HTTP_ADDR:-:8090}
       SCOS_OKF_SYNCHRONISER_STATE_PATH: ${SCOS_OKF_SYNCHRONISER_STATE_PATH:-/var/lib/scos/okf/projections.json}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -508,18 +679,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8090/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   security-gate:
-    build:
-      context: ../..
-      dockerfile: services/security-gate/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["security-gate"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_SECURITY_GATE_HTTP_ADDR: ${SCOS_SECURITY_GATE_HTTP_ADDR:-:8091}
       SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
       SCOS_SECURITY_GATE_STORE_PATH: ${SCOS_SECURITY_GATE_STORE_PATH:-/var/lib/scos/security-gate.json}
@@ -541,17 +712,17 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8091/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   tool-governance:
-    build:
-      context: ../..
-      dockerfile: services/tool-governance/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["tool-governance"]
     restart: unless-stopped
     environment:
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_TOOL_GOVERNANCE_HTTP_ADDR: ${SCOS_TOOL_GOVERNANCE_HTTP_ADDR:-:8092}
       SCOS_TOOL_GOVERNANCE_STORE_PATH: ${SCOS_TOOL_GOVERNANCE_STORE_PATH:-/var/lib/scos/tool-governance.json}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -569,17 +740,17 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8092/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   agent-registry:
-    build:
-      context: ../..
-      dockerfile: services/agent-registry/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["agent-registry"]
     restart: unless-stopped
     environment:
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_AGENT_REGISTRY_HTTP_ADDR: ${SCOS_AGENT_REGISTRY_HTTP_ADDR:-:8093}
       SCOS_AGENT_REGISTRY_STORE_PATH: ${SCOS_AGENT_REGISTRY_STORE_PATH:-/var/lib/scos/agent-registry/state.json}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -597,18 +768,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8093/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   recovery-orchestrator:
-    build:
-      context: ../..
-      dockerfile: services/recovery-orchestrator/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["recovery-orchestrator"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR: ${SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR:-:8094}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
@@ -624,18 +795,18 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8094/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   backup-manager:
-    build:
-      context: ../..
-      dockerfile: services/backup-manager/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["backup-manager"]
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_BACKUP_MANAGER_HTTP_ADDR: ${SCOS_BACKUP_MANAGER_HTTP_ADDR:-:8095}
       SCOS_BACKUP_PROVIDER: ${SCOS_BACKUP_PROVIDER:-disabled}
       SCOS_BACKUP_DESTINATION: ${SCOS_BACKUP_DESTINATION:-}
@@ -659,17 +830,17 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8095/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   observability:
-    build:
-      context: ../..
-      dockerfile: services/observability/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["observability"]
     restart: unless-stopped
     environment:
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_OBSERVABILITY_HTTP_ADDR: ${SCOS_OBSERVABILITY_HTTP_ADDR:-:8096}
       SCOS_OBSERVABILITY_STORE_PATH: ${SCOS_OBSERVABILITY_STORE_PATH:-/var/lib/scos/observability/observability.jsonl}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
@@ -690,17 +861,17 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8096/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
   transparency-projection:
-    build:
-      context: ../..
-      dockerfile: services/transparency-projection/Dockerfile
+    <<: [*service-limits, *fabric-image]
+    command: ["transparency-projection"]
     restart: unless-stopped
     environment:
-      <<: [*service-auth-environment, *service-tls-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_TRANSPARENCY_HTTP_ADDR: ${SCOS_TRANSPARENCY_HTTP_ADDR:-:8097}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
       SCOS_AGENT_REGISTRY_URL: ${SCOS_AGENT_REGISTRY_URL:-https://agent-registry:8093}
@@ -740,8 +911,9 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8097/health/ready"]
-      interval: 10s
-      timeout: 3s
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
       retries: 10
 
 volumes:

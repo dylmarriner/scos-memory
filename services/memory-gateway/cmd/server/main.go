@@ -62,6 +62,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		database.TuneSQLDB(db)
 		s.db = db
 		defer db.Close()
 	}

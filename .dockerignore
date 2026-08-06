@@ -1,0 +1,33 @@
+# The unified image (deploy/Dockerfile) takes the repository root as its build
+# context so it can compile every service in one pass. Without this file Docker
+# would ship ~360 MB of node_modules and git history to the daemon on every
+# build -- on a Raspberry Pi that transfer alone costs more than the compile.
+node_modules
+**/node_modules
+.git
+.gitignore
+
+# Build outputs and local state
+dist
+build
+out
+*.test
+coverage
+.cache
+
+# Nothing under here affects a service binary
+docs
+benchmarks
+tests
+plugins
+skills
+dashboard/node_modules
+audit-log.jsonl
+*.md
+!README.md
+
+# Local editor / tooling noise
+.idea
+.vscode
+.DS_Store
+*.swp

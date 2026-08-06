@@ -317,16 +317,26 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 			"queue_depth": s.prefetchQueue.depth(),
 		})
 	case "scos_recall":
-		if req.SessionID == "" || !isUUID(req.SessionID) {
-			http.Error(w, "session_id must be a UUID for scos_recall", http.StatusBadRequest)
+		query, _ := req.Arguments["query"].(string)
+		if strings.TrimSpace(query) == "" {
+			http.Error(w, "arguments.query is required for scos_recall", http.StatusBadRequest)
 			return
 		}
-		recall, err := recentTurns(r.Context(), s.db, identity.TenantID, req.SessionID, recallLimit)
+		maxItems := 10
+		switch v := req.Arguments["max_items"].(type) {
+		case float64:
+			maxItems = int(v)
+		case json.Number:
+			if n, err := v.Int64(); err == nil {
+				maxItems = int(n)
+			}
+		}
+		memories, err := searchMemories(r.Context(), s.db, identity.TenantID, query, maxItems)
 		if err != nil {
-			http.Error(w, "load recall: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "search memories: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"tool": req.Tool, "recall": recall})
+		writeJSON(w, map[string]any{"tool": req.Tool, "recall": memories})
 	default:
 		// The remaining inspection and correction tools are served by
 		// memory-intelligence, which owns the user model, graph and
