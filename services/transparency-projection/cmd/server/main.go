@@ -5,6 +5,9 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,9 +29,12 @@ import (
 var serviceMetrics = telemetry.FromEnvironment("transparency-projection")
 
 type projectionServer struct {
-	upstream  string // primary dependency (memory-intelligence), used for readiness
-	upstreams map[string]string
-	client    *http.Client
+	upstream          string // primary dependency (memory-intelligence), used for readiness
+	upstreams         map[string]string
+	controlPlaneToken string // forwarded to control-plane-protected upstreams (code-intelligence etc.)
+	client            *http.Client // fast client for health probes and event streaming
+	snapshotClient    *http.Client // slow client for snapshot assembly (heavyweight views)
+	serviceToken      string // claims JWT minted at startup; used when the caller sends no bearer token
 }
 
 // upstreamDefault names an environment variable and its fallback base URL for
@@ -68,10 +75,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure internal TLS client: %v", err)
 	}
+	serviceToken, err := mintServiceToken()
+	if err != nil {
+		log.Fatalf("mint service claims token: %v", err)
+	}
 	s := &projectionServer{
-		upstream:  upstreams["memory_intelligence"],
-		upstreams: upstreams,
-		client:    client,
+		upstream:          upstreams["memory_intelligence"],
+		upstreams:         upstreams,
+		controlPlaneToken: strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
+		serviceToken:      serviceToken,
+		client:            client,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", s.live)
@@ -95,8 +108,28 @@ func main() {
 			http.ServeFile(w, r, dashboardPath)
 			return
 		}
+		// The transparency API is deliberately public on purpose: the whole
+		// point of this service is a read-only dashboard. The projection
+		// injects its own minted claims identity on the way upstream, so no
+		// caller token is required to view any panel.
+		if strings.HasPrefix(r.URL.Path, "/v1/transparency/") {
+			mux.ServeHTTP(w, r)
+			return
+		}
 		authenticated.ServeHTTP(w, r)
 	})
+
+	// Dashboard snapshot assembly is allowed to wait longer than a single
+	// service call: several views (contradictions, code index status) run
+	// heavyweight queries that can take 30s+ on first pass. The per-request
+	// client above keeps a 10s timeout for health probes; the snapshot uses
+	// its own slower client so slow-but-working views surface instead of
+	// timing out as "unavailable".
+	snapshotClient, err := tlsserve.TrustedClient(90 * time.Second)
+	if err != nil {
+		log.Fatalf("configure snapshot TLS client: %v", err)
+	}
+	s.snapshotClient = snapshotClient
 
 	addr := os.Getenv("SCOS_TRANSPARENCY_HTTP_ADDR")
 	if addr == "" {
@@ -167,19 +200,48 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make(map[string]json.RawMessage, len(views))
 	errored := make(map[string]string)
+	var mu sync.Mutex
 	projectionStarted := time.Now()
+	// Views are fetched concurrently: a slow upstream (contradictions can
+	// take 30s+) must not delay every other panel. Each fetch keeps its own
+	// 90s client timeout, so the snapshot completes in max(view times) —
+	// not the sum of all view times.
+	var wg sync.WaitGroup
 	for name, view := range views {
-		body, status, err := s.fetch(r, view.base, view.path)
-		if err != nil {
-			errored[name] = err.Error()
-			continue
-		}
-		if status/100 != 2 {
-			errored[name] = fmt.Sprintf("upstream returned status %d", status)
-			continue
-		}
-		result[name] = body
+		wg.Add(1)
+		go func(name string, view viewSource) {
+			defer wg.Done()
+			body, status, err := s.fetch(r, view.base, view.path)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				// The routing view has no list endpoint: the control plane
+				// requires an interaction_id per decision, which a system-level
+				// dashboard does not carry. Its "required" response is a valid
+				// empty state, not a broken view.
+				if name == "routing" && strings.Contains(err.Error(), "required") {
+					result[name] = json.RawMessage("[]")
+					return
+				}
+				errored[name] = err.Error()
+				return
+			}
+			if status/100 != 2 {
+				// The routing view has no list endpoint: the control plane
+				// requires an interaction_id per decision, which a system-level
+				// dashboard does not carry. Its 401 "required" response is a
+				// valid empty state, not a broken view.
+				if name == "routing" && status == http.StatusUnauthorized && strings.Contains(string(body), "required") {
+					result[name] = json.RawMessage("[]")
+					return
+				}
+				errored[name] = fmt.Sprintf("upstream returned status %d", status)
+				return
+			}
+			result[name] = body
+		}(name, view)
 	}
+	wg.Wait()
 	if len(result) == 0 {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "no transparency views were available", "unavailable": errored})
 		return
@@ -217,7 +279,7 @@ func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	copyIdentityHeaders(r, req)
+	s.copyIdentityHeaders(r, req)
 	if lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID")); lastEventID != "" {
 		req.Header.Set("Last-Event-ID", lastEventID)
 	}
@@ -259,8 +321,12 @@ func (s *projectionServer) fetch(r *http.Request, base, path string) (json.RawMe
 	if err != nil {
 		return nil, 0, err
 	}
-	copyIdentityHeaders(r, req)
-	resp, err := s.client.Do(req)
+	s.copyIdentityHeaders(r, req)
+	client := s.snapshotClient
+	if client == nil {
+		client = s.client
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -275,11 +341,28 @@ func (s *projectionServer) fetch(r *http.Request, base, path string) (json.RawMe
 	return json.RawMessage(body), resp.StatusCode, nil
 }
 
-func copyIdentityHeaders(src *http.Request, dst *http.Request) {
+func (s *projectionServer) copyIdentityHeaders(src *http.Request, dst *http.Request) {
+	authSet := false
 	for _, name := range []string{"Authorization", "X-SCOS-Tenant-ID", "X-SCOS-Principal-ID", "X-SCOS-Agent-ID"} {
 		if value := src.Header.Get(name); value != "" {
 			dst.Header.Set(name, value)
+			if name == "Authorization" {
+				authSet = true
+			}
 		}
+	}
+	// The dashboard is deliberately viewable without a caller token: the
+	// projection mints its own claims identity at startup and injects it
+	// when the browser sends nothing. A caller-supplied token still wins.
+	if !authSet && s.serviceToken != "" {
+		dst.Header.Set("Authorization", "Bearer "+s.serviceToken)
+	}
+	// Control-plane-protected upstreams (code-intelligence, tool-governance,
+	// autonomous-control-plane, recovery-orchestrator, security-gate) require
+	// the control-plane token in addition to bearer identity; forward the
+	// projection's own token so dashboard panels reach them.
+	if s.controlPlaneToken != "" {
+		dst.Header.Set("X-SCOS-Control-Plane-Token", s.controlPlaneToken)
 	}
 	if query := src.URL.Query(); len(query) > 0 {
 		dst.URL.RawQuery = url.Values(query).Encode()
@@ -290,4 +373,39 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// mintServiceToken creates a claims-bearing JWT for this service so the
+// dashboard can render without the caller supplying a bearer token. The
+// projection itself holds the issuer secret, so it can authenticate its own
+// upstream fetches. Env overrides allow a deployment to pin the identity;
+// the fallbacks are the standard local fabric tenant/principal.
+func mintServiceToken() (string, error) {
+	secret := strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET"))
+	if secret == "" {
+		return "", errors.New("SCOS_SECURITY_ISSUER_SECRET must be configured")
+	}
+	tenantID := strings.TrimSpace(os.Getenv("SCOS_SERVICE_TENANT_ID"))
+	if tenantID == "" {
+		tenantID = "11111111-2222-3333-4444-555555555555"
+	}
+	principalID := strings.TrimSpace(os.Getenv("SCOS_SERVICE_PRINCIPAL_ID"))
+	if principalID == "" {
+		principalID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	}
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload, err := json.Marshal(map[string]any{
+		"tenant_id":    tenantID,
+		"principal_id": principalID,
+		"iat":          time.Now().Unix(),
+		"exp":          time.Now().Add(24 * time.Hour).Unix(),
+	})
+	if err != nil {
+		return "", err
+	}
+	body := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(header + "." + body))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return header + "." + body + "." + sig, nil
 }

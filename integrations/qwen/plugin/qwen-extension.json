@@ -1,0 +1,13 @@
+{
+  "name": "scos-memory",
+  "version": "1.0.0",
+  "contextFileName": "QWEN.md",
+  "mcpServers": {
+    "scos": {
+      "command": "python3",
+      "args": ["-E", "${extensionPath}${/}scos-launcher.py"],
+      "cwd": "${extensionPath}"
+    }
+  },
+  "skills": ["skills/scos-memory"]
+}

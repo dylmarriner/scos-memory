@@ -5,7 +5,9 @@ instead of the manual `~/.codex/config.toml` steps in
 `docs/agent-connection-guide.md` §3. Same backend and tools as the
 Claude Code / Claude Desktop packaging in `../claude/`:
 `scos_recall`, `scos_status`, `scos_explain`, `scos_user_model`,
-`scos_memory_graph`, `scos_correct`, `scos_forget`.
+`scos_memory_graph`, `scos_correct`, `scos_forget` (memory, via
+hermes-provider) plus `scos_code_index`, `scos_code_query`,
+`scos_code_impact` (code intelligence, via code-intelligence :8084).
 
 - [`plugins/scos-memory-fabric/README.md`](plugins/scos-memory-fabric/README.md)
 

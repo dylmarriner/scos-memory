@@ -1,8 +1,8 @@
-# Connecting Agents to the SCOS Memory Fabric (rabuntu)
+# Connecting Agents to the SCOS Memory Fabric (kubuntux)
 
 This is the setup guide for pointing any MCP-capable coding agent at the
-`hermes-provider` instance running on the Raspberry Pi 5 (`ssh rabuntu`,
-Tailscale IP `100.68.0.96`). One shared memory backbone, many clients.
+SCOS stack running locally on kubuntux (Tailscale IP `100.93.75.87`,
+Docker Compose). One shared memory backbone, many clients.
 
 ## 1. How it fits together
 
@@ -12,45 +12,49 @@ Tailscale IP `100.68.0.96`). One shared memory backbone, many clients.
    ▼
  scos-mcp-bridge.py            ~/.hermes/scripts/scos-mcp-bridge.py
    │  HTTPS + Bearer token
-   ▼
- hermes-provider  (rabuntu, :8088, TLS)   ── services/hermes-provider
-   │
-   ▼
- memory-gateway (:8080) ── PostgreSQL + pgvector  (authoritative store)
+   ├──► hermes-provider        (kubuntux, :8088, TLS)  — 7 memory tools
+   │      └──► memory-gateway (:8080) ── PostgreSQL + pgvector
+   └──► code-intelligence     (kubuntux, :8084, TLS, control-plane)  — 3 code tools
+          └──► /v1/index, /v1/query, /v1/impact
 ```
 
 Every agent talks to the **same** bridge script, which talks to the **same**
-provider, so all agents share one memory. The bridge exists because most
-agent CLIs speak MCP over **stdio**, while `hermes-provider` only speaks
-**HTTPS**. The bridge translates one to the other and injects auth headers
-so individual agent configs never need to embed the bearer token in plain
-JSON alongside everything else.
+services, so all agents share one memory and one code index. The bridge
+exists because most agent CLIs speak MCP over **stdio**, while the SCOS
+services speak **HTTPS**. The bridge translates one to the other and injects
+auth headers so individual agent configs never need to embed the bearer
+token in plain JSON alongside everything else.
 
 Tools exposed to every connected agent: `scos_recall`, `scos_status`,
 `scos_explain`, `scos_user_model`, `scos_memory_graph`, `scos_correct`,
-`scos_forget`.
+`scos_forget` (memory, via hermes-provider) plus `scos_code_index`,
+`scos_code_query`, `scos_code_impact` (code intelligence, via
+code-intelligence :8084 — needs `SCOS_CONTROL_PLANE_TOKEN` in scos.env).
 
 ## 2. One-time prerequisites (already done on this machine, listed for a fresh box)
 
-1. **Network reachability to rabuntu.** Either Tailscale (`100.68.0.96`) or
-   plain LAN/SSH (`ssh rabuntu`) must reach the Pi. Verify:
+1. **Network reachability to kubuntux.** Tailscale (`100.93.75.87`) must
+   reach the stack. Verify:
    ```bash
-   ssh rabuntu 'hostname'
-   curl -sk https://100.68.0.96:8088/health/live
+   curl -sk https://100.93.75.87:8088/health/live
+   curl -sk https://100.93.75.87:8084/health/live
    ```
 2. **Shared bridge config** at `~/.hermes/scos.env` (mode `600`, never commit
    this — it holds the bearer token):
    ```bash
-   SCOS_HERMES_PROVIDER_URL=https://100.68.0.96:8088
-   SCOS_HERMES_BEARER_TOKEN=<internal service token>
+   SCOS_HERMES_PROVIDER_URL=https://100.93.75.87:8088
+   SCOS_HERMES_BEARER_TOKEN=<internal service token or claims JWT>
+   SCOS_CODE_INTELLIGENCE_URL=https://100.93.75.87:8084
+   SCOS_CONTROL_PLANE_TOKEN=<control plane token>
    SCOS_TENANT_ID=<tenant uuid>
    SCOS_PRINCIPAL_ID=<principal uuid>
    SCOS_NAMESPACE_ID=<namespace uuid>
    SCOS_TLS_CA_PATH=~/.hermes/scos-ca.crt
    ```
-3. **CA cert** at `~/.hermes/scos-ca.crt`, matching the cert `hermes-provider`
-   serves (self-signed / internal CA — the bridge falls back to
-   `CERT_NONE` if this file is missing, so it degrades but still connects).
+3. **CA cert** at `~/.hermes/scos-ca.crt`. The internal cert is a self-signed
+   leaf (O=scos-internal-dev) and cannot verify as a trust anchor, so the
+   bridge matches the scos-nexus plugin and disables peer verification
+   (`CERT_NONE`) — the file is optional for compatibility.
 4. **The bridge script** itself: `~/.hermes/scripts/scos-mcp-bridge.py`.
 
 Steps 2–4 are per-machine, not per-agent — set them up once, then every
@@ -98,26 +102,34 @@ whichever service actually owns it:
 | `scos_explain` | `memory-intelligence` `GET /v1/facts/{id}` |
 | `scos_user_model` | `memory-intelligence` `GET /v1/dashboard/user-model` |
 | `scos_memory_graph` | `memory-intelligence` `GET /v1/dashboard/memory-graph` |
-| `scos_correct`, `scos_forget` | not implemented anywhere in this fleet yet — the gateway reports `{"implemented": false}` rather than fabricating success |
+| `scos_memory_summary` | `memory-intelligence` `GET /v1/dashboard/summary` — real LLM summary when `DEEPSEEK_API_KEY` is configured, otherwise a deterministic network-grouped digest (response's `mode` field says which) |
+| `scos_correct` | `memory-intelligence` `PATCH /v1/facts/{id}` — inserts a new fact with the corrected content and marks the old one `superseded` (facts are append-only; nothing is mutated in place) |
+| `scos_forget` | `memory-intelligence` `DELETE /v1/facts/{id}[?cascade=true]` — soft-deletes the fact (`status='revoked'`); idempotent. `cascade=true` also revokes the fact's superseded predecessor chain |
+| `scos_correct_batch` | `memory-intelligence` `POST /v1/facts/batch-correct` — up to 100 corrections in one call, each independent |
+| `scos_forget_batch` | `memory-intelligence` `POST /v1/facts/batch-forget` — up to 100 forgets by ID in one call, each independent |
+| `scos_fact_feedback` | `memory-intelligence` `POST /v1/facts/{id}/feedback` — records POSITIVE/NEGATIVE/VERY_NEGATIVE quality signal against a fact (stored only, no automatic action taken) |
+| `scos_fact_history` | `memory-intelligence` `GET /v1/facts/{id}/history` — full append-only revision history for a fact, including versions from before a correction or after a forget |
+| `scos_forget_all` | `memory-intelligence` `DELETE /v1/facts?confirm=true[&namespace_id=...]` — bulk soft-delete: one namespace, or (omitting `namespace_id`) every active fact for the tenant. Requires `confirm=true` |
+| `scos_code_index` | `code-intelligence` `POST /v1/index` — index (or re-index) files for a repository |
+| `scos_code_query` | `code-intelligence` `POST /v1/query` — query the code index by symbol/path/intent |
+| `scos_code_impact` | `code-intelligence` `POST /v1/impact` — change-impact set for modified symbols |
 
-Deployed at `https://rabuntu.tail2c15c8.ts.net:8098/mcp`
-(`deploy/compose/docker-compose.yml`, container `compose-mcp-gateway-1`).
-It's the **only** service in this fleet a plain external MCP client (no
-custom CA trust, no `-k`) can reach directly: it serves a real
-Tailscale-issued (Let's Encrypt) certificate for `rabuntu.tail2c15c8.ts.net`
-at its own listener (`tls-external/`, gitignored — never commit it), while
-its outbound calls to `hermes-provider`/`memory-intelligence` still verify
-against the shared internal dev CA via `SCOS_TLS_CA_FILE`. The cert
-auto-renews daily via cron (`deploy/scripts/renew-mcp-gateway-cert.sh`,
-`17 3 * * *` on rabuntu) and only restarts the container when it actually
-changes.
+Deployed locally at `https://100.93.75.87:8098/mcp` (kubuntux, container
+`compose-mcp-gateway-1`) — this is the **full** governed tool surface (133
+tools incl. the code indexer), unlike the bridge's 10. The gateway serves a
+self-signed cert (valid for 127.0.0.1), so remote MCP clients need
+`--insecure`/SSL-verify-off or the `tls-external/` Tailscale-issued cert
+recipe from `deploy/scripts/renew-mcp-gateway-cert.sh` (gitignored — never
+commit it). Its outbound calls to `hermes-provider`/`memory-intelligence`/
+`code-intelligence` still verify against the shared internal dev CA via
+`SCOS_TLS_CA_FILE`.
 
 **Claude Code** (CLI, and Desktop's embedded Claude Code sessions, which
 share `~/.claude.json`):
 ```bash
 claude mcp add --transport http --scope user scos-remote \
-  https://rabuntu.tail2c15c8.ts.net:8098/mcp \
-  -H "Authorization: Bearer <SCOS_HERMES_BEARER_TOKEN>" \
+  https://100.93.75.87:8098/mcp \
+  -H "Authorization: Bearer <SCOS_...KEN>" \
   -H "X-SCOS-Tenant-ID: <tenant uuid>" \
   -H "X-SCOS-Principal-ID: <principal uuid>"
 ```
@@ -126,12 +138,11 @@ Verify with `claude mcp get scos-remote` — should show `✔ Connected`.
 
 **Claude Desktop's account-level Connectors** (Settings → Connectors, the
 same mechanism behind the `claude.ai *` remote tools — Notion, Vercel,
-Zapier, etc.) can now point at `https://rabuntu.tail2c15c8.ts.net:8098/mcp`
-too, since it's a real MCP-over-HTTPS endpoint with a publicly-trusted
-cert. Whether that UI's "Add connector" flow accepts static bearer/custom
-headers (vs. requiring OAuth) hasn't been confirmed — if it doesn't, the
-Claude Code path above already covers both CLI and Desktop's embedded
-sessions, which is the same tool access either way.
+Zapier, etc.) can now point at `https://100.93.75.87:8098/mcp` too. Whether
+that UI's "Add connector" flow accepts static bearer/custom headers (vs.
+requiring OAuth) hasn't been confirmed — if it doesn't, the Claude Code path
+above already covers both CLI and Desktop's embedded sessions, which is the
+same tool access either way.
 
 ### Codex
 
@@ -235,9 +246,10 @@ JSON-RPC traffic.
 | Symptom | Likely cause |
 |---|---|
 | Agent hangs on startup / MCP timeout | Bridge is fine (`tools/list` answers from a static list instantly) — check the agent's own MCP startup timeout instead. |
-| `transport error` in bridge stderr | rabuntu unreachable — check Tailscale (`tailscale status`) or `ssh rabuntu`. |
+| `transport error` in bridge stderr | kubuntux unreachable — check Tailscale (`tailscale status`) or that the SCOS compose stack is up (`docker ps`). |
 | HTTP 401/403 from provider | `SCOS_HERMES_BEARER_TOKEN` missing/stale in `~/.hermes/scos.env`. |
-| TLS handshake failure | `~/.hermes/scos-ca.crt` missing or doesn't match the cert `hermes-provider` is serving; the bridge falls back to no verification rather than failing, so a handshake failure means something is actually wrong (wrong port, no TLS, etc.), not just a missing CA. |
+| HTTP 401/403 from code-intelligence on a `scos_code_*` call | `SCOS_CONTROL_PLANE_TOKEN` missing/mismatched in `~/.hermes/scos.env` — code tools need the control-plane token header in addition to the bearer. |
+| TLS handshake failure | the internal cert is a self-signed leaf (`O=scos-internal-dev`) and the bridge disables peer verification (`CERT_NONE`) to match the plugin; a handshake failure means something is actually wrong (wrong port, no TLS, etc.), not just a missing CA. |
 | `scos_recall` returns nothing / wrong bucket | Two agents sharing one `SCOS_AGENT_NAME` collide on the same session UUID — give each a unique name. |
 
 ## 6. Security notes

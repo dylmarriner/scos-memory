@@ -3,18 +3,22 @@
 Wires Codex CLI to the SCOS Memory Fabric via a bundled, self-contained
 stdio bridge (`scripts/scos-mcp-bridge.py`, a copy of
 `~/.hermes/scripts/scos-mcp-bridge.py`) that talks directly to
-`hermes-provider` on rabuntu — see `docs/agent-connection-guide.md` §1/§3.
+`hermes-provider` on kubuntux and `code-intelligence` on :8084 — see
+`docs/agent-connection-guide.md` §1/§3.
 
 Codex plugin `.mcp.json` entries (unlike Claude Code's) weren't confirmed to
 support templating a bearer token into `headers` from a per-install
 config prompt, so this follows the same pattern as the existing manual
 Codex setup and the bundled Python bridge: it reads
 `SCOS_HERMES_PROVIDER_URL` / `SCOS_HERMES_BEARER_TOKEN` / `SCOS_TENANT_ID` /
-`SCOS_PRINCIPAL_ID` from `~/.hermes/scos.env` on the machine it runs on,
+`SCOS_PRINCIPAL_ID` / `SCOS_CONTROL_PLANE_TOKEN` / `SCOS_CODE_INTELLIGENCE_URL`
+from `~/.hermes/scos.env` on the machine it runs on,
 same as every other agent on this fleet.
 
 Tools exposed once connected: `scos_recall`, `scos_status`, `scos_explain`,
-`scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget`.
+`scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget`
+(memory) plus `scos_code_index`, `scos_code_query`, `scos_code_impact`
+(code intelligence).
 
 ## What the plugin adds
 

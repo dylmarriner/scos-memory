@@ -4,13 +4,16 @@ import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/llmclient"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -26,6 +30,12 @@ import (
 // serviceMetrics emits this service's §32 measures. It is nil-safe and a
 // no-op when no collector is configured.
 var serviceMetrics = telemetry.FromEnvironment("memory-intelligence")
+
+// llmClient is nil (and every llmclient method fails fast, honestly) unless
+// DEEPSEEK_API_KEY is configured. Entity extraction (resolveEntityMentions)
+// and memory summarization (handleDashboardSummary) degrade to deterministic
+// fallbacks when it is nil rather than requiring it at startup.
+var llmClient = llmclient.FromEnvironment(nil)
 
 const version = "0.1.0"
 
@@ -55,6 +65,7 @@ type Fact struct {
 	ValidUntil   string        `json:"valid_until,omitempty"`
 	RecordedAt   string        `json:"recorded_at"`
 	SupersededBy string        `json:"superseded_by,omitempty"`
+	Status       string        `json:"status,omitempty"` // active, merged -- see loadFactsIncludingMerged
 	Evidence     []string      `json:"evidence,omitempty"`
 	Inferred     bool          `json:"inferred"`
 	Derivation   string        `json:"derivation,omitempty"`
@@ -160,6 +171,16 @@ type engineServer struct {
 	db         *sql.DB
 	httpClient *http.Client
 	peers      map[string]string // service name -> base URL, for the real system map (§25.9)
+
+	// okfSynchroniserURL and the promotion thresholds below back
+	// maybePromoteToOKF (§16/§26): a fact whose authority and confidence
+	// both clear their threshold gets an OKF proposal opened automatically,
+	// but never merged automatically -- merge still requires an independent
+	// knowledge_curator review, exactly as every other OKF proposal does.
+	okfSynchroniserURL   string
+	okfAuthorityThresh   int
+	okfConfidenceThresh  float64
+	internalServiceToken string
 }
 
 // peerDefault names an environment variable and its fallback base URL for a
@@ -178,6 +199,36 @@ var peerDefaults = []peerDefault{
 	{"execution-proxy", "SCOS_EXECUTION_PROXY_URL", "https://execution-proxy:8085"},
 	{"extension-manager", "SCOS_EXTENSION_MANAGER_URL", "https://extension-manager:8086"},
 	{"compatibility-gateway", "SCOS_COMPATIBILITY_GATEWAY_URL", "https://compatibility-gateway:8087"},
+}
+
+func resolveUpstream(envVar, fallback string) string {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv(envVar)), "/")
+	if base == "" {
+		base = fallback
+	}
+	return base
+}
+
+func envInt(envVar string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(envVar))
+	if raw == "" {
+		return fallback
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		return n
+	}
+	return fallback
+}
+
+func envFloat(envVar string, fallback float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(envVar))
+	if raw == "" {
+		return fallback
+	}
+	if f, err := strconv.ParseFloat(raw, 64); err == nil {
+		return f
+	}
+	return fallback
 }
 
 func resolvePeers() map[string]string {
@@ -208,7 +259,9 @@ func (s *engineServer) readinessCheck() error {
 	if s.db == nil {
 		return fmt.Errorf("postgres dependency is not configured")
 	}
-	return s.db.PingContext(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return s.db.PingContext(ctx)
 }
 
 func newEngineServer() *engineServer {
@@ -279,6 +332,10 @@ func main() {
 	}
 	srv.httpClient = client
 	srv.peers = resolvePeers()
+	srv.okfSynchroniserURL = resolveUpstream("SCOS_OKF_SYNCHRONISER_URL", "https://okf-synchroniser:8090")
+	srv.okfAuthorityThresh = envInt("SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD", 90)
+	srv.okfConfidenceThresh = envFloat("SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD", 0.85)
+	srv.internalServiceToken = strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -289,6 +346,8 @@ func main() {
 
 	// Memory networks
 	mux.HandleFunc("/v1/facts", srv.handleFacts)
+	mux.HandleFunc("/v1/facts/batch-correct", srv.handleFactsBatchCorrect)
+	mux.HandleFunc("/v1/facts/batch-forget", srv.handleFactsBatchForget)
 	mux.HandleFunc("/v1/memory", srv.handleFacts)
 	mux.HandleFunc("/v1/facts/", srv.handleFactByID)
 	mux.HandleFunc("/v1/entities", srv.handleEntities)
@@ -304,6 +363,7 @@ func main() {
 	mux.HandleFunc("/v1/dashboard/system", srv.handleDashboardSystem)
 	mux.HandleFunc("/v1/dashboard/memory-graph", srv.handleDashboardMemoryGraph)
 	mux.HandleFunc("/v1/dashboard/facts", srv.handleDashboardFacts)
+	mux.HandleFunc("/v1/dashboard/summary", srv.handleDashboardSummary)
 	mux.HandleFunc("/v1/dashboard/learnings", srv.handleDashboardLearnings)
 	mux.HandleFunc("/v1/dashboard/contradictions", srv.handleDashboardContradictions)
 	mux.HandleFunc("/v1/dashboard/timeline", srv.handleDashboardTimeline)
@@ -408,12 +468,19 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, status)
 			return
 		}
-		facts, err := loadFacts(r.Context(), s.db, identity.TenantID, "")
+		loader := loadFacts
+		if r.URL.Query().Get("include_merged") == "true" {
+			loader = loadFactsIncludingMerged
+		}
+		facts, err := loader(r.Context(), s.db, identity.TenantID, "")
 		if err != nil {
 			http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, facts)
+
+	case http.MethodDelete:
+		s.handleFactsForgetAll(w, r)
 
 	case http.MethodPost:
 		var fact Fact
@@ -443,20 +510,15 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 		fact.RecordedAt = time.Now().UTC().Format(time.RFC3339)
 
 		ctx := r.Context()
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer tx.Rollback()
-		if err := setPrincipalContext(ctx, tx, identity); err != nil {
-			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		// Resolved before the transaction opens: both of these may be LLM
+		// calls, and an outbound HTTP request must never hold a database
+		// transaction open.
+		mentions := resolveEntityMentions(ctx, fact.Content)
 
-		// Detect contradictions against every existing fact in this tenant
-		// before inserting, exactly as the original in-memory implementation
-		// did, just sourced from the durable store instead of a map.
+		// Detect contradictions and duplicates against every existing fact in
+		// this tenant before inserting, exactly as the original in-memory
+		// implementation did for contradictions, just sourced from the
+		// durable store instead of a map.
 		existing, err := loadFacts(ctx, s.db, identity.TenantID, "")
 		if err != nil {
 			http.Error(w, "load existing facts: "+err.Error(), http.StatusInternalServerError)
@@ -468,8 +530,35 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 				contradictions = append(contradictions, other.ID)
 			}
 		}
+		merge := findMergeCandidate(ctx, &fact, existing)
 
-		factID, err := insertFact(ctx, tx, identity, fact.NamespaceID, &fact)
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+		if err := setPrincipalContext(ctx, tx, identity); err != nil {
+			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if merge != nil && !merge.NewIsRicher {
+			// The existing fact already states this at least as fully: keep
+			// the single canonical memory rather than writing a second copy
+			// (Dream's Merge -- "no second copy is created, so you simply
+			// keep the one memory"). Nothing was written; let the deferred
+			// rollback clean up the otherwise-empty transaction.
+			serviceMetrics.Count(telemetry.MetricUserModelChanges,
+				map[string]string{"change": "fact_merge_skipped"},
+				telemetry.Correlation{Tenant: identity.TenantID})
+			writeJSON(w, map[string]any{
+				"fact": merge.ExistingFact, "merged": true, "canonical_fact_id": merge.ExistingFact.ID,
+			})
+			return
+		}
+
+		factID, err := insertFact(ctx, tx, identity, fact.NamespaceID, &fact, mentions)
 		if err != nil {
 			http.Error(w, "failed to persist fact: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -478,6 +567,12 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 		for _, c := range contradictions {
 			if err := insertRelation(ctx, tx, factID, c, "contradicts"); err != nil {
 				http.Error(w, "failed to persist contradiction: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if merge != nil && merge.NewIsRicher {
+			if err := markFactMerged(ctx, tx, identity.TenantID, merge.ExistingFact.ID, factID); err != nil {
+				http.Error(w, "failed to mark duplicate merged: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -496,29 +591,549 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 				map[string]string{"namespace": fact.NamespaceID},
 				telemetry.Correlation{Tenant: identity.TenantID})
 		}
-		writeJSON(w, map[string]any{"fact": fact, "contradictions": contradictions})
+		response := map[string]any{"fact": fact, "contradictions": contradictions}
+		if merge != nil && merge.NewIsRicher {
+			serviceMetrics.Count(telemetry.MetricUserModelChanges,
+				map[string]string{"change": "fact_merged"},
+				telemetry.Correlation{Tenant: identity.TenantID})
+			response["merged_fact_id"] = merge.ExistingFact.ID
+		}
+		s.maybePromoteToOKF(&fact, identity.TenantID)
+		writeJSON(w, response)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (s *engineServer) handleFactByID(w http.ResponseWriter, r *http.Request) {
+// handleFactsForgetAll implements bulk scos_forget / mem0's delete_all and
+// reset (§25/§42): DELETE /v1/facts?namespace_id=X&confirm=true revokes every
+// active fact in that namespace; omitting namespace_id revokes every active
+// fact for the whole tenant (a reset of this tenant's factual memory).
+// confirm=true is mandatory in both cases — this is bulk and irreversible in
+// intent (soft-deleted, not physically removed, but not meant to be routine).
+func (s *engineServer) handleFactsForgetAll(w http.ResponseWriter, r *http.Request) {
 	identity, status, msg := resolveIdentityFromRequest(r)
 	if status != 0 {
 		http.Error(w, msg, status)
 		return
 	}
+	if r.URL.Query().Get("confirm") != "true" {
+		http.Error(w, "bulk forget requires confirm=true", http.StatusBadRequest)
+		return
+	}
+	namespaceID := strings.TrimSpace(r.URL.Query().Get("namespace_id"))
+	revoked, err := forgetAllFacts(r.Context(), s.db, identity, namespaceID)
+	if err != nil {
+		http.Error(w, "bulk forget: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	serviceMetrics.Gauge(telemetry.MetricUserModelChanges, float64(revoked), "count",
+		map[string]string{"change": "facts_bulk_forgotten", "namespace_scoped": strconv.FormatBool(namespaceID != "")},
+		telemetry.Correlation{Tenant: identity.TenantID})
+	writeJSON(w, map[string]any{
+		"forgotten":     true,
+		"namespace_id":  namespaceID,
+		"revoked_count": revoked,
+	})
+}
+
+func (s *engineServer) handleFactByID(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/history") {
+		s.handleFactHistory(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/feedback") {
+		s.handleFactFeedback(w, r)
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/facts/")
-	fact, err := getFact(r.Context(), s.db, identity.TenantID, id)
+	if id == "" {
+		http.Error(w, "fact id is required", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		identity, status, msg := resolveIdentityFromRequest(r)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
+		fact, err := getFact(r.Context(), s.db, identity.TenantID, id)
+		if err == sql.ErrNoRows {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		} else if err != nil {
+			http.Error(w, "load fact: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, fact)
+
+	case http.MethodPatch:
+		s.handleFactCorrect(w, r, id)
+
+	case http.MethodDelete:
+		s.handleFactForget(w, r, id)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleFactHistory implements scos_fact_history (mem0's history()):
+// GET /v1/facts/{id}/history returns every version ever recorded for the
+// fact, including versions from before a correction or after a forget — the
+// append-only audit trail behind scos_correct/scos_forget.
+func (s *engineServer) handleFactHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/facts/"), "/history")
+	if id == "" {
+		http.Error(w, "fact id is required", http.StatusBadRequest)
+		return
+	}
+	history, err := loadFactHistory(r.Context(), s.db, identity.TenantID, id)
 	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "load fact history: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"fact_id": id, "history": history})
+}
+
+// handleFactCorrect implements scos_correct (§25/§42): PATCH /v1/facts/{id}
+// with {"content": "...", "reason": "..."} records a new fact carrying the
+// corrected content and marks the old one superseded. See correctFact.
+func (s *engineServer) handleFactCorrect(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct {
+		Content     string `json:"content"`
+		Reason      string `json:"reason"`
+		TenantID    string `json:"tenant_id,omitempty"`
+		PrincipalID string `json:"principal_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Content) == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, body.TenantID, body.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	corrected, err := correctFact(r.Context(), s.db, identity, id, body.Content, body.Reason)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "correct fact: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	serviceMetrics.Count(telemetry.MetricUserModelChanges,
+		map[string]string{"change": "fact_corrected"},
+		telemetry.Correlation{Tenant: identity.TenantID})
+	s.maybePromoteToOKF(corrected, identity.TenantID)
+	writeJSON(w, map[string]any{
+		"corrected":        true,
+		"previous_fact_id": id,
+		"fact":             corrected,
+	})
+}
+
+// okfCategories are the only valid targets for an auto-generated OKF
+// proposal (§26's recommended okf/ structure). "memory" is deliberately not
+// one of these -- a flat per-fact bucket is exactly the Markdown landfill
+// OKF exists to avoid. A promoted fact lands in the same curated tree a
+// human author would use.
+var okfCategories = map[string]bool{
+	"governance": true, "architecture": true, "projects": true,
+	"infrastructure": true, "procedures": true, "tools": true,
+	"decisions": true, "glossary": true,
+}
+
+var okfSlugSanitizer = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// maybePromoteToOKF implements the automatic half of §16/§26. The
+// authority/confidence threshold (SCOS_OKF_PROMOTION_*) is only a cheap
+// pre-filter to avoid spending an LLM call on every low-grade fact; the
+// real durability gate is the model itself, prompted to reject anything
+// that isn't governing policy, an architecture/project/infrastructure
+// concept, a durable confirmed fact about a real entity, a procedure, tool
+// documentation, a decision, or a glossary term -- exactly the "belongs in
+// OKF" list, not raw conversational content. When the model says a fact
+// doesn't qualify, or DEEPSEEK_API_KEY isn't configured, nothing happens:
+// this is additive and silent, never a requirement for the fact write it
+// followed to succeed.
+//
+// What it produces either way is a *proposal*, never a merge -- the
+// existing OKF workflow (proposed -> validated -> diffed -> under_review ->
+// approved -> merged -> indexed) still requires an independent
+// knowledge_curator (or role-appropriate reviewer) to approve it. Nothing
+// here bypasses that; it only decides whether a proposal is worth opening
+// and how to shape it.
+func (s *engineServer) maybePromoteToOKF(fact *Fact, tenantID string) {
+	if fact == nil || fact.Authority < s.okfAuthorityThresh || fact.Confidence < s.okfConfidenceThresh {
+		return
+	}
+	if !llmClient.Enabled() || s.okfSynchroniserURL == "" || s.internalServiceToken == "" || s.httpClient == nil {
+		return
+	}
+
+	candidate, err := classifyForOKF(context.Background(), fact)
+	if err != nil {
+		log.Printf("okf classification for fact %s: %v", fact.ID, err)
+		return
+	}
+	if candidate == nil {
+		return // model judged this fact not durable/structural enough for OKF
+	}
+
+	path := candidate.Category + "/" + candidate.Slug + ".md"
+	body, err := json.Marshal(map[string]any{
+		"path":     path,
+		"content":  candidate.render(fact),
+		"proposer": "system:memory-intelligence-auto-promotion",
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.okfSynchroniserURL+"/v1/proposals", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.internalServiceToken)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		log.Printf("okf promotion proposal for fact %s: %v", fact.ID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		log.Printf("okf promotion proposal for fact %s (%s): %s: %s", fact.ID, path, resp.Status, strings.TrimSpace(string(respBody)))
+		return
+	}
+	serviceMetrics.Count(telemetry.MetricUserModelChanges,
+		map[string]string{"change": "fact_okf_proposal_opened", "category": candidate.Category},
+		telemetry.Correlation{Tenant: tenantID})
+}
+
+// okfCandidate is what the model decides when asked whether, and how, a
+// fact should become an OKF document.
+type okfCandidate struct {
+	Category  string   `json:"category"`
+	Slug      string   `json:"slug"`
+	Title     string   `json:"title"`
+	Type      string   `json:"type"`
+	Status    string   `json:"status"`
+	Authority string   `json:"authority"`
+	Tags      []string `json:"tags"`
+	Summary   string   `json:"summary"`
+}
+
+// render produces the exact YAML-frontmatter Markdown shape OKF documents
+// use elsewhere in this repository (see okf/glossary/index.md and
+// GOVERNANCE.md §26): id, title, type, status, version, scope, authority,
+// timestamps, evidence linking back to the source fact, and tags.
+func (c *okfCandidate) render(fact *Fact) string {
+	now := time.Now().UTC().Format(time.RFC3339)
+	var tags strings.Builder
+	for _, t := range c.Tags {
+		fmt.Fprintf(&tags, "  - %s\n", t)
+	}
+	return fmt.Sprintf(`---
+id: %s.%s
+title: %s
+type: %s
+status: %s
+version: 1
+scope:
+  - system/governance
+authority: %s
+created_at: %s
+updated_at: %s
+evidence:
+  - fact: %s
+tags:
+%s---
+
+# %s
+
+%s
+`, c.Category, c.Slug, c.Title, c.Type, c.Status, c.Authority, now, now, fact.ID, tags.String(), c.Title, c.Summary)
+}
+
+// classifyForOKF asks the model whether fact is durable/structural enough
+// to become curated OKF knowledge and, if so, how to place and shape it.
+// Returns (nil, nil) -- not an error -- when the model judges the fact does
+// not belong in OKF; that is the expected, common outcome, not a failure.
+func classifyForOKF(ctx context.Context, fact *Fact) (*okfCandidate, error) {
+	llmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	var result struct {
+		Durable   bool     `json:"durable"`
+		Category  string   `json:"category"`
+		Slug      string   `json:"slug"`
+		Title     string   `json:"title"`
+		Type      string   `json:"type"`
+		Authority string   `json:"authority"`
+		Tags      []string `json:"tags"`
+		Summary   string   `json:"summary"`
+	}
+	err := llmClient.ChatJSON(llmCtx,
+		`You decide whether a piece of remembered information is durable enough to become permanent, curated knowledge in an Open Knowledge Format (OKF) repository, and if so, how to classify it.
+
+OKF is NOT a dump for every fact -- reject anything that is a one-off observation, unverified inferred fact, temporary state, narrow personal preference, or ordinary conversational content. Only accept: governing policies, architecture/design decisions, stable project or infrastructure concepts (hosts, services, tools), confirmed durable facts about real entities and their relationships, standard operating procedures, tool documentation, approved workflows, and terminology.
+
+Respond with a JSON object of exactly this shape:
+{"durable": true or false, "category": "one of governance|architecture|projects|infrastructure|procedures|tools|decisions|glossary", "slug": "lowercase-hyphenated-id-no-slashes", "title": "short human title", "type": "e.g. architecture-decision, host, policy, concept, procedure, tool", "authority": "one of governing|confirmed|approved|candidate", "tags": ["a few lowercase tags"], "summary": "1-3 sentence body content, factual, no speculation"}
+
+If durable is false, category/slug/title/type/authority/tags/summary may be empty strings/arrays -- do not fabricate placement for content that doesn't belong in OKF.`,
+		fmt.Sprintf("network: %s\nnamespace: %s\ncontent: %s", fact.Network, fact.NamespaceID, fact.Content),
+		&result)
+	if err != nil {
+		return nil, err
+	}
+	if !result.Durable {
+		return nil, nil
+	}
+	if !okfCategories[result.Category] {
+		return nil, fmt.Errorf("model chose invalid category %q", result.Category)
+	}
+	slug := strings.Trim(okfSlugSanitizer.ReplaceAllString(strings.ToLower(strings.TrimSpace(result.Slug)), "-"), "-")
+	if slug == "" {
+		return nil, fmt.Errorf("model returned an empty slug")
+	}
+	if strings.TrimSpace(result.Title) == "" || strings.TrimSpace(result.Summary) == "" {
+		return nil, fmt.Errorf("model returned an empty title or summary")
+	}
+	authority := result.Authority
+	switch authority {
+	case "governing", "confirmed", "approved", "candidate":
+	default:
+		authority = "candidate"
+	}
+	statusVal := "proposed"
+	typeVal := strings.TrimSpace(result.Type)
+	if typeVal == "" {
+		typeVal = "concept"
+	}
+	return &okfCandidate{
+		Category: result.Category, Slug: slug, Title: strings.TrimSpace(result.Title),
+		Type: typeVal, Status: statusVal, Authority: authority,
+		Tags: result.Tags, Summary: strings.TrimSpace(result.Summary),
+	}, nil
+}
+
+// handleFactForget implements scos_forget (§25/§42): DELETE /v1/facts/{id}
+// soft-deletes the fact (status='revoked'). ?cascade=true also revokes the
+// fact's superseded predecessor chain (see forgetFact).
+func (s *engineServer) handleFactForget(w http.ResponseWriter, r *http.Request, id string) {
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	cascade := r.URL.Query().Get("cascade") == "true"
+	revoked, err := forgetFact(r.Context(), s.db, identity, id, cascade)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "forget fact: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	serviceMetrics.Count(telemetry.MetricUserModelChanges,
+		map[string]string{"change": "fact_forgotten", "cascade": strconv.FormatBool(cascade)},
+		telemetry.Correlation{Tenant: identity.TenantID})
+	writeJSON(w, map[string]any{
+		"forgotten":     true,
+		"id":            id,
+		"cascade":       cascade,
+		"revoked_count": revoked,
+		"revoked_at":    time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+// handleFactFeedback implements scos_fact_feedback (mem0's feedback()):
+// POST /v1/facts/{id}/feedback with {"feedback":"POSITIVE|NEGATIVE|VERY_NEGATIVE","reason":"..."}
+// records quality signal against a fact without acting on it. See
+// recordFactFeedback.
+func (s *engineServer) handleFactFeedback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/facts/"), "/feedback")
+	if id == "" {
+		http.Error(w, "fact id is required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Feedback    string `json:"feedback"`
+		Reason      string `json:"reason"`
+		TenantID    string `json:"tenant_id,omitempty"`
+		PrincipalID string `json:"principal_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, body.TenantID, body.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	if _, err := getFact(r.Context(), s.db, identity.TenantID, id); err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	} else if err != nil {
 		http.Error(w, "load fact: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, fact)
+	feedback := strings.ToUpper(strings.TrimSpace(body.Feedback))
+	if err := recordFactFeedback(r.Context(), s.db, identity, id, feedback, body.Reason); err != nil {
+		http.Error(w, "record feedback: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	serviceMetrics.Count(telemetry.MetricUserModelChanges,
+		map[string]string{"change": "fact_feedback", "feedback": feedback},
+		telemetry.Correlation{Tenant: identity.TenantID})
+	writeJSON(w, map[string]any{"recorded": true, "fact_id": id, "feedback": feedback})
+}
+
+// batchLimit caps batch fact operations at a defensible size: large enough
+// for real agent workflows, small enough that one request can't tie up the
+// database indefinitely or be used to bulk-drain the tenant one call at a time.
+const batchLimit = 100
+
+// handleFactsBatchCorrect implements scos_correct_batch (mem0's
+// batch_update): POST /v1/facts/batch-correct with
+// {"corrections":[{"memory_id":"...","value":"...","reason":"..."}]}.
+// Each correction is applied independently in its own transaction (via
+// correctFact) — one bad ID in the batch does not roll back the others.
+func (s *engineServer) handleFactsBatchCorrect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Corrections []struct {
+			MemoryID string `json:"memory_id"`
+			Value    string `json:"value"`
+			Reason   string `json:"reason"`
+		} `json:"corrections"`
+		TenantID    string `json:"tenant_id,omitempty"`
+		PrincipalID string `json:"principal_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(body.Corrections) == 0 {
+		http.Error(w, "corrections must not be empty", http.StatusBadRequest)
+		return
+	}
+	if len(body.Corrections) > batchLimit {
+		http.Error(w, fmt.Sprintf("corrections must not exceed %d items", batchLimit), http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, body.TenantID, body.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+
+	results := make([]map[string]any, 0, len(body.Corrections))
+	succeeded := 0
+	for _, c := range body.Corrections {
+		if strings.TrimSpace(c.Value) == "" {
+			results = append(results, map[string]any{"memory_id": c.MemoryID, "ok": false, "error": "content required"})
+			continue
+		}
+		corrected, err := correctFact(r.Context(), s.db, identity, c.MemoryID, c.Value, c.Reason)
+		if err != nil {
+			results = append(results, map[string]any{"memory_id": c.MemoryID, "ok": false, "error": err.Error()})
+			continue
+		}
+		succeeded++
+		results = append(results, map[string]any{"memory_id": c.MemoryID, "ok": true, "fact": corrected})
+	}
+	serviceMetrics.Count(telemetry.MetricUserModelChanges,
+		map[string]string{"change": "facts_batch_corrected"},
+		telemetry.Correlation{Tenant: identity.TenantID})
+	writeJSON(w, map[string]any{"succeeded": succeeded, "failed": len(results) - succeeded, "results": results})
+}
+
+// handleFactsBatchForget implements scos_forget_batch (mem0's batch_delete):
+// POST /v1/facts/batch-forget with {"memory_ids":["...","..."],"cascade":false}.
+// Each forget is applied independently (via forgetFact) — one bad ID in the
+// batch does not fail the others.
+func (s *engineServer) handleFactsBatchForget(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		MemoryIDs   []string `json:"memory_ids"`
+		Cascade     bool     `json:"cascade"`
+		TenantID    string   `json:"tenant_id,omitempty"`
+		PrincipalID string   `json:"principal_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(body.MemoryIDs) == 0 {
+		http.Error(w, "memory_ids must not be empty", http.StatusBadRequest)
+		return
+	}
+	if len(body.MemoryIDs) > batchLimit {
+		http.Error(w, fmt.Sprintf("memory_ids must not exceed %d items", batchLimit), http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, body.TenantID, body.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+
+	results := make([]map[string]any, 0, len(body.MemoryIDs))
+	succeeded, totalRevoked := 0, 0
+	for _, memoryID := range body.MemoryIDs {
+		revoked, err := forgetFact(r.Context(), s.db, identity, memoryID, body.Cascade)
+		if err != nil {
+			results = append(results, map[string]any{"memory_id": memoryID, "ok": false, "error": err.Error()})
+			continue
+		}
+		succeeded++
+		totalRevoked += revoked
+		results = append(results, map[string]any{"memory_id": memoryID, "ok": true, "revoked_count": revoked})
+	}
+	serviceMetrics.Count(telemetry.MetricUserModelChanges,
+		map[string]string{"change": "facts_batch_forgotten", "cascade": strconv.FormatBool(body.Cascade)},
+		telemetry.Correlation{Tenant: identity.TenantID})
+	writeJSON(w, map[string]any{
+		"succeeded": succeeded, "failed": len(results) - succeeded,
+		"total_revoked": totalRevoked, "results": results,
+	})
 }
 
 // ── entities ─────────────────────────────────────────────────────────────
@@ -1030,6 +1645,17 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 			"type": rel.Type,
 		})
 	}
+	// Entity-mention edges: linkEntityMentions (store.go) records, on every
+	// fact write, which entities that fact's content mentions. Surface those
+	// here so the graph shows entity<->fact links the way mem0's entity
+	// store does, not just fact<->fact relations.
+	for _, e := range entities {
+		for _, factID := range e.Facts {
+			edges = append(edges, map[string]any{
+				"source": e.ID, "target": factID, "type": "mentions",
+			})
+		}
+	}
 
 	writeJSON(w, map[string]any{
 		"type":  "memory_graph",
@@ -1045,7 +1671,11 @@ func (s *engineServer) handleDashboardFacts(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	network := r.URL.Query().Get("network")
-	facts, err := loadFacts(r.Context(), s.db, identity.TenantID, network)
+	loader := loadFacts
+	if r.URL.Query().Get("include_merged") == "true" {
+		loader = loadFactsIncludingMerged
+	}
+	facts, err := loader(r.Context(), s.db, identity.TenantID, network)
 	if err != nil {
 		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1059,6 +1689,111 @@ func (s *engineServer) handleDashboardFacts(w http.ResponseWriter, r *http.Reque
 		TotalCount:  len(facts),
 		LastUpdated: time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// handleDashboardSummary implements scos_memory_summary (mem0 Platform's
+// get_summary): GET /v1/dashboard/summary?network=&max_facts= produces a
+// natural-language summary of the caller's facts. When llmClient is
+// configured it asks the model for a real summary; otherwise it falls back
+// to a deterministic network-grouped digest and says so explicitly in
+// "mode" -- §42 forbids presenting the fallback as if it were model-
+// generated prose.
+func (s *engineServer) handleDashboardSummary(w http.ResponseWriter, r *http.Request) {
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	network := r.URL.Query().Get("network")
+	facts, err := loadFacts(r.Context(), s.db, identity.TenantID, network)
+	if err != nil {
+		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sort.Slice(facts, func(i, j int) bool { return facts[i].RecordedAt > facts[j].RecordedAt })
+
+	maxFacts := 200
+	if raw := r.URL.Query().Get("max_facts"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			maxFacts = clampInt(n, 1, 500)
+		}
+	}
+	if len(facts) > maxFacts {
+		facts = facts[:maxFacts]
+	}
+
+	if len(facts) == 0 {
+		writeJSON(w, map[string]any{
+			"type": "summary", "mode": "empty", "summary": "No active facts to summarize.",
+			"fact_count": 0, "last_updated": time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	if summary, themes, err := summarizeFactsWithLLM(r.Context(), facts); err == nil {
+		writeJSON(w, map[string]any{
+			"type": "summary", "mode": "llm_generated", "summary": summary, "themes": themes,
+			"fact_count": len(facts), "last_updated": time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"type": "summary", "mode": "deterministic_fallback",
+		"summary":      summarizeFactsDeterministic(facts),
+		"fact_count":   len(facts),
+		"last_updated": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+// summarizeFactsWithLLM asks llmClient for a short prose summary plus a
+// handful of named themes across facts. Returns an error (never a fabricated
+// summary) if the client is disabled or the call fails, so the caller can
+// fall back honestly.
+func summarizeFactsWithLLM(ctx context.Context, facts []*Fact) (string, []string, error) {
+	if !llmClient.Enabled() {
+		return "", nil, llmclient.ErrDisabled
+	}
+	var b strings.Builder
+	for i, f := range facts {
+		fmt.Fprintf(&b, "%d. [%s] %s\n", i+1, f.Network, truncateContent(f.Content, 300))
+	}
+	llmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	var result struct {
+		Summary string   `json:"summary"`
+		Themes  []string `json:"themes"`
+	}
+	err := llmClient.ChatJSON(llmCtx,
+		`You summarize a list of stored memory facts for a user. Respond with a JSON object of the exact shape {"summary": "2-4 sentence prose summary", "themes": ["short theme 1", "short theme 2"]}. Be factual and concise; do not invent facts not present in the list. List at most 6 themes.`,
+		b.String(), &result)
+	if err != nil {
+		return "", nil, err
+	}
+	if strings.TrimSpace(result.Summary) == "" {
+		return "", nil, fmt.Errorf("model returned an empty summary")
+	}
+	return result.Summary, result.Themes, nil
+}
+
+// summarizeFactsDeterministic is the no-LLM fallback: a network-grouped
+// count digest. It makes no claim to prose quality — it is data, formatted
+// as a sentence, not a generated summary.
+func summarizeFactsDeterministic(facts []*Fact) string {
+	counts := make(map[MemoryNetwork]int)
+	for _, f := range facts {
+		counts[f.Network]++
+	}
+	networks := make([]string, 0, len(counts))
+	for n := range counts {
+		networks = append(networks, string(n))
+	}
+	sort.Strings(networks)
+	parts := make([]string, 0, len(networks))
+	for _, n := range networks {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[MemoryNetwork(n)], n))
+	}
+	return fmt.Sprintf("%d active facts: %s.", len(facts), strings.Join(parts, ", "))
 }
 
 func (s *engineServer) handleDashboardLearnings(w http.ResponseWriter, r *http.Request) {
@@ -1092,14 +1827,27 @@ func (s *engineServer) handleDashboardContradictions(w http.ResponseWriter, r *h
 		http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Load every fact once and index by ID. The previous N+1 (getFact per
+	// relation endpoint, each loading the full fact set) turned ~1k relations
+	// into ~2k full-table scans; with a big relation set the contradictions
+	// panel took minutes. One query, one map, O(1) lookups.
+	facts, err := loadFacts(ctx, s.db, identity.TenantID, "")
+	if err != nil {
+		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	byID := make(map[string]*Fact, len(facts))
+	for _, f := range facts {
+		byID[f.ID] = f
+	}
 	var contra []map[string]any
 	for _, rel := range relations {
 		if rel.Type != "contradicts" {
 			continue
 		}
-		f1, err1 := getFact(ctx, s.db, identity.TenantID, rel.SourceID)
-		f2, err2 := getFact(ctx, s.db, identity.TenantID, rel.TargetID)
-		if err1 == nil && err2 == nil {
+		f1, ok1 := byID[rel.SourceID]
+		f2, ok2 := byID[rel.TargetID]
+		if ok1 && ok2 {
 			contra = append(contra, map[string]any{
 				"fact_a":       f1.Content,
 				"fact_b":       f2.Content,
@@ -1234,7 +1982,10 @@ func (s *engineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		case <-poll.C:
 			events, err := loadTransparencyEvents(r.Context(), s.db, identity.TenantID, lastSequence, 100)
 			if err != nil {
-				http.Error(w, "load transparency events: "+err.Error(), http.StatusServiceUnavailable)
+				// Headers and the "connected" frame are already flushed —
+				// http.Error here would emit a superfluous WriteHeader. Log
+				// and terminate the stream; the client reconnects.
+				log.Printf("transparency stream: load events: %v", err)
 				return
 			}
 			for _, event := range events {
@@ -1367,6 +2118,123 @@ func isContradictory(a, b *Fact) bool {
 	}
 
 	return sharedTerms >= 1
+}
+
+// ── Dream-style Merge (§16/§25) ─────────────────────────────────────────
+
+func significantWords(content string) []string {
+	words := strings.Fields(strings.ToLower(content))
+	out := make([]string, 0, len(words))
+	for _, w := range words {
+		if len(w) > 3 {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// overlapScore is the fraction of significant words (len > 3) the shorter
+// of a/b's content shares with the longer, restricted to the same
+// network/scope. It is a cheap shortlist filter, not the merge decision
+// itself -- see findMergeCandidate.
+func overlapScore(a, b *Fact) float64 {
+	if a.Network != b.Network || a.Scope != b.Scope {
+		return 0
+	}
+	aWords := significantWords(a.Content)
+	bWords := significantWords(b.Content)
+	if len(aWords) == 0 || len(bWords) == 0 {
+		return 0
+	}
+	bSet := make(map[string]bool, len(bWords))
+	for _, w := range bWords {
+		bSet[w] = true
+	}
+	seen := make(map[string]bool)
+	shared := 0
+	for _, w := range aWords {
+		if bSet[w] && !seen[w] {
+			shared++
+			seen[w] = true
+		}
+	}
+	shorter := len(aWords)
+	if len(bWords) < shorter {
+		shorter = len(bWords)
+	}
+	return float64(shared) / float64(shorter)
+}
+
+// mergeDuplicateThreshold is the minimum heuristic overlap score before a
+// candidate is even worth an LLM call to confirm as a duplicate -- keeps
+// the LLM call bounded to genuinely close candidates instead of running on
+// every write.
+const mergeDuplicateThreshold = 0.5
+const maxMergeCandidates = 3
+
+type mergeDecision struct {
+	ExistingFact *Fact
+	NewIsRicher  bool
+}
+
+// findMergeCandidate implements Dream's Merge duplicate-detection: a new
+// fact that's an exact or near-exact restatement of an existing one should
+// fold into a single canonical memory rather than create a second copy.
+// isContradictory candidates are excluded up front -- a fact that
+// contradicts an existing one belongs on the correction path
+// (scos_correct), not the duplicate path. Returns nil when nothing looks
+// like a duplicate, which is the common case.
+func findMergeCandidate(ctx context.Context, fact *Fact, existing []*Fact) *mergeDecision {
+	type scored struct {
+		fact  *Fact
+		score float64
+	}
+	var candidates []scored
+	for _, other := range existing {
+		if isContradictory(fact, other) {
+			continue
+		}
+		if score := overlapScore(fact, other); score >= mergeDuplicateThreshold {
+			candidates = append(candidates, scored{other, score})
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	if len(candidates) > maxMergeCandidates {
+		candidates = candidates[:maxMergeCandidates]
+	}
+
+	if !llmClient.Enabled() {
+		// Deterministic fallback: only trust a very high heuristic overlap,
+		// and keep whichever content is longer as canonical.
+		top := candidates[0]
+		if top.score < 0.85 {
+			return nil
+		}
+		return &mergeDecision{ExistingFact: top.fact, NewIsRicher: len(fact.Content) >= len(top.fact.Content)}
+	}
+
+	var options strings.Builder
+	for i, c := range candidates {
+		fmt.Fprintf(&options, "%d. id=%s: %s\n", i, c.fact.ID, c.fact.Content)
+	}
+	llmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var result struct {
+		IsDuplicate    bool   `json:"is_duplicate"`
+		CandidateIndex int    `json:"candidate_index"`
+		Richer         string `json:"richer"`
+	}
+	err := llmClient.ChatJSON(llmCtx,
+		`You decide whether a new fact is a duplicate or near-duplicate restatement of any of the given existing facts (not a correction or contradiction -- those are a different case and won't appear here). Respond with a JSON object of the exact shape {"is_duplicate": true or false, "candidate_index": the numbered index of the matching existing fact if is_duplicate is true else -1, "richer": "new" or "existing" -- whichever states the same information more completely}. Be conservative: only mark is_duplicate true when the new fact and the existing one genuinely restate the same underlying information.`,
+		fmt.Sprintf("New fact: %s\n\nExisting candidates:\n%s", fact.Content, options.String()),
+		&result)
+	if err != nil || !result.IsDuplicate || result.CandidateIndex < 0 || result.CandidateIndex >= len(candidates) {
+		return nil
+	}
+	return &mergeDecision{ExistingFact: candidates[result.CandidateIndex].fact, NewIsRicher: result.Richer != "existing"}
 }
 
 // ── utility ──────────────────────────────────────────────────────────────

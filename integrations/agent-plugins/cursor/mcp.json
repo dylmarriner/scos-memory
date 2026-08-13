@@ -1,0 +1,6 @@
+{
+  "name": "scos",
+  "command": "sh",
+  "args": ["-c", "exec python3 -E \"$HOME/.hermes/scripts/scos-mcp-bridge.py\""],
+  "env": {"SCOS_AGENT_NAME": "cursor"}
+}

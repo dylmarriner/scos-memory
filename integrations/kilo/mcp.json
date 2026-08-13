@@ -1,0 +1,7 @@
+{
+  "scos": {
+    "type": "local",
+    "command": ["/usr/bin/python3", "-E", "/home/kubuntux/.hermes/scripts/scos-mcp-bridge.py"],
+    "environment": { "SCOS_AGENT_NAME": "kilo" }
+  }
+}

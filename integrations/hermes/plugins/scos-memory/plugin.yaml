@@ -1,0 +1,4 @@
+name: scos-memory
+version: "1.0.0"
+description: SCOS Nexus Memory Fabric tools for Hermes Agent.
+author: SCOS Core Team

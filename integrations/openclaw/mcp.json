@@ -1,0 +1,8 @@
+{
+  "scos": {
+    "command": "python3",
+    "args": ["-E", "/home/kubuntux/.hermes/scripts/scos-mcp-bridge.py"],
+    "env": { "SCOS_AGENT_NAME": "openclaw" },
+    "enabled": true
+  }
+}

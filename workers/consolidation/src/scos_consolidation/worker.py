@@ -26,9 +26,11 @@ from psycopg.rows import dict_row
 from .conflicts import ConflictSet, detect_conflicts
 from .dedup import deduplicate
 from .extractor import extract_candidates
+from .llm_enrichment import enrich_candidates
 from .models import MemoryCandidate
 from .promoter import evaluate_promotion, build_memory_item, build_memory_version
 from .review import requires_human_review, apply_review
+from .synthesis import run_synthesis_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,13 @@ DATABASE_URL = os.environ.get(
     "SCOS_DATABASE_URL",
     os.environ.get("DATABASE_URL", ""),
 )
+
+# Synthesis (Dream) runs on its own, much coarser clock than the per-job
+# outbox poll: per-namespace eligibility is itself cadence-gated inside
+# run_synthesis_cycle (SCOS_SYNTHESIS_CADENCE_HOURS), so this only needs to
+# bound how often that check runs at all -- no reason to query every
+# namespace's eligibility every 5-second poll tick.
+SYNTHESIS_CHECK_INTERVAL_SECONDS = float(os.environ.get("SCOS_SYNTHESIS_CHECK_INTERVAL_SECONDS", "3600"))
 
 
 def require_tls_database_url(value: str) -> None:
@@ -64,10 +73,16 @@ def main() -> None:
     require_tls_database_url(DATABASE_URL)
 
     logger.info("consolidation worker starting, poll_interval=%ds", POLL_INTERVAL_SECONDS)
+    next_synthesis_check = 0.0
     while True:
         try:
             with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
                 _process_cycle(conn)
+                if time.monotonic() >= next_synthesis_check:
+                    next_synthesis_check = time.monotonic() + SYNTHESIS_CHECK_INTERVAL_SECONDS
+                    written = run_synthesis_cycle(conn)
+                    if written:
+                        logger.info("synthesis: %d pattern fact(s) written this cycle", written)
         except Exception:
             logger.exception("cycle failed")
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -152,6 +167,12 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
         logger.info("turn %s: no extractable candidates", turn_id)
         _mark_completed(conn, job_id)
         return
+
+    # ── 2.5. Optional LLM rewrite of title/content for clarity ───────
+    # No-op (returns candidates unchanged) unless DEEPSEEK_API_KEY is set;
+    # never touches memory_class/authority/confidence/sensitivity -- those
+    # stay governed by the deterministic heuristics above.
+    candidates = enrich_candidates(candidates)
 
     # ── 3. Load existing context for dedup and conflict detection ────
     namespace_id = candidates[0].namespace_id

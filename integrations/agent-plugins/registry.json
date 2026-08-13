@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "bridge": "~/.hermes/scripts/scos-mcp-bridge.py",
+  "agents": [
+    {"id": "claude-code", "path": "../claude", "kind": "native-plugin", "agent_name": "claude-code"},
+    {"id": "codex", "path": "../codex", "kind": "native-plugin", "agent_name": "codex"},
+    {"id": "hermes-agent", "path": "../hermes", "kind": "native-plugin", "agent_name": "hermes-agent"},
+    {"id": "kilo", "path": "../kilo", "kind": "native-plugin", "agent_name": "kilo"},
+    {"id": "opencode", "path": "../opencode", "kind": "native-plugin", "agent_name": "opencode"},
+    {"id": "openclaw", "path": "../openclaw", "kind": "native-plugin", "agent_name": "openclaw"},
+    {"id": "qwen-code", "path": "../qwen", "kind": "native-plugin", "agent_name": "qwen"},
+    {"id": "gemini-cli", "path": "gemini", "kind": "extension", "agent_name": "gemini-cli"},
+    {"id": "cline", "path": "cline", "kind": "mcp-and-rules", "agent_name": "cline"},
+    {"id": "cursor", "path": "cursor", "kind": "mcp-and-rules", "agent_name": "cursor"},
+    {"id": "windsurf-devin", "path": "windsurf", "kind": "mcp-and-rules", "agent_name": "windsurf-devin"},
+    {"id": "antigravity", "path": "antigravity", "kind": "mcp-and-rules", "agent_name": "antigravity"},
+    {"id": "continue", "path": "continue", "kind": "mcp-and-rules", "agent_name": "continue"},
+    {"id": "aider", "path": "aider", "kind": "rules-bundle", "agent_name": "aider"}
+  ]
+}

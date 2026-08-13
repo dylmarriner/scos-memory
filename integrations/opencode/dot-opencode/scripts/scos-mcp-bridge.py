@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
 SCOS Nexus Memory Fabric — stdio MCP bridge for external agents (kilo, codex,
-Claude Code, OpenAI tunnel). Talks to the SCOS hermes-provider on rabuntu and
-exposes the 7 governed tools (scos_recall, scos_status, scos_explain,
-scos_user_model, scos_memory_graph, scos_correct, scos_forget) over stdio MCP.
+Claude Code, OpenAI tunnel). Talks to the SCOS hermes-provider on kubuntux and
+exposes the 7 governed memory tools (scos_recall, scos_status, scos_explain,
+scos_user_model, scos_memory_graph, scos_correct, scos_forget) PLUS the 3 code
+intelligence tools (scos_code_index, scos_code_query, scos_code_impact) over
+stdio MCP. Code tools route directly to code-intelligence :8084 (control-plane
+protected: bearer + X-SCOS-Control-Plane-Token + tenant header).
 
 Config comes from ~/.hermes/scos.env:
   SCOS_HERMES_PROVIDER_URL  base URL (default https://100.68.0.96:8088)
-  SCOS_HERMES_BEARER_TOKEN  internal service token
+  SCOS_HERMES_BEARER_TOKEN  internal service token / claims JWT
+  SCOS_CODE_INTELLIGENCE_URL  code-intelligence base (default https://100.93.75.87:8084)
+  SCOS_CONTROL_PLANE_TOKEN  control-plane token for code-intelligence
   SCOS_TENANT_ID / SCOS_PRINCIPAL_ID / SCOS_NAMESPACE_ID  identity
   SCOS_TLS_CA_PATH          CA for TLS verification (optional)
 
@@ -29,6 +34,7 @@ ENV_PATH = os.path.expanduser("~/.hermes/scos.env")
 
 DEFAULTS = {
     "SCOS_HERMES_PROVIDER_URL": "https://100.68.0.96:8088",
+    "SCOS_CODE_INTELLIGENCE_URL": "https://100.93.75.87:8084",
     "SCOS_TENANT_ID": "11111111-2222-3333-4444-555555555555",
     "SCOS_PRINCIPAL_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     "SCOS_NAMESPACE_ID": "bbbbbbbb-1111-2222-3333-444444444444",
@@ -54,7 +60,9 @@ def load_env():
 
 ENV = load_env()
 BASE_URL = ENV["SCOS_HERMES_PROVIDER_URL"].rstrip("/")
+CODE_URL = ENV["SCOS_CODE_INTELLIGENCE_URL"].rstrip("/")
 TOKEN = ENV.get("SCOS_HERMES_BEARER_TOKEN", "")
+CONTROL_PLANE_TOKEN = ENV.get("SCOS_CONTROL_PLANE_TOKEN", "")
 TENANT_ID = ENV["SCOS_TENANT_ID"]
 PRINCIPAL_ID = ENV["SCOS_PRINCIPAL_ID"]
 CA_PATH = ENV.get("SCOS_TLS_CA_PATH", "")
@@ -73,8 +81,11 @@ def log(msg):
 def ssl_ctx():
     ctx = ssl.create_default_context(cafile=CA_PATH) if CA_PATH and os.path.exists(CA_PATH) else ssl.create_default_context()
     ctx.check_hostname = False
-    if not (CA_PATH and os.path.exists(CA_PATH)):
-        ctx.verify_mode = ssl.CERT_NONE
+    # The internal cert is a self-signed leaf (O=scos-internal-dev); the
+    # "CA" file at ~/.hermes/scos-ca.crt is that same leaf, so it can never
+    # verify as a trust anchor. This is an internal tailnet service — match
+    # the scos-nexus plugin's behaviour and skip peer verification entirely.
+    ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
@@ -106,6 +117,41 @@ def provider_post(path, payload, timeout=30.0):
         return {"error": {"code": e.code, "message": body[:500]}}
     except Exception as e:
         log(f"{path} transport error: {e}")
+        return {"error": {"code": -1, "message": str(e)}}
+
+
+def code_headers():
+    h = {
+        "Content-Type": "application/json",
+        "X-SCOS-Tenant-ID": TENANT_ID,
+    }
+    if TOKEN:
+        h["Authorization"] = "Bearer " + TOKEN
+    if CONTROL_PLANE_TOKEN:
+        h["X-SCOS-Control-Plane-Token"] = CONTROL_PLANE_TOKEN
+    return h
+
+
+def code_post(path, payload, timeout=30.0):
+    """POST to code-intelligence (:8084). Control-plane protected: needs the
+    bearer (internal token or claims JWT) PLUS X-SCOS-Control-Plane-Token PLUS
+    the tenant header — the plain provider headers() are NOT enough."""
+    req = urllib.request.Request(
+        CODE_URL + path,
+        data=json.dumps(payload or {}).encode(),
+        headers=code_headers(),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx()) as resp:
+            body = resp.read().decode()
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        log(f"code-intelligence {path} HTTP {e.code}: {body[:300]}")
+        return {"error": {"code": e.code, "message": body[:500]}}
+    except Exception as e:
+        log(f"code-intelligence {path} transport error: {e}")
         return {"error": {"code": -1, "message": str(e)}}
 
 
@@ -172,6 +218,51 @@ STATIC_TOOLS = [
         },
         "name": "scos_correct",
     },
+    {
+        "description": "Index (or re-index) files in a repository for code intelligence search",
+        "inputSchema": {
+            "properties": {
+                "commit_id": {"description": "Commit SHA being indexed", "type": "string"},
+                "files": {"description": "File paths to index", "items": {"type": "string"}, "type": "array"},
+                "repository_id": {"description": "Repository identifier (e.g. repo-1)", "type": "string"},
+            },
+            "required": ["repository_id", "files"],
+            "type": "object",
+        },
+        "name": "scos_code_index",
+    },
+    {
+        "description": "Query indexed code by symbol, path, or natural-language intent",
+        "inputSchema": {
+            "properties": {
+                "branch": {"description": "Branch filter", "type": "string"},
+                "include_docs": {"description": "Include doc comments in results", "type": "boolean"},
+                "intent": {"description": "Query intent: exact_lookup, symbol_lookup, reference_search, implementation_search, architecture_question, test_discovery, configuration_lookup, or search", "type": "string"},
+                "language": {"description": "Language filter", "type": "string"},
+                "max_results": {"description": "Max results", "type": "integer"},
+                "path": {"description": "File path filter", "type": "string"},
+                "query": {"description": "Search text", "type": "string"},
+                "repository_id": {"description": "Repository filter", "type": "string"},
+                "symbol_name": {"description": "Symbol name filter", "type": "string"},
+            },
+            "required": ["intent", "query"],
+            "type": "object",
+        },
+        "name": "scos_code_query",
+    },
+    {
+        "description": "Compute the change-impact set for modified symbols in a repository",
+        "inputSchema": {
+            "properties": {
+                "commit_id": {"description": "Commit SHA", "type": "string"},
+                "modified_symbols": {"description": "Symbols that were modified", "items": {"type": "string"}, "type": "array"},
+                "repository_id": {"description": "Repository identifier", "type": "string"},
+            },
+            "required": ["repository_id", "modified_symbols"],
+            "type": "object",
+        },
+        "name": "scos_code_impact",
+    },
 ]
 
 
@@ -183,7 +274,9 @@ def _refresh_once():
     """Background refresh of tool schemas from the provider. Never blocks the
     handshake — the static list is served immediately; live schemas land when
     the provider responds. Normalizes snake_case input_schema to the
-    spec-compliant camelCase inputSchema."""
+    spec-compliant camelCase inputSchema. Code-intelligence tools are ALWAYS
+    kept from STATIC_TOOLS (the provider's tool_schemas only knows the 7
+    memory tools) — the refresh only merges live schemas over them by name."""
     try:
         resp = provider_post("/v1/provider/tool_schemas", {}, timeout=5.0)
         tools = []
@@ -198,7 +291,13 @@ def _refresh_once():
                 t["inputSchema"] = t["input_schema"]
                 t.pop("input_schema", None)
             normalized.append(t)
-        return normalized or STATIC_TOOLS
+        # Start from the full static list (7 memory + 3 code tools), then
+        # overlay any live memory-tool schema the provider returned.
+        merged = [dict(t) for t in STATIC_TOOLS]
+        live_names = {t.get("name") for t in normalized if isinstance(t, dict)}
+        merged = [t for t in merged if t.get("name") not in live_names]
+        merged.extend(normalized)
+        return merged or STATIC_TOOLS
     except Exception as e:
         log(f"live tool refresh failed, using static list: {e}")
     return STATIC_TOOLS
@@ -226,6 +325,24 @@ def handle_tool_call(name, arguments):
     if name == "scos_recall":
         # Provider requires a UUID session_id; inject stable per-agent UUID.
         args.setdefault("session_id", SESSION_UUID)
+    if name == "scos_code_index":
+        # code-intelligence /v1/index — files is REQUIRED, pass through as-is
+        resp = code_post("/v1/index", args)
+        if "error" in resp:
+            return None, resp["error"]
+        return resp, None
+    if name == "scos_code_query":
+        # code-intelligence /v1/query — {intent, query, repository_id?, ...}
+        resp = code_post("/v1/query", args)
+        if "error" in resp:
+            return None, resp["error"]
+        return resp, None
+    if name == "scos_code_impact":
+        # code-intelligence /v1/impact — {repository_id, modified_symbols, commit_id?}
+        resp = code_post("/v1/impact", args)
+        if "error" in resp:
+            return None, resp["error"]
+        return resp, None
     resp = provider_post("/v1/provider/tool_call", {
         "session_id": args.pop("session_id", SESSION_UUID),
         "tenant_id": TENANT_ID,

@@ -1,0 +1,9 @@
+{
+  "name": "@scos/kilo-memory-plugin",
+  "version": "1.0.0",
+  "description": "SCOS Memory Fabric lifecycle plugin for Kilo Code",
+  "type": "module",
+  "main": "index.js",
+  "license": "UNLICENSED",
+  "dependencies": { "@kilocode/plugin": "^7.2.0" }
+}

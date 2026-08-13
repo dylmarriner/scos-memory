@@ -1,0 +1,13 @@
+{
+  "name": "scos-memory-gemini",
+  "version": "1.0.0",
+  "description": "SCOS Memory Fabric for Gemini CLI.",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "scos": {
+      "command": "python3",
+      "args": ["-E", "${extensionPath}/scos-mcp-bridge.py"],
+      "env": {"SCOS_AGENT_NAME": "gemini-cli"}
+    }
+  }
+}

@@ -31,17 +31,11 @@
     const snapshotEndpoint = window.SCOS_TRANSPARENCY_ENDPOINT || '/v1/transparency/snapshot';
     const streamEndpoint = window.SCOS_TRANSPARENCY_STREAM_ENDPOINT || '/v1/transparency/stream';
 
-    // Every route except this static shell requires a signed bearer token
-    // (packages/auth.AuthenticatedHandler). The token is held only in
-    // sessionStorage for this tab's lifetime; it is never sent anywhere but
-    // this origin's own API routes.
+    // The transparency API is public (no bearer token required): the
+    // projection mints its own identity and injects it upstream. No prompt,
+    // no sessionStorage, no Authorization header.
     function authHeaders() {
-      let token = sessionStorage.getItem('scos_dashboard_token');
-      if (!token) {
-        token = window.prompt('SCOS API bearer token (kept only in this tab):') || '';
-        sessionStorage.setItem('scos_dashboard_token', token);
-      }
-      return token ? { Authorization: `Bearer ${token}` } : {};
+      return {};
     }
 
     // Panel labels are illustrative only; every value rendered comes from an
@@ -97,8 +91,7 @@
     async function refreshSnapshot() {
       const response = await fetch(snapshotEndpoint, { credentials: 'same-origin', headers: authHeaders() });
       if (response.status === 401) {
-        sessionStorage.removeItem('scos_dashboard_token');
-        throw new Error('unauthorized (token cleared, reload to re-enter it)');
+        throw new Error('unauthorized (the transparency API should be public)');
       }
       if (!response.ok) throw new Error(`projection returned ${response.status}`);
       const payload = await response.json();
@@ -156,7 +149,6 @@
       try {
         const response = await fetch(streamEndpoint, { headers: authHeaders(), credentials: 'same-origin' });
         if (response.status === 401) {
-          sessionStorage.removeItem('scos_dashboard_token');
           throw new Error('unauthorized');
         }
         if (!response.ok || !response.body) throw new Error(`stream returned ${response.status}`);

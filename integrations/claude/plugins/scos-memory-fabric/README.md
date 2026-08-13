@@ -1,17 +1,18 @@
 # scos-memory-fabric (Claude Code plugin)
 
 Wires Claude Code to the SCOS Memory Fabric's `mcp-gateway` service
-(`services/mcp-gateway`, deployed at
-`https://rabuntu.tail2c15c8.ts.net:8098/mcp` — see
+(`services/mcp-gateway`, deployed at `https://100.93.75.87:8098/mcp` — see
 `docs/agent-connection-guide.md`) over the native `http` MCP transport. No
-local bridge script, no CA trust setup: `mcp-gateway` serves a
-publicly-trusted (Let's Encrypt via Tailscale) cert, so this works from any
-machine that can reach `rabuntu.tail2c15c8.ts.net:8098`.
+local bridge script; the gateway serves the full governed tool surface (133
+tools incl. the code indexer). The internal cert is self-signed for
+127.0.0.1, so remote clients use `claude mcp add --transport http` with the
+bearer/tenant headers (see the connection guide) or the `tls-external/`
+Tailscale cert recipe.
 
-Tools exposed once connected: `scos_recall`, `scos_status`, `scos_explain`,
-`scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget` (the
-last two currently return `{"implemented": false}` — see the connection
-guide).
+Tools exposed once connected: the full gateway set, incl. `scos_recall`,
+`scos_status`, `scos_explain`, `scos_user_model`, `scos_memory_graph`,
+`scos_correct`, `scos_forget` (memory) plus `scos_code_index`,
+`scos_code_query`, `scos_code_impact` (code intelligence).
 
 ## Install
 

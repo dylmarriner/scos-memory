@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -32,9 +33,8 @@ import (
 //   - scos_code_index           -> code-intelligence /v1/index
 //   - scos_code_query           -> code-intelligence /v1/query
 //   - scos_code_impact          -> code-intelligence /v1/impact
-//   - scos_correct, scos_forget -> not implemented anywhere in this fleet yet
-//     (memory-intelligence exposes no write/delete path for facts). This
-//     handler reports that honestly rather than fabricating success (§42).
+//   - scos_correct               -> memory-intelligence PATCH /v1/facts/{id}
+//   - scos_forget                -> memory-intelligence DELETE /v1/facts/{id}
 const version = "0.1.0"
 
 type requestIdentity struct {
@@ -61,6 +61,7 @@ type gatewayServer struct {
 	toolGovernanceURL         string
 	transparencyProjectionURL string
 	observabilityURL          string
+	controlPlaneToken         string
 	client                    *http.Client
 	startTime                 time.Time
 }
@@ -97,6 +98,7 @@ func main() {
 		toolGovernanceURL:         resolveUpstream("SCOS_TOOL_GOVERNANCE_URL", "https://tool-governance:8092"),
 		transparencyProjectionURL: resolveUpstream("SCOS_TRANSPARENCY_PROJECTION_URL", "https://transparency-projection:8097"),
 		observabilityURL:          resolveUpstream("SCOS_OBSERVABILITY_URL", "https://observability:8096"),
+		controlPlaneToken:         strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		client:                    client,
 		startTime:                 time.Now(),
 	}
@@ -219,6 +221,16 @@ func (s *gatewayServer) handleToolsCall(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, identity requestIdentity, tool string, args map[string]any) (any, error) {
+	// Downstream services resolve identity from X-SCOS-Tenant-ID /
+	// X-SCOS-Principal-ID headers. When the caller authenticated via bearer
+	// claims only, those headers are absent — inject them from the resolved
+	// identity so every forward carries the caller's scope.
+	if r.Header.Get("X-SCOS-Tenant-ID") == "" {
+		r.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
+	}
+	if r.Header.Get("X-SCOS-Principal-ID") == "" {
+		r.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
+	}
 	switch tool {
 	case "scos_status", "scos_recall":
 		return s.callHermesProvider(ctx, r, identity, tool, args)
@@ -229,21 +241,78 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/dashboard/user-model")
 	case "scos_memory_graph":
 		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/dashboard/memory-graph")
+	case "scos_memory_summary":
+		u := s.memoryIntelligenceURL + "/v1/dashboard/summary"
+		q := url.Values{}
+		if n := stringArg(args, "network"); n != "" {
+			q.Set("network", n)
+		}
+		if mf := stringArg(args, "max_facts"); mf != "" {
+			q.Set("max_facts", mf)
+		}
+		if encoded := q.Encode(); encoded != "" {
+			u += "?" + encoded
+		}
+		return s.forwardGET(ctx, r, u)
 	case "scos_code_index":
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/index", args)
 	case "scos_code_query":
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/query", args)
 	case "scos_code_impact":
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/impact", args)
-	case "scos_correct", "scos_forget":
-		// §42: report the boundary rather than fabricate a local answer.
-		// memory-intelligence exposes GET /v1/facts/{id} only -- there is no
-		// write or delete path for facts anywhere in this fleet yet.
-		return map[string]any{
-			"tool":        tool,
-			"implemented": false,
-			"reason":      "no write/delete endpoint exists for facts in memory-intelligence yet",
-		}, nil
+	case "scos_correct":
+		memoryID := stringArg(args, "memory_id")
+		if memoryID == "" {
+			return nil, fmt.Errorf("memory_id is required")
+		}
+		return s.forwardPATCH(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+memoryID, map[string]any{
+			"content": stringArg(args, "value"),
+			"reason":  stringArg(args, "reason"),
+		})
+	case "scos_forget":
+		memoryID := stringArg(args, "memory_id")
+		if memoryID == "" {
+			return nil, fmt.Errorf("memory_id is required")
+		}
+		u := s.memoryIntelligenceURL + "/v1/facts/" + memoryID
+		if cascade, _ := args["cascade"].(bool); cascade {
+			u += "?cascade=true"
+		}
+		return s.forwardDELETE(ctx, r, u)
+	case "scos_correct_batch":
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/batch-correct", map[string]any{
+			"corrections": args["corrections"],
+		})
+	case "scos_forget_batch":
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/batch-forget", map[string]any{
+			"memory_ids": args["memory_ids"],
+			"cascade":    args["cascade"],
+		})
+	case "scos_fact_feedback":
+		memoryID := stringArg(args, "memory_id")
+		if memoryID == "" {
+			return nil, fmt.Errorf("memory_id is required")
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+memoryID+"/feedback", map[string]any{
+			"feedback": stringArg(args, "feedback"),
+			"reason":   stringArg(args, "reason"),
+		})
+	case "scos_fact_history":
+		memoryID := stringArg(args, "memory_id")
+		if memoryID == "" {
+			return nil, fmt.Errorf("memory_id is required")
+		}
+		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+memoryID+"/history")
+	case "scos_forget_all":
+		confirm, _ := args["confirm"].(bool)
+		if !confirm {
+			return nil, fmt.Errorf("confirm must be true to bulk-forget memory")
+		}
+		u := s.memoryIntelligenceURL + "/v1/facts?confirm=true"
+		if ns := stringArg(args, "namespace_id"); ns != "" {
+			u += "&namespace_id=" + url.QueryEscape(ns)
+		}
+		return s.forwardDELETE(ctx, r, u)
 
 	// ── agent-registry ──────────────────────────────────────────────────
 	case "scos_agent_list":
@@ -535,7 +604,7 @@ func (s *gatewayServer) callHermesProvider(ctx context.Context, r *http.Request,
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	copyIdentityHeaders(r, req)
+	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, errUnreachable("hermes-provider unavailable: " + err.Error())
@@ -560,7 +629,7 @@ func (s *gatewayServer) forwardGET(ctx context.Context, r *http.Request, url str
 	if err != nil {
 		return nil, err
 	}
-	copyIdentityHeaders(r, req)
+	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
@@ -590,7 +659,7 @@ func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url st
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	copyIdentityHeaders(r, req)
+	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, errUnreachable("code-intelligence unavailable: " + err.Error())
@@ -602,6 +671,65 @@ func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url st
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, errUnreachable("code-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+	}
+	var result any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *gatewayServer) forwardPATCH(ctx context.Context, r *http.Request, url string, args any) (any, error) {
+	return s.forwardWithBody(ctx, r, http.MethodPatch, url, args)
+}
+
+func (s *gatewayServer) forwardDELETE(ctx context.Context, r *http.Request, url string) (any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	s.copyIdentityHeaders(r, req)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, errUnreachable("memory-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+	}
+	var result any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *gatewayServer) forwardWithBody(ctx context.Context, r *http.Request, method, url string, args any) (any, error) {
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(string(encoded)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.copyIdentityHeaders(r, req)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, errUnreachable("memory-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -629,11 +757,17 @@ type errUnreachable string
 
 func (e errUnreachable) Error() string { return string(e) }
 
-func copyIdentityHeaders(src *http.Request, dst *http.Request) {
+func (s *gatewayServer) copyIdentityHeaders(src *http.Request, dst *http.Request) {
 	for _, name := range []string{"Authorization", "X-SCOS-Tenant-ID", "X-SCOS-Principal-ID", "Idempotency-Key"} {
 		if value := src.Header.Get(name); value != "" {
 			dst.Header.Set(name, value)
 		}
+	}
+	// Control-plane-protected services (code-intelligence etc.) require the
+	// control-plane token in addition to the bearer identity; forward the
+	// gateway's own token so governed tool calls reach them.
+	if s.controlPlaneToken != "" {
+		dst.Header.Set("X-SCOS-Control-Plane-Token", s.controlPlaneToken)
 	}
 }
 
@@ -755,6 +889,17 @@ func governedTools() []map[string]any {
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
+			"name":        "scos_memory_summary",
+			"description": "Summarize the caller's active facts. Uses a real LLM summary when configured, otherwise a deterministic network-grouped digest -- the response's mode field says which",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"network":   map[string]any{"type": "string", "description": "Limit to one memory network (world, experience, entity, belief, procedure, negative)"},
+					"max_facts": map[string]any{"type": "string", "description": "Max facts to include (default 200, max 500)"},
+				},
+			},
+		},
+		{
 			"name":        "scos_code_index",
 			"description": "Index (or re-index) files in a repository for code intelligence search",
 			"inputSchema": map[string]any{
@@ -813,11 +958,83 @@ func governedTools() []map[string]any {
 		},
 		{
 			"name":        "scos_forget",
-			"description": "Request removal of a specific memory",
+			"description": "Request removal of a specific memory. cascade=true also forgets the fact's superseded predecessor chain",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_id": map[string]any{"type": "string", "description": "Memory ID to forget"},
+					"cascade":   map[string]any{"type": "boolean", "description": "Also revoke this fact's superseded predecessor chain"},
+				},
+				"required": []string{"memory_id"},
+			},
+		},
+		{
+			"name":        "scos_correct_batch",
+			"description": "Correct multiple facts in one call, each independently -- one failure does not fail the others",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"corrections": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"memory_id": map[string]any{"type": "string", "description": "Memory ID to correct"},
+								"value":     map[string]any{"type": "string", "description": "Corrected value"},
+								"reason":    map[string]any{"type": "string", "description": "Why this correction was made"},
+							},
+							"required": []string{"memory_id", "value"},
+						},
+						"description": "Up to 100 corrections",
+					},
+				},
+				"required": []string{"corrections"},
+			},
+		},
+		{
+			"name":        "scos_forget_batch",
+			"description": "Forget multiple specific facts by ID in one call, each independently -- one failure does not fail the others",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Up to 100 fact IDs to forget"},
+					"cascade":    map[string]any{"type": "boolean", "description": "Also revoke each fact's superseded predecessor chain"},
+				},
+				"required": []string{"memory_ids"},
+			},
+		},
+		{
+			"name":        "scos_fact_feedback",
+			"description": "Record quality feedback (POSITIVE, NEGATIVE, or VERY_NEGATIVE) against a fact. Recorded as a signal only -- does not itself correct or forget the fact",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_id": map[string]any{"type": "string", "description": "Fact ID"},
+					"feedback":  map[string]any{"type": "string", "description": "POSITIVE, NEGATIVE, or VERY_NEGATIVE"},
+					"reason":    map[string]any{"type": "string", "description": "Why this feedback was given"},
+				},
+				"required": []string{"memory_id", "feedback"},
+			},
+		},
+		{
+			"name":        "scos_fact_history",
+			"description": "Get the full append-only revision history of a fact, including versions from before a correction or after a forget",
 			"inputSchema": map[string]any{
 				"type":       "object",
-				"properties": map[string]any{"memory_id": map[string]any{"type": "string", "description": "Memory ID to forget"}},
+				"properties": map[string]any{"memory_id": map[string]any{"type": "string", "description": "Fact ID"}},
 				"required":   []string{"memory_id"},
+			},
+		},
+		{
+			"name":        "scos_forget_all",
+			"description": "Bulk-forget memory: all active facts in one namespace, or (omitting namespace_id) every active fact for the caller's tenant. Irreversible in intent -- requires confirm=true",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"namespace_id": map[string]any{"type": "string", "description": "Limit to one namespace; omit to forget every namespace for the tenant"},
+					"confirm":      map[string]any{"type": "boolean", "description": "Must be true to perform the bulk forget"},
+				},
+				"required": []string{"confirm"},
 			},
 		},
 	}

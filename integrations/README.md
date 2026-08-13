@@ -1,15 +1,25 @@
 # Agent integrations
 
+The complete local-agent catalog is in
+[`agent-plugins/`](agent-plugins/), including native bundles for Hermes,
+Gemini, Cline, Cursor, Windsurf/Devin, Antigravity, Continue, and Aider's
+rules-only fallback. Run `python3 integrations/agent-plugins/validate.py` to
+check that every registered local agent has a bundle. Each agent uses its own
+`SCOS_AGENT_NAME` while sharing the same secret-free bridge configuration.
+
 Packaged installers for connecting coding agents to the SCOS Memory
 Fabric, instead of the manual per-agent steps in
-`docs/agent-connection-guide.md`. All four point at the same memory
-backend and expose the same seven tools: `scos_recall`, `scos_status`,
-`scos_explain`, `scos_user_model`, `scos_memory_graph`, `scos_correct`,
-`scos_forget`.
+`docs/agent-connection-guide.md`. All agents point at the same memory
+backend and code index: the bridge exposes the seven memory tools
+(`scos_recall`, `scos_status`, `scos_explain`, `scos_user_model`,
+`scos_memory_graph`, `scos_correct`, `scos_forget`) plus the three code
+intelligence tools (`scos_code_index`, `scos_code_query`,
+`scos_code_impact`), while the `mcp-gateway` http transport exposes the
+full 133-tool governed surface.
 
-| | Claude Code | Claude Desktop | Codex CLI | OpenCode |
+| | Claude Code | Claude Desktop | Codex CLI | Hermes Agent | Kilo | OpenCode | OpenClaw | Qwen Code |
 |---|---|---|---|---|
-| Directory | [`claude/plugins/scos-memory-fabric/`](claude/plugins/scos-memory-fabric/) | [`claude/desktop-extension/`](claude/desktop-extension/) | [`codex/plugins/scos-memory-fabric/`](codex/plugins/scos-memory-fabric/) | [`opencode/dot-opencode/`](opencode/dot-opencode/) |
+| Directory | [`claude/plugins/scos-memory-fabric/`](claude/plugins/scos-memory-fabric/) | [`claude/desktop-extension/`](claude/desktop-extension/) | [`codex/plugins/scos-memory-fabric/`](codex/plugins/scos-memory-fabric/) | [`hermes/plugins/scos-memory/`](hermes/plugins/scos-memory/) | [`kilo/`](kilo/) | [`opencode/dot-opencode/`](opencode/dot-opencode/) | [`openclaw/`](openclaw/) | [`qwen/`](qwen/) |
 | Mechanism | Plugin, via `claude/.claude-plugin/marketplace.json` | `.mcpb` bundle (Desktop Extension) | Plugin, via `codex/.agents/plugins/marketplace.json` | Copy into `.opencode/` — no marketplace system exists for local bundles |
 | Backend | `mcp-gateway` (`services/mcp-gateway`), Streamable HTTP | `mcp-gateway`, via bundled stdio↔HTTP relay | `hermes-provider` directly, via bundled stdio bridge | `hermes-provider` directly, via bundled stdio bridge |
 | Transport | Native `http` MCP transport | Local stdio, relayed to HTTP (Desktop only launches local stdio servers) | Local stdio (Codex plugin `.mcp.json` local-command entries, same as its manual config) | Local stdio (`mcp.json`, same as its manual config) |

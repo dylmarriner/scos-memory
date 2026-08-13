@@ -2246,6 +2246,26 @@ Git SHALL be authoritative for approved OKF content. PostgreSQL SHALL store inde
 
 Divergence SHALL be marked and reviewed. Neither side SHALL silently overwrite the other.
 
+### 26.1 Automatic proposal generation from semantic memory
+
+memory-intelligence MAY open an OKF proposal automatically for a fact whose
+authority and confidence clear a configured threshold
+(`SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD`,
+`SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD`). That threshold is only a
+pre-filter; the durability judgment itself — whether the fact is governing
+policy, an architecture/project/infrastructure concept, a confirmed durable
+fact about a real entity, a procedure, tool documentation, a decision, or a
+glossary term, as opposed to a one-off observation, unverified inference, or
+ordinary conversational content — is made by the configured LLM
+(`DEEPSEEK_API_KEY`), which also assigns the category, slug, title and tags.
+Facts the model judges not durable enough produce no proposal.
+
+Automatic proposal generation SHALL NOT bypass §26's proposal lifecycle: the
+generated proposal still requires an independent, role-authorised review and
+protected-branch merge exactly as a human-authored proposal does. This
+mechanism only decides whether a proposal is worth opening and how to shape
+it — never whether it merges.
+
 ---
 
 ## 27. Security model

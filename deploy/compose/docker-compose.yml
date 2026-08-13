@@ -92,10 +92,27 @@ x-fabric-image: &fabric-image
     dockerfile: deploy/Dockerfile
 
 x-service-limits: &service-limits
+  # PID 1 in each container is the Go service binary itself, which never
+  # reaps children -- and Docker's HEALTHCHECK spawns a new wget/curl
+  # subprocess every interval. Without an init process those pile up as
+  # zombies (thousands per day across the fleet). init: true runs tini as
+  # PID 1 instead, which reaps them for free.
+  init: true
   mem_limit: ${SCOS_SERVICE_MEM_LIMIT:-160m}
   memswap_limit: ${SCOS_SERVICE_MEM_LIMIT:-160m}
   cpus: ${SCOS_SERVICE_CPUS:-2}
   logging: *service-logging
+
+# Optional: real LLM reasoning for entity extraction, memory summarization
+# (memory-intelligence) and candidate title/content rewriting
+# (consolidation-worker). Every one of those call sites treats an unset
+# DEEPSEEK_API_KEY as "feature disabled" and falls back to a deterministic
+# path -- no service in this fleet requires this key to start or to serve
+# its other endpoints. Leave it unset for a fully offline deployment.
+x-deepseek-environment: &deepseek-environment
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+  DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
 
 services:
   tls-certs:
@@ -320,8 +337,8 @@ services:
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-    expose:
-      - "8080"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8080:8080"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -357,8 +374,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - autonomous-control-plane-state:/var/lib/scos/control-plane
-    expose:
-      - "8081"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8081:8081"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -384,6 +401,12 @@ services:
       SCOS_CONSOLIDATION_POLL_SECONDS: ${SCOS_CONSOLIDATION_POLL_SECONDS:-5}
       SCOS_CONSOLIDATION_BATCH_SIZE: ${SCOS_CONSOLIDATION_BATCH_SIZE:-10}
       SCOS_LOG_LEVEL: ${SCOS_LOG_LEVEL:-info}
+      # Dream-style Synthesis (§16/§25): no-op without DEEPSEEK_API_KEY.
+      SCOS_SYNTHESIS_MIN_FACTS: ${SCOS_SYNTHESIS_MIN_FACTS:-20}
+      SCOS_SYNTHESIS_CADENCE_HOURS: ${SCOS_SYNTHESIS_CADENCE_HOURS:-24}
+      SCOS_SYNTHESIS_MAX_FACTS: ${SCOS_SYNTHESIS_MAX_FACTS:-200}
+      SCOS_SYNTHESIS_CHECK_INTERVAL_SECONDS: ${SCOS_SYNTHESIS_CHECK_INTERVAL_SECONDS:-3600}
+      <<: *deepseek-environment
     depends_on:
       postgres:
         condition: service_healthy
@@ -406,8 +429,8 @@ services:
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-    expose:
-      - "8082"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8082:8082"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -434,8 +457,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - context-data:/var/lib/scos/context
-    expose:
-      - "8083"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8083:8083"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -458,8 +481,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - code-intelligence-data:/var/lib/scos/code-intelligence
-    expose:
-      - "8084"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8084:8084"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -485,8 +508,8 @@ services:
       - tls-certs:/etc/scos/tls:ro
       - execution-proxy-raw:/var/lib/scos/execution-proxy/raw
       - execution-proxy-state:/var/lib/scos/execution-proxy/state
-    expose:
-      - "8085"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8085:8085"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -512,8 +535,8 @@ services:
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-    expose:
-      - "8086"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8086:8086"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -539,8 +562,8 @@ services:
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-    expose:
-      - "8087"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8087:8087"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -568,8 +591,8 @@ services:
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-    expose:
-      - "8088"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8088:8088"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -590,7 +613,7 @@ services:
     restart: unless-stopped
     environment:
       SCOS_OBSERVABILITY_URL: http://observability:8096
-      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment, *deepseek-environment]
       SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR: ${SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR:-:8089}
       SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
       SCOS_RETRIEVAL_ORCHESTRATOR_URL: ${SCOS_RETRIEVAL_ORCHESTRATOR_URL:-https://retrieval-orchestrator:8082}
@@ -600,10 +623,22 @@ services:
       SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
       SCOS_COMPATIBILITY_GATEWAY_URL: ${SCOS_COMPATIBILITY_GATEWAY_URL:-https://compatibility-gateway:8087}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      # §16/§26 automatic OKF promotion (maybePromoteToOKF): no-op unless
+      # DEEPSEEK_API_KEY is also set -- the LLM is the actual durability
+      # judge, these thresholds are only a cheap pre-filter.
+      SCOS_OKF_SYNCHRONISER_URL: ${SCOS_OKF_SYNCHRONISER_URL:-https://okf-synchroniser:8090}
+      SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD: ${SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD:-90}
+      SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD: ${SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD:-0.85}
+      # Memory-intelligence runs a 1s-poll SSE stream plus dashboard views
+      # against the same pool; the 3-conn shared default exhausts and wedges
+      # readiness (Ping blocks forever waiting for a free conn). Give it a
+      # real pool.
+      SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_MI:-12}
+      SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_MI:-4}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-    expose:
-      - "8089"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8089:8089"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -640,8 +675,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - ../../tls-external:/etc/scos/tls-external:ro
-    expose:
-      - "8098"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8098:8098"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -668,8 +703,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - okf-data:/var/lib/scos/okf
-    expose:
-      - "8090"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8090:8090"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -701,8 +736,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - security-gate-data:/var/lib/scos
-    expose:
-      - "8091"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8091:8091"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -729,8 +764,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - tool-governance-data:/var/lib/scos
-    expose:
-      - "8092"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8092:8092"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -757,8 +792,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - agent-registry-state:/var/lib/scos/agent-registry/state
-    expose:
-      - "8093"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8093:8093"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -784,8 +819,8 @@ services:
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-    expose:
-      - "8094"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8094:8094"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -823,8 +858,8 @@ services:
       - tls-certs:/etc/scos/tls:ro
       - backup-data:/var/lib/scos/backups
       - postgres-wal-archive:/var/lib/scos/wal-archive
-    expose:
-      - "8095"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8095:8095"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -850,8 +885,8 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - observability-data:/var/lib/scos/observability
-    expose:
-      - "8096"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8096:8096"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -884,8 +919,8 @@ services:
       SCOS_OBSERVABILITY_URL: ${SCOS_OBSERVABILITY_URL:-https://observability:8096}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-    expose:
-      - "8097"
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8097:8097"
     depends_on:
       tls-certs:
         condition: service_completed_successfully

@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -85,7 +88,7 @@ func clampFloat(v, lo, hi float64) float64 {
 // (version 1 — facts are append-only per governance and are never mutated
 // in place) plus one memory_evidence row per cited evidence fact ID, and
 // returns the generated fact ID.
-func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID string, fact *Fact) (string, error) {
+func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID string, fact *Fact, mentions []string) (string, error) {
 	if namespaceID == "" {
 		return "", errors.New("namespace_id is required")
 	}
@@ -145,20 +148,56 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 			return "", fmt.Errorf("insert fact evidence: %w", err)
 		}
 	}
+	linkEntityMentions(ctx, tx, id.TenantID, memoryID, mentions)
 	return memoryID, nil
 }
 
-// loadFacts reconstructs every fact belonging to tenantID (optionally
-// filtered to one network) back into the historical Fact JSON shape.
+// loadFacts reconstructs every active, unexpired fact belonging to tenantID
+// (optionally filtered to one network) back into the historical Fact JSON
+// shape. Corrected (superseded), merged (duplicate-folded) and forgotten
+// (revoked) facts are deliberately excluded here — see correctFact,
+// markFactMerged and forgetFact — as is any fact past its valid_until, so
+// every reader of this function (recall, dashboards, contradiction
+// detection, belief evidence) automatically stops surfacing memory that has
+// been corrected, merged, forgotten, or expired, without each caller
+// re-implementing the filter itself. getFact, and therefore scos_explain,
+// uses the same filter — an expired, merged or forgotten fact is treated as
+// gone, not merely hidden from listings. Use loadFactsIncludingMerged for
+// Dream-style include_merged=true reads.
 func loadFacts(ctx context.Context, db *sql.DB, tenantID, network string) ([]*Fact, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT mi.id, mi.authority_level, mi.confidence_score, mi.created_at,
+	return loadFactsByStatus(ctx, db, tenantID, network, []string{"active"})
+}
+
+// loadFactsIncludingMerged behaves like loadFacts but also returns facts
+// marked 'merged' (Dream's include_merged=true read mode) — still excludes
+// 'superseded'/'revoked', which have their own dedicated access paths
+// (scos_fact_history, scos_explain).
+func loadFactsIncludingMerged(ctx context.Context, db *sql.DB, tenantID, network string) ([]*Fact, error) {
+	return loadFactsByStatus(ctx, db, tenantID, network, []string{"active", "merged"})
+}
+
+// loadFactsByStatus is shared by loadFacts and loadFactsIncludingMerged.
+// statuses is always a fixed internal literal set (never user input), so
+// building the IN(...) clause by string join is safe and sidesteps relying
+// on driver-specific array-parameter binding.
+func loadFactsByStatus(ctx context.Context, db *sql.DB, tenantID, network string, statuses []string) ([]*Fact, error) {
+	placeholders := make([]string, len(statuses))
+	args := make([]any, 0, len(statuses)+1)
+	args = append(args, tenantID)
+	for i, st := range statuses {
+		args = append(args, st)
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+	}
+	query := fmt.Sprintf(`
+		SELECT mi.id, mi.namespace_id, mi.authority_level, mi.confidence_score, mi.created_at, mi.status,
 		       mv.content, mv.structured_content, mv.version_number, mv.created_at
 		FROM memory_items mi
 		JOIN memory_versions mv ON mv.id = mi.current_version_id
-		WHERE mi.tenant_id = $1
+		WHERE mi.tenant_id = $1 AND mi.status IN (%s)
+		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
 		ORDER BY mv.created_at DESC
-	`, tenantID)
+	`, strings.Join(placeholders, ","))
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +208,7 @@ func loadFacts(ctx context.Context, db *sql.DB, tenantID, network string) ([]*Fa
 		var f Fact
 		var structuredRaw []byte
 		var itemCreatedAt, versionCreatedAt time.Time
-		if err := rows.Scan(&f.ID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
 			return nil, err
 		}
 		var structured struct {
@@ -240,6 +279,390 @@ func getFact(ctx context.Context, db *sql.DB, tenantID, factID string) (*Fact, e
 	return nil, sql.ErrNoRows
 }
 
+// markFactMerged implements the fold-in half of Dream-style Merge
+// (§16/§25): a duplicate/barer fact is marked 'merged' and pointed at the
+// canonical (richer) fact that replaced it, via the same superseded_by_id
+// column correctFact uses for contradictions -- the status value is what
+// tells a reader *why* a fact stopped being current (contradicted vs.
+// duplicated), the pointer mechanism is identical either way. Called on the
+// same transaction as the canonical fact's own insertFact, by the caller.
+func markFactMerged(ctx context.Context, tx *sql.Tx, tenantID, duplicateFactID, canonicalFactID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memory_items SET status='merged', superseded_by_id=$1
+		WHERE id=$2 AND tenant_id=$3 AND status='active'
+	`, canonicalFactID, duplicateFactID, tenantID); err != nil {
+		return fmt.Errorf("mark fact merged: %w", err)
+	}
+	return insertRelation(ctx, tx, canonicalFactID, duplicateFactID, "duplicate_of")
+}
+
+// correctFact implements scos_correct (§25/§42): facts are append-only and
+// are never mutated in place, so a correction inserts a brand new fact
+// carrying the corrected content and the old fact's network/scope/authority,
+// marks the old memory_items row 'superseded' with superseded_by_id pointing
+// at the new one, and records an explicit 'supersedes' relation so the
+// memory graph shows the correction rather than silently losing the old
+// value. getFact only returns status='active' facts, so the old ID stops
+// appearing in recall/dashboards the moment this commits, while remaining in
+// the database for audit.
+func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID, newContent, reason string) (*Fact, error) {
+	old, err := getFact(ctx, db, id.TenantID, oldFactID)
+	if err != nil {
+		return nil, err
+	}
+	if old.NamespaceID == "" {
+		return nil, fmt.Errorf("existing fact %q has no namespace on record", oldFactID)
+	}
+	// Resolved before the transaction opens: this may be an LLM call
+	// (resolveEntityMentions), and an outbound HTTP request must never hold a
+	// database transaction open.
+	mentions := resolveEntityMentions(ctx, newContent)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return nil, err
+	}
+
+	derivation := "correction of " + oldFactID
+	if reason != "" {
+		derivation += ": " + reason
+	}
+	corrected := &Fact{
+		Network:    old.Network,
+		Content:    newContent,
+		Source:     "explicit",
+		Authority:  old.Authority,
+		Confidence: old.Confidence,
+		Scope:      old.Scope,
+		ObservedAt: time.Now().UTC().Format(time.RFC3339),
+		Evidence:   old.Evidence,
+		Derivation: derivation,
+	}
+	newFactID, err := insertFact(ctx, tx, id, old.NamespaceID, corrected, mentions)
+	if err != nil {
+		return nil, fmt.Errorf("insert corrected fact: %w", err)
+	}
+	corrected.ID = newFactID
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memory_items SET status='superseded', superseded_by_id=$1
+		WHERE id=$2 AND tenant_id=$3 AND status='active'
+	`, newFactID, oldFactID, id.TenantID); err != nil {
+		return nil, fmt.Errorf("mark fact superseded: %w", err)
+	}
+	if err := insertRelation(ctx, tx, newFactID, oldFactID, "supersedes"); err != nil {
+		return nil, fmt.Errorf("insert supersedes relation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	corrected.SupersededBy = ""
+	return corrected, nil
+}
+
+// FactVersion is one entry in a fact's append-only revision history —
+// memory_versions rows are never mutated or deleted, so this is a complete,
+// tamper-evident audit trail of every correction ever made to a fact.
+type FactVersion struct {
+	VersionNumber int    `json:"version_number"`
+	Content       string `json:"content"`
+	ChangeReason  string `json:"change_reason"`
+	CreatedAt     string `json:"created_at"`
+	CreatedBy     string `json:"created_by"`
+}
+
+// loadFactHistory returns every version ever recorded for factID, oldest
+// first. Unlike loadFacts/getFact it does not filter on status: history
+// must remain visible for a fact that has since been corrected or
+// forgotten, since that is exactly what an audit trail is for (§42).
+func loadFactHistory(ctx context.Context, db *sql.DB, tenantID, factID string) ([]FactVersion, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, factID, tenantID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, sql.ErrNoRows
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT mv.version_number, mv.content, mv.change_reason, mv.created_at, COALESCE(p.display_name, mv.created_by::text)
+		FROM memory_versions mv
+		JOIN memory_items mi ON mi.id = mv.memory_id
+		LEFT JOIN principals p ON p.id = mv.created_by
+		WHERE mv.memory_id = $1 AND mi.tenant_id = $2
+		ORDER BY mv.version_number ASC
+	`, factID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	history := make([]FactVersion, 0)
+	for rows.Next() {
+		var v FactVersion
+		var createdAt time.Time
+		if err := rows.Scan(&v.VersionNumber, &v.Content, &v.ChangeReason, &createdAt, &v.CreatedBy); err != nil {
+			return nil, err
+		}
+		v.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		history = append(history, v)
+	}
+	return history, rows.Err()
+}
+
+// forgetAllFacts implements bulk scos_forget (mem0's delete_all/reset):
+// soft-deletes every active fact for the tenant, optionally scoped to one
+// namespace. Omitting namespaceID forgets every namespace the tenant owns —
+// callers MUST gate that on an explicit confirmation, this function does
+// not second-guess its caller. Returns the number of facts revoked.
+func forgetAllFacts(ctx context.Context, db *sql.DB, id requestIdentity, namespaceID string) (int, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return 0, err
+	}
+	var res sql.Result
+	if namespaceID != "" {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE memory_items SET status='revoked'
+			WHERE tenant_id=$1 AND namespace_id=$2 AND status='active'
+		`, id.TenantID, namespaceID)
+	} else {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE memory_items SET status='revoked'
+			WHERE tenant_id=$1 AND status='active'
+		`, id.TenantID)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("bulk revoke facts: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
+// ── entity linking ───────────────────────────────────────────────────────
+
+// entityMentionPattern is a deterministic, dependency-free stand-in for
+// NER: it matches runs of capitalized words (e.g. "Rabuntu Pi", "Claude
+// Code"), which is what mem0's entity extraction is used for in practice —
+// proper nouns worth linking across memories for graph/retrieval boosting.
+// It is intentionally conservative (no LLM call is available inside this
+// service) and callers should treat matches as candidates, not ground truth.
+var entityMentionPattern = regexp.MustCompile(`\b[A-Z][a-zA-Z0-9]*(?:\s+[A-Z][a-zA-Z0-9]*)*\b`)
+
+// entityMentionStopwords excludes common sentence-initial capitals that are
+// not proper nouns on their own (e.g. "The service restarted.").
+var entityMentionStopwords = map[string]bool{
+	"the": true, "this": true, "that": true, "these": true, "those": true,
+	"a": true, "an": true, "i": true, "we": true, "they": true, "it": true,
+	"he": true, "she": true, "you": true, "if": true, "when": true, "why": true,
+	"how": true, "what": true, "who": true, "which": true, "there": true,
+}
+
+// extractEntityMentions returns up to 5 deduplicated candidate proper-noun
+// mentions from content, longest-first so multi-word names ("Claude Code")
+// are preferred over single-word substrings ("Claude") when both match.
+func extractEntityMentions(content string) []string {
+	matches := entityMentionPattern.FindAllString(content, -1)
+	seen := make(map[string]bool, len(matches))
+	candidates := make([]string, 0, len(matches))
+	for _, m := range matches {
+		key := strings.ToLower(strings.TrimSpace(m))
+		if key == "" || len(key) < 2 || entityMentionStopwords[key] {
+			continue
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		candidates = append(candidates, strings.TrimSpace(m))
+	}
+	sort.Slice(candidates, func(i, j int) bool { return len(candidates[i]) > len(candidates[j]) })
+	if len(candidates) > 5 {
+		candidates = candidates[:5]
+	}
+	return candidates
+}
+
+// resolveEntityMentions is the single call site for "what entities does this
+// fact mention": it prefers real LLM-based extraction (llmClient) when
+// DEEPSEEK_API_KEY is configured, and falls back to the deterministic
+// extractEntityMentions regex heuristic when the client is disabled, times
+// out, or returns something that doesn't parse. It never returns an error —
+// a mention-extraction failure degrades to fewer/no entities linked, it must
+// never fail the fact write itself.
+func resolveEntityMentions(ctx context.Context, content string) []string {
+	if !llmClient.Enabled() || strings.TrimSpace(content) == "" {
+		return extractEntityMentions(content)
+	}
+	llmCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var result struct {
+		Entities []string `json:"entities"`
+	}
+	err := llmClient.ChatJSON(llmCtx,
+		`You extract named entities (people, systems, organisations, products, places -- proper nouns worth remembering) from a single piece of text. Respond with a JSON object of the exact shape {"entities": ["Name One", "Name Two"]}. List each distinct entity once, in the form it appears in the text. Return at most 5 entities. If there are none, return {"entities": []}.`,
+		content, &result)
+	if err != nil || result.Entities == nil {
+		return extractEntityMentions(content)
+	}
+	seen := make(map[string]bool, len(result.Entities))
+	mentions := make([]string, 0, len(result.Entities))
+	for _, e := range result.Entities {
+		e = strings.TrimSpace(e)
+		key := strings.ToLower(e)
+		if e == "" || len(e) > 120 || seen[key] {
+			continue
+		}
+		seen[key] = true
+		mentions = append(mentions, e)
+		if len(mentions) >= 5 {
+			break
+		}
+	}
+	return mentions
+}
+
+// linkEntityMentions finds-or-creates a lightweight entity (entity_type
+// 'entity', distinct from the explicit user/agent/organisation entities
+// created via POST /v1/entities) for each mention and appends factID to its
+// linked fact_ids, so handleDashboardMemoryGraph can render mention edges
+// and retrieval can boost on entity overlap the way mem0's entity store
+// does. Best-effort: a failure to link one mention does not fail the fact
+// write, since these are candidate proper nouns, not required data.
+func linkEntityMentions(ctx context.Context, tx *sql.Tx, tenantID, factID string, mentions []string) {
+	for _, mention := range mentions {
+		var entityID string
+		var metadataRaw []byte
+		err := tx.QueryRowContext(ctx, `
+			SELECT id, metadata FROM entities
+			WHERE tenant_id=$1 AND entity_type='entity' AND lower(display_name)=lower($2)
+		`, tenantID, mention).Scan(&entityID, &metadataRaw)
+		if err == sql.ErrNoRows {
+			newID, genErr := newID()
+			if genErr != nil {
+				continue
+			}
+			metadata, _ := json.Marshal(map[string]any{"fact_ids": []string{factID}})
+			// $1 is passed twice (id and entity_key are both this generated
+			// UUID) rather than reused positionally: pgx's extended protocol
+			// infers each placeholder's type once, and id (uuid) vs
+			// entity_key (text) sharing $1 makes that inference ambiguous --
+			// "inconsistent types deduced for parameter $1: uuid versus text".
+			if _, insErr := tx.ExecContext(ctx, `
+				INSERT INTO entities (id, tenant_id, entity_key, entity_type, display_name, scope, metadata)
+				VALUES ($1,$2,$3,'entity',$4,'global',$5)
+			`, newID, tenantID, newID, mention, metadata); insErr != nil {
+				continue
+			}
+			continue
+		}
+		if err != nil {
+			continue
+		}
+		var metadata struct {
+			FactIDs []string `json:"fact_ids"`
+		}
+		if len(metadataRaw) > 0 {
+			_ = json.Unmarshal(metadataRaw, &metadata)
+		}
+		linked := false
+		for _, existing := range metadata.FactIDs {
+			if existing == factID {
+				linked = true
+				break
+			}
+		}
+		if linked {
+			continue
+		}
+		metadata.FactIDs = append(metadata.FactIDs, factID)
+		updated, _ := json.Marshal(metadata)
+		_, _ = tx.ExecContext(ctx, `UPDATE entities SET metadata=$1 WHERE id=$2`, updated, entityID)
+	}
+}
+
+// forgetFact implements scos_forget (§25/§42): the fact is soft-deleted
+// (status='revoked') rather than physically removed, so backups, audit
+// trails and existing evidence citations remain intact while the fact stops
+// being active memory. It is idempotent: forgetting an already-revoked or
+// already-superseded fact is not an error.
+//
+// cascade mirrors mem0's delete(id, delete_linked=True): when true, it also
+// walks factID's supersession chain backward (every fact that led up to
+// factID via scos_correct) and revokes those too, so a superseded ancestor
+// does not stay in 'superseded' limbo forever once the fact that replaced it
+// is gone. Without cascade, only factID itself is revoked. Returns the total
+// number of facts revoked (1, or more when cascading).
+func forgetFact(ctx context.Context, db *sql.DB, id requestIdentity, factID string, cascade bool) (int, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE memory_items SET status='revoked'
+		WHERE id=$1 AND tenant_id=$2 AND status NOT IN ('revoked')
+	`, factID, id.TenantID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke fact: %w", err)
+	}
+	revoked := 0
+	if affected, err := res.RowsAffected(); err == nil && affected > 0 {
+		revoked = 1
+	} else if err == nil && affected == 0 {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, factID, id.TenantID).Scan(&exists); err != nil {
+			return 0, err
+		}
+		if !exists {
+			return 0, sql.ErrNoRows
+		}
+		// Already revoked: idempotent no-op, but still eligible to cascade.
+	}
+
+	if cascade {
+		current := factID
+		for {
+			var predecessor string
+			err := tx.QueryRowContext(ctx, `
+				SELECT id FROM memory_items
+				WHERE superseded_by_id=$1 AND tenant_id=$2 AND status != 'revoked'
+			`, current, id.TenantID).Scan(&predecessor)
+			if err == sql.ErrNoRows {
+				break
+			}
+			if err != nil {
+				return 0, fmt.Errorf("walk supersession chain: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE memory_items SET status='revoked' WHERE id=$1`, predecessor); err != nil {
+				return 0, fmt.Errorf("revoke superseded predecessor: %w", err)
+			}
+			revoked++
+			current = predecessor
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return revoked, nil
+}
+
 // insertRelation records a temporal relation between two facts, deduplicated
 // on the (source, type, target) primary key.
 func insertRelation(ctx context.Context, tx *sql.Tx, sourceFactID, targetFactID, relType string) error {
@@ -298,10 +721,13 @@ func insertEntity(ctx context.Context, tx *sql.Tx, id requestIdentity, entity *E
 	if err != nil {
 		return "", err
 	}
+	// $1 passed twice rather than reused positionally -- see the identical
+	// note in linkEntityMentions; id (uuid) and entity_key (text) sharing a
+	// placeholder makes pgx's extended-protocol type inference ambiguous.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO entities (id, tenant_id, entity_key, entity_type, display_name, scope, metadata)
-		VALUES ($1,$2,$1,$3,$4,$5,$6)
-	`, entityID, id.TenantID, entity.Type, entity.Name, entity.Scope, metadata); err != nil {
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+	`, entityID, id.TenantID, entityID, entity.Type, entity.Name, entity.Scope, metadata); err != nil {
 		return "", fmt.Errorf("insert entity: %w", err)
 	}
 	return entityID, nil
@@ -514,6 +940,48 @@ func insertDiaryEntry(ctx context.Context, tx *sql.Tx, id requestIdentity, entry
 		VALUES ($1,$2,'observation',$3)
 	`, id.TenantID, id.PrincipalID, string(body))
 	return err
+}
+
+// FactFeedback is quality signal recorded against a fact (mem0's
+// feedback(memory_id, POSITIVE/NEGATIVE/VERY_NEGATIVE, reason)). It is
+// stored, not acted on: nothing here auto-adjusts confidence or authority,
+// since that judgment belongs to the consolidation worker or a human
+// reviewer, not to the act of recording the signal itself.
+var validFactFeedback = map[string]bool{"POSITIVE": true, "NEGATIVE": true, "VERY_NEGATIVE": true}
+
+// recordFactFeedback persists feedback about a fact as a diary entry
+// (entry_type='fact_feedback'), reusing the existing append-only, tenant-
+// scoped diary store rather than adding a dedicated table for a single
+// small record shape.
+func recordFactFeedback(ctx context.Context, db *sql.DB, id requestIdentity, factID, feedback, reason string) error {
+	if !validFactFeedback[feedback] {
+		return fmt.Errorf("feedback must be one of POSITIVE, NEGATIVE, VERY_NEGATIVE")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]any{
+		"type":        "fact_feedback",
+		"fact_id":     factID,
+		"feedback":    feedback,
+		"reason":      reason,
+		"recorded_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO diary_entries (tenant_id, principal_id, entry_type, content)
+		VALUES ($1,$2,'fact_feedback',$3)
+	`, id.TenantID, id.PrincipalID, string(body)); err != nil {
+		return fmt.Errorf("record fact feedback: %w", err)
+	}
+	return tx.Commit()
 }
 
 func loadDiary(ctx context.Context, db *sql.DB, tenantID string) ([]any, error) {

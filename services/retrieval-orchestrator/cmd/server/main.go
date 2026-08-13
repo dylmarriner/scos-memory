@@ -262,8 +262,11 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// ── 10. Dedup by memory_id ──────────────────────────────────────
 	deduped := deduplicateResults(fused)
 
+	// ── 10.5. Rerank ──────────────────────────────────────────────
+	reranked := rerankResults(deduped)
+
 	// ── 11. Apply token budget ──────────────────────────────────────
-	allocated := allocateByTokenBudget(deduped, tokenBudget)
+	allocated := allocateByTokenBudget(reranked, tokenBudget)
 
 	// ── 12. Assemble into sections per §17 ─────────────────────────
 	sections := assembleSections(allocated)
@@ -711,6 +714,29 @@ type scoredResult struct {
 	rankScores map[string]float64 // source -> RRF score
 }
 
+// rerankResults applies a deterministic, non-LLM reranking pass on top of
+// RRF fusion. RRF's fused score captures cross-signal agreement (exact,
+// full-text, vector, relation, session) but says nothing about how
+// authoritative or well-evidenced a candidate actually is. This nudges the
+// order with a bounded multiplicative boost (up to +30%) from
+// authority_level and confidence_score, so it refines close calls without
+// letting a low-signal, high-authority result leapfrog a strong multi-signal
+// match — the boost scales the existing score rather than replacing it.
+func rerankResults(results []RetrievalResult) []RetrievalResult {
+	reranked := make([]RetrievalResult, len(results))
+	copy(reranked, results)
+	for i := range reranked {
+		authorityBoost := float64(reranked[i].Authority) / 100.0
+		confidenceBoost := reranked[i].Confidence
+		reranked[i].FusedScore *= 1 + 0.15*authorityBoost + 0.15*confidenceBoost
+	}
+	sort.SliceStable(reranked, func(i, j int) bool { return reranked[i].FusedScore > reranked[j].FusedScore })
+	for i := range reranked {
+		reranked[i].Rank = i + 1
+	}
+	return reranked
+}
+
 func fuseResults(k float64, sets ...[]RetrievalResult) []RetrievalResult {
 	seen := make(map[string]*scoredResult)
 	allSources := []string{"exact", "fulltext", "semantic", "relation", "session_state"}
@@ -869,9 +895,9 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 		RETURNING id
 	`, req.TenantID, req.PrincipalID, req.AgentID, req.SessionID, req.TurnID,
 		queryHash, toJSONB(namespaces), toJSONB(req.Filters),
-		`{"fusion":"rrf","k":60,"reranker":"none"}`, selectedJSON, latencyMs,
+		`{"fusion":"rrf","k":60,"reranker":"authority_confidence_v1"}`, selectedJSON, latencyMs,
 		toJSONB(candidateCounts), estimateSectionsTokens(sections),
-		toJSONB(map[string]string{"embedding": "request-supplied-or-none", "reranker": "none"})).Scan(&runID)
+		toJSONB(map[string]string{"embedding": "request-supplied-or-none", "reranker": "authority_confidence_v1"})).Scan(&runID)
 	if err != nil {
 		return "", err
 	}

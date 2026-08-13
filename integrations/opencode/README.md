@@ -12,10 +12,13 @@ Connects to the SCOS Memory Fabric the same way the Codex packaging does
 (`../codex/`): a bundled, self-contained stdio bridge
 (`scripts/scos-mcp-bridge.py`, a copy of
 `~/.hermes/scripts/scos-mcp-bridge.py`) talking directly to
-`hermes-provider` on rabuntu — see `docs/agent-connection-guide.md` §1/§3.
+`hermes-provider` on kubuntux and `code-intelligence` on :8084 — see
+`docs/agent-connection-guide.md` §1/§3.
 
 Tools exposed once connected: `scos_recall`, `scos_status`, `scos_explain`,
-`scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget`.
+`scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget`
+(memory) plus `scos_code_index`, `scos_code_query`, `scos_code_impact`
+(code intelligence).
 
 ## What's here
 

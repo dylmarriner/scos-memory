@@ -50,10 +50,10 @@ audit-runtime:
 	python3 scripts/audit_governance_runtime.py
 
 compose-up:
-	docker compose -f deploy/compose/docker-compose.yml up --build
+	docker compose --env-file .env -f deploy/compose/docker-compose.yml up --build
 
 compose-down:
-	docker compose -f deploy/compose/docker-compose.yml down
+	docker compose --env-file .env -f deploy/compose/docker-compose.yml down
 
 db-shell:
-	docker compose -f deploy/compose/docker-compose.yml exec postgres psql -U "$${POSTGRES_USER:-scos}" -d "$${POSTGRES_DB:-scos_memory}"
+	docker compose --env-file .env -f deploy/compose/docker-compose.yml exec postgres psql -U "$${POSTGRES_USER:-scos}" -d "$${POSTGRES_DB:-scos_memory}"
