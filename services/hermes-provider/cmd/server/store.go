@@ -258,10 +258,10 @@ func recentTurns(ctx context.Context, db *sql.DB, tenantID, sessionID string, li
 
 // SearchedMemory is one ranked hit returned by searchMemories.
 type SearchedMemory struct {
-	MemoryID      string  `json:"memory_id"`
-	Title         string  `json:"title"`
-	Content       string  `json:"content"`
-	Type          string  `json:"type"`
+	MemoryID        string  `json:"memory_id"`
+	Title           string  `json:"title"`
+	Content         string  `json:"content"`
+	Type            string  `json:"type"`
 	ConfidenceScore float64 `json:"confidence_score"`
 	AuthorityLevel  int     `json:"authority_level"`
 	Rank            float64 `json:"rank"`

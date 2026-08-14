@@ -1,0 +1,16 @@
+[Unit]
+Description=SCOS Memory Fabric - database migrations
+After=network-online.target postgresql.service
+Requires=postgresql.service
+Before=scos-fabric.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=scos
+Group=scos
+EnvironmentFile=/etc/scos/scos-fabric.env
+ExecStart=/usr/local/bin/scos-migrate
+
+[Install]
+WantedBy=scos-fabric.target

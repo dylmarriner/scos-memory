@@ -1,0 +1,39 @@
+[Unit]
+Description=SCOS Memory Fabric - %i
+Documentation=https://github.com/dylmarriner/scos-memory/blob/main/deploy/native/README.md
+After=network-online.target scos-fabric-migrations.service
+Wants=network-online.target
+Requires=scos-fabric-migrations.service
+PartOf=scos-fabric.target
+
+[Service]
+Type=exec
+User=scos
+Group=scos
+# Base config first, then the per-service override -- the leading "-" makes
+# a missing override file non-fatal (a handful of services, like
+# extension-manager, only need the base config and have no override file).
+EnvironmentFile=/etc/scos/scos-fabric.env
+EnvironmentFile=-/etc/scos/env/%i.env
+ExecStart=/opt/scos-fabric/bin/%i
+
+# Matches packages/tlsserve.ServeGracefully's SIGTERM handling: systemd's
+# default stop signal is already SIGTERM, so `systemctl stop` triggers the
+# same in-flight-request drain a container runtime's SIGTERM does. Services
+# not yet migrated to ServeGracefully (see README Technical Highlights) still
+# get a clean SIGTERM/SIGKILL from systemd either way.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=2s
+
+# Hardening: least privilege consistent with the container's non-root user
+# and the service only needing its own subtree of /var/lib/scos.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/scos
+
+[Install]
+WantedBy=scos-fabric.target

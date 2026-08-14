@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Builds all 19 Go service binaries and the consolidation-worker Python
+# package, without Docker. Mirrors deploy/Dockerfile's build stage exactly --
+# same service list, same build flags -- so a native build produces the same
+# binaries the container image would.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+INSTALL_BIN_DIR="${SCOS_NATIVE_BIN_DIR:-/opt/scos-fabric/bin}"
+VENV_DIR="${SCOS_NATIVE_VENV_DIR:-/opt/scos-fabric/venv/consolidation}"
+
+# Keep in sync with deploy/Dockerfile's SERVICES list.
+SERVICES="agent-registry autonomous-control-plane backup-manager \
+code-intelligence compatibility-gateway context-optimisation execution-proxy \
+extension-manager hermes-provider mcp-gateway memory-gateway \
+memory-intelligence observability okf-synchroniser recovery-orchestrator \
+retrieval-orchestrator security-gate tool-governance transparency-projection"
+
+echo "==> building ${SERVICES// /, }"
+cd "$REPO_ROOT"
+mkdir -p "$INSTALL_BIN_DIR.new"
+export CGO_ENABLED=0 GOFLAGS=-buildvcs=false
+for svc in $SERVICES; do
+  echo "building $svc"
+  go build -trimpath -ldflags="-s -w" -o "$INSTALL_BIN_DIR.new/$svc" "./services/$svc/cmd/server"
+done
+
+# Atomic swap: a build failure above never leaves a partially-overwritten
+# bin/ directory that systemd could pick up mid-write.
+rm -rf "$INSTALL_BIN_DIR.old"
+[ -d "$INSTALL_BIN_DIR" ] && mv "$INSTALL_BIN_DIR" "$INSTALL_BIN_DIR.old"
+mv "$INSTALL_BIN_DIR.new" "$INSTALL_BIN_DIR"
+rm -rf "$INSTALL_BIN_DIR.old"
+
+echo "==> building consolidation-worker (venv at $VENV_DIR)"
+python3 -m venv "$VENV_DIR"
+"$VENV_DIR/bin/pip" install --quiet --upgrade pip
+"$VENV_DIR/bin/pip" install --quiet "$REPO_ROOT/workers/consolidation"
+
+echo "==> done. Binaries in $INSTALL_BIN_DIR, worker venv in $VENV_DIR"
+echo "    Run deploy/native/install.sh once (as root) before starting services,"
+echo "    then re-run this script alone for subsequent rebuilds/upgrades and"
+echo "    'sudo systemctl restart scos-fabric.target' to pick them up."

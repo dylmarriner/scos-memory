@@ -218,6 +218,7 @@ def audit() -> list[str]:
             not path.is_file()
             or path.suffix not in CODE_SUFFIXES
             or ".git" in path.parts
+            or ".github" in path.parts
             or "node_modules" in path.parts
             or "vendor" in path.parts
             or "dist" in path.parts

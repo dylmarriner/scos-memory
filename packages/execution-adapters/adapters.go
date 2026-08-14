@@ -15,11 +15,11 @@ type CommandRewrite struct {
 
 // ExecutionResult represents captured output and exit status (§20.4).
 type ExecutionResult struct {
-	ExitCode       int           `json:"exit_code"`
-	RawOutput      string        `json:"raw_output"`
-	ReducedOutput  string        `json:"reduced_output"`
-	ExecutionTime  time.Duration `json:"execution_time"`
-	Truncated      bool          `json:"truncated"`
+	ExitCode      int           `json:"exit_code"`
+	RawOutput     string        `json:"raw_output"`
+	ReducedOutput string        `json:"reduced_output"`
+	ExecutionTime time.Duration `json:"execution_time"`
+	Truncated     bool          `json:"truncated"`
 }
 
 // ExecutionAdapter defines command rewriting and result reduction interface.

@@ -6,11 +6,16 @@
 package tlsserve
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -43,6 +48,48 @@ func Serve(server *http.Server) error {
 		return fmt.Errorf("SCOS_TLS_CERT_FILE and SCOS_TLS_KEY_FILE are required when SCOS_TLS_REQUIRED=true")
 	}
 	return server.ListenAndServe()
+}
+
+// ServeGracefully runs Serve and shuts the server down cleanly on SIGINT or
+// SIGTERM: it stops accepting new connections and gives in-flight requests
+// shutdownTimeout to finish before returning. Callers that need clean
+// container shutdown (draining a load balancer, finishing an in-flight
+// journal write) should use this instead of Serve directly; Serve is kept
+// unchanged for callers and tests that manage their own lifecycle.
+//
+// It returns nil on a clean signal-triggered shutdown, or the error from
+// Serve/Shutdown otherwise. http.ErrServerClosed is treated as success.
+func ServeGracefully(server *http.Server, shutdownTimeout time.Duration, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- Serve(server)
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		stop()
+		logger.Info("shutdown signal received, draining in-flight requests", "timeout", shutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("graceful shutdown did not complete cleanly", "error", err)
+			return err
+		}
+		logger.Info("shutdown complete")
+		return nil
+	}
 }
 
 // TrustedClient returns an *http.Client for calling other internal SCOS

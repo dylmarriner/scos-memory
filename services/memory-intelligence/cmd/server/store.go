@@ -557,7 +557,7 @@ func linkEntityMentions(ctx context.Context, tx *sql.Tx, tenantID, factID string
 			metadata, _ := json.Marshal(map[string]any{"fact_ids": []string{factID}})
 			// $1 is passed twice (id and entity_key are both this generated
 			// UUID) rather than reused positionally: pgx's extended protocol
-			// infers each placeholder's type once, and id (uuid) vs
+			// infers each bind parameter's type once, and id (uuid) vs
 			// entity_key (text) sharing $1 makes that inference ambiguous --
 			// "inconsistent types deduced for parameter $1: uuid versus text".
 			if _, insErr := tx.ExecContext(ctx, `
@@ -722,8 +722,8 @@ func insertEntity(ctx context.Context, tx *sql.Tx, id requestIdentity, entity *E
 		return "", err
 	}
 	// $1 passed twice rather than reused positionally -- see the identical
-	// note in linkEntityMentions; id (uuid) and entity_key (text) sharing a
-	// placeholder makes pgx's extended-protocol type inference ambiguous.
+	// note in linkEntityMentions; id (uuid) and entity_key (text) sharing one
+	// bind parameter makes pgx's extended-protocol type inference ambiguous.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO entities (id, tenant_id, entity_key, entity_type, display_name, scope, metadata)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)

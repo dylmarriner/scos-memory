@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/dylmarriner/scos-memory/security/advisories/new
+    about: Please report vulnerabilities privately instead of opening a public issue.
+  - name: Architecture / governance question
+    url: https://github.com/dylmarriner/scos-memory/discussions
+    about: Ask before investing time in a change that may need architectural rework.

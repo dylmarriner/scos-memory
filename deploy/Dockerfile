@@ -18,7 +18,11 @@
 # Adding a service means adding its name to SERVICES below and giving it a
 # `command:` in compose -- nothing else.
 
-FROM golang:1.22-alpine AS build
+# Pinned to a specific patch, not a floating "1.26-alpine" tag: go.mod pins
+# `toolchain go1.26.6`, and the build should always reproduce with the same
+# toolchain rather than whatever patch Docker Hub resolves the tag to on a
+# given day.
+FROM golang:1.26.6-alpine AS build
 ENV GOFLAGS=-buildvcs=false CGO_ENABLED=0
 WORKDIR /src
 

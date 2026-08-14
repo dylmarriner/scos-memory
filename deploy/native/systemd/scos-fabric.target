@@ -1,0 +1,27 @@
+[Unit]
+Description=SCOS Memory Fabric (all services)
+# Explicit Wants= for every unit rather than relying on each service's own
+# WantedBy=scos-fabric.target: this makes `systemctl start scos-fabric.target`
+# alone bring up the whole fleet, instead of requiring the operator to also
+# `systemctl enable` each instance first.
+Wants=scos-fabric-migrations.service
+Wants=scos-fabric@memory-gateway.service
+Wants=scos-fabric@autonomous-control-plane.service
+Wants=scos-fabric@retrieval-orchestrator.service
+Wants=scos-fabric@context-optimisation.service
+Wants=scos-fabric@code-intelligence.service
+Wants=scos-fabric@execution-proxy.service
+Wants=scos-fabric@extension-manager.service
+Wants=scos-fabric@compatibility-gateway.service
+Wants=scos-fabric@hermes-provider.service
+Wants=scos-fabric@memory-intelligence.service
+Wants=scos-fabric@mcp-gateway.service
+Wants=scos-fabric@okf-synchroniser.service
+Wants=scos-fabric@security-gate.service
+Wants=scos-fabric@tool-governance.service
+Wants=scos-fabric@agent-registry.service
+Wants=scos-fabric@recovery-orchestrator.service
+Wants=scos-fabric@backup-manager.service
+Wants=scos-fabric@observability.service
+Wants=scos-fabric@transparency-projection.service
+Wants=scos-consolidation-worker.service

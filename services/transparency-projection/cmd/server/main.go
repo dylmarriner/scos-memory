@@ -31,10 +31,10 @@ var serviceMetrics = telemetry.FromEnvironment("transparency-projection")
 type projectionServer struct {
 	upstream          string // primary dependency (memory-intelligence), used for readiness
 	upstreams         map[string]string
-	controlPlaneToken string // forwarded to control-plane-protected upstreams (code-intelligence etc.)
+	controlPlaneToken string       // forwarded to control-plane-protected upstreams (code-intelligence etc.)
 	client            *http.Client // fast client for health probes and event streaming
 	snapshotClient    *http.Client // slow client for snapshot assembly (heavyweight views)
-	serviceToken      string // claims JWT minted at startup; used when the caller sends no bearer token
+	serviceToken      string       // claims JWT minted at startup; used when the caller sends no bearer token
 }
 
 // upstreamDefault names an environment variable and its fallback base URL for

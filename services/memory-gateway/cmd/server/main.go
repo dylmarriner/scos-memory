@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,9 +16,12 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/httpmid"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+var logger = httpmid.NewLogger("memory-gateway")
 
 type server struct {
 	version     string
@@ -49,18 +51,21 @@ func main() {
 	defer s.metrics.Close()
 	if s.databaseURL != "" {
 		if err := database.RequireTLS(s.databaseURL); err != nil {
-			log.Fatal(err)
+			logger.Error("startup failed", "error", err)
+			os.Exit(1)
 		}
 	}
 	validator, err := newEventValidator(os.Getenv("SCOS_SCHEMA_DIR"))
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("startup failed", "error", err)
+		os.Exit(1)
 	}
 	s.validator = validator
 	if s.databaseURL != "" {
 		db, err := sql.Open("pgx", s.databaseURL)
 		if err != nil {
-			log.Fatal(err)
+			logger.Error("startup failed", "error", err)
+			os.Exit(1)
 		}
 		database.TuneSQLDB(db)
 		s.db = db
@@ -68,7 +73,8 @@ func main() {
 	}
 	authConfig, err := auth.FromEnvironment()
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("startup failed", "error", err)
+		os.Exit(1)
 	}
 
 	httpServer := &http.Server{
@@ -80,9 +86,10 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("memory gateway listening on %s", addr)
-	if err := tlsserve.Serve(httpServer); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	logger.Info("memory gateway listening", "addr", addr)
+	if err := tlsserve.ServeGracefully(httpServer, 15*time.Second, logger); err != nil {
+		logger.Error("server exited with error", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -102,7 +109,7 @@ func (s server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/operations", s.handlePrepareOperation)
 	mux.HandleFunc("GET /v1/outbox/status", s.handleOutboxStatus)
 	mux.HandleFunc("GET /v1/outbox/dead-letters", s.handleDeadLetters)
-	return requestLogging(mux)
+	return httpmid.Recover(logger, "memory-gateway")(httpmid.RequestLogging(logger)(mux))
 }
 
 func (s server) handleListTurns(w http.ResponseWriter, r *http.Request) {
@@ -386,16 +393,8 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
-		log.Printf("encode response: %v", err)
+		logger.Error("encode response", "error", err)
 	}
-}
-
-func requestLogging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		started := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("method=%s path=%s duration=%s", r.Method, r.URL.Path, time.Since(started))
-	})
 }
 
 func getenv(key, fallback string) string {

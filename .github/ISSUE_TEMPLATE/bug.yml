@@ -1,0 +1,69 @@
+name: Bug report
+description: Something in the fabric is broken or behaving unexpectedly.
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What's wrong?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Commands run, requests sent, or Compose services involved.
+      placeholder: |
+        1. `docker compose -f deploy/compose/docker-compose.yml up --build`
+        2. `curl ...`
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include relevant logs, status codes, or error output.
+    validations:
+      required: true
+
+  - type: input
+    id: service
+    attributes:
+      label: Affected service(s)
+      placeholder: e.g. services/memory-gateway, workers/consolidation
+    validations:
+      required: false
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit / version
+      placeholder: git rev-parse HEAD
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Docker/Compose version, Go/Python version.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+    validations:
+      required: false

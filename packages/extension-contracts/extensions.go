@@ -18,15 +18,15 @@ const (
 
 // Manifest defines an extension package manifest (§22.2).
 type Manifest struct {
-	PackageID          string        `json:"package_id"`
-	Name               string        `json:"name"`
-	Version            string        `json:"version"`
-	Type               ExtensionType `json:"type"`
-	Publisher          string        `json:"publisher"`
-	Signature          string        `json:"signature"`
-	RequiredPermissions []string     `json:"required_permissions"`
-	Hooks              []HookDef     `json:"hooks,omitempty"`
-	Skills             []SkillDef    `json:"skills,omitempty"`
+	PackageID           string        `json:"package_id"`
+	Name                string        `json:"name"`
+	Version             string        `json:"version"`
+	Type                ExtensionType `json:"type"`
+	Publisher           string        `json:"publisher"`
+	Signature           string        `json:"signature"`
+	RequiredPermissions []string      `json:"required_permissions"`
+	Hooks               []HookDef     `json:"hooks,omitempty"`
+	Skills              []SkillDef    `json:"skills,omitempty"`
 }
 
 // HookDef defines a hook declaration within an extension manifest.

@@ -1,0 +1,29 @@
+[Unit]
+Description=SCOS Memory Fabric - consolidation-worker
+Documentation=https://github.com/dylmarriner/scos-memory/blob/main/deploy/native/README.md
+After=network-online.target scos-fabric-migrations.service scos-fabric@memory-gateway.service
+Wants=network-online.target
+Requires=scos-fabric-migrations.service
+PartOf=scos-fabric.target
+
+[Service]
+Type=exec
+User=scos
+Group=scos
+EnvironmentFile=/etc/scos/scos-fabric.env
+EnvironmentFile=-/etc/scos/env/consolidation-worker.env
+ExecStart=/opt/scos-fabric/venv/consolidation/bin/python -m scos_consolidation.worker
+
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=2s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/scos
+
+[Install]
+WantedBy=scos-fabric.target

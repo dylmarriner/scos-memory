@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -20,10 +19,13 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/httpmid"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var logger = httpmid.NewLogger("autonomous-control-plane")
 
 type RouteRequest struct {
 	TenantID          string `json:"tenant_id,omitempty"`
@@ -1162,36 +1164,43 @@ func main() {
 	if databaseURL == "" && statePath != "" {
 		store, err = newLocalStateStore(statePath)
 		if err != nil {
-			log.Fatalf("load control-plane state: %v", err)
+			logger.Error("startup failed", "error", err)
+			os.Exit(1)
 		}
 	}
 	var db *pgxpool.Pool
 	if databaseURL != "" {
 		if err := database.RequireTLS(databaseURL); err != nil {
-			log.Fatal(err)
+			logger.Error("startup failed", "error", err)
+			os.Exit(1)
 		}
 		db, err = database.NewPool(context.Background(), databaseURL)
 		if err != nil {
-			log.Fatalf("connect to database: %v", err)
+			logger.Error("startup failed", "error", err)
+			os.Exit(1)
 		}
 		defer db.Close()
 		if err := db.Ping(context.Background()); err != nil {
-			log.Fatalf("database is not ready: %v", err)
+			logger.Error("startup failed", "error", err)
+			os.Exit(1)
 		}
 	}
 	if db == nil {
-		log.Fatal("DATABASE_URL is required; local control-plane state is test-only fallback")
+		logger.Error("startup failed", "error", "DATABASE_URL is required; local control-plane state is test-only fallback")
+		os.Exit(1)
 	}
 	commitEndpoint := strings.TrimSpace(os.Getenv("SCOS_MEMORY_GATEWAY_URL"))
 	if commitEndpoint == "" {
-		log.Fatal("SCOS_MEMORY_GATEWAY_URL is required; authoritative turn commit is unavailable")
+		logger.Error("startup failed", "error", "SCOS_MEMORY_GATEWAY_URL is required; authoritative turn commit is unavailable")
+		os.Exit(1)
 	}
 	// memory-gateway is an internal service, so its committer uses the shared
 	// internal TLS trust anchor rather than the system pool used for the
 	// (potentially external) agent endpoint dispatcher below.
 	commitClient, err := tlsserve.TrustedClient(10 * time.Second)
 	if err != nil {
-		log.Fatalf("configure internal TLS client: %v", err)
+		logger.Error("startup failed", "error", err)
+		os.Exit(1)
 	}
 	plane := &controlPlane{db: db, store: store, client: commitClient, committer: memoryGatewayCommitter{endpoint: commitEndpoint, client: commitClient}}
 	mux := http.NewServeMux()
@@ -1245,8 +1254,22 @@ func main() {
 	if addr == "" {
 		addr = ":8081"
 	}
-	log.Printf("autonomous control plane listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
-		log.Fatal(err)
+
+	handler := auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
+	handler = httpmid.Recover(logger, "autonomous-control-plane")(httpmid.RequestLogging(logger)(handler))
+
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	logger.Info("autonomous control plane listening", "addr", addr)
+	if err := tlsserve.ServeGracefully(httpServer, 15*time.Second, logger); err != nil {
+		logger.Error("server exited with error", "error", err)
+		os.Exit(1)
 	}
 }

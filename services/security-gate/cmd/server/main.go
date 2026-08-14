@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,10 +22,13 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/httpmid"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+var logger = httpmid.NewLogger("security-gate")
 
 // serviceMetrics emits this service's §32 measures. It is nil-safe and a
 // no-op when no collector is configured.
@@ -153,7 +155,7 @@ type securityServer struct {
 func newSecurityServer() *securityServer {
 	httpClient, err := tlsserve.TrustedClient(5 * time.Second)
 	if err != nil {
-		log.Printf("securestore http client: %v; falling back to a plain client", err)
+		logger.Warn("securestore http client init failed, falling back to a plain client", "error", err)
 		httpClient = &http.Client{Timeout: 5 * time.Second}
 	}
 	return &securityServer{
@@ -178,18 +180,22 @@ func (s *securityServer) ready() error {
 func main() {
 	issuerSecret := os.Getenv("SCOS_SECURITY_ISSUER_SECRET")
 	if issuerSecret == "" {
-		log.Fatal("SCOS_SECURITY_ISSUER_SECRET must be configured")
+		logger.Error("startup failed", "error", "SCOS_SECURITY_ISSUER_SECRET must be configured")
+		os.Exit(1)
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		log.Fatal("DATABASE_URL is required")
+		logger.Error("startup failed", "error", "DATABASE_URL is required")
+		os.Exit(1)
 	}
 	if err := database.RequireTLS(databaseURL); err != nil {
-		log.Fatal(err)
+		logger.Error("startup failed", "error", err)
+		os.Exit(1)
 	}
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
-		log.Fatalf("connect to database: %v", err)
+		logger.Error("startup failed", "error", err)
+		os.Exit(1)
 	}
 	database.TuneSQLDB(db)
 	defer db.Close()
@@ -223,9 +229,23 @@ func main() {
 	if addr == "" {
 		addr = ":8091"
 	}
-	log.Printf("security gate listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
-		log.Fatal(err)
+
+	handler := auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
+	handler = httpmid.Recover(logger, "security-gate")(httpmid.RequestLogging(logger)(handler))
+
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	logger.Info("security gate listening", "addr", addr)
+	if err := tlsserve.ServeGracefully(httpServer, 15*time.Second, logger); err != nil {
+		logger.Error("server exited with error", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -777,16 +797,16 @@ func (s *securityServer) resolveSecretValue(w http.ResponseWriter, r *http.Reque
 
 	secret, err := s.securestoreClient().getSecret(r.Context(), ref.Ref)
 	if err != nil {
-		log.Printf("securestore resolve failed for ref %s: %v", id, err)
+		logger.Error("securestore resolve failed", "ref", id, "error", err)
 		if failErr := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "error", Reason: "securestore unreachable"}); failErr != nil {
-			log.Printf("unable to persist audit record for failed resolve of %s: %v", id, failErr)
+			logger.Error("unable to persist audit record for failed resolve", "ref", id, "error", failErr)
 		}
 		http.Error(w, "securestore unreachable", http.StatusBadGateway)
 		return
 	}
 	if secret.Status == "approval_required" || secret.Value == "" {
 		if failErr := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "denied", Reason: "securestore requires approval"}); failErr != nil {
-			log.Printf("unable to persist audit record for pending resolve of %s: %v", id, failErr)
+			logger.Error("unable to persist audit record for pending resolve", "ref", id, "error", failErr)
 		}
 		http.Error(w, "secret retrieval requires approval", http.StatusServiceUnavailable)
 		return
@@ -891,6 +911,6 @@ func (c *securestoreClient) getSecret(ctx context.Context, credentialID string) 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("encode response: %v", err)
+		logger.Error("encode response", "error", err)
 	}
 }
