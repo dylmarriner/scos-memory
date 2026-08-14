@@ -67,6 +67,45 @@ def _deepseek_config() -> tuple[str, str, str] | None:
     return api_key, base_url, model
 
 
+def _parse_llm_json(content: str) -> dict:
+    """Parse an LLM JSON response tolerantly.
+
+    Models sometimes wrap the JSON in ```json fences or stray prose, and a
+    hard ``json.loads`` then raises "Unterminated string" on every synthesis
+    cycle (which is what made synthesis look permanently broken). We strip
+    fences, try the whole string, then try progressively shorter / repaired
+    variants so a single bad tail doesn't kill the run.
+    """
+    content = content.strip()
+    # Strip markdown code fences (```json ... ``` or ``` ... ```).
+    if content.startswith("```"):
+        content = content.split("```", 2)[1] if content.count("```") >= 2 else content.lstrip("`")
+    content = content.strip().lstrip("`").strip()
+    direct = _try_parse(content)
+    if direct is not None:
+        return direct
+    # Some models emit prose around the object or truncate the tail with junk
+    # braces/brackets. Walk candidate [{...}] spans from the first '{' and try
+    # progressively shorter end positions until one parses.
+    start = content.find("{")
+    if start != -1:
+        for end in range(len(content) - 1, start, -1):
+            if content[end] in "}]":
+                candidate = content[start:end + 1]
+                parsed = _try_parse(candidate)
+                if parsed is not None:
+                    return parsed
+    raise ValueError("LLM returned no parseable JSON object")
+
+
+def _try_parse(content: str) -> dict | None:
+    try:
+        obj = json.loads(content)
+    except (ValueError, TypeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 def _call_deepseek(api_key: str, base_url: str, model: str, facts: list[dict], timeout: float = 30.0) -> dict:
     numbered = "\n".join(f"- id={f['id']}: {f['content']}" for f in facts)
     body = json.dumps({
@@ -76,7 +115,7 @@ def _call_deepseek(api_key: str, base_url: str, model: str, facts: list[dict], t
             {"role": "user", "content": numbered},
         ],
         "temperature": 0.2,
-        "max_tokens": 1500,
+        "max_tokens": 2000,
         "response_format": {"type": "json_object"},
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -91,7 +130,7 @@ def _call_deepseek(api_key: str, base_url: str, model: str, facts: list[dict], t
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     content = payload["choices"][0]["message"]["content"]
-    return json.loads(content)
+    return _parse_llm_json(content)
 
 
 def _eligible_namespaces(conn: psycopg.Connection) -> list[dict]:
@@ -111,12 +150,12 @@ def _eligible_namespaces(conn: psycopg.Connection) -> list[dict]:
 
 
 def _due_for_synthesis(conn: psycopg.Connection, namespace_id) -> bool:
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT last_run_at FROM memory_synthesis_state WHERE namespace_id = %s", (namespace_id,))
         row = cur.fetchone()
-    if row is None or row[0] is None:
+    if row is None or row.get("last_run_at") is None:
         return True
-    last_run_at = row[0]
+    last_run_at = row["last_run_at"]
     if last_run_at.tzinfo is None:
         last_run_at = last_run_at.replace(tzinfo=timezone.utc)
     return datetime.now(timezone.utc) - last_run_at >= timedelta(hours=CADENCE_HOURS)

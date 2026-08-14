@@ -4,6 +4,7 @@ import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -83,7 +84,9 @@ type RetrieveResponse struct {
 // ── server state ─────────────────────────────────────────────────────────
 
 type server struct {
-	db *pgxpool.Pool
+	db            *pgxpool.Pool
+	embeddingsURL string // optional: when set, query text is embedded for real vector search
+	embedClient   *http.Client
 }
 
 func (s *server) readinessCheck() error {
@@ -135,7 +138,14 @@ func main() {
 	}
 	defer pool.Close()
 
-	srv := &server{db: pool}
+	srv := &server{
+		db:            pool,
+		embeddingsURL: strings.TrimSpace(os.Getenv("SCOS_EMBEDDINGS_URL")),
+		// The embeddings worker serves plain HTTP on the internal fabric network
+		// (SCOS_EMBEDDINGS_URL=http://embeddings-worker:8102) — no TLS, and the
+		// request never leaves the host/Tailscale boundary.
+		embedClient: &http.Client{Timeout: 10 * time.Second},
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) {
@@ -239,6 +249,15 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── 6. Vector search ────────────────────────────────────────────
+	// Embed the query text when no embedding was supplied and an embedder is
+	// configured, so vector search runs instead of silently degrading to FTS.
+	if len(req.QueryEmbedding) == 0 && req.Query != "" && s.embeddingsURL != "" {
+		if emb, err := s.embedQuery(ctx, req.Query); err == nil && len(emb) > 0 {
+			req.QueryEmbedding = emb
+		} else if err != nil {
+			log.Printf("query embedding unavailable (%v); vector search will use fallback", err)
+		}
+	}
 	vectorResults, err := s.vectorSearch(ctx, req, namespaces, sensitivityFilter, maxResults)
 	if err != nil {
 		log.Printf("vector search error: %v", err)
@@ -413,6 +432,39 @@ func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namesp
 		LIMIT $5
 	`
 	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, tsQuery, "fulltext")
+}
+
+// embedQuery calls the embeddings worker to turn free-text into a query
+// embedding. Returns nil/error if the embedder is unreachable or produces no
+// vector, in which case the caller falls back to the deterministic FTS path.
+func (s *server) embedQuery(ctx context.Context, query string) ([]float64, error) {
+	body, err := json.Marshal(map[string]string{"input": query})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.embeddingsURL+"/v1/embed", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.embedClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("embedder returned status %d", resp.StatusCode)
+	}
+	var out struct {
+		Embedding []float64 `json:"embedding"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if len(out.Embedding) == 0 {
+		return nil, fmt.Errorf("embedder returned empty vector")
+	}
+	return out.Embedding, nil
 }
 
 func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {

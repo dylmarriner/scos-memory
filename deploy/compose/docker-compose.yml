@@ -415,6 +415,68 @@ services:
       migrations:
         condition: service_completed_successfully
 
+  embeddings-worker:
+    <<: *service-limits
+    # Override the shared 160m cap: the local ONNX runtime + bge-small model
+    # (~130MB weights) needs far more headroom than the thin Go services.
+    mem_limit: ${SCOS_EMBEDDINGS_MEM_LIMIT:-768m}
+    memswap_limit: ${SCOS_EMBEDDINGS_MEM_LIMIT:-768m}
+    cpus: ${SCOS_EMBEDDINGS_CPUS:-2}
+    build:
+      context: ../..
+      dockerfile: workers/embeddings/Dockerfile
+    restart: unless-stopped
+    environment:
+      SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_EMBEDDINGS_HTTP_ADDR: ${SCOS_EMBEDDINGS_HTTP_ADDR:-:8102}
+      SCOS_EMBEDDINGS_POLL_SECONDS: ${SCOS_EMBEDDINGS_POLL_SECONDS:-5}
+      SCOS_EMBEDDINGS_BATCH_SIZE: ${SCOS_EMBEDDINGS_BATCH_SIZE:-64}
+      SCOS_EMBED_MODEL: ${SCOS_EMBED_MODEL:-BAAI/bge-small-en-v1.5}
+      SCOS_LOG_LEVEL: ${SCOS_LOG_LEVEL:-info}
+    volumes:
+      - embeddings-cache:/var/lib/scos/embeddings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+  index-maintenance-worker:
+    <<: *service-limits
+    build:
+      context: ../..
+      dockerfile: workers/index-maintenance/Dockerfile
+    restart: unless-stopped
+    # One-shot cycle wrapped in a loop so it runs on the maintenance cadence.
+    command: ["sh", "-c", "while true; do python3 main.py; sleep $${SCOS_INDEX_MAINTENANCE_INTERVAL:-3600}; done"]
+    environment:
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_INDEX_MAINTENANCE_INTERVAL: ${SCOS_INDEX_MAINTENANCE_INTERVAL:-3600}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+  policy-evaluation-worker:
+    <<: *service-limits
+    build:
+      context: ../..
+      dockerfile: workers/policy-evaluation/Dockerfile
+    restart: unless-stopped
+    command: ["sh", "-c", "while true; do python3 main.py; sleep $${SCOS_POLICY_EVAL_INTERVAL:-21600}; done"]
+    environment:
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_POLICY_EVAL_INTERVAL: ${SCOS_POLICY_EVAL_INTERVAL:-21600}
+      SCOS_POLICY_EVAL_MIN_SAMPLES: ${SCOS_POLICY_EVAL_MIN_SAMPLES:-20}
+      SCOS_POLICY_EVAL_REGRESSION_THRESHOLD: ${SCOS_POLICY_EVAL_REGRESSION_THRESHOLD:-0.05}
+      SCOS_POLICY_EVAL_SAMPLE_LIMIT: ${SCOS_POLICY_EVAL_SAMPLE_LIMIT:-200}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
   retrieval-orchestrator:
     <<: [*service-limits, *fabric-image]
     command: ["retrieval-orchestrator"]
@@ -427,6 +489,9 @@ services:
       SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
       SCOS_RETRIEVAL_HTTP_ADDR: ${SCOS_RETRIEVAL_HTTP_ADDR:-:8082}
       DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      # When set, the retrieval orchestrator embeds the query so pgvector
+      # semantic search runs instead of silently falling back to full-text.
+      SCOS_EMBEDDINGS_URL: ${SCOS_EMBEDDINGS_URL:-http://embeddings-worker:8102}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -908,6 +973,7 @@ services:
     environment:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_TRANSPARENCY_HTTP_ADDR: ${SCOS_TRANSPARENCY_HTTP_ADDR:-:8097}
+      SCOS_DASHBOARD_EDIT_PASSPHRASE: ${SCOS_DASHBOARD_EDIT_PASSPHRASE:-}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
       SCOS_AGENT_REGISTRY_URL: ${SCOS_AGENT_REGISTRY_URL:-https://agent-registry:8093}
       SCOS_TOOL_GOVERNANCE_URL: ${SCOS_TOOL_GOVERNANCE_URL:-https://tool-governance:8092}
@@ -966,4 +1032,5 @@ volumes:
   code-intelligence-data:
   okf-data:
   backup-data:
+  embeddings-cache:
   postgres-wal-archive:

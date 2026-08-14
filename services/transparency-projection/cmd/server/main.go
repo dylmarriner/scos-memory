@@ -35,7 +35,16 @@ type projectionServer struct {
 	client            *http.Client // fast client for health probes and event streaming
 	snapshotClient    *http.Client // slow client for snapshot assembly (heavyweight views)
 	serviceToken      string       // claims JWT minted at startup; used when the caller sends no bearer token
+
+	editPassphrase string // SCOS_DASHBOARD_EDIT_PASSPHRASE; empty disables editing entirely
+	editSecret     string // HMAC key for dashboard edit-session tokens (reuses the security issuer secret)
 }
+
+// dashboardEditTokenTTL bounds how long a passphrase login stays valid. The
+// dashboard is otherwise a read-only, unauthenticated surface (see the
+// handler comment below) -- edit sessions are the one exception, and keeping
+// them short-lived limits the blast radius of a token left in a browser tab.
+const dashboardEditTokenTTL = 2 * time.Hour
 
 // upstreamDefault names an environment variable and its fallback base URL for
 // a service this projection aggregates read-only views from.
@@ -85,6 +94,11 @@ func main() {
 		controlPlaneToken: strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		serviceToken:      serviceToken,
 		client:            client,
+		editPassphrase:    strings.TrimSpace(os.Getenv("SCOS_DASHBOARD_EDIT_PASSPHRASE")),
+		editSecret:        strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET")),
+	}
+	if s.editPassphrase == "" {
+		log.Printf("SCOS_DASHBOARD_EDIT_PASSPHRASE not set: dashboard editing (fact correct/forget) is disabled, viewing only")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", s.live)
@@ -92,6 +106,8 @@ func main() {
 	mux.HandleFunc("/v1/transparency/snapshot", s.snapshot)
 	mux.HandleFunc("/v1/transparency/events", s.events)
 	mux.HandleFunc("/v1/transparency/stream", s.events)
+	mux.HandleFunc("/v1/transparency/login", s.login)
+	mux.HandleFunc("/v1/transparency/facts/", s.factByID)
 	authenticated := auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
 
 	// The dashboard shell carries no authoritative data of its own: every
@@ -314,6 +330,135 @@ func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// login exchanges the dashboard edit passphrase (SCOS_DASHBOARD_EDIT_PASSPHRASE)
+// for a short-lived edit-session token. Viewing the dashboard requires no
+// auth at all (see the handler comment in main); editing (correcting or
+// forgetting a fact) requires this token, obtained by whoever knows the
+// shared passphrase. This is deliberately simpler than the fabric's normal
+// tenant/principal auth -- the dashboard has no user accounts -- but it
+// keeps "public read, gated write" instead of leaving writes wide open.
+func (s *projectionServer) login(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if s.editPassphrase == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "dashboard editing is not configured on this deployment"})
+		return
+	}
+	var body struct {
+		Passphrase string `json:"passphrase"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if !hmac.Equal([]byte(body.Passphrase), []byte(s.editPassphrase)) {
+		// Fixed comparison time regardless of match: this is the one
+		// unauthenticated write-adjacent endpoint on this service.
+		time.Sleep(150 * time.Millisecond)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "incorrect passphrase"})
+		return
+	}
+	token, expires, err := s.mintEditToken()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to mint edit token"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "expires": expires.UTC().Format(time.RFC3339)})
+}
+
+// factByID proxies to memory-intelligence's /v1/facts/{id} and /v1/facts/{id}/history.
+// GET (including history) stays public, matching every other panel. PATCH
+// (correct) and DELETE (forget) require a valid dashboard edit-session token.
+func (s *projectionServer) factByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPatch || r.Method == http.MethodDelete {
+		if !s.hasValidEditToken(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "editing requires a valid dashboard login"})
+			return
+		}
+	}
+	upstreamPath := "/v1" + strings.TrimPrefix(r.URL.Path, "/v1/transparency")
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, s.upstream+upstreamPath, r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.copyIdentityHeaders(r, req)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream unavailable"})
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
+}
+
+// mintEditToken and hasValidEditToken mirror mintServiceToken's HMAC-JWT
+// shape below, but with purpose:"dashboard-edit" and a short TTL, so an edit
+// token can never be replayed as a fabric identity token or vice versa.
+func (s *projectionServer) mintEditToken() (string, time.Time, error) {
+	if s.editSecret == "" {
+		return "", time.Time{}, errors.New("SCOS_SECURITY_ISSUER_SECRET must be configured")
+	}
+	expires := time.Now().Add(dashboardEditTokenTTL)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload, err := json.Marshal(map[string]any{
+		"purpose": "dashboard-edit",
+		"iat":     time.Now().Unix(),
+		"exp":     expires.Unix(),
+	})
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	body := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, []byte(s.editSecret))
+	_, _ = mac.Write([]byte(header + "." + body))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return header + "." + body + "." + sig, expires, nil
+}
+
+func (s *projectionServer) hasValidEditToken(r *http.Request) bool {
+	if s.editSecret == "" || s.editPassphrase == "" {
+		return false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("X-SCOS-Dashboard-Edit-Token"), "Bearer "))
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(s.editSecret))
+	_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
+	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expectedSig), []byte(parts[2])) {
+		return false
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Purpose string `json:"purpose"`
+		Exp     int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return false
+	}
+	return claims.Purpose == "dashboard-edit" && time.Now().Unix() < claims.Exp
 }
 
 func (s *projectionServer) fetch(r *http.Request, base, path string) (json.RawMessage, int, error) {

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scos-embeddings"
+version = "0.1.0"
+description = "Local ONNX embedding worker + query-embedding endpoint for SCOS vector memory"
+requires-python = ">=3.11"
+dependencies = [
+  "psycopg[binary]>=3.2,<4",
+  "onnxruntime>=1.17,<2",
+  "numpy>=1.24,<3",
+  "tokenizers>=0.19,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scos_embeddings"]
