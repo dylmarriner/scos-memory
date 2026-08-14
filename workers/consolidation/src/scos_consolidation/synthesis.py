@@ -106,7 +106,7 @@ def _try_parse(content: str) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
-def _call_deepseek(api_key: str, base_url: str, model: str, facts: list[dict], timeout: float = 30.0) -> dict:
+def _call_deepseek(api_key: str, base_url: str, model: str, facts: list[dict], timeout: float = 120.0) -> dict:
     numbered = "\n".join(f"- id={f['id']}: {f['content']}" for f in facts)
     body = json.dumps({
         "model": model,
@@ -115,7 +115,11 @@ def _call_deepseek(api_key: str, base_url: str, model: str, facts: list[dict], t
             {"role": "user", "content": numbered},
         ],
         "temperature": 0.2,
-        "max_tokens": 2000,
+        # deepseek-v4-flash is a reasoning model whose reasoning_content eats
+        # the token budget; with a large fact set a low cap truncates the actual
+        # JSON down to zero (finish=length, content empty). Give it generous room
+        # — the trace can exceed 8k on the real 179-fact namespace.
+        "max_tokens": 16000,
         "response_format": {"type": "json_object"},
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -130,7 +134,16 @@ def _call_deepseek(api_key: str, base_url: str, model: str, facts: list[dict], t
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     content = payload["choices"][0]["message"]["content"]
-    return _parse_llm_json(content)
+    try:
+        return _parse_llm_json(content)
+    except ValueError:
+        # Log the raw response so a bad model output is diagnosable instead of
+        # an opaque "no parseable JSON" warning every cycle.
+        logger.warning(
+            "deepseek synthesis returned unparseable content (len=%d finish=%s): %r",
+            len(content), payload["choices"][0].get("finish_reason"), content[:400],
+        )
+        raise
 
 
 def _eligible_namespaces(conn: psycopg.Connection) -> list[dict]:
