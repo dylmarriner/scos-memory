@@ -56,14 +56,28 @@ def copy_rule(source: Path, target: Path) -> None:
     print(f"installed rules -> {target}")
 
 
+def copy_commands(source_dir: Path, target_dir: Path) -> None:
+    """Copy each file in source_dir into target_dir, backing up collisions."""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for source in source_dir.iterdir():
+        if not source.is_file():
+            continue
+        target = target_dir / source.name
+        backup(target)
+        shutil.copy2(source, target)
+        print(f"installed command -> {target}")
+
+
 def run(command: list[str]) -> None:
     print("$", " ".join(command))
     subprocess.run(command, cwd=ROOT, check=True)
 
 
 def install(skip_gemini: bool = False) -> None:
-    if not BRIDGE.is_file():
-        raise SystemExit(f"missing shared bridge: {BRIDGE}")
+    BRIDGE.parent.mkdir(parents=True, exist_ok=True)
+    backup(BRIDGE)
+    shutil.copy2(ROOT / "integrations/agent-plugins/scos-mcp-bridge.py", BRIDGE)
+    print(f"installed shared bridge -> {BRIDGE}")
 
     hermes_target = HOME / ".hermes" / "plugins" / "scos-memory"
     hermes_target.parent.mkdir(parents=True, exist_ok=True)
@@ -108,6 +122,25 @@ def install(skip_gemini: bool = False) -> None:
     copy_rule(ROOT / "integrations/agent-plugins/antigravity/ANTIGRAVITY.md", HOME / ".gemini/antigravity/scos-memory.md")
     copy_rule(ROOT / "integrations/agent-plugins/continue/CONTINUE.md", HOME / ".continue/rules/scos-memory.md")
     copy_rule(ROOT / "integrations/agent-plugins/aider/AIDER.md", HOME / ".aider.scos.md")
+
+    # Slash commands. Codex, Continue, Kilo, and Qwen Code resolve custom
+    # commands from a user-global directory rather than the plugin/rules
+    # bundle itself, so they need an explicit copy here; Cline, Cursor,
+    # Windsurf, and Antigravity resolve commands/workflows per-project and
+    # are meant to be checked into each repo instead (see their READMEs).
+    copy_commands(ROOT / "integrations/codex/plugins/scos-memory-fabric/prompts", HOME / ".codex" / "prompts")
+    copy_commands(ROOT / "integrations/agent-plugins/continue/prompts", HOME / ".continue" / "prompts")
+    copy_commands(ROOT / "integrations/kilo/commands", HOME / ".kilo" / "commands")
+    copy_commands(ROOT / "integrations/qwen/plugin/commands", HOME / ".qwen" / "commands")
+
+    # OpenClaw skills are each a directory (SKILL.md plus any assets), not a
+    # single file, so they need copytree rather than copy_commands.
+    openclaw_skills_target = HOME / ".openclaw" / "skills"
+    openclaw_skills_target.mkdir(parents=True, exist_ok=True)
+    for skill_dir in (ROOT / "integrations/openclaw/skills").iterdir():
+        if skill_dir.is_dir():
+            shutil.copytree(skill_dir, openclaw_skills_target / skill_dir.name, dirs_exist_ok=True)
+            print(f"installed skill -> {openclaw_skills_target / skill_dir.name}")
 
     run(["codex", "plugin", "add", "scos-memory-fabric@scos-fabric-tools"])
 

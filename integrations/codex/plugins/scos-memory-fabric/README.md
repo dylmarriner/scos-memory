@@ -27,6 +27,11 @@ Tools exposed once connected: `scos_recall`, `scos_status`, `scos_explain`,
   to confirm the exact `memory_id` before `scos_correct`/`scos_forget`.
 - **`hooks.json`** — a `SessionStart` hook that reminds new sessions of the
   same guidance via `additionalContext`.
+- **`prompts/scos-recall.md`, `prompts/scos-explain.md`, `prompts/scos-status.md`**
+  — `/scos-recall`, `/scos-explain`, `/scos-status` custom prompts. Codex's
+  plugin manifest has no field to bundle these directly, so
+  `scripts/install_agent_plugins.py` copies them into `$CODEX_HOME/prompts/`
+  (`~/.codex/prompts/`) separately from the `codex plugin add` step.
 
 ## Prerequisite
 

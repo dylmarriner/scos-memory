@@ -29,6 +29,10 @@ Tools exposed once connected: `scos_recall`, `scos_status`, `scos_explain`,
 - **`dot-opencode/skills/scos-memory/`** — same skill content as the
   Claude Code / Codex packagings: when to call each tool, and to always
   confirm the exact `memory_id` before `scos_correct`/`scos_forget`.
+- **`dot-opencode/command/scos-recall.md`, `scos-explain.md`, `scos-status.md`**
+  — `/scos-recall`, `/scos-explain`, `/scos-status` custom commands
+  (OpenCode's `.opencode/command/*.md` convention, `$ARGUMENTS` for the
+  text typed after the command name).
 - **`dot-opencode/plugins/scos-memory-reminder.ts`** — a behavior plugin
   using the `event` (`session.created`) and
   `experimental.chat.system.transform` hooks to inject the same
