@@ -4,10 +4,19 @@ description: Use the SCOS Memory Fabric's mcp-gateway tools (scos_recall, scos_s
 user-invocable: false
 ---
 
-The `scos` MCP server (this plugin) connects to the SCOS Memory Fabric's
-`mcp-gateway` (`services/mcp-gateway`), which proxies to `hermes-provider`
-and `memory-intelligence`. It exposes seven tools, scoped to the tenant and
-principal configured at plugin install time.
+This plugin has two mechanisms working together, and they cover different
+gaps:
+
+- **`hooks/hooks.json`** fires a `SessionStart` reminder automatically, every
+  session, with no action from you — it's already told you to call
+  `scos_recall` before answering from assumption. Don't re-derive that
+  instruction from this skill; it's already in context by the time you read
+  this file.
+- **This skill** is what fills in the rest: the four read-only inspection
+  tools the hook doesn't detail, and the two mutating ones that need care.
+  It also covers the three slash commands (`/scos-recall`, `/scos-explain`,
+  `/scos-status`) — those exist for when the *user* wants to trigger a
+  lookup directly rather than you inferring the need for one.
 
 ## Tools
 
@@ -23,21 +32,25 @@ principal configured at plugin install time.
 
 ## When to use each
 
-- **Start of nontrivial work, or when the user references past context**
-  ("we talked about this before", "what did we decide about X") → call
-  `scos_recall` with a focused query before answering from assumption.
-- **User asks whether memory/the connection is working** → `scos_status`.
+- **The hook already nudged you at session start** — but recall again
+  mid-session too, whenever the topic shifts to something the opening
+  recall wouldn't have covered. One recall at session start doesn't cover
+  a whole session.
+- **User runs `/scos-recall [query]`** → that's an explicit, user-triggered
+  lookup; present only what the tool returns, same as any other call.
+- **User asks whether memory/the connection is working** → `scos_status`,
+  or `/scos-status`.
 - **User asks "why do you think/remember that" about a specific fact** →
-  `scos_explain` with that memory's id (get the id from a prior `scos_recall`
-  result, don't invent one).
+  `scos_explain` with that memory's id (get the id from a prior
+  `scos_recall` result, don't invent one), or `/scos-explain [memory_id]`.
 - **User asks what you know about them, broadly** → `scos_user_model`.
-- **User asks how memories relate to each other, or wants a broader picture**
-  → `scos_memory_graph`.
+- **User asks how memories relate to each other, or wants a broader
+  picture** → `scos_memory_graph`.
 - **User says a stored fact is wrong** → `scos_correct`, quoting back the
   corrected value before calling, since it's a mutation.
-- **User explicitly asks to forget/delete something** → `scos_forget`, only
-  after confirming the specific `memory_id` and getting the user's explicit
-  go-ahead — this is destructive and not easily undone.
+- **User explicitly asks to forget/delete something** → `scos_forget`,
+  only after confirming the specific `memory_id` and getting the user's
+  explicit go-ahead — this is destructive and not easily undone.
 
 ## Caution: `scos_correct` and `scos_forget`
 
@@ -50,11 +63,14 @@ silence means success.
 
 ## Anti-patterns
 
-WRONG: skipping `scos_recall` and answering "I don't have any memory of
-that" from the current conversation alone.
+WRONG: skipping `scos_recall` after the session-start hook fires, on the
+theory that the hook already "did the recall." The hook is a reminder, not
+a substitute for calling the tool with a query relevant to the current
+question.
 
-RIGHT: call `scos_recall` first, and only report "nothing found" after the
-tool actually returns empty.
+RIGHT: call `scos_recall` yourself, with a query specific to what's being
+asked, and only report "nothing found" after the tool actually returns
+empty.
 
 WRONG: calling `scos_forget` because the user seems annoyed about something
 being remembered, without asking which specific memory.

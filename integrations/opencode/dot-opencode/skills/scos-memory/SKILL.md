@@ -3,6 +3,20 @@ name: scos-memory
 description: Use the SCOS Memory Fabric tools (scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct, scos_forget) to search, inspect, and manage persistent cross-session memory. Use when the user says "recall", "what do you remember about", "check memory status", "why do you believe/remember", "forget that", or "that's wrong, it's actually".
 ---
 
+OpenCode's reminder isn't a session-start hook the way Claude Code's and
+Codex's are — it's `.opencode/plugins/scos-memory-reminder.ts`, a TypeScript
+plugin using OpenCode's `experimental.chat.system.transform` hook. It tracks
+already-reminded session IDs in memory and pushes the reminder into the
+system prompt exactly once, the first time that hook fires for a given
+`session.created` event. If the OpenCode process restarts mid-session, the
+in-memory tracking resets and the reminder can fire again — that's expected,
+not a bug to route around.
+
+There are no slash commands here either (OpenCode's plugin API doesn't
+expose one for this), so every recall, explain, or status check happens
+through you calling the tool directly in response to what the user asks in
+plain text.
+
 The `scos` MCP server (registered in this project's `.opencode/mcp.json`)
 is a bundled stdio bridge (`.opencode/scripts/scos-mcp-bridge.py`) that
 talks directly to the SCOS Memory Fabric's `hermes-provider` on rabuntu,
@@ -26,7 +40,10 @@ the tenant and principal in that file.
 
 - **Start of nontrivial work, or when the user references past context**
   ("we talked about this before", "what did we decide about X") → call
-  `scos_recall` with a focused query before answering from assumption.
+  `scos_recall` with a focused query before answering from assumption. The
+  one-time system-prompt reminder only covers the first turn of a
+  session — recall again whenever the topic shifts later in the same
+  session.
 - **User asks whether memory/the connection is working** → `scos_status`.
 - **User asks "why do you think/remember that" about a specific fact** →
   `scos_explain` with that memory's id (get the id from a prior
@@ -61,4 +78,5 @@ first.
   every agent on this fleet, and where credentials live.
 - `integrations/opencode/README.md` — how this integration installs.
 - `integrations/claude/`, `integrations/codex/` — the equivalent
-  packaging for other agents, same backend.
+  packaging for other agents, same backend but with a hook-based
+  (not system-prompt-transform-based) reminder.

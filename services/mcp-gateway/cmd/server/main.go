@@ -25,16 +25,13 @@ import (
 //
 // It does not own any data itself. Every tool call is forwarded, with the
 // caller's own identity headers, to the service that actually owns that
-// tool's implementation:
-//   - scos_status, scos_recall  -> hermes-provider  (already implemented)
-//   - scos_explain              -> memory-intelligence /v1/facts/{id}
-//   - scos_user_model           -> memory-intelligence /v1/dashboard/user-model
-//   - scos_memory_graph         -> memory-intelligence /v1/dashboard/memory-graph
-//   - scos_code_index           -> code-intelligence /v1/index
-//   - scos_code_query           -> code-intelligence /v1/query
-//   - scos_code_impact          -> code-intelligence /v1/impact
-//   - scos_correct               -> memory-intelligence PATCH /v1/facts/{id}
-//   - scos_forget                -> memory-intelligence DELETE /v1/facts/{id}
+// tool's implementation. See governedTools() for the full, current catalogue
+// (memory/fact ops, agent-registry, autonomous-control-plane, backup-manager,
+// compatibility-gateway, context-optimisation, execution-proxy,
+// extension-manager, memory-gateway, okf-synchroniser, recovery-orchestrator,
+// retrieval-orchestrator, security-gate, tool-governance,
+// transparency-projection, and observability) and dispatchTool() for the
+// per-tool forwarding logic.
 const version = "0.1.0"
 
 type requestIdentity struct {
@@ -181,7 +178,7 @@ func (s *gatewayServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		writeRPCResult(w, req.ID, map[string]any{})
 	case "tools/list":
-		writeRPCResult(w, req.ID, map[string]any{"tools": governedTools()})
+		writeRPCResult(w, req.ID, map[string]any{"tools": agentTools(r.Header.Get("X-SCOS-Agent-Name"))})
 	case "tools/call":
 		s.handleToolsCall(w, r, req)
 	default:
@@ -200,6 +197,11 @@ func (s *gatewayServer) handleToolsCall(w http.ResponseWriter, r *http.Request, 
 	}
 	if !governedToolNames()[call.Name] {
 		writeRPCError(w, req.ID, -32602, "unknown tool: "+call.Name)
+		return
+	}
+	agentName := r.Header.Get("X-SCOS-Agent-Name")
+	if names := desktopAgentToolNames[agentName]; names != nil && !names[call.Name] {
+		writeRPCError(w, req.ID, -32602, "tool "+call.Name+" is not exposed to agent "+agentName)
 		return
 	}
 
@@ -819,6 +821,53 @@ func governedToolNames() map[string]bool {
 		names[t["name"].(string)] = true
 	}
 	return names
+}
+
+// memoryTierToolNames is the curated memory subset documented in every
+// desktop-agent plugin bundle (integrations/*/skills/scos-memory/SKILL.md,
+// integrations/agent-plugins/*/*.md): recall, inspect, correct, forget --
+// none of mcp-gateway's code-intelligence, agent-registry, or governance
+// tooling, which those bundles never mention and are not built to drive.
+var memoryTierToolNames = map[string]bool{
+	"scos_recall":       true,
+	"scos_status":       true,
+	"scos_explain":      true,
+	"scos_user_model":   true,
+	"scos_memory_graph": true,
+	"scos_correct":      true,
+	"scos_forget":       true,
+}
+
+// desktopAgentToolNames maps X-SCOS-Agent-Name values (set by the shared
+// stdio bridge from SCOS_AGENT_NAME, see scripts/install_agent_plugins.py)
+// to the tool subset that agent's bundle documents and is scoped to. Agents
+// absent from this map (native-plugin integrations that may grow beyond the
+// memory tier, and any caller that omits the header) get the full governed
+// catalogue -- this map only ever narrows, never widens, access.
+var desktopAgentToolNames = map[string]map[string]bool{
+	"cline":          memoryTierToolNames,
+	"cursor":         memoryTierToolNames,
+	"windsurf-devin": memoryTierToolNames,
+	"antigravity":    memoryTierToolNames,
+	"continue":       memoryTierToolNames,
+	"gemini-cli":     memoryTierToolNames,
+}
+
+// agentTools returns the tools/list payload for one caller: the full
+// governed catalogue, or the narrower memory-tier subset for agents in
+// desktopAgentToolNames.
+func agentTools(agentName string) []map[string]any {
+	names := desktopAgentToolNames[agentName]
+	if names == nil {
+		return governedTools()
+	}
+	tools := make([]map[string]any, 0, len(names))
+	for _, t := range governedTools() {
+		if names[t["name"].(string)] {
+			tools = append(tools, t)
+		}
+	}
+	return tools
 }
 
 // strField, intField, boolField, arrField and objField build inputSchema

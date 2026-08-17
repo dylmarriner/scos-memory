@@ -3,10 +3,21 @@ name: scos-memory
 description: Use the SCOS Memory Fabric tools (scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct, scos_forget) to search, inspect, and manage persistent cross-session memory. Use when the user says "recall", "what do you remember about", "check memory status", "why do you believe/remember", "forget that", or "that's wrong, it's actually".
 ---
 
-The `scos` MCP server (this plugin) is a bundled stdio bridge
-(`scripts/scos-mcp-bridge.py`) that talks directly to the SCOS Memory
-Fabric's `hermes-provider` on rabuntu, reading connection details from
-`~/.hermes/scos.env` on this machine (see
+This plugin installs from the Codex plugin marketplace (`codex plugin add
+scos-memory-fabric@scos-fabric-tools`, see
+`scripts/install_agent_plugins.py`) rather than being copied into a
+user-config directory the way the Cline/Cursor/Windsurf bundles are. Its
+`hooks.json` fires the same `SessionStart` reminder Claude Code gets — call
+`scos_recall` before answering from assumption — but unlike Claude Code,
+**there are no slash commands here**: Codex's plugin SDK doesn't expose a
+command surface, so every recall, explain, or status check happens through
+you calling the tool directly, never through a user-typed shortcut. If the
+user wants an explicit lookup, that request comes as plain text, not a
+`/command`.
+
+The bundled bridge (`scripts/scos-mcp-bridge.py`) talks directly to the SCOS
+Memory Fabric's `hermes-provider` on rabuntu, reading connection details
+from `~/.hermes/scos.env` on this machine (see
 `docs/agent-connection-guide.md` §2 for how that file is populated). It
 exposes seven tools, scoped to the tenant and principal in that file.
 
@@ -26,7 +37,9 @@ exposes seven tools, scoped to the tenant and principal in that file.
 
 - **Start of nontrivial work, or when the user references past context**
   ("we talked about this before", "what did we decide about X") → call
-  `scos_recall` with a focused query before answering from assumption.
+  `scos_recall` with a focused query before answering from assumption. The
+  session-start hook is only a one-time reminder — recall again whenever
+  the topic shifts.
 - **User asks whether memory/the connection is working** → `scos_status`.
 - **User asks "why do you think/remember that" about a specific fact** →
   `scos_explain` with that memory's id (get the id from a prior
@@ -59,6 +72,7 @@ first.
 
 - `docs/agent-connection-guide.md` — how the gateway/bridge is wired for
   every agent on this fleet, and where credentials live.
-- `integrations/codex/README.md` — how this plugin installs.
+- `integrations/codex/README.md` — how this plugin installs from the
+  marketplace.
 - `integrations/claude/` — the equivalent Claude Code / Claude Desktop
-  packaging, same backend.
+  packaging, same backend but with slash commands this bundle doesn't have.
