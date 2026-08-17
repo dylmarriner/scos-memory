@@ -5,67 +5,184 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SCOS Transparency</title>
   <style>
-    :root { color-scheme: dark; }
+    :root {
+      color-scheme: dark;
+      --bg: #0b0e13;
+      --bg-grid: radial-gradient(circle at 15% 0%, rgba(99,102,241,.08), transparent 45%),
+                 radial-gradient(circle at 85% 15%, rgba(45,212,191,.06), transparent 40%);
+      --panel: #141a24;
+      --panel-2: #10151e;
+      --border: #232c3a;
+      --border-soft: #1c2432;
+      --text: #edf2f7;
+      --text-dim: #8b98ac;
+      --text-faint: #5a6678;
+      --ok: #34d399;
+      --warn: #f6ad55;
+      --err: #f87171;
+      --link: #7dd3fc;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.55);
+      --radius: .75rem;
+    }
     * { box-sizing: border-box; }
-    body { font: 15px/1.45 system-ui, sans-serif; max-width: 1500px; margin: 0 auto; padding: 1.5rem; background: #101318; color: #edf2f7; }
-    h1 { margin: 0; font-size: 1.4rem; }
-    header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: .5rem; margin-bottom: .25rem; }
-    .status { color: #9ae6b4; margin: 0 0 1.25rem; font-size: .9rem; }
-    .status.error { color: #feb2b2; }
+    body {
+      font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+      max-width: 1560px; margin: 0 auto; padding: 1.75rem 1.5rem 3rem;
+      background: var(--bg-grid), var(--bg);
+      background-attachment: fixed;
+      color: var(--text);
+    }
+    header {
+      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .75rem;
+      margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-soft);
+    }
+    .brand { display: flex; align-items: center; gap: .65rem; }
+    .brand-mark {
+      width: 2.1rem; height: 2.1rem; border-radius: .55rem; flex: none;
+      background: conic-gradient(from 200deg, #6366f1, #2dd4bf, #6366f1);
+      box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 6px 16px -6px rgba(99,102,241,.55);
+      display: grid; place-items: center; font-size: 1.05rem;
+    }
+    h1 { margin: 0; font-size: 1.3rem; font-weight: 650; letter-spacing: -.01em; }
+    h1 small { display: block; font-weight: 500; font-size: .74rem; color: var(--text-faint); letter-spacing: .04em; text-transform: uppercase; margin-top: .1rem; }
+    .status {
+      display: inline-flex; align-items: center; gap: .45rem; margin: 0;
+      font-size: .82rem; color: var(--text-dim);
+      background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 999px; padding: .35rem .75rem;
+    }
+    .status::before { content: ''; width: .5rem; height: .5rem; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(52,211,153,.18); flex: none; }
+    .status.error::before { background: var(--err); box-shadow: 0 0 0 3px rgba(248,113,113,.18); animation: none; }
+    .status:not(.error)::before { animation: pulse-dot 2.4s ease-in-out infinite; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+    .status.error { color: var(--err); }
+
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; }
-    .panel { background: #171d26; border: 1px solid #232c38; border-radius: .6rem; padding: .9rem 1rem; min-width: 0; }
-    .panel h2 { margin: 0 0 .5rem; font-size: .95rem; color: #90cdf4; display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; }
-    .panel h2 small { color: #718096; font-weight: normal; font-size: .75rem; }
-    .panel-body { max-height: 380px; overflow: auto; }
-    .missing { color: #718096; font-style: italic; }
+    .panel {
+      position: relative;
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: .95rem 1.05rem 1.05rem; min-width: 0;
+      box-shadow: var(--shadow);
+      border-left: 3px solid hsl(var(--accent, 220) 70% 58%);
+      animation: rise .35s ease both;
+      transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+    }
+    .panel:hover { border-color: color-mix(in srgb, hsl(var(--accent, 220) 70% 58%) 45%, var(--border)); }
+    @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    .panel h2 {
+      margin: 0 0 .65rem; font-size: .82rem; font-weight: 650; letter-spacing: .02em; text-transform: uppercase;
+      color: hsl(var(--accent, 220) 78% 72%);
+      display: flex; justify-content: space-between; align-items: baseline; gap: .5rem;
+    }
+    .panel h2 small { color: var(--text-faint); font-weight: normal; font-size: .72rem; text-transform: none; letter-spacing: 0; }
+    .panel-body { max-height: 380px; overflow: auto; font-variant-numeric: tabular-nums; }
+    .panel-body::-webkit-scrollbar, dialog::-webkit-scrollbar { width: 9px; height: 9px; }
+    .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+    .missing { color: var(--text-faint); font-style: italic; }
     .wide { grid-column: 1 / -1; }
-    pre.raw { white-space: pre-wrap; word-break: break-word; background: #0d1117; padding: .6rem; border-radius: .4rem; overflow: auto; max-height: 320px; margin: 0; font-size: .78rem; }
+    pre.raw {
+      white-space: pre-wrap; word-break: break-word; background: #080a0f; color: #a5f3c9;
+      padding: .7rem .8rem; border-radius: .5rem; overflow: auto; max-height: 320px; margin: 0;
+      font: .78rem/1.5 ui-monospace, "SF Mono", Menlo, monospace; border: 1px solid var(--border-soft);
+    }
 
     /* Generic human-readable renderer: tables for lists of objects, key/value rows for objects. */
     table.kv { width: 100%; border-collapse: collapse; font-size: .85rem; }
-    table.kv td { padding: .2rem .4rem; vertical-align: top; border-bottom: 1px solid #1e2733; }
-    table.kv td.key { color: #a0aec0; white-space: nowrap; width: 1%; padding-right: .75rem; }
+    table.kv td { padding: .32rem .4rem; vertical-align: top; border-bottom: 1px solid var(--border-soft); }
+    table.kv tr:last-child td { border-bottom: none; }
+    table.kv td.key { color: var(--text-dim); white-space: nowrap; width: 1%; padding-right: .75rem; font-size: .78rem; letter-spacing: .01em; }
     table.records { width: 100%; border-collapse: collapse; font-size: .82rem; }
-    table.records th { text-align: left; color: #90cdf4; border-bottom: 1px solid #2d3748; padding: .3rem .4rem; position: sticky; top: 0; background: #171d26; }
-    table.records td { padding: .3rem .4rem; border-bottom: 1px solid #1e2733; vertical-align: top; }
-    table.records tr:hover td { background: #1a212c; }
+    table.records th {
+      text-align: left; color: var(--text-dim); font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
+      border-bottom: 1px solid var(--border); padding: .4rem .5rem; position: sticky; top: 0; background: var(--panel);
+    }
+    table.records td { padding: .42rem .5rem; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+    table.records tbody tr { transition: background .1s ease; }
+    table.records tbody tr:nth-child(even) { background: rgba(255,255,255,.012); }
+    table.records tr:hover td { background: rgba(125,211,252,.05); }
     .cell-actions { white-space: nowrap; }
-    .scalar { color: #edf2f7; }
-    .scalar.null { color: #718096; font-style: italic; }
-    .scalar.bool-true { color: #9ae6b4; }
-    .scalar.bool-false { color: #feb2b2; }
+    .scalar { color: var(--text); }
+    .scalar.null { color: var(--text-faint); font-style: italic; }
+    .scalar.bool-true { color: var(--ok); font-weight: 600; }
+    .scalar.bool-false { color: var(--err); font-weight: 600; }
 
-    button, .btn { font: inherit; background: #232c38; color: #edf2f7; border: 1px solid #2d3748; border-radius: .35rem; padding: .3rem .6rem; cursor: pointer; }
-    button:hover, .btn:hover { background: #2a3543; }
-    button.primary { background: #2b6cb0; border-color: #2b6cb0; }
-    button.primary:hover { background: #3182ce; }
-    button.danger { background: #822727; border-color: #822727; }
-    button.danger:hover { background: #9b2c2c; }
-    button.link { background: none; border: none; color: #90cdf4; padding: 0 .25rem; }
-    button.small, .btn.small { padding: .12rem .4rem; font-size: .78rem; }
+    button, .btn {
+      font: inherit; background: #1c2433; color: var(--text); border: 1px solid var(--border);
+      border-radius: .4rem; padding: .32rem .65rem; cursor: pointer; transition: background .12s ease, border-color .12s ease, transform .05s ease;
+    }
+    button:hover, .btn:hover { background: #263047; border-color: #37455c; }
+    button:active, .btn:active { transform: translateY(1px); }
+    button.primary { background: #4f46e5; border-color: #4f46e5; }
+    button.primary:hover { background: #6366f1; border-color: #6366f1; }
+    button.danger { background: #7f1d1d; border-color: #7f1d1d; }
+    button.danger:hover { background: #991b1b; border-color: #991b1b; }
+    button.link { background: none; border: none; color: var(--link); padding: 0 .25rem; }
+    button.small, .btn.small { padding: .16rem .5rem; font-size: .76rem; }
 
-    .edit-state { font-size: .8rem; color: #718096; display: flex; align-items: center; gap: .5rem; }
-    .edit-state.on { color: #f6ad55; }
+    .edit-state { font-size: .78rem; color: var(--text-dim); display: flex; align-items: center; gap: .55rem; background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 999px; padding: .3rem .3rem .3rem .75rem; }
+    .edit-state.on { color: var(--warn); }
+    .edit-state.on::before { content: '●'; color: var(--warn); font-size: .55rem; }
 
-    dialog { background: #171d26; color: #edf2f7; border: 1px solid #2d3748; border-radius: .6rem; padding: 1.25rem; max-width: 420px; width: 90vw; }
-    dialog::backdrop { background: rgba(0,0,0,.6); }
-    dialog h3 { margin: 0 0 .75rem; }
-    dialog label { display: block; font-size: .85rem; color: #a0aec0; margin: .6rem 0 .25rem; }
-    dialog input, dialog textarea { width: 100%; background: #0d1117; color: #edf2f7; border: 1px solid #2d3748; border-radius: .35rem; padding: .4rem .5rem; font: inherit; }
+    dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.35rem; max-width: 420px; width: 90vw; box-shadow: 0 24px 64px -20px rgba(0,0,0,.7); }
+    dialog::backdrop { background: rgba(5,7,11,.72); backdrop-filter: blur(2px); }
+    dialog h3 { margin: 0 0 .75rem; font-size: 1.02rem; letter-spacing: -.01em; }
+    dialog label { display: block; font-size: .82rem; color: var(--text-dim); margin: .6rem 0 .3rem; }
+    dialog input, dialog textarea { width: 100%; background: #0b0f16; color: var(--text); border: 1px solid var(--border); border-radius: .4rem; padding: .5rem .6rem; font: inherit; transition: border-color .12s ease; }
+    dialog input:focus, dialog textarea:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.18); }
     dialog textarea { min-height: 4.5rem; resize: vertical; }
-    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
-    .dialog-error { color: #feb2b2; font-size: .82rem; margin-top: .5rem; min-height: 1.1em; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1.1rem; }
+    .dialog-error { color: var(--err); font-size: .82rem; margin-top: .5rem; min-height: 1.1em; }
 
-    .trace-panel { grid-column: 1 / -1; }
+    /* Memory graph: force-directed node/link visualization. */
+    .graph-body { max-height: none; overflow: hidden; }
+    .graph-wrap { position: relative; }
+    .graph-svg {
+      width: 100%; height: 420px; display: block; touch-action: none; cursor: grab;
+      background: radial-gradient(circle at 50% 40%, rgba(167,139,250,.045), transparent 65%);
+      border-radius: .5rem;
+    }
+    .graph-svg.panning { cursor: grabbing; }
+    .graph-edge { stroke: #4a5568; stroke-width: 1; opacity: .55; transition: opacity .12s ease, stroke .12s ease; }
+    .graph-edge.mentions { stroke-dasharray: 2 3; opacity: .35; }
+    .graph-edge.dim { opacity: .06; }
+    .graph-edge.active { stroke: #a78bfa; stroke-width: 1.6; opacity: .95; }
+    .graph-node circle { stroke-width: 1.5; transition: opacity .12s ease, r .12s ease; }
+    .graph-node.fact circle { fill: #2a2416; stroke: #fbbf24; }
+    .graph-node.entity circle { fill: #241f36; stroke: #a78bfa; }
+    .graph-node.dim { opacity: .18; }
+    .graph-node:hover circle { filter: brightness(1.3); }
+    .graph-label { fill: var(--text-dim); font-size: 8.5px; text-anchor: middle; pointer-events: none; user-select: none; }
+    .graph-tooltip {
+      display: none; position: absolute; z-index: 5; pointer-events: none; max-width: 190px;
+      background: #0b0f16; border: 1px solid var(--border); border-radius: .4rem; padding: .4rem .55rem;
+      font-size: .74rem; line-height: 1.4; color: var(--text); box-shadow: var(--shadow);
+    }
+    .graph-tooltip span { color: var(--text-faint); }
+    .graph-legend { display: flex; flex-wrap: wrap; align-items: center; gap: .9rem; margin-top: .5rem; font-size: .74rem; color: var(--text-dim); }
+    .graph-legend span { display: inline-flex; align-items: center; gap: .35rem; }
+    .graph-dot { width: .55rem; height: .55rem; border-radius: 50%; display: inline-block; border: 1.5px solid; }
+    .graph-dot.fact { background: #2a2416; border-color: #fbbf24; }
+    .graph-dot.entity { background: #241f36; border-color: #a78bfa; }
+    .graph-count { color: var(--text-faint); }
+    .graph-hint { margin-left: auto; color: var(--text-faint); font-style: italic; }
+    .graph-truncated { margin: .4rem 0 0; font-size: .74rem; }
+
+    .trace-panel { grid-column: 1 / -1; --accent: 265; }
+    .trace-panel h2 #trace-meta.live::before { content: '● '; color: var(--ok); }
     #trace-log { max-height: 220px; }
-    .trace-line { color: #a0aec0; }
-    .trace-line .event { color: #f6ad55; }
-    .toggle-raw { font-size: .72rem; }
+    .trace-line { color: var(--text-dim); border-bottom: 1px solid rgba(255,255,255,.03); padding: .12rem 0; }
+    .trace-line .event { color: var(--warn); font-weight: 600; }
+    .toggle-raw { font-size: .72rem; color: var(--text-faint); cursor: pointer; user-select: none; }
+
+    @media (max-width: 640px) { body { padding: 1.1rem .9rem 2.5rem; } }
   </style>
 </head>
 <body>
   <header>
-    <h1>SCOS Transparency</h1>
+    <div class="brand">
+      <div class="brand-mark">🜂</div>
+      <h1>SCOS Transparency<small>Nexus Memory Fabric &middot; live operational state</small></h1>
+    </div>
     <span class="edit-state" id="edit-state">
       <span id="edit-state-text">view only</span>
       <button id="edit-toggle" class="small">Enable editing</button>
@@ -283,8 +400,248 @@
       return isPlainObject(obj) && typeof obj.id === 'string' && ('content' in obj || 'memory' in obj);
     }
 
+    // Recognizes a node/edge graph projection (memory-intelligence's
+    // /v1/dashboard/memory-graph shape today; any future panel returning the
+    // same {nodes, edges} shape gets the visual graph for free).
+    function looksLikeGraph(v) {
+      return isPlainObject(v) && Array.isArray(v.nodes) && Array.isArray(v.edges);
+    }
+
+    // ── force-directed graph layout ─────────────────────────────────────
+    // Textbook Fruchterman-Reingold: mutual repulsion between every pair,
+    // spring attraction along edges, a light centering pull so disconnected
+    // components don't drift off-canvas, and per-iteration displacement
+    // capped by a cooling "temperature" (rather than raw force magnitude) —
+    // that cap is what keeps the layout converging to an organic spread
+    // instead of oscillating or pinning every node against the walls.
+    function forceLayout(nodes, edges, width, height, iterations) {
+      const index = new Map(nodes.map((n, i) => [n.id, i]));
+      const pos = nodes.map(() => ({
+        x: width / 2 + (Math.random() - 0.5) * width * 0.8,
+        y: height / 2 + (Math.random() - 0.5) * height * 0.8,
+      }));
+      const links = edges
+        .map((e) => ({ s: index.get(e.source), t: index.get(e.target) }))
+        .filter((l) => l.s !== undefined && l.t !== undefined && l.s !== l.t);
+      const k = Math.sqrt((width * height) / Math.max(nodes.length, 1));
+      let temperature = Math.max(width, height) / 8;
+      const cooling = temperature / iterations;
+
+      for (let iter = 0; iter < iterations; iter++) {
+        const disp = pos.map(() => ({ x: 0, y: 0 }));
+        for (let i = 0; i < pos.length; i++) {
+          for (let j = i + 1; j < pos.length; j++) {
+            const dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y;
+            const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            const force = (k * k) / d;
+            const ux = dx / d, uy = dy / d;
+            disp[i].x += ux * force; disp[i].y += uy * force;
+            disp[j].x -= ux * force; disp[j].y -= uy * force;
+          }
+        }
+        for (const l of links) {
+          const a = pos[l.s], b = pos[l.t];
+          const dx = a.x - b.x, dy = a.y - b.y;
+          const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          const force = (d * d) / k;
+          const ux = dx / d, uy = dy / d;
+          disp[l.s].x -= ux * force; disp[l.s].y -= uy * force;
+          disp[l.t].x += ux * force; disp[l.t].y += uy * force;
+        }
+        for (let i = 0; i < pos.length; i++) {
+          disp[i].x += (width / 2 - pos[i].x) * 0.01;
+          disp[i].y += (height / 2 - pos[i].y) * 0.01;
+        }
+        for (let i = 0; i < pos.length; i++) {
+          const dx = disp[i].x, dy = disp[i].y;
+          const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          const capped = Math.min(d, temperature);
+          pos[i].x = Math.max(24, Math.min(width - 24, pos[i].x + (dx / d) * capped));
+          pos[i].y = Math.max(24, Math.min(height - 24, pos[i].y + (dy / d) * capped));
+        }
+        temperature = Math.max(0.5, temperature - cooling);
+      }
+      return pos;
+    }
+
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const GRAPH_MAX_NODES = 220;
+
+    function renderGraph(data) {
+      const wrap = document.createElement('div');
+      wrap.className = 'graph-wrap';
+
+      const allNodes = (data.nodes || []).filter((n) => n && n.id != null);
+      const allEdges = (data.edges || []).filter((e) => e && e.source != null && e.target != null);
+
+      if (allNodes.length === 0) {
+        const p = document.createElement('p');
+        p.className = 'missing';
+        p.textContent = 'no linked memories yet';
+        wrap.appendChild(p);
+        return wrap;
+      }
+
+      // Cap for layout/render cost on large graphs, keeping the most
+      // connected nodes (and every edge between kept nodes). Truncation is
+      // surfaced, never silent.
+      let nodes = allNodes, edges = allEdges, truncated = false;
+      const rawDegree = new Map();
+      for (const e of allEdges) {
+        rawDegree.set(e.source, (rawDegree.get(e.source) || 0) + 1);
+        rawDegree.set(e.target, (rawDegree.get(e.target) || 0) + 1);
+      }
+      if (allNodes.length > GRAPH_MAX_NODES) {
+        nodes = [...allNodes].sort((a, b) => (rawDegree.get(b.id) || 0) - (rawDegree.get(a.id) || 0)).slice(0, GRAPH_MAX_NODES);
+        const keep = new Set(nodes.map((n) => n.id));
+        edges = allEdges.filter((e) => keep.has(e.source) && keep.has(e.target));
+        truncated = true;
+      }
+
+      const width = 780, height = 460;
+      const degree = new Map();
+      for (const e of edges) {
+        degree.set(e.source, (degree.get(e.source) || 0) + 1);
+        degree.set(e.target, (degree.get(e.target) || 0) + 1);
+      }
+      const pos = forceLayout(nodes, edges, width, height, Math.min(220, 4000 / Math.max(nodes.length, 1) + 60));
+      const index = new Map(nodes.map((n, i) => [n.id, i]));
+
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      svg.setAttribute('class', 'graph-svg');
+      const g = document.createElementNS(SVG_NS, 'g');
+      svg.appendChild(g);
+      const edgeGroup = document.createElementNS(SVG_NS, 'g');
+      const nodeGroup = document.createElementNS(SVG_NS, 'g');
+      g.append(edgeGroup, nodeGroup);
+
+      const edgeEls = [];
+      for (const e of edges) {
+        const si = index.get(e.source), ti = index.get(e.target);
+        if (si === undefined || ti === undefined) continue;
+        const line = document.createElementNS(SVG_NS, 'line');
+        line.setAttribute('class', 'graph-edge' + (e.type === 'mentions' ? ' mentions' : ''));
+        line.setAttribute('x1', pos[si].x); line.setAttribute('y1', pos[si].y);
+        line.setAttribute('x2', pos[ti].x); line.setAttribute('y2', pos[ti].y);
+        line.dataset.s = si; line.dataset.t = ti;
+        const title = document.createElementNS(SVG_NS, 'title');
+        title.textContent = e.type || 'related';
+        line.appendChild(title);
+        edgeGroup.appendChild(line);
+        edgeEls.push(line);
+      }
+
+      const neighbors = nodes.map(() => new Set());
+      edges.forEach((e) => {
+        const si = index.get(e.source), ti = index.get(e.target);
+        if (si === undefined || ti === undefined) return;
+        neighbors[si].add(ti); neighbors[ti].add(si);
+      });
+
+      const tooltip = document.createElement('div');
+      tooltip.className = 'graph-tooltip';
+      function showTooltip(ev, n, isEntity) {
+        tooltip.style.display = 'block';
+        tooltip.innerHTML = `<strong>${escapeHtml(n.label || n.id)}</strong><br><span>${
+          isEntity ? 'entity' : (n.network ? 'fact &middot; ' + escapeHtml(n.network) : 'fact')
+        }</span>`;
+        const rect = wrap.getBoundingClientRect();
+        tooltip.style.left = Math.min(rect.width - 190, Math.max(0, ev.clientX - rect.left + 14)) + 'px';
+        tooltip.style.top = Math.max(0, ev.clientY - rect.top - 8) + 'px';
+      }
+      function hideTooltip() { tooltip.style.display = 'none'; }
+
+      const nodeEls = [];
+      nodes.forEach((n, i) => {
+        const p = pos[i];
+        const isEntity = n.type === 'entity';
+        const r = Math.min(17, 5 + Math.sqrt(degree.get(n.id) || 0) * 2.3);
+        const nodeEl = document.createElementNS(SVG_NS, 'g');
+        nodeEl.setAttribute('class', 'graph-node' + (isEntity ? ' entity' : ' fact'));
+        nodeEl.setAttribute('transform', `translate(${p.x},${p.y})`);
+        const circle = document.createElementNS(SVG_NS, 'circle');
+        circle.setAttribute('r', r);
+        nodeEl.appendChild(circle);
+        if (r > 8) {
+          const label = document.createElementNS(SVG_NS, 'text');
+          label.setAttribute('class', 'graph-label');
+          label.setAttribute('y', r + 11);
+          label.textContent = String(n.label || n.id || '').slice(0, 22);
+          nodeEl.appendChild(label);
+        }
+        nodeEl.addEventListener('mouseenter', (ev) => { highlightNode(i); showTooltip(ev, n, isEntity); });
+        nodeEl.addEventListener('mousemove', (ev) => showTooltip(ev, n, isEntity));
+        nodeEl.addEventListener('mouseleave', () => { clearHighlight(); hideTooltip(); });
+        if (!isEntity) {
+          nodeEl.style.cursor = 'pointer';
+          nodeEl.addEventListener('click', () => openHistory(n.id));
+        }
+        nodeGroup.appendChild(nodeEl);
+        nodeEls.push(nodeEl);
+      });
+
+      function highlightNode(i) {
+        const keep = new Set([i, ...neighbors[i]]);
+        nodeEls.forEach((el, j) => el.classList.toggle('dim', !keep.has(j)));
+        edgeEls.forEach((el) => {
+          const s = +el.dataset.s, t = +el.dataset.t;
+          el.classList.toggle('dim', !(keep.has(s) && keep.has(t)));
+          el.classList.toggle('active', s === i || t === i);
+        });
+      }
+      function clearHighlight() {
+        nodeEls.forEach((el) => el.classList.remove('dim'));
+        edgeEls.forEach((el) => el.classList.remove('dim', 'active'));
+      }
+
+      // Pan (drag) & zoom (wheel), entirely local to this SVG — the panel
+      // body itself stays non-scrolling for graphs (see .graph-body CSS).
+      let scale = 1, tx = 0, ty = 0, dragging = false, lastX = 0, lastY = 0;
+      function applyTransform() { g.setAttribute('transform', `translate(${tx},${ty}) scale(${scale})`); }
+      svg.addEventListener('wheel', (ev) => {
+        ev.preventDefault();
+        scale = Math.min(4, Math.max(0.35, scale * (ev.deltaY < 0 ? 1.12 : 0.89)));
+        applyTransform();
+      }, { passive: false });
+      svg.addEventListener('pointerdown', (ev) => {
+        dragging = true; lastX = ev.clientX; lastY = ev.clientY;
+        svg.setPointerCapture(ev.pointerId);
+        svg.classList.add('panning');
+      });
+      svg.addEventListener('pointermove', (ev) => {
+        if (!dragging) return;
+        tx += ev.clientX - lastX; ty += ev.clientY - lastY;
+        lastX = ev.clientX; lastY = ev.clientY;
+        applyTransform();
+      });
+      svg.addEventListener('pointerup', () => { dragging = false; svg.classList.remove('panning'); });
+      svg.addEventListener('pointerleave', () => { dragging = false; svg.classList.remove('panning'); });
+
+      wrap.append(svg, tooltip);
+
+      const legend = document.createElement('div');
+      legend.className = 'graph-legend';
+      legend.innerHTML =
+        '<span><i class="graph-dot fact"></i>fact</span>' +
+        '<span><i class="graph-dot entity"></i>entity</span>' +
+        `<span class="graph-count">${nodes.length} node${nodes.length === 1 ? '' : 's'} &middot; ${edges.length} link${edges.length === 1 ? '' : 's'}</span>` +
+        '<span class="graph-hint">scroll to zoom &middot; drag to pan &middot; click a fact for history</span>';
+      wrap.appendChild(legend);
+
+      if (truncated) {
+        const note = document.createElement('p');
+        note.className = 'missing graph-truncated';
+        note.textContent = `showing the ${nodes.length} most-connected of ${allNodes.length} nodes`;
+        wrap.appendChild(note);
+      }
+
+      return wrap;
+    }
+
     function render(value, depth) {
       depth = depth || 0;
+      if (looksLikeGraph(value)) return renderGraph(value);
       if (Array.isArray(value)) {
         if (value.length === 0) { const p = document.createElement('p'); p.className = 'missing'; p.textContent = 'empty'; return p; }
         if (value.every(isPlainObject)) return renderTable(value);
@@ -394,25 +751,25 @@
     // authoritative backend projection. A view that the backend could not
     // reach is shown as explicitly missing, never filled with fabricated data.
     const PANELS = [
-      { key: 'system', title: 'System Map' },
-      { key: 'memory', title: 'Memory Graph' },
-      { key: 'user_model', title: 'User Model' },
-      { key: 'facts', title: 'Facts', wide: true },
-      { key: 'learnings', title: 'Learnings' },
-      { key: 'contradictions', title: 'Contradictions' },
-      { key: 'timeline', title: 'Timeline' },
-      { key: 'diary', title: 'Diary' },
-      { key: 'agents', title: 'Agents' },
-      { key: 'tool_operations', title: 'Tool Operations' },
-      { key: 'plugins', title: 'Plugins' },
-      { key: 'skills', title: 'Skills' },
-      { key: 'hooks', title: 'Hooks' },
-      { key: 'code_intelligence', title: 'Code Intelligence' },
-      { key: 'routing', title: 'Routing' },
-      { key: 'recovery', title: 'Recovery' },
-      { key: 'security', title: 'Security' },
-      { key: 'token_flow', title: 'Token Flow' },
-      { key: 'costs', title: 'Costs' },
+      { key: 'system', title: 'System Map', icon: '🗺️', hue: 220 },
+      { key: 'memory', title: 'Memory Graph', icon: '🧠', hue: 265, wide: true },
+      { key: 'user_model', title: 'User Model', icon: '🪪', hue: 190 },
+      { key: 'facts', title: 'Facts', wide: true, icon: '📌', hue: 38 },
+      { key: 'learnings', title: 'Learnings', icon: '💡', hue: 152 },
+      { key: 'contradictions', title: 'Contradictions', icon: '⚡', hue: 355 },
+      { key: 'timeline', title: 'Timeline', icon: '📈', hue: 200 },
+      { key: 'diary', title: 'Diary', icon: '📓', hue: 320 },
+      { key: 'agents', title: 'Agents', icon: '🤖', hue: 245 },
+      { key: 'tool_operations', title: 'Tool Operations', icon: '🛠️', hue: 25 },
+      { key: 'plugins', title: 'Plugins', icon: '🧩', hue: 95 },
+      { key: 'skills', title: 'Skills', icon: '🎯', hue: 210 },
+      { key: 'hooks', title: 'Hooks', icon: '🪝', hue: 280 },
+      { key: 'code_intelligence', title: 'Code Intelligence', icon: '🧬', hue: 230 },
+      { key: 'routing', title: 'Routing', icon: '🧭', hue: 175 },
+      { key: 'recovery', title: 'Recovery', icon: '🩹', hue: 140 },
+      { key: 'security', title: 'Security', icon: '🛡️', hue: 5 },
+      { key: 'token_flow', title: 'Token Flow', icon: '🌊', hue: 45 },
+      { key: 'costs', title: 'Costs', icon: '💰', hue: 340 },
     ];
 
     const panelsEl = document.getElementById('panels');
@@ -422,7 +779,9 @@
     for (const panel of PANELS) {
       const el = document.createElement('div');
       el.className = 'panel' + (panel.wide ? ' wide' : '');
-      el.innerHTML = `<h2>${panel.title} <small><label class="toggle-raw"><input type="checkbox" data-role="raw-toggle"> raw</label> <span data-role="meta"></span></small></h2><div class="panel-body" data-role="body"><p class="missing">Waiting for projection&hellip;</p></div>`;
+      el.style.setProperty('--accent', panel.hue);
+      el.style.animationDelay = (PANELS.indexOf(panel) * 25) + 'ms';
+      el.innerHTML = `<h2>${panel.icon ? panel.icon + ' ' : ''}${panel.title} <small><label class="toggle-raw"><input type="checkbox" data-role="raw-toggle"> raw</label> <span data-role="meta"></span></small></h2><div class="panel-body" data-role="body"><p class="missing">Waiting for projection&hellip;</p></div>`;
       panelsEl.appendChild(el);
       const body = el.querySelector('[data-role="body"]');
       const rawToggle = el.querySelector('[data-role="raw-toggle"]');
@@ -434,6 +793,7 @@
     function paintPanel(state) {
       if (state.lastValue === null) return;
       state.body.innerHTML = '';
+      state.body.classList.toggle('graph-body', !state.raw && looksLikeGraph(state.lastValue));
       if (state.raw) {
         const pre = document.createElement('pre');
         pre.className = 'raw';
@@ -446,7 +806,7 @@
 
     const tracePanel = document.createElement('div');
     tracePanel.className = 'panel trace-panel';
-    tracePanel.innerHTML = '<h2>Live Trace <small id="trace-meta">connecting&hellip;</small></h2><pre id="trace-log" class="raw"></pre>';
+    tracePanel.innerHTML = '<h2>📡 Live Trace <small id="trace-meta">connecting&hellip;</small></h2><pre id="trace-log" class="raw"></pre>';
     panelsEl.appendChild(tracePanel);
     const traceLog = document.getElementById('trace-log');
     const traceMeta = document.getElementById('trace-meta');
@@ -522,6 +882,7 @@
         }
         if (!response.ok || !response.body) throw new Error(`stream returned ${response.status}`);
         traceMeta.textContent = 'connected';
+        traceMeta.classList.add('live');
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -544,6 +905,7 @@
         }
         throw new Error('stream closed');
       } catch (error) {
+        traceMeta.classList.remove('live');
         traceMeta.textContent = `reconnecting… (${error.message})`;
       } finally {
         setTimeout(connectTrace, 5000);
