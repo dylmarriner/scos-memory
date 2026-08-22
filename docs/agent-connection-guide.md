@@ -27,9 +27,15 @@ token in plain JSON alongside everything else.
 
 Tools exposed to every connected agent: `scos_recall`, `scos_status`,
 `scos_explain`, `scos_user_model`, `scos_memory_graph`, `scos_correct`,
-`scos_forget` (memory, via hermes-provider) plus `scos_code_index`,
+`scos_forget` (memory, via hermes-provider) plus `scos_graphify_query`,
+`scos_graphify_path`, `scos_graphify_explain` (graphify knowledge-graph
+traversal, via graphify-provider :8099), and `scos_code_repo_register`,
+`scos_code_repo_list`, `scos_code_repo_get`, `scos_code_index`,
 `scos_code_query`, `scos_code_impact` (code intelligence, via
-code-intelligence :8084 — needs `SCOS_CONTROL_PLANE_TOKEN` in scos.env).
+code-intelligence :8084 — needs `SCOS_CONTROL_PLANE_TOKEN` in scos.env). A
+repository must be registered with `scos_code_repo_register` (or `POST
+/v1/repos` directly) before `scos_code_index` will accept files for it --
+`scos_code_index` 404s against an unregistered `repository_id`.
 
 ## 2. One-time prerequisites (already done on this machine, listed for a fresh box)
 
@@ -103,6 +109,9 @@ whichever service actually owns it:
 | `scos_user_model` | `memory-intelligence` `GET /v1/dashboard/user-model` |
 | `scos_memory_graph` | `memory-intelligence` `GET /v1/dashboard/memory-graph` |
 | `scos_memory_summary` | `memory-intelligence` `GET /v1/dashboard/summary` — real LLM summary when `DEEPSEEK_API_KEY` is configured, otherwise a deterministic network-grouped digest (response's `mode` field says which) |
+| `scos_graphify_query` | `graphify-provider` `POST /v1/graphify/query` |
+| `scos_graphify_path` | `graphify-provider` `POST /v1/graphify/path` |
+| `scos_graphify_explain` | `graphify-provider` `POST /v1/graphify/explain` |
 | `scos_correct` | `memory-intelligence` `PATCH /v1/facts/{id}` — inserts a new fact with the corrected content and marks the old one `superseded` (facts are append-only; nothing is mutated in place) |
 | `scos_forget` | `memory-intelligence` `DELETE /v1/facts/{id}[?cascade=true]` — soft-deletes the fact (`status='revoked'`); idempotent. `cascade=true` also revokes the fact's superseded predecessor chain |
 | `scos_correct_batch` | `memory-intelligence` `POST /v1/facts/batch-correct` — up to 100 corrections in one call, each independent |
@@ -110,12 +119,15 @@ whichever service actually owns it:
 | `scos_fact_feedback` | `memory-intelligence` `POST /v1/facts/{id}/feedback` — records POSITIVE/NEGATIVE/VERY_NEGATIVE quality signal against a fact (stored only, no automatic action taken) |
 | `scos_fact_history` | `memory-intelligence` `GET /v1/facts/{id}/history` — full append-only revision history for a fact, including versions from before a correction or after a forget |
 | `scos_forget_all` | `memory-intelligence` `DELETE /v1/facts?confirm=true[&namespace_id=...]` — bulk soft-delete: one namespace, or (omitting `namespace_id`) every active fact for the tenant. Requires `confirm=true` |
+| `scos_code_repo_register` | `code-intelligence` `POST /v1/repos` — register a repository (canonical path, remote identity, branch, language set) and get back the `repository_id` to index/query/impact against |
+| `scos_code_repo_list` | `code-intelligence` `GET /v1/repos` — list repositories registered for the caller's tenant |
+| `scos_code_repo_get` | `code-intelligence` `GET /v1/repos/{id}` — a registered repository's details, incl. its current index generation |
 | `scos_code_index` | `code-intelligence` `POST /v1/index` — index (or re-index) files for a repository |
 | `scos_code_query` | `code-intelligence` `POST /v1/query` — query the code index by symbol/path/intent |
 | `scos_code_impact` | `code-intelligence` `POST /v1/impact` — change-impact set for modified symbols |
 
 Deployed locally at `https://100.93.75.87:8098/mcp` (kubuntux, container
-`compose-mcp-gateway-1`) — this is the **full** governed tool surface (133
+`compose-mcp-gateway-1`) — this is the **full** governed tool surface (136
 tools incl. the code indexer), unlike the bridge's 10. The gateway serves a
 self-signed cert (valid for 127.0.0.1), so remote MCP clients need
 `--insecure`/SSL-verify-off or the `tls-external/` Tailscale-issued cert

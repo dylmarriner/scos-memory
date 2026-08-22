@@ -58,6 +58,7 @@ type gatewayServer struct {
 	toolGovernanceURL         string
 	transparencyProjectionURL string
 	observabilityURL          string
+	graphifyProviderURL       string
 	controlPlaneToken         string
 	client                    *http.Client
 	startTime                 time.Time
@@ -95,6 +96,7 @@ func main() {
 		toolGovernanceURL:         resolveUpstream("SCOS_TOOL_GOVERNANCE_URL", "https://tool-governance:8092"),
 		transparencyProjectionURL: resolveUpstream("SCOS_TRANSPARENCY_PROJECTION_URL", "https://transparency-projection:8097"),
 		observabilityURL:          resolveUpstream("SCOS_OBSERVABILITY_URL", "https://observability:8096"),
+		graphifyProviderURL:       resolveUpstream("SCOS_GRAPHIFY_PROVIDER_URL", "https://graphify-provider:8099"),
 		controlPlaneToken:         strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		client:                    client,
 		startTime:                 time.Now(),
@@ -256,6 +258,22 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			u += "?" + encoded
 		}
 		return s.forwardGET(ctx, r, u)
+	case "scos_graphify_query":
+		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/query", args)
+	case "scos_graphify_path":
+		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/path", args)
+	case "scos_graphify_explain":
+		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/explain", args)
+	case "scos_code_repo_register":
+		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/repos", args)
+	case "scos_code_repo_list":
+		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v1/repos")
+	case "scos_code_repo_get":
+		repoID := stringArg(args, "repository_id")
+		if repoID == "" {
+			return nil, fmt.Errorf("repository_id is required")
+		}
+		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v1/repos/"+repoID)
 	case "scos_code_index":
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/index", args)
 	case "scos_code_query":
@@ -829,13 +847,16 @@ func governedToolNames() map[string]bool {
 // none of mcp-gateway's code-intelligence, agent-registry, or governance
 // tooling, which those bundles never mention and are not built to drive.
 var memoryTierToolNames = map[string]bool{
-	"scos_recall":       true,
-	"scos_status":       true,
-	"scos_explain":      true,
-	"scos_user_model":   true,
-	"scos_memory_graph": true,
-	"scos_correct":      true,
-	"scos_forget":       true,
+	"scos_recall":           true,
+	"scos_status":           true,
+	"scos_explain":          true,
+	"scos_user_model":       true,
+	"scos_memory_graph":     true,
+	"scos_correct":          true,
+	"scos_forget":           true,
+	"scos_graphify_query":   true,
+	"scos_graphify_path":    true,
+	"scos_graphify_explain": true,
 }
 
 // desktopAgentToolNames maps X-SCOS-Agent-Name values (set by the shared
@@ -946,6 +967,69 @@ func governedTools() []map[string]any {
 					"network":   map[string]any{"type": "string", "description": "Limit to one memory network (world, experience, entity, belief, procedure, negative)"},
 					"max_facts": map[string]any{"type": "string", "description": "Max facts to include (default 200, max 500)"},
 				},
+			},
+		},
+		{
+			"name":        "scos_graphify_query",
+			"description": "Ask a plain-language question against the graphify knowledge graph and get back the scoped subgraph that answers it",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"q": map[string]any{"type": "string", "description": "The question to ask the graph"}},
+				"required":   []string{"q"},
+			},
+		},
+		{
+			"name":        "scos_graphify_path",
+			"description": "Trace the shortest path between two concepts in the graphify knowledge graph",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"from": map[string]any{"type": "string", "description": "Starting node name"},
+					"to":   map[string]any{"type": "string", "description": "Target node name"},
+				},
+				"required": []string{"from", "to"},
+			},
+		},
+		{
+			"name":        "scos_graphify_explain",
+			"description": "Explain one node in the graphify knowledge graph and list its connections",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"node": map[string]any{"type": "string", "description": "Node name to explain"}},
+				"required":   []string{"node"},
+			},
+		},
+		{
+			"name":        "scos_code_repo_register",
+			"description": "Register a repository with code intelligence so it can be indexed and queried. Returns the assigned repository_id -- pass that to scos_code_index",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"canonical_path":     map[string]any{"type": "string", "description": "Absolute canonical path of the repository on disk"},
+					"remote_identity":    map[string]any{"type": "string", "description": "Remote identity, e.g. a git remote URL"},
+					"branch_or_worktree": map[string]any{"type": "string", "description": "Branch or worktree name"},
+					"language_set":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Languages present in the repository"},
+				},
+				"required": []string{"canonical_path"},
+			},
+		},
+		{
+			"name":        "scos_code_repo_list",
+			"description": "List repositories registered with code intelligence for the caller's tenant",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			"name":        "scos_code_repo_get",
+			"description": "Get a registered repository's details, including its current index generation",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"repository_id": map[string]any{"type": "string", "description": "Repository identifier"},
+				},
+				"required": []string{"repository_id"},
 			},
 		},
 		{

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds all 19 Go service binaries and the consolidation-worker Python
+# Builds all 20 Go service binaries and the consolidation-worker Python
 # package, without Docker. Mirrors deploy/Dockerfile's build stage exactly --
 # same service list, same build flags -- so a native build produces the same
 # binaries the container image would.
@@ -9,10 +9,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL_BIN_DIR="${SCOS_NATIVE_BIN_DIR:-/opt/scos-fabric/bin}"
 VENV_DIR="${SCOS_NATIVE_VENV_DIR:-/opt/scos-fabric/venv/consolidation}"
 
-# Keep in sync with deploy/Dockerfile's SERVICES list.
+# Keep in sync with deploy/Dockerfile's SERVICES list. graphify-provider's
+# binary builds here like any other service, but (unlike the Dockerfile) this
+# script does not install the `graphify` CLI itself -- on a native box, run
+# `pipx install graphifyy` (see github.com/Graphify-Labs/graphify) separately
+# before starting graphify-provider.
 SERVICES="agent-registry autonomous-control-plane backup-manager \
 code-intelligence compatibility-gateway context-optimisation execution-proxy \
-extension-manager hermes-provider mcp-gateway memory-gateway \
+extension-manager graphify-provider hermes-provider mcp-gateway memory-gateway \
 memory-intelligence observability okf-synchroniser recovery-orchestrator \
 retrieval-orchestrator security-gate tool-governance transparency-projection"
 

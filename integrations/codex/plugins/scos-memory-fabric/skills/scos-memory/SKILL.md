@@ -1,6 +1,6 @@
 ---
 name: scos-memory
-description: Use the SCOS Memory Fabric tools (scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct, scos_forget) to search, inspect, and manage persistent cross-session memory. Use when the user says "recall", "what do you remember about", "check memory status", "why do you believe/remember", "forget that", or "that's wrong, it's actually".
+description: Use the SCOS Memory Fabric tools (scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct, scos_forget, scos_graphify_query, scos_graphify_path, scos_graphify_explain) to search, inspect, and manage persistent cross-session memory, including the graphify codebase knowledge graph. Use when the user says "recall", "what do you remember about", "check memory status", "why do you believe/remember", "forget that", "that's wrong, it's actually", or asks how parts of the codebase connect.
 ---
 
 This plugin installs from the Codex plugin marketplace (`codex plugin add
@@ -19,7 +19,7 @@ The bundled bridge (`scripts/scos-mcp-bridge.py`) talks directly to the SCOS
 Memory Fabric's `hermes-provider` on rabuntu, reading connection details
 from `~/.hermes/scos.env` on this machine (see
 `docs/agent-connection-guide.md` §2 for how that file is populated). It
-exposes seven tools, scoped to the tenant and principal in that file.
+exposes ten tools, scoped to the tenant and principal in that file.
 
 ## Tools
 
@@ -32,6 +32,9 @@ exposes seven tools, scoped to the tenant and principal in that file.
 | `scos_memory_graph` | Inspect memory entities and their relationships | none |
 | `scos_correct` | Correct a stored memory, preserving the superseded version | `memory_id`, `value` |
 | `scos_forget` | Request removal of a specific memory | `memory_id` |
+| `scos_graphify_query` | Ask a plain-language question against the graphify codebase knowledge graph | `q` |
+| `scos_graphify_path` | Trace the shortest path between two concepts in the graph | `from`, `to` |
+| `scos_graphify_explain` | Explain one node in the graph and list its connections | `node` |
 
 ## When to use each
 
@@ -52,6 +55,10 @@ exposes seven tools, scoped to the tenant and principal in that file.
 - **User explicitly asks to forget/delete something** → `scos_forget`,
   only after confirming the specific `memory_id` and getting the user's
   explicit go-ahead — this is destructive and not easily undone.
+- **User asks how two things in the codebase connect, or wants a scoped
+  answer instead of grepping** → `scos_graphify_query` for an open
+  question, `scos_graphify_path` for two named things, `scos_graphify_explain`
+  for one node's connections.
 
 ## Anti-patterns
 

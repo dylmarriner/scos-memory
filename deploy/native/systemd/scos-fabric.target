@@ -15,6 +15,7 @@ Wants=scos-fabric@extension-manager.service
 Wants=scos-fabric@compatibility-gateway.service
 Wants=scos-fabric@hermes-provider.service
 Wants=scos-fabric@memory-intelligence.service
+Wants=scos-fabric@graphify-provider.service
 Wants=scos-fabric@mcp-gateway.service
 Wants=scos-fabric@okf-synchroniser.service
 Wants=scos-fabric@security-gate.service

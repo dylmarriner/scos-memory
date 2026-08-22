@@ -17,8 +17,11 @@ same as every other agent on this fleet.
 
 Tools exposed once connected: `scos_recall`, `scos_status`, `scos_explain`,
 `scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget`
-(memory) plus `scos_code_index`, `scos_code_query`, `scos_code_impact`
-(code intelligence).
+(memory) plus `scos_graphify_query`, `scos_graphify_path`,
+`scos_graphify_explain` (graphify knowledge-graph traversal) and
+`scos_code_repo_register`, `scos_code_repo_list`, `scos_code_repo_get`,
+`scos_code_index`, `scos_code_query`, `scos_code_impact` (code
+intelligence).
 
 ## What the plugin adds
 

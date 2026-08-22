@@ -1,0 +1,226 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {
+      "id": "cli_wrapper_adapter",
+      "label": "adapter.go",
+      "_origin": "ast",
+      "community": 0,
+      "file_type": "code",
+      "norm_label": "adapter.go",
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "cli_wrapper_adapter_newwrapper",
+      "label": "NewWrapper()",
+      "_origin": "ast",
+      "community": 0,
+      "file_type": "code",
+      "norm_label": "newwrapper()",
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L17"
+    },
+    {
+      "id": "cli_wrapper_wrapper",
+      "label": "Wrapper",
+      "_origin": "ast",
+      "community": 0,
+      "file_type": "code",
+      "norm_label": "wrapper",
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L12"
+    },
+    {
+      "id": "go_type_github_com_dylmarriner_scos_memory_packages_execution_adapters_executionadapter",
+      "label": "github.com/dylmarriner/scos-memory/packages/execution-adapters.ExecutionAdapter",
+      "_origin": "ast",
+      "community": 0,
+      "file_type": "code",
+      "norm_label": "github.com/dylmarriner/scos-memory/packages/execution-adapters.executionadapter",
+      "source_file": "",
+      "source_location": ""
+    },
+    {
+      "id": "cli_wrapper_adapter_test",
+      "label": "adapter_test.go",
+      "_origin": "ast",
+      "community": 1,
+      "file_type": "code",
+      "norm_label": "adapter_test.go",
+      "source_file": "cli-wrapper/adapter_test.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "cli_wrapper_adapter_test_testcliwrapper",
+      "label": "TestCLIWrapper()",
+      "_origin": "ast",
+      "community": 1,
+      "file_type": "code",
+      "norm_label": "testcliwrapper()",
+      "source_file": "cli-wrapper/adapter_test.go",
+      "source_location": "L8"
+    },
+    {
+      "id": "go_type_testing_t",
+      "label": "testing.T",
+      "_origin": "ast",
+      "community": 1,
+      "file_type": "code",
+      "norm_label": "testing.t",
+      "source_file": "",
+      "source_location": ""
+    },
+    {
+      "id": "cli_wrapper_wrapper_executecommand",
+      "label": ".ExecuteCommand()",
+      "_origin": "ast",
+      "community": 2,
+      "file_type": "code",
+      "norm_label": ".executecommand()",
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L24"
+    },
+    {
+      "id": "go_type_context_context",
+      "label": "context.Context",
+      "_origin": "ast",
+      "community": 2,
+      "file_type": "code",
+      "norm_label": "context.context",
+      "source_file": "",
+      "source_location": ""
+    },
+    {
+      "id": "go_type_github_com_dylmarriner_scos_memory_packages_execution_adapters_executionresult",
+      "label": "github.com/dylmarriner/scos-memory/packages/execution-adapters.ExecutionResult",
+      "_origin": "ast",
+      "community": 2,
+      "file_type": "code",
+      "norm_label": "github.com/dylmarriner/scos-memory/packages/execution-adapters.executionresult",
+      "source_file": "",
+      "source_location": ""
+    }
+  ],
+  "links": [
+    {
+      "source": "cli_wrapper_wrapper",
+      "target": "go_type_github_com_dylmarriner_scos_memory_packages_execution_adapters_executionadapter",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "field",
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L13",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_adapter_test_testcliwrapper",
+      "target": "go_type_testing_t",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "cli-wrapper/adapter_test.go",
+      "source_location": "L8",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_wrapper_executecommand",
+      "target": "go_type_context_context",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L24",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_adapter_newwrapper",
+      "target": "cli_wrapper_wrapper",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "return_type",
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L17",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_wrapper_executecommand",
+      "target": "go_type_github_com_dylmarriner_scos_memory_packages_execution_adapters_executionresult",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "return_type",
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L24",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_adapter",
+      "target": "cli_wrapper_wrapper",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L12",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_adapter",
+      "target": "cli_wrapper_adapter_newwrapper",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L17",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_adapter_test",
+      "target": "cli_wrapper_adapter_test_testcliwrapper",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "cli-wrapper/adapter_test.go",
+      "source_location": "L8",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_wrapper",
+      "target": "cli_wrapper_wrapper_executecommand",
+      "relation": "method",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "cli-wrapper/adapter.go",
+      "source_location": "L24",
+      "weight": 1.0
+    },
+    {
+      "source": "cli_wrapper_adapter_test_testcliwrapper",
+      "target": "cli_wrapper_adapter_newwrapper",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "context": "call",
+      "source_file": "cli-wrapper/adapter_test.go",
+      "source_location": "L9",
+      "weight": 1.0
+    }
+  ],
+  "hyperedges": []
+}

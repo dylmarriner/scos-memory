@@ -1326,17 +1326,71 @@ func (s *engineServer) handleBeliefs(w http.ResponseWriter, r *http.Request) {
 // ── relations ────────────────────────────────────────────────────────────
 
 func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
-	identity, status, msg := resolveIdentityFromRequest(r)
-	if status != 0 {
-		http.Error(w, msg, status)
-		return
+	switch r.Method {
+	case http.MethodGet:
+		identity, status, msg := resolveIdentityFromRequest(r)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
+		relations, err := loadRelations(r.Context(), s.db, identity.TenantID)
+		if err != nil {
+			http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, relations)
+
+	case http.MethodPost:
+		var req struct {
+			TenantID       string `json:"tenant_id,omitempty"`
+			PrincipalID    string `json:"principal_id,omitempty"`
+			SourceMemoryID string `json:"source_memory_id"`
+			TargetMemoryID string `json:"target_memory_id"`
+			RelationType   string `json:"relation_type"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.SourceMemoryID == "" || req.TargetMemoryID == "" || req.RelationType == "" {
+			http.Error(w, "source_memory_id, target_memory_id and relation_type are required", http.StatusBadRequest)
+			return
+		}
+		identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+		if err := setPrincipalContext(ctx, tx, identity); err != nil {
+			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := insertRelation(ctx, tx, req.SourceMemoryID, req.TargetMemoryID, req.RelationType); err != nil {
+			http.Error(w, "insert relation: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"created":          true,
+			"source_memory_id": req.SourceMemoryID,
+			"target_memory_id": req.TargetMemoryID,
+			"relation_type":    req.RelationType,
+		})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	relations, err := loadRelations(r.Context(), s.db, identity.TenantID)
-	if err != nil {
-		http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, relations)
 }
 
 // ── hierarchy ────────────────────────────────────────────────────────────

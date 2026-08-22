@@ -12,10 +12,12 @@ Fabric, instead of the manual per-agent steps in
 `docs/agent-connection-guide.md`. All agents point at the same memory
 backend and code index: the bridge exposes the seven memory tools
 (`scos_recall`, `scos_status`, `scos_explain`, `scos_user_model`,
-`scos_memory_graph`, `scos_correct`, `scos_forget`) plus the three code
-intelligence tools (`scos_code_index`, `scos_code_query`,
-`scos_code_impact`), while the `mcp-gateway` http transport exposes the
-full 133-tool governed surface.
+`scos_memory_graph`, `scos_correct`, `scos_forget`) plus three graphify
+knowledge-graph tools (`scos_graphify_query`, `scos_graphify_path`,
+`scos_graphify_explain`) and the six code intelligence tools
+(`scos_code_repo_register`, `scos_code_repo_list`, `scos_code_repo_get`,
+`scos_code_index`, `scos_code_query`, `scos_code_impact`), while the
+`mcp-gateway` http transport exposes the full 139-tool governed surface.
 
 | | Claude Code | Claude Desktop | Codex CLI | Hermes Agent | Kilo | OpenCode | OpenClaw | Qwen Code |
 |---|---|---|---|---|

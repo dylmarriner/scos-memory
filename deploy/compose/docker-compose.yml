@@ -135,7 +135,8 @@ services:
                    extension-manager compatibility-gateway hermes-provider \
                    memory-intelligence okf-synchroniser security-gate \
                    tool-governance agent-registry recovery-orchestrator \
-                   backup-manager observability transparency-projection; do
+                   backup-manager observability transparency-projection \
+                   graphify-provider; do
           SAN="$$SAN,DNS:$$svc"
         done
         openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
@@ -672,6 +673,41 @@ services:
       start_period: 30s
       retries: 10
 
+  graphify-provider:
+    <<: [*service-limits, *fabric-image]
+    command: ["graphify-provider"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR: ${SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR:-:8099}
+      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      GRAPHIFY_REPO_PATH: ${GRAPHIFY_REPO_PATH:-/repo}
+      # Left optional rather than compose-required: these must be a real
+      # tenant/principal/namespace already provisioned with a
+      # namespace_memberships row (can_write_candidates=true) for ingestion
+      # to succeed, which isn't something this file can invent. Unset, the
+      # service still starts and serves /health and the read-side
+      # query/path/explain tools -- handleExtract (main.go) itself returns
+      # 412 for POST /v1/graphify/extract until these are set.
+      GRAPHIFY_NAMESPACE_ID: ${GRAPHIFY_NAMESPACE_ID:-}
+      GRAPHIFY_TENANT_ID: ${GRAPHIFY_TENANT_ID:-}
+      GRAPHIFY_PRINCIPAL_ID: ${GRAPHIFY_PRINCIPAL_ID:-}
+      GRAPHIFY_BACKEND: ${GRAPHIFY_BACKEND:-}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - ${GRAPHIFY_REPO_HOST_PATH:-..}:/repo:ro
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      memory-intelligence:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8099/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
   memory-intelligence:
     <<: [*service-limits, *fabric-image]
     command: ["memory-intelligence"]
@@ -727,6 +763,7 @@ services:
       SCOS_MCP_GATEWAY_HTTP_ADDR: ${SCOS_MCP_GATEWAY_HTTP_ADDR:-:8098}
       SCOS_HERMES_PROVIDER_URL: ${SCOS_HERMES_PROVIDER_URL:-https://hermes-provider:8088}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      SCOS_GRAPHIFY_PROVIDER_URL: ${SCOS_GRAPHIFY_PROVIDER_URL:-https://graphify-provider:8099}
       # This service alone is reached by external MCP clients (Claude Code
       # --transport http, Claude Desktop) that verify TLS against the public
       # CA pool and cannot pin the shared internal self-signed dev CA the
@@ -748,6 +785,8 @@ services:
       hermes-provider:
         condition: service_healthy
       memory-intelligence:
+        condition: service_healthy
+      graphify-provider:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8098/health/ready"]

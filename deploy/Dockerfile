@@ -42,7 +42,7 @@ COPY services ./services
 # shares one warm build cache across all of them.
 ARG SERVICES="agent-registry autonomous-control-plane backup-manager \
 code-intelligence compatibility-gateway context-optimisation execution-proxy \
-extension-manager hermes-provider mcp-gateway memory-gateway \
+extension-manager graphify-provider hermes-provider mcp-gateway memory-gateway \
 memory-intelligence observability okf-synchroniser recovery-orchestrator \
 retrieval-orchestrator security-gate tool-governance transparency-projection"
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
@@ -54,7 +54,15 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     done
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates \
+# graphify-provider execs the `graphify` CLI (PyPI `graphifyy`) as a
+# subprocess -- python3/pipx are added here, once, for the whole shared
+# image, rather than giving that one service its own base image.
+# PIPX_BIN_DIR=/usr/local/bin (already on PATH, already where the Go
+# binaries land below) makes the installed `graphify` script reachable by
+# every user in the image, not just whichever account ran the build.
+ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
+RUN apk add --no-cache ca-certificates python3 py3-pip pipx \
+    && pipx install graphifyy \
     && addgroup -S scos && adduser -S -G scos scos \
     # State directories for the services that keep local state. compose mounts
     # a named volume over each of these; Docker seeds a fresh named volume from

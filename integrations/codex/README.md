@@ -6,8 +6,12 @@ instead of the manual `~/.codex/config.toml` steps in
 Claude Code / Claude Desktop packaging in `../claude/`:
 `scos_recall`, `scos_status`, `scos_explain`, `scos_user_model`,
 `scos_memory_graph`, `scos_correct`, `scos_forget` (memory, via
-hermes-provider) plus `scos_code_index`, `scos_code_query`,
-`scos_code_impact` (code intelligence, via code-intelligence :8084).
+hermes-provider) plus `scos_graphify_query`, `scos_graphify_path`,
+`scos_graphify_explain` (graphify knowledge-graph traversal, via
+graphify-provider :8099) and `scos_code_repo_register`,
+`scos_code_repo_list`, `scos_code_repo_get`, `scos_code_index`,
+`scos_code_query`, `scos_code_impact` (code intelligence, via
+code-intelligence :8084).
 
 - [`plugins/scos-memory-fabric/README.md`](plugins/scos-memory-fabric/README.md)
 

@@ -3,7 +3,7 @@
 Wires Claude Code to the SCOS Memory Fabric's `mcp-gateway` service
 (`services/mcp-gateway`, deployed at `https://100.93.75.87:8098/mcp` — see
 `docs/agent-connection-guide.md`) over the native `http` MCP transport. No
-local bridge script; the gateway serves the full governed tool surface (133
+local bridge script; the gateway serves the full governed tool surface (136
 tools incl. the code indexer). The internal cert is self-signed for
 127.0.0.1, so remote clients use `claude mcp add --transport http` with the
 bearer/tenant headers (see the connection guide) or the `tls-external/`
@@ -11,8 +11,13 @@ Tailscale cert recipe.
 
 Tools exposed once connected: the full gateway set, incl. `scos_recall`,
 `scos_status`, `scos_explain`, `scos_user_model`, `scos_memory_graph`,
-`scos_correct`, `scos_forget` (memory) plus `scos_code_index`,
-`scos_code_query`, `scos_code_impact` (code intelligence).
+`scos_correct`, `scos_forget` (memory) plus `scos_graphify_query`,
+`scos_graphify_path`, `scos_graphify_explain` (graphify knowledge-graph
+traversal) and `scos_code_repo_register`, `scos_code_repo_list`,
+`scos_code_repo_get`, `scos_code_index`, `scos_code_query`,
+`scos_code_impact` (code intelligence). A repository
+must be registered with `scos_code_repo_register` before `scos_code_index`
+will accept it.
 
 ## Install
 
@@ -60,7 +65,7 @@ claude plugin uninstall scos-memory-fabric@scos-fabric-tools
   `/scos-explain <memory_id>` — thin wrappers around the read-path tools for
   quick invocation.
 - **Skill** (`skills/scos-memory/`): teaches Claude when to reach for each
-  of the seven tools (e.g. call `scos_recall` before answering from
+  of the ten tools (e.g. call `scos_recall` before answering from
   assumption about prior context) and to always confirm the exact
   `memory_id` with the user before attempting `scos_correct` or
   `scos_forget`, since those mutate memory and aren't implemented on this
