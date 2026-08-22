@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 const version = "0.1.0"
@@ -95,7 +97,7 @@ func main() {
 		addr = ":8088"
 	}
 	log.Printf("hermes memory provider (%s) listening on %s", providerName, addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -146,8 +149,8 @@ func main() {
 	mux.HandleFunc("/v1/hooks/", srv.handleHookByEvent)
 
 	// Installation
-	mux.HandleFunc("/v1/install", srv.handleInstall)
-	mux.HandleFunc("/v1/extensions/install", srv.handleInstall)
+	mux.Handle("/v1/install", serviceauth.RequireScope("extensions:install", http.HandlerFunc(srv.handleInstall)))
+	mux.Handle("/v1/extensions/install", serviceauth.RequireScope("extensions:install", http.HandlerFunc(srv.handleInstall)))
 	mux.HandleFunc("/v1/install/dryrun", srv.handleInstallDryRun)
 	mux.HandleFunc("/v1/receipts", srv.handleReceipts)
 
@@ -159,7 +162,7 @@ func main() {
 		addr = ":8086"
 	}
 	log.Printf("extension manager listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -443,6 +446,10 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "content_hash is required", http.StatusBadRequest)
 		return
 	}
+	if !verifyManifestSignature(manifest) {
+		http.Error(w, "manifest signature invalid", http.StatusForbidden)
+		return
+	}
 
 	warnings := s.validateManifest(manifest)
 	if len(warnings) > 0 {
@@ -610,6 +617,24 @@ func (s *extServer) validateManifest(m ExtensionManifest) []string {
 	}
 
 	return warnings
+}
+
+func verifyManifestSignature(m ExtensionManifest) bool {
+	secret := strings.TrimSpace(os.Getenv("SCOS_EXTENSION_SIGNING_SECRET"))
+	if secret == "" || secret == "change-me" || m.Signature == "" {
+		return false
+	}
+	signature := m.Signature
+	m.Signature = ""
+	canonical, err := json.Marshal(m)
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(canonical)
+	_, _ = mac.Write([]byte(":" + m.ContentHash))
+	provided, err := base64.RawURLEncoding.DecodeString(signature)
+	return err == nil && hmac.Equal(provided, mac.Sum(nil))
 }
 
 func (s *extServer) determineIsolation(m ExtensionManifest) string {

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 const version = "0.1.0"
@@ -94,7 +96,7 @@ func main() {
 		addr = ":8090"
 	}
 	log.Printf("okf synchroniser listening on %s (root: %s)", addr, srv.okfRoot)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

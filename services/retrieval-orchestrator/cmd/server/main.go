@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -114,7 +115,7 @@ func main() {
 		addr = ":8082"
 	}
 	log.Printf("retrieval orchestrator listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

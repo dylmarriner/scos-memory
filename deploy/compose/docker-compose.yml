@@ -1,3 +1,6 @@
+x-service-auth-env: &service-auth-env
+  SCOS_AUTH_ISSUER_SECRET: ${SCOS_AUTH_ISSUER_SECRET:?SCOS_AUTH_ISSUER_SECRET must be set}
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -5,9 +8,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-scos_memory}
       POSTGRES_USER: ${POSTGRES_USER:-scos}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ../../database/migrations/000001_initial.sql:/docker-entrypoint-initdb.d/000001_initial.sql:ro
@@ -30,11 +33,12 @@ services:
       dockerfile: services/memory-gateway/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_HTTP_ADDR: ${SCOS_HTTP_ADDR:-:8080}
       SCOS_VERSION: ${SCOS_VERSION:-0.1.0-dev}
-      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,10 +55,11 @@ services:
       dockerfile: services/autonomous-control-plane/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_CONTROL_HTTP_ADDR: ${SCOS_CONTROL_HTTP_ADDR:-:8081}
-      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,7 +75,7 @@ services:
       dockerfile: workers/consolidation/Dockerfile
     restart: unless-stopped
     environment:
-      SCOS_DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
+      SCOS_DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
       SCOS_CONSOLIDATION_POLL_SECONDS: ${SCOS_CONSOLIDATION_POLL_SECONDS:-5}
       SCOS_CONSOLIDATION_BATCH_SIZE: ${SCOS_CONSOLIDATION_BATCH_SIZE:-10}
       SCOS_LOG_LEVEL: ${SCOS_LOG_LEVEL:-info}
@@ -86,10 +91,11 @@ services:
       dockerfile: services/retrieval-orchestrator/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_RETRIEVAL_HTTP_ADDR: ${SCOS_RETRIEVAL_HTTP_ADDR:-:8082}
-      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
     ports:
-      - "8082:8082"
+      - "127.0.0.1:8082:8082"
     depends_on:
       postgres:
         condition: service_healthy
@@ -105,9 +111,10 @@ services:
       dockerfile: services/context-optimisation/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_CONTEXT_HTTP_ADDR: ${SCOS_CONTEXT_HTTP_ADDR:-:8083}
     ports:
-      - "8083:8083"
+      - "127.0.0.1:8083:8083"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8083/health/ready"]
       interval: 10s
@@ -120,9 +127,10 @@ services:
       dockerfile: services/code-intelligence/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_CODE_INTELLIGENCE_HTTP_ADDR: ${SCOS_CODE_INTELLIGENCE_HTTP_ADDR:-:8084}
     ports:
-      - "8084:8084"
+      - "127.0.0.1:8084:8084"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8084/health/ready"]
       interval: 10s
@@ -135,12 +143,13 @@ services:
       dockerfile: services/execution-proxy/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_EXECUTION_PROXY_HTTP_ADDR: ${SCOS_EXECUTION_PROXY_HTTP_ADDR:-:8085}
       SCOS_PROXY_RAW_DIR: ${SCOS_PROXY_RAW_DIR:-/var/lib/scos/execution-proxy/raw}
     volumes:
       - execution-proxy-raw:/var/lib/scos/execution-proxy/raw
     ports:
-      - "8085:8085"
+      - "127.0.0.1:8085:8085"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8085/health/ready"]
       interval: 10s
@@ -153,10 +162,12 @@ services:
       dockerfile: services/extension-manager/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
+      SCOS_EXTENSION_SIGNING_SECRET: ${SCOS_EXTENSION_SIGNING_SECRET:?SCOS_EXTENSION_SIGNING_SECRET must be set}
       SCOS_EXTENSION_MANAGER_HTTP_ADDR: ${SCOS_EXTENSION_MANAGER_HTTP_ADDR:-:8086}
-      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER:-scos}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-scos_memory}?sslmode=disable
     ports:
-      - "8086:8086"
+      - "127.0.0.1:8086:8086"
     depends_on:
       postgres:
         condition: service_healthy
@@ -172,9 +183,10 @@ services:
       dockerfile: services/compatibility-gateway/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR: ${SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR:-:8087}
     ports:
-      - "8087:8087"
+      - "127.0.0.1:8087:8087"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8087/health/ready"]
       interval: 10s
@@ -187,9 +199,10 @@ services:
       dockerfile: services/hermes-provider/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_HERMES_PROVIDER_HTTP_ADDR: ${SCOS_HERMES_PROVIDER_HTTP_ADDR:-:8088}
     ports:
-      - "8088:8088"
+      - "127.0.0.1:8088:8088"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8088/health/ready"]
       interval: 10s
@@ -202,9 +215,10 @@ services:
       dockerfile: services/memory-intelligence/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR: ${SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR:-:8089}
     ports:
-      - "8089:8089"
+      - "127.0.0.1:8089:8089"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8089/health/ready"]
       interval: 10s
@@ -217,9 +231,10 @@ services:
       dockerfile: services/okf-synchroniser/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_OKF_SYNCHRONISER_HTTP_ADDR: ${SCOS_OKF_SYNCHRONISER_HTTP_ADDR:-:8090}
     ports:
-      - "8090:8090"
+      - "127.0.0.1:8090:8090"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8090/health/ready"]
       interval: 10s
@@ -232,9 +247,10 @@ services:
       dockerfile: services/security-gate/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_SECURITY_GATE_HTTP_ADDR: ${SCOS_SECURITY_GATE_HTTP_ADDR:-:8091}
     ports:
-      - "8091:8091"
+      - "127.0.0.1:8091:8091"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8091/health/ready"]
       interval: 10s
@@ -247,9 +263,10 @@ services:
       dockerfile: services/tool-governance/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_TOOL_GOVERNANCE_HTTP_ADDR: ${SCOS_TOOL_GOVERNANCE_HTTP_ADDR:-:8092}
     ports:
-      - "8092:8092"
+      - "127.0.0.1:8092:8092"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8092/health/ready"]
       interval: 10s
@@ -262,9 +279,10 @@ services:
       dockerfile: services/agent-registry/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_AGENT_REGISTRY_HTTP_ADDR: ${SCOS_AGENT_REGISTRY_HTTP_ADDR:-:8093}
     ports:
-      - "8093:8093"
+      - "127.0.0.1:8093:8093"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8093/health/ready"]
       interval: 10s
@@ -277,9 +295,10 @@ services:
       dockerfile: services/recovery-orchestrator/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR: ${SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR:-:8094}
     ports:
-      - "8094:8094"
+      - "127.0.0.1:8094:8094"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8094/health/ready"]
       interval: 10s
@@ -292,9 +311,10 @@ services:
       dockerfile: services/backup-manager/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_BACKUP_MANAGER_HTTP_ADDR: ${SCOS_BACKUP_MANAGER_HTTP_ADDR:-:8095}
     ports:
-      - "8095:8095"
+      - "127.0.0.1:8095:8095"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8095/health/ready"]
       interval: 10s
@@ -307,9 +327,10 @@ services:
       dockerfile: services/observability/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_OBSERVABILITY_HTTP_ADDR: ${SCOS_OBSERVABILITY_HTTP_ADDR:-:8096}
     ports:
-      - "8096:8096"
+      - "127.0.0.1:8096:8096"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8096/health/ready"]
       interval: 10s
@@ -322,10 +343,11 @@ services:
       dockerfile: services/transparency-projection/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *service-auth-env
       SCOS_TRANSPARENCY_HTTP_ADDR: ${SCOS_TRANSPARENCY_HTTP_ADDR:-:8097}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-http://memory-intelligence:8089}
     ports:
-      - "8097:8097"
+      - "127.0.0.1:8097:8097"
     depends_on:
       memory-intelligence:
         condition: service_started

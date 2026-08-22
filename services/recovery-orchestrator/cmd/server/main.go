@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 const version = "0.1.0"
@@ -48,25 +50,30 @@ func newRecoveryServer() *recoveryServer {
 	}
 }
 
-func main() {
-	s := newRecoveryServer()
+func newMux(s *recoveryServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/ready", healthOK)
 
-	mux.HandleFunc("/v1/recovery/start", s.handleRecoveryStart)
-	mux.HandleFunc("/v1/recovery/checklist", s.handleChecklistUpdate)
-	mux.HandleFunc("/v1/recovery/complete", s.handleRecoveryComplete)
+	mux.Handle("/v1/recovery/start", serviceauth.RequireScope("recovery:admin", http.HandlerFunc(s.handleRecoveryStart)))
+	mux.Handle("/v1/recovery/checklist", serviceauth.RequireScope("recovery:admin", http.HandlerFunc(s.handleChecklistUpdate)))
+	mux.Handle("/v1/recovery/complete", serviceauth.RequireScope("recovery:admin", http.HandlerFunc(s.handleRecoveryComplete)))
 	mux.HandleFunc("/v1/recovery/status", s.handleRecoveryStatus)
 	mux.HandleFunc("/v1/recovery/status/", s.handleRecoveryStatusByID)
 	mux.HandleFunc("/v1/recovery/interrupted-turns", s.handleInterruptedTurns)
+	return mux
+}
+
+func main() {
+	s := newRecoveryServer()
+	mux := newMux(s)
 
 	addr := os.Getenv("SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8094"
 	}
 	log.Printf("recovery orchestrator listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

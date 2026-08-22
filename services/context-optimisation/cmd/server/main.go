@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 // ── configuration ────────────────────────────────────────────────────────
@@ -104,7 +106,7 @@ func main() {
 		addr = ":8083"
 	}
 	log.Printf("context optimisation layer listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -1,6 +1,7 @@
 FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY packages/service-auth ./packages/service-auth
 COPY services/memory-gateway ./services/memory-gateway
 RUN go mod download
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/memory-gateway ./services/memory-gateway/cmd/server

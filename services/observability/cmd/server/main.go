@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 const version = "0.1.0"
@@ -122,7 +124,7 @@ func main() {
 		addr = ":8096"
 	}
 	log.Printf("observability listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

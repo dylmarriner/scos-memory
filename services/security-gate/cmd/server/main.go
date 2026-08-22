@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 const version = "0.1.0"
@@ -139,7 +139,7 @@ func main() {
 		addr = ":8091"
 	}
 	log.Printf("security gate listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -161,6 +161,7 @@ func (s *securityServer) handleAuthIssue(w http.ResponseWriter, r *http.Request)
 		AgentID   string    `json:"agent_id"`
 		Tenant    string    `json:"tenant"`
 		SessionID string    `json:"session_id"`
+		Scopes    []string  `json:"scopes,omitempty"`
 		DataClass DataClass `json:"max_data_class"`
 		ExpiresIn int       `json:"expires_in_seconds"`
 	}
@@ -172,17 +173,40 @@ func (s *securityServer) handleAuthIssue(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "principal required", http.StatusBadRequest)
 		return
 	}
+	secret, err := serviceauth.Secret()
+	if err != nil || !serviceauth.IssuerAuthorized(r, secret) {
+		http.Error(w, "authenticated issuer required", http.StatusUnauthorized)
+		return
+	}
+	if strings.TrimSpace(req.Tenant) == "" {
+		http.Error(w, "tenant required", http.StatusBadRequest)
+		return
+	}
 	if req.DataClass == "" {
 		req.DataClass = ClassInternal
 	}
 	if req.ExpiresIn <= 0 {
 		req.ExpiresIn = 3600
 	}
+	if req.ExpiresIn > 3600 {
+		http.Error(w, "expires_in_seconds exceeds one hour", http.StatusBadRequest)
+		return
+	}
 
-	tokenBytes := sha256.Sum256([]byte(fmt.Sprintf("%s-%s-%d", req.Principal, req.Tenant, time.Now().UnixNano())))
-	tokenID := hex.EncodeToString(tokenBytes[:16])
-
-	expiresAt := time.Now().UTC().Add(time.Duration(req.ExpiresIn) * time.Second).Format(time.RFC3339)
+	expiresAtTime := time.Now().UTC().Add(time.Duration(req.ExpiresIn) * time.Second)
+	expiresAt := expiresAtTime.Format(time.RFC3339)
+	tokenID, err := serviceauth.Issue(serviceauth.Identity{
+		Principal: req.Principal,
+		Tenant:    req.Tenant,
+		AgentID:   req.AgentID,
+		SessionID: req.SessionID,
+		Scopes:    req.Scopes,
+		ExpiresAt: expiresAtTime.Unix(),
+	}, secret)
+	if err != nil {
+		http.Error(w, "could not issue token", http.StatusInternalServerError)
+		return
+	}
 
 	s.mu.Lock()
 	s.tokens[tokenID] = &AuthToken{

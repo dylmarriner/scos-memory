@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 const version = "0.1.0"
@@ -92,30 +94,35 @@ func newBackupServer() *backupServer {
 	}
 }
 
-func main() {
-	s := newBackupServer()
+func newMux(s *backupServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/ready", healthOK)
 
 	mux.HandleFunc("/v1/backups", s.handleBackups)
 	mux.HandleFunc("/v1/backups/", s.handleBackupByID)
-	mux.HandleFunc("/v1/backups/start", s.handleBackupStart)
-	mux.HandleFunc("/v1/backups/complete", s.handleBackupComplete)
+	mux.Handle("/v1/backups/start", serviceauth.RequireScope("backups:admin", http.HandlerFunc(s.handleBackupStart)))
+	mux.Handle("/v1/backups/complete", serviceauth.RequireScope("backups:admin", http.HandlerFunc(s.handleBackupComplete)))
 
 	mux.HandleFunc("/v1/restore-tests", s.handleRestoreTests)
-	mux.HandleFunc("/v1/restore-tests/start", s.handleRestoreTestStart)
-	mux.HandleFunc("/v1/restore-tests/complete", s.handleRestoreTestComplete)
+	mux.Handle("/v1/restore-tests/start", serviceauth.RequireScope("backups:admin", http.HandlerFunc(s.handleRestoreTestStart)))
+	mux.Handle("/v1/restore-tests/complete", serviceauth.RequireScope("backups:admin", http.HandlerFunc(s.handleRestoreTestComplete)))
 
 	mux.HandleFunc("/v1/plan", s.handlePlan)
 	mux.HandleFunc("/v1/retention", s.handleRetention)
+	return mux
+}
+
+func main() {
+	s := newBackupServer()
+	mux := newMux(s)
 
 	addr := os.Getenv("SCOS_BACKUP_MANAGER_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8095"
 	}
 	log.Printf("backup manager listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

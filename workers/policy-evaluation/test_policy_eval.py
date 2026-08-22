@@ -1,7 +1,12 @@
+import sys
 import unittest
 from unittest.mock import MagicMock
 
-from main import (
+# The worker talks to PostgreSQL through psycopg, but every unit under test
+# takes an injected connection. Stub the driver so the suite runs without it.
+sys.modules.setdefault("psycopg", MagicMock())
+
+from main import (  # noqa: E402
     compute_success_rate,
     evaluate_policy_candidate,
     evaluate_regression,

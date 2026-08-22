@@ -1,9 +1,179 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
+
+const tgTestSecret = "tool-governance-test-secret"
+
+func tgBearer(t *testing.T, principal, tenant string, scopes ...string) string {
+	t.Helper()
+	token, err := serviceauth.Issue(serviceauth.Identity{
+		Principal: principal,
+		Tenant:    tenant,
+		Scopes:    scopes,
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	}, []byte(tgTestSecret))
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	return token
+}
+
+func tgRequest(t *testing.T, mux http.Handler, method, path, bearer string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader *bytes.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reader = bytes.NewReader(data)
+	} else {
+		reader = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestToolGovernanceTenantIsolation exercises the full authenticated HTTP
+// path (not just the in-memory struct) and proves a caller from tenant-b
+// cannot register into, read, transition, start, complete, or reconcile
+// tenant-a's tools/operations even while holding the same admin scopes.
+func TestToolGovernanceTenantIsolation(t *testing.T) {
+	t.Setenv("SCOS_AUTH_ISSUER_SECRET", tgTestSecret)
+	s := newToolGovernanceServer()
+	mux := serviceauth.Require(newMux(s))
+
+	ownerToken := tgBearer(t, "alice", "tenant-a", "tools:admin", "operations:execute", "operations:complete", "operations:reconcile")
+	attackerToken := tgBearer(t, "mallory", "tenant-b", "tools:admin", "operations:execute", "operations:complete", "operations:reconcile")
+
+	// Register a tool as tenant-a.
+	rec := tgRequest(t, mux, http.MethodPost, "/v1/tools/register", ownerToken, map[string]any{"name": "read_file"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var tool ToolDefinition
+	if err := json.Unmarshal(rec.Body.Bytes(), &tool); err != nil {
+		t.Fatalf("decode tool: %v", err)
+	}
+	if tool.Tenant != "tenant-a" || tool.Owner != "alice" {
+		t.Fatalf("expected tool bound to tenant-a/alice, got tenant=%s owner=%s", tool.Tenant, tool.Owner)
+	}
+
+	// tenant-b cannot see it in the list.
+	rec = tgRequest(t, mux, http.MethodGet, "/v1/tools", attackerToken, nil)
+	var listed []ToolDefinition
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode tool list: %v", err)
+	}
+	for _, lt := range listed {
+		if lt.ID == tool.ID {
+			t.Fatalf("tenant-b listed tenant-a's tool %s", tool.ID)
+		}
+	}
+
+	// tenant-b cannot read it directly.
+	rec = tgRequest(t, mux, http.MethodGet, "/v1/tools/"+tool.ID, attackerToken, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant tool read status = %d, want 404", rec.Code)
+	}
+
+	// tenant-b cannot transition it despite holding tools:admin.
+	rec = tgRequest(t, mux, http.MethodPost, "/v1/tools/transition", attackerToken, map[string]any{"tool_id": tool.ID, "new_state": string(StatePrepared)})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant transition status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// tenant-a authorises and starts the tool normally.
+	rec = tgRequest(t, mux, http.MethodPost, "/v1/tools/transition", ownerToken, map[string]any{"tool_id": tool.ID, "new_state": string(StatePrepared)})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner transition to prepared status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rec = tgRequest(t, mux, http.MethodPost, "/v1/tools/transition", ownerToken, map[string]any{"tool_id": tool.ID, "new_state": string(StateAuthorised)})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner transition to authorised status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// tenant-b cannot start an operation against tenant-a's authorised tool.
+	rec = tgRequest(t, mux, http.MethodPost, "/v1/operations/start", attackerToken, map[string]any{"tool_id": tool.ID})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant operation start status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// tenant-a starts the operation.
+	rec = tgRequest(t, mux, http.MethodPost, "/v1/operations/start", ownerToken, map[string]any{"tool_id": tool.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner operation start status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var op ToolOperation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatalf("decode operation: %v", err)
+	}
+	if op.Tenant != "tenant-a" || op.Owner != "alice" {
+		t.Fatalf("expected operation bound to tenant-a/alice, got tenant=%s owner=%s", op.Tenant, op.Owner)
+	}
+
+	// tenant-b cannot read, complete, or reconcile it.
+	if rec = tgRequest(t, mux, http.MethodGet, "/v1/operations/"+op.ID, attackerToken, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant operation read status = %d, want 404", rec.Code)
+	}
+	if rec = tgRequest(t, mux, http.MethodPost, "/v1/operations/complete", attackerToken, map[string]any{"operation_id": op.ID, "result": "succeeded"}); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant operation complete status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// tenant-a completes it for real.
+	rec = tgRequest(t, mux, http.MethodPost, "/v1/operations/complete", ownerToken, map[string]any{"operation_id": op.ID, "result": "failed", "error": "boom"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner operation complete status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// tenant-b cannot reconcile the now-failed operation.
+	if rec = tgRequest(t, mux, http.MethodPost, "/v1/operations/reconcile", attackerToken, map[string]any{"operation_id": op.ID}); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant reconcile status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// tenant-a can reconcile its own failed operation.
+	rec = tgRequest(t, mux, http.MethodPost, "/v1/operations/reconcile", ownerToken, map[string]any{"operation_id": op.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner reconcile status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestToolGovernanceAdminScopeCrossesTenants documents that the "admin"
+// scope is an intentional cross-tenant escape hatch, matching
+// serviceauth.HasScope semantics used elsewhere in the repository.
+func TestToolGovernanceAdminScopeCrossesTenants(t *testing.T) {
+	t.Setenv("SCOS_AUTH_ISSUER_SECRET", tgTestSecret)
+	s := newToolGovernanceServer()
+	mux := serviceauth.Require(newMux(s))
+
+	ownerToken := tgBearer(t, "alice", "tenant-a", "tools:admin")
+	adminToken := tgBearer(t, "root", "tenant-b", "admin")
+
+	rec := tgRequest(t, mux, http.MethodPost, "/v1/tools/register", ownerToken, map[string]any{"name": "read_file"})
+	var tool ToolDefinition
+	if err := json.Unmarshal(rec.Body.Bytes(), &tool); err != nil {
+		t.Fatalf("decode tool: %v", err)
+	}
+
+	rec = tgRequest(t, mux, http.MethodGet, "/v1/tools/"+tool.ID, adminToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin cross-tenant read status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
 
 func TestNewToolGovernanceServer(t *testing.T) {
 	s := newToolGovernanceServer()

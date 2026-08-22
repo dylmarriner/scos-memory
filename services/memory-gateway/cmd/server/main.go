@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -46,7 +47,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           s.routes(),
+		Handler:           serviceauth.Require(s.routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

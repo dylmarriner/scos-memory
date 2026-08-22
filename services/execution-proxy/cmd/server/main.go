@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 const version = "0.1.0"
@@ -63,6 +66,8 @@ type ExecutionResult struct {
 	Errors                []string      `json:"errors,omitempty"`
 	Warnings              []string      `json:"warnings,omitempty"`
 	ProxyPolicyVersion    string        `json:"proxy_policy_version"`
+	TenantID              string        `json:"tenant_id,omitempty"`
+	PrincipalID           string        `json:"principal_id,omitempty"`
 }
 
 type ResultGroup struct {
@@ -73,8 +78,10 @@ type ResultGroup struct {
 }
 
 type rawArtifact struct {
-	Stdout string `json:"stdout"`
-	Stderr string `json:"stderr"`
+	Stdout      string `json:"stdout"`
+	Stderr      string `json:"stderr"`
+	TenantID    string `json:"tenant_id"`
+	PrincipalID string `json:"principal_id"`
 }
 
 type RewriteRule struct {
@@ -184,7 +191,7 @@ func main() {
 		addr = ":8085"
 	}
 	log.Printf("adaptive execution proxy listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -206,19 +213,16 @@ func validateExecutionRequest(r *http.Request, req ExecuteRequest) error {
 	if req.TenantID == "" || req.PrincipalID == "" {
 		return fmt.Errorf("tenant_id and principal_id are required")
 	}
-	tenant, principal := r.Header.Get("X-SCOS-Tenant-ID"), r.Header.Get("X-SCOS-Principal-ID")
-	if tenant == "" || principal == "" {
-		return fmt.Errorf("authenticated tenant and principal headers are required")
+	identity, ok := serviceauth.IdentityFromContext(r.Context())
+	if !ok {
+		return fmt.Errorf("authenticated bearer identity is required")
 	}
-	if tenant != req.TenantID || principal != req.PrincipalID {
+	if identity.Tenant != req.TenantID || identity.Principal != req.PrincipalID {
 		return fmt.Errorf("request identity does not match authenticated identity")
 	}
 	risk := classifyRisk(req.Command)
 	if risk == "destructive" && !req.Confirmed {
 		return fmt.Errorf("explicit confirmation is required for destructive commands")
-	}
-	if risk != "read" && req.OperationID == "" {
-		return fmt.Errorf("operation_id is required for side-effecting commands")
 	}
 	return nil
 }
@@ -298,13 +302,18 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Plan the command
 	plan := s.planCommand(req)
 
-	// Assign operation ID
+	identity, _ := serviceauth.IdentityFromContext(r.Context())
+	// Client operation IDs are idempotency hints only. Results always receive a
+	// server-owned collision-resistant identifier.
 	s.mu.Lock()
 	s.nextOp++
-	opID := fmt.Sprintf("op-%d", s.nextOp)
-	if req.OperationID != "" {
-		opID = req.OperationID
+	randomID := make([]byte, 8)
+	if _, err := rand.Read(randomID); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "could not allocate operation id", http.StatusInternalServerError)
+		return
 	}
+	opID := fmt.Sprintf("op-%d-%x", s.nextOp, randomID)
 	s.mu.Unlock()
 
 	now := time.Now().UTC()
@@ -319,6 +328,8 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		ExitStatus:         0,
 		RawContentHash:     sha256Hex([]byte(req.Command)),
 		ProxyPolicyVersion: version,
+		TenantID:           identity.Tenant,
+		PrincipalID:        identity.Principal,
 	}
 
 	if req.DryRun {
@@ -353,7 +364,7 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 	result.RawContentHash = sha256Hex([]byte(stdout + "\x00" + stderr))
 	result.RestorationHandle = result.RawContentHash
-	if err := s.persistRaw(result.RestorationHandle, rawArtifact{Stdout: stdout, Stderr: stderr}); err != nil {
+	if err := s.persistRaw(result.RestorationHandle, rawArtifact{Stdout: stdout, Stderr: stderr, TenantID: identity.Tenant, PrincipalID: identity.Principal}); err != nil {
 		result.RestorationHandle = ""
 		result.Errors = append(result.Errors, "raw output persistence failed")
 		log.Printf("persist raw output operation=%s handle=%s: %v", opID, result.RestorationHandle, err)
@@ -373,6 +384,11 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 // ── result endpoints ─────────────────────────────────────────────────────
 
 func (s *proxyServer) handleResult(w http.ResponseWriter, r *http.Request) {
+	identity, authenticated := serviceauth.IdentityFromContext(r.Context())
+	if !authenticated {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	opID := strings.TrimPrefix(r.URL.Path, "/v1/results/")
 	if opID == "" {
 		http.Error(w, "operation_id required", http.StatusBadRequest)
@@ -381,7 +397,7 @@ func (s *proxyServer) handleResult(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	result, ok := s.results[opID]
 	s.mu.RUnlock()
-	if !ok {
+	if !ok || result.TenantID != identity.Tenant || result.PrincipalID != identity.Principal {
 		http.Error(w, "result not found", http.StatusNotFound)
 		return
 	}
@@ -398,6 +414,11 @@ func (s *proxyServer) handleRestore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid restoration handle", http.StatusBadRequest)
 		return
 	}
+	identity, authenticated := serviceauth.IdentityFromContext(r.Context())
+	if !authenticated {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	data, err := os.ReadFile(filepath.Join(s.rawDir, handle+".json"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -407,18 +428,33 @@ func (s *proxyServer) handleRestore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "restore failed", http.StatusInternalServerError)
 		return
 	}
+	var artifact rawArtifact
+	if err := json.Unmarshal(data, &artifact); err != nil || artifact.TenantID != identity.Tenant || artifact.PrincipalID != identity.Principal {
+		http.Error(w, "raw result not found", http.StatusNotFound)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
 }
 
 func (s *proxyServer) handleResults(w http.ResponseWriter, r *http.Request) {
+	identity, authenticated := serviceauth.IdentityFromContext(r.Context())
+	if !authenticated {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	s.mu.RLock()
 	// Return last 50 results
 	start := 0
 	if len(s.history) > 50 {
 		start = len(s.history) - 50
 	}
-	results := s.history[start:]
+	results := make([]*ExecutionResult, 0, 50)
+	for _, result := range s.history[start:] {
+		if result.TenantID == identity.Tenant && result.PrincipalID == identity.Principal {
+			results = append(results, result)
+		}
+	}
 	s.mu.RUnlock()
 	writeJSON(w, results)
 }

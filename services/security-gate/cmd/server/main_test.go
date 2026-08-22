@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 func TestNewSecurityServer(t *testing.T) {
@@ -32,6 +38,41 @@ func TestAuthIssueAndValidate(t *testing.T) {
 	}
 	if stored.Principal != "user-1" {
 		t.Fatal("principal mismatch")
+	}
+}
+
+func TestAuthIssueRequiresIssuerAndProducesSignedToken(t *testing.T) {
+	t.Setenv("SCOS_AUTH_ISSUER_SECRET", "issuer-test-secret")
+	s := newSecurityServer()
+	body := []byte(`{"principal":"user-1","tenant":"tenant-1","expires_in_seconds":300}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/issue", bytes.NewReader(body))
+	req.Header.Set("X-SCOS-Issuer-Secret", "issuer-test-secret")
+	response := httptest.NewRecorder()
+	s.handleAuthIssue(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("issue status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var issued struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &issued); err != nil || issued.Token == "" {
+		t.Fatalf("invalid issued token response: %s", response.Body.String())
+	}
+	validate := httptest.NewRequest(http.MethodPost, "/v1/auth/validate", nil)
+	validate.Header.Set("Authorization", "Bearer "+issued.Token)
+	identity, err := serviceauth.ParseRequest(validate, []byte("issuer-test-secret"))
+	if err != nil || identity.Principal != "user-1" || identity.Tenant != "tenant-1" {
+		t.Fatalf("issued token did not validate: %+v, %v", identity, err)
+	}
+}
+
+func TestAuthIssueRejectsMissingIssuer(t *testing.T) {
+	t.Setenv("SCOS_AUTH_ISSUER_SECRET", "issuer-test-secret")
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/issue", bytes.NewBufferString(`{"principal":"user-1","tenant":"tenant-1"}`))
+	response := httptest.NewRecorder()
+	newSecurityServer().handleAuthIssue(response, req)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("issue status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 }
 

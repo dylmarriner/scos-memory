@@ -1,8 +1,13 @@
+import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, call
 
-from main import (
+# The worker talks to PostgreSQL through psycopg, but every unit under test
+# takes an injected connection. Stub the driver so the suite runs without it.
+sys.modules.setdefault("psycopg", MagicMock())
+
+from main import (  # noqa: E402
     compute_retention_cutoff,
     embedding_backlog_count,
     expire_by_explicit_expiry,

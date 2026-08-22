@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 type projectionServer struct {
@@ -39,7 +41,7 @@ func main() {
 		addr = ":8097"
 	}
 	log.Printf("transparency projection listening on %s, upstream=%s", addr, upstream)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

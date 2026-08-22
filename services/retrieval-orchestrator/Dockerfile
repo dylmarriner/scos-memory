@@ -2,6 +2,7 @@ FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+COPY packages/service-auth ./packages/service-auth
 COPY services/retrieval-orchestrator ./services/retrieval-orchestrator
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/retrieval-orchestrator ./services/retrieval-orchestrator/cmd/server
 

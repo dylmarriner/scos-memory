@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	serviceauth "github.com/dylanmarriner/scos-memory-fabric/packages/service-auth"
 )
 
 const version = "0.1.0"
@@ -49,6 +51,7 @@ type ToolDefinition struct {
 	State        ToolState      `json:"state"`
 	CurrentState ToolState      `json:"current_state"`
 	Owner        string         `json:"owner"`
+	Tenant       string         `json:"tenant"`
 	CreatedAt    string         `json:"created_at"`
 	UpdatedAt    string         `json:"updated_at"`
 }
@@ -62,8 +65,26 @@ type ToolOperation struct {
 	Error       string    `json:"error,omitempty"`
 	RetryCount  int       `json:"retry_count"`
 	ParentOp    string    `json:"parent_op,omitempty"`
+	Owner       string    `json:"owner"`
+	Tenant      string    `json:"tenant"`
 	StartedAt   string    `json:"started_at"`
 	CompletedAt string    `json:"completed_at,omitempty"`
+}
+
+// tenantAuthorized reports whether the authenticated identity may act on a
+// resource owned by ownerTenant. Callers holding the "admin" scope act across
+// tenants by design (see serviceauth.HasScope); every other caller is
+// confined to its own tenant so mutation and read endpoints cannot be used to
+// enumerate or transition another tenant's tools/operations.
+func tenantAuthorized(r *http.Request, ownerTenant string) (serviceauth.Identity, bool) {
+	identity, ok := serviceauth.IdentityFromContext(r.Context())
+	if !ok {
+		return identity, false
+	}
+	if serviceauth.HasScope(identity, "admin") {
+		return identity, true
+	}
+	return identity, ownerTenant == "" || identity.Tenant == ownerTenant
 }
 
 var validTransitions = map[ToolState][]ToolState{
@@ -103,28 +124,33 @@ func newToolGovernanceServer() *toolGovernanceServer {
 	}
 }
 
-func main() {
-	s := newToolGovernanceServer()
+func newMux(s *toolGovernanceServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/ready", healthOK)
 
 	mux.HandleFunc("/v1/tools", s.handleTools)
 	mux.HandleFunc("/v1/tools/", s.handleToolByID)
-	mux.HandleFunc("/v1/tools/register", s.handleToolRegister)
-	mux.HandleFunc("/v1/tools/transition", s.handleToolTransition)
+	mux.Handle("/v1/tools/register", serviceauth.RequireScope("tools:admin", http.HandlerFunc(s.handleToolRegister)))
+	mux.Handle("/v1/tools/transition", serviceauth.RequireScope("tools:admin", http.HandlerFunc(s.handleToolTransition)))
 	mux.HandleFunc("/v1/operations", s.handleOperations)
 	mux.HandleFunc("/v1/operations/", s.handleOperationByID)
-	mux.HandleFunc("/v1/operations/start", s.handleOperationStart)
-	mux.HandleFunc("/v1/operations/complete", s.handleOperationComplete)
-	mux.HandleFunc("/v1/operations/reconcile", s.handleReconcile)
+	mux.Handle("/v1/operations/start", serviceauth.RequireScope("operations:execute", http.HandlerFunc(s.handleOperationStart)))
+	mux.Handle("/v1/operations/complete", serviceauth.RequireScope("operations:complete", http.HandlerFunc(s.handleOperationComplete)))
+	mux.Handle("/v1/operations/reconcile", serviceauth.RequireScope("operations:reconcile", http.HandlerFunc(s.handleReconcile)))
+	return mux
+}
+
+func main() {
+	s := newToolGovernanceServer()
+	mux := newMux(s)
 
 	addr := os.Getenv("SCOS_TOOL_GOVERNANCE_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8092"
 	}
 	log.Printf("tool governance listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, serviceauth.Require(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -137,10 +163,18 @@ func healthOK(w http.ResponseWriter, _ *http.Request) {
 // ── tools ────────────────────────────────────────────────────────────────
 
 func (s *toolGovernanceServer) handleTools(w http.ResponseWriter, r *http.Request) {
+	identity, authenticated := serviceauth.IdentityFromContext(r.Context())
+	if !authenticated {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	admin := serviceauth.HasScope(identity, "admin")
 	s.mu.RLock()
 	var tools []*ToolDefinition
 	for _, t := range s.tools {
-		tools = append(tools, t)
+		if admin || t.Tenant == "" || t.Tenant == identity.Tenant {
+			tools = append(tools, t)
+		}
 	}
 	s.mu.RUnlock()
 	writeJSON(w, tools)
@@ -155,12 +189,21 @@ func (s *toolGovernanceServer) handleToolByID(w http.ResponseWriter, r *http.Req
 		http.Error(w, "tool not found", http.StatusNotFound)
 		return
 	}
+	if _, authorized := tenantAuthorized(r, tool.Tenant); !authorized {
+		http.Error(w, "tool not found", http.StatusNotFound)
+		return
+	}
 	writeJSON(w, tool)
 }
 
 func (s *toolGovernanceServer) handleToolRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, authenticated := serviceauth.IdentityFromContext(r.Context())
+	if !authenticated {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	var tool ToolDefinition
@@ -176,6 +219,11 @@ func (s *toolGovernanceServer) handleToolRegister(w http.ResponseWriter, r *http
 	tool.ID = fmt.Sprintf("tool-%d", len(s.tools)+1)
 	tool.State = StateProposed
 	tool.CurrentState = StateProposed
+	// Ownership is derived from the verified bearer identity, never from
+	// caller-supplied fields, so a tool cannot be registered into another
+	// tenant's namespace.
+	tool.Owner = identity.Principal
+	tool.Tenant = identity.Tenant
 	tool.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	tool.UpdatedAt = tool.CreatedAt
 	s.tools[tool.ID] = &tool
@@ -203,6 +251,11 @@ func (s *toolGovernanceServer) handleToolTransition(w http.ResponseWriter, r *ht
 		http.Error(w, "tool not found", http.StatusNotFound)
 		return
 	}
+	if _, authorized := tenantAuthorized(r, tool.Tenant); !authorized {
+		s.mu.Unlock()
+		http.Error(w, "tool not found", http.StatusNotFound)
+		return
+	}
 
 	if !canTransition(tool.State, req.NewState) {
 		s.mu.Unlock()
@@ -220,10 +273,18 @@ func (s *toolGovernanceServer) handleToolTransition(w http.ResponseWriter, r *ht
 // ── operations ───────────────────────────────────────────────────────────
 
 func (s *toolGovernanceServer) handleOperations(w http.ResponseWriter, r *http.Request) {
+	identity, authenticated := serviceauth.IdentityFromContext(r.Context())
+	if !authenticated {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	admin := serviceauth.HasScope(identity, "admin")
 	s.mu.RLock()
 	var ops []*ToolOperation
 	for _, o := range s.operations {
-		ops = append(ops, o)
+		if admin || o.Tenant == "" || o.Tenant == identity.Tenant {
+			ops = append(ops, o)
+		}
 	}
 	s.mu.RUnlock()
 	writeJSON(w, ops)
@@ -235,6 +296,10 @@ func (s *toolGovernanceServer) handleOperationByID(w http.ResponseWriter, r *htt
 	op, ok := s.operations[id]
 	s.mu.RUnlock()
 	if !ok {
+		http.Error(w, "operation not found", http.StatusNotFound)
+		return
+	}
+	if _, authorized := tenantAuthorized(r, op.Tenant); !authorized {
 		http.Error(w, "operation not found", http.StatusNotFound)
 		return
 	}
@@ -255,9 +320,19 @@ func (s *toolGovernanceServer) handleOperationStart(w http.ResponseWriter, r *ht
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	identity, authorized := tenantAuthorized(r, "")
+	if !authorized {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	s.mu.Lock()
 	tool, ok := s.tools[req.ToolID]
 	if !ok {
+		s.mu.Unlock()
+		http.Error(w, "tool not found", http.StatusNotFound)
+		return
+	}
+	if _, ok := tenantAuthorized(r, tool.Tenant); !ok {
 		s.mu.Unlock()
 		http.Error(w, "tool not found", http.StatusNotFound)
 		return
@@ -272,6 +347,8 @@ func (s *toolGovernanceServer) handleOperationStart(w http.ResponseWriter, r *ht
 		ToolID:    req.ToolID,
 		State:     StateExecuting,
 		Input:     req.Input,
+		Owner:     identity.Principal,
+		Tenant:    tool.Tenant,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	s.operations[op.ID] = op
@@ -298,6 +375,11 @@ func (s *toolGovernanceServer) handleOperationComplete(w http.ResponseWriter, r 
 	s.mu.Lock()
 	op, ok := s.operations[req.OperationID]
 	if !ok {
+		s.mu.Unlock()
+		http.Error(w, "operation not found", http.StatusNotFound)
+		return
+	}
+	if _, authorized := tenantAuthorized(r, op.Tenant); !authorized {
 		s.mu.Unlock()
 		http.Error(w, "operation not found", http.StatusNotFound)
 		return
@@ -343,6 +425,11 @@ func (s *toolGovernanceServer) handleReconcile(w http.ResponseWriter, r *http.Re
 	s.mu.Lock()
 	op, ok := s.operations[req.OperationID]
 	if !ok {
+		s.mu.Unlock()
+		http.Error(w, "operation not found", http.StatusNotFound)
+		return
+	}
+	if _, authorized := tenantAuthorized(r, op.Tenant); !authorized {
 		s.mu.Unlock()
 		http.Error(w, "operation not found", http.StatusNotFound)
 		return
