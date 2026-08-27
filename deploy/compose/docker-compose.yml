@@ -682,6 +682,14 @@ services:
       SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR: ${SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR:-:8099}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
       GRAPHIFY_REPO_PATH: ${GRAPHIFY_REPO_PATH:-/repo}
+      # query/path/explain accept an optional repo_path (MCP tool arg) to
+      # graph any repo under this mount, not just GRAPHIFY_REPO_PATH -- see
+      # resolveWorkDir (main.go). GRAPHIFY_ALLOWED_ROOT bounds that input to
+      # this container's actual bind mount, so a caller-supplied repo_path
+      # can't walk outside it. GRAPHIFY_CACHE_DIR is where each repo's
+      # extracted graph.json is cached (source mount is read-only).
+      GRAPHIFY_ALLOWED_ROOT: ${GRAPHIFY_ALLOWED_ROOT:-/workspaces}
+      GRAPHIFY_CACHE_DIR: ${GRAPHIFY_CACHE_DIR:-/var/lib/graphify-cache}
       # Left optional rather than compose-required: these must be a real
       # tenant/principal/namespace already provisioned with a
       # namespace_memberships row (can_write_candidates=true) for ingestion
@@ -696,6 +704,14 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - ${GRAPHIFY_REPO_HOST_PATH:-..}:/repo:ro
+      # Deliberately has no default. This mount is the entire universe of
+      # source graphify can be asked about, and defaulting it to a whole
+      # development drive put ~90 unrelated projects -- and every .env inside
+      # them -- one query away from a network-reachable service. Point it at
+      # the specific directory holding the repositories you want graphable;
+      # Compose refuses to start rather than guessing.
+      - ${GRAPHIFY_WORKSPACE_HOST_PATH:?GRAPHIFY_WORKSPACE_HOST_PATH must name the directory graphify may read; do not point it at a whole drive}:/workspaces:ro
+      - graphify-cache:/var/lib/graphify-cache
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -1072,4 +1088,5 @@ volumes:
   okf-data:
   backup-data:
   embeddings-cache:
+  graphify-cache:
   postgres-wal-archive:

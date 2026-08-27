@@ -28,6 +28,18 @@ type Claims struct {
 	DelegatedAuthority string
 	ExpiresAt          time.Time
 	TraceID            string
+	// Scopes carries the operations this token may perform. Ported from the
+	// scos-memory sibling's serviceauth package, which gated every mutating
+	// route on a scope while this fabric had authentication only. A token
+	// without scopes can still authenticate; it simply cannot pass
+	// RequireScope. The shared static service token has no claims at all and
+	// therefore no scopes, which is deliberate: it must not satisfy an
+	// operator-only route.
+	Scopes []string
+	// JTI identifies a single issued token so it can be named in an audit
+	// trail or a future revocation list. The sibling required it; this format
+	// did not carry one.
+	JTI string
 }
 
 // InstructionSource makes the prompt-injection boundary explicit to callers.
@@ -69,6 +81,16 @@ func Identity(ctx context.Context) string {
 func CanonicalClaims(ctx context.Context) (Claims, bool) {
 	claims, ok := ctx.Value(claimsKey{}).(Claims)
 	return claims, ok
+}
+
+// ContextWithClaims attaches verified claims to a context. Middleware does
+// this after validating a token; it is exported so a service can construct
+// an authenticated context directly when driving its own handlers, which is
+// otherwise impossible from outside this package because the context key is
+// unexported. It performs no validation of its own -- only pass claims that
+// have already been verified.
+func ContextWithClaims(ctx context.Context, claims Claims) context.Context {
+	return context.WithValue(ctx, claimsKey{}, claims)
 }
 func BearerToken(ctx context.Context) string {
 	token, _ := ctx.Value(bearerKey{}).(string)
@@ -189,14 +211,16 @@ func validateClaims(token, secret string) (Claims, error) {
 		return Claims{}, err
 	}
 	var raw struct {
-		TenantID           string `json:"tenant_id"`
-		Tenant             string `json:"tenant"`
-		PrincipalID        string `json:"principal_id"`
-		Subject            string `json:"sub"`
-		AgentID            string `json:"agent_id"`
-		DelegatedAuthority string `json:"delegated_authority"`
-		Exp                int64  `json:"exp"`
-		TraceID            string `json:"trace_id"`
+		TenantID           string   `json:"tenant_id"`
+		Tenant             string   `json:"tenant"`
+		PrincipalID        string   `json:"principal_id"`
+		Subject            string   `json:"sub"`
+		AgentID            string   `json:"agent_id"`
+		DelegatedAuthority string   `json:"delegated_authority"`
+		Exp                int64    `json:"exp"`
+		TraceID            string   `json:"trace_id"`
+		Scopes             []string `json:"scopes"`
+		JTI                string   `json:"jti"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return Claims{}, err
@@ -222,7 +246,39 @@ func validateClaims(token, secret string) (Claims, error) {
 		expiresAt = time.Unix(raw.Exp, 0).UTC()
 	}
 	return Claims{TenantID: raw.TenantID, PrincipalID: raw.PrincipalID, AgentID: raw.AgentID, Subject: raw.Subject,
-		DelegatedAuthority: raw.DelegatedAuthority, ExpiresAt: expiresAt, TraceID: raw.TraceID}, nil
+		DelegatedAuthority: raw.DelegatedAuthority, ExpiresAt: expiresAt, TraceID: raw.TraceID,
+		Scopes: raw.Scopes, JTI: raw.JTI}, nil
+}
+
+// HasScope reports whether a token may perform `required`. The "admin" scope
+// is a deliberate cross-scope escape hatch, carried over unchanged from the
+// sibling's serviceauth.HasScope so operator tokens behave identically in
+// both codebases.
+func HasScope(claims Claims, required string) bool {
+	for _, scope := range claims.Scopes {
+		if scope == required || scope == "admin" {
+			return true
+		}
+	}
+	return false
+}
+
+// RequireScope gates one route on a single scope. It fails closed in every
+// direction that matters: a request with no claims on its context (which is
+// every request authenticated by the shared static service token) has no
+// scopes and is refused, as is a claims-bearing token whose scope list does
+// not cover the operation. Wrap individual mutating handlers with this —
+// AuthenticatedHandler still answers the separate question of whether the
+// caller is authenticated at all.
+func RequireScope(required string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := CanonicalClaims(r.Context())
+		if !ok || !HasScope(claims, required) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func unauthorized(w http.ResponseWriter) {

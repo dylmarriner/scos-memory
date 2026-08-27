@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -36,6 +38,86 @@ func runExtract(ctx context.Context, workDir, backend string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(workDir, "graphify-out", "graph.json"), nil
+}
+
+// cacheKey turns an absolute repo path into a filesystem-safe directory
+// name so each repo's cached graph lives in its own subdirectory of the
+// shared cache volume, keyed by the repo's own path rather than a mutable
+// per-request identifier.
+func cacheKey(workDir string) string {
+	// Hash rather than flatten. Replacing separators with underscores made
+	// "/a/b" and "/a_b" collide onto the same cache directory, which serves
+	// one repository's graph in answer to a question about another. A digest
+	// of the cleaned path is collision-free and still filesystem-safe; the
+	// trailing basename is kept only so the directory is recognisable to a
+	// human clearing the cache by hand.
+	clean := filepath.Clean(workDir)
+	sum := sha256.Sum256([]byte(clean))
+	return sanitiseComponent(filepath.Base(clean)) + "-" + hex.EncodeToString(sum[:8])
+}
+
+// sanitiseComponent reduces a path element to characters that are safe as a
+// single directory name, so the human-readable half of a cache key can never
+// itself introduce a separator.
+func sanitiseComponent(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "repo"
+	}
+	return b.String()
+}
+
+// rejectFlagLike refuses a user-supplied value that graphify's CLI would
+// parse as an option rather than as the positional it is meant to be. The
+// arguments below reach exec.CommandContext directly, so there is no shell
+// and no command injection -- but a query of "--out" is still argument
+// injection into whatever flags that binary happens to expose.
+func rejectFlagLike(field, value string) error {
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("%s must not begin with '-'", field)
+	}
+	return nil
+}
+
+// ensureCachedGraph builds workDir's graph.json under cacheDir on first use,
+// so query/path/explain work against any repo without a separate manual
+// extract call -- and without needing write access to workDir itself, which
+// this service only ever mounts read-only. It only checks existence, not
+// staleness: a repo that has changed since its last extract needs its cache
+// subdirectory removed (or GRAPHIFY_FORCE=1) to pick up the new source --
+// this is a one-time bootstrap, not a cache-invalidation mechanism. Returns
+// the path to the resulting graph.json.
+func ensureCachedGraph(ctx context.Context, workDir, cacheDir, backend string) (string, error) {
+	outDir := filepath.Join(cacheDir, cacheKey(workDir))
+	graphPath := filepath.Join(outDir, "graphify-out", "graph.json")
+	if _, err := os.Stat(graphPath); err == nil {
+		return graphPath, nil
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return "", fmt.Errorf("create cache dir: %w", err)
+	}
+	// --max-workers 1: this service's container is sized for a Go binary's
+	// footprint (GOMEMLIMIT=96MiB, matching every other fabric service), not
+	// for graphify's default cpu_count-worker AST extraction -- against a
+	// repo with thousands of files, unbounded workers OOM-killed the
+	// container even with the memory limit raised. One worker is slower but
+	// bounded regardless of repo size or host core count.
+	args := []string{"extract", workDir, "--code-only", "--max-workers", "1", "--out", outDir}
+	if backend != "" {
+		args = append(args, "--backend", backend)
+	}
+	if _, err := runGraphify(ctx, outDir, args...); err != nil {
+		return "", err
+	}
+	return graphPath, nil
 }
 
 // graphNode/graphEdge/graphDocument mirror graphify's actual networkx

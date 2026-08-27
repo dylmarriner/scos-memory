@@ -223,12 +223,14 @@ func main() {
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/ready", s.handleReady)
 	mux.HandleFunc("/v1/backups", s.handleBackups)
-	mux.HandleFunc("/v1/backups/start", s.handleBackupStart)
-	mux.HandleFunc("/v1/backups/complete", s.handleBackupComplete)
+	// Falsifying these is how a fleet ends up believing in a backup that
+	// never ran and a restore that was never tested; both are operator-only.
+	mux.Handle("/v1/backups/start", auth.RequireScope("backups:admin", http.HandlerFunc(s.handleBackupStart)))
+	mux.Handle("/v1/backups/complete", auth.RequireScope("backups:admin", http.HandlerFunc(s.handleBackupComplete)))
 	mux.HandleFunc("/v1/backups/", s.handleBackupByID)
 	mux.HandleFunc("/v1/restore-tests", s.handleRestoreTests)
-	mux.HandleFunc("/v1/restore-tests/start", s.handleRestoreTestStart)
-	mux.HandleFunc("/v1/restore-tests/complete", s.handleRestoreTestComplete)
+	mux.Handle("/v1/restore-tests/start", auth.RequireScope("backups:admin", http.HandlerFunc(s.handleRestoreTestStart)))
+	mux.Handle("/v1/restore-tests/complete", auth.RequireScope("backups:admin", http.HandlerFunc(s.handleRestoreTestComplete)))
 	mux.HandleFunc("/v1/restore-tests/cadence", s.handleRestoreCadence)
 	mux.HandleFunc("/v1/plan", s.handlePlan)
 	mux.HandleFunc("/v1/retention", s.handleRetention)

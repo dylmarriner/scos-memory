@@ -6,10 +6,12 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,10 +30,56 @@ type graphifyServer struct {
 	httpClient            *http.Client
 	memoryIntelligenceURL string
 	repoPath              string
+	allowedRoot           string
+	cacheDir              string
 	namespaceID           string
 	tenantID              string
 	principalID           string
 	backend               string
+}
+
+// resolveWorkDir picks the directory query/path/explain operate on: the
+// caller-supplied repoPath when given (letting one graphify-provider
+// instance serve any repo it's asked about, not just the one bind-mounted
+// at startup), or the service's configured default otherwise.
+//
+// This is the only thing standing between arbitrary MCP tool input and
+// exec.CommandContext's cmd.Dir, so it is deliberately strict: a repo_path
+// is accepted only when an allowed root is configured and the path's real
+// location -- after symlink resolution on both sides -- lies inside it.
+func (s *graphifyServer) resolveWorkDir(requested string) (string, error) {
+	if requested == "" {
+		return s.repoPath, nil
+	}
+	// Fail closed. An unset GRAPHIFY_ALLOWED_ROOT used to mean "no
+	// containment at all", so any deployment that did not come from the
+	// Compose file -- the native scripts, a directly-run binary -- accepted
+	// an arbitrary caller-supplied directory. An unconfigured boundary is
+	// not an absent boundary.
+	if s.allowedRoot == "" {
+		return "", fmt.Errorf("repo_path was supplied but GRAPHIFY_ALLOWED_ROOT is not configured; refusing to graph an unbounded path")
+	}
+	// Resolve symlinks on both sides before comparing. filepath.Clean is
+	// purely lexical: it collapses "..", but a symlink inside allowedRoot
+	// pointing anywhere on the filesystem survives it untouched, and the
+	// os.Stat below follows that link happily. Comparing real paths is what
+	// actually makes this containment rather than string matching.
+	root, err := filepath.EvalSymlinks(s.allowedRoot)
+	if err != nil {
+		return "", fmt.Errorf("configured allowed root is unavailable")
+	}
+	clean, err := filepath.EvalSymlinks(filepath.Clean(requested))
+	if err != nil {
+		return "", fmt.Errorf("repo_path %s is not an accessible directory", filepath.Clean(requested))
+	}
+	rel, err := filepath.Rel(root, clean)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("repo_path must be inside %s", s.allowedRoot)
+	}
+	if info, err := os.Stat(clean); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("repo_path %s is not an accessible directory", clean)
+	}
+	return clean, nil
 }
 
 func (s *graphifyServer) readinessCheck() error {
@@ -72,6 +120,11 @@ func main() {
 	srv.repoPath = strings.TrimSpace(os.Getenv("GRAPHIFY_REPO_PATH"))
 	if srv.repoPath == "" {
 		srv.repoPath = "."
+	}
+	srv.allowedRoot = strings.TrimSpace(os.Getenv("GRAPHIFY_ALLOWED_ROOT"))
+	srv.cacheDir = strings.TrimSpace(os.Getenv("GRAPHIFY_CACHE_DIR"))
+	if srv.cacheDir == "" {
+		srv.cacheDir = "/var/lib/graphify-cache"
 	}
 	srv.namespaceID = strings.TrimSpace(os.Getenv("GRAPHIFY_NAMESPACE_ID"))
 	srv.tenantID = strings.TrimSpace(os.Getenv("GRAPHIFY_TENANT_ID"))
@@ -242,13 +295,28 @@ func (s *graphifyServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Q string `json:"q"`
+		Q        string `json:"q"`
+		RepoPath string `json:"repo_path,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Q == "" {
 		http.Error(w, "q is required", http.StatusBadRequest)
 		return
 	}
-	out, err := runGraphify(r.Context(), s.repoPath, "query", req.Q)
+	if err := rejectFlagLike("q", req.Q); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	workDir, err := s.resolveWorkDir(req.RepoPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	graphPath, err := ensureCachedGraph(r.Context(), workDir, s.cacheDir, s.backend)
+	if err != nil {
+		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out, err := runGraphify(r.Context(), workDir, "query", req.Q, "--graph", graphPath)
 	if err != nil {
 		http.Error(w, "graphify query: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -262,14 +330,33 @@ func (s *graphifyServer) handlePath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From     string `json:"from"`
+		To       string `json:"to"`
+		RepoPath string `json:"repo_path,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.From == "" || req.To == "" {
 		http.Error(w, "from and to are required", http.StatusBadRequest)
 		return
 	}
-	out, err := runGraphify(r.Context(), s.repoPath, "path", req.From, req.To)
+	if err := rejectFlagLike("from", req.From); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := rejectFlagLike("to", req.To); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	workDir, err := s.resolveWorkDir(req.RepoPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	graphPath, err := ensureCachedGraph(r.Context(), workDir, s.cacheDir, s.backend)
+	if err != nil {
+		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out, err := runGraphify(r.Context(), workDir, "path", req.From, req.To, "--graph", graphPath)
 	if err != nil {
 		http.Error(w, "graphify path: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -283,13 +370,28 @@ func (s *graphifyServer) handleExplain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Node string `json:"node"`
+		Node     string `json:"node"`
+		RepoPath string `json:"repo_path,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Node == "" {
 		http.Error(w, "node is required", http.StatusBadRequest)
 		return
 	}
-	out, err := runGraphify(r.Context(), s.repoPath, "explain", req.Node)
+	if err := rejectFlagLike("node", req.Node); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	workDir, err := s.resolveWorkDir(req.RepoPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	graphPath, err := ensureCachedGraph(r.Context(), workDir, s.cacheDir, s.backend)
+	if err != nil {
+		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out, err := runGraphify(r.Context(), workDir, "explain", req.Node, "--graph", graphPath)
 	if err != nil {
 		http.Error(w, "graphify explain: "+err.Error(), http.StatusInternalServerError)
 		return

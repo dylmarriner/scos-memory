@@ -226,15 +226,14 @@ func (s *gatewayServer) handleToolsCall(w http.ResponseWriter, r *http.Request, 
 
 func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, identity requestIdentity, tool string, args map[string]any) (any, error) {
 	// Downstream services resolve identity from X-SCOS-Tenant-ID /
-	// X-SCOS-Principal-ID headers. When the caller authenticated via bearer
-	// claims only, those headers are absent — inject them from the resolved
-	// identity so every forward carries the caller's scope.
-	if r.Header.Get("X-SCOS-Tenant-ID") == "" {
-		r.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
-	}
-	if r.Header.Get("X-SCOS-Principal-ID") == "" {
-		r.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
-	}
+	// X-SCOS-Principal-ID headers. Overwrite unconditionally rather than only
+	// filling a gap: whatever the caller sent is discarded and replaced with
+	// the identity proven by their token claims. Preserving a caller-supplied
+	// value here was the forwarding half of the tenant-spoofing path closed
+	// in resolveIdentity above -- both halves have to go, or an inbound
+	// header still reaches the services behind this one.
+	r.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
+	r.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
 	switch tool {
 	case "scos_status", "scos_recall":
 		return s.callHermesProvider(ctx, r, identity, tool, args)
@@ -791,19 +790,29 @@ func (s *gatewayServer) copyIdentityHeaders(src *http.Request, dst *http.Request
 	}
 }
 
-// resolveIdentity mirrors the convention used by hermes-provider and
-// memory-intelligence: an authenticated claims-bearing bearer token takes
-// precedence, falling back to the internal X-SCOS-* headers.
+// resolveIdentity derives the caller's tenant and principal from validated
+// bearer claims and from nothing else.
+//
+// The internal services (hermes-provider, memory-intelligence,
+// tool-governance) still accept X-SCOS-Tenant-ID / X-SCOS-Principal-ID as a
+// fallback for direct service-to-service calls on the private network. This
+// gateway must not, because it is the one externally reachable surface in
+// the fleet: every agent plugin, desktop extension and CLI reaches the fabric
+// through here. Honouring a caller-supplied tenant header at this boundary
+// let any holder of the shared service token read and write any tenant's
+// memory simply by naming a different UUID -- the tenant boundary was
+// enforced by real code everywhere downstream, but the value it enforced on
+// originated with the attacker.
+//
+// Claims are therefore mandatory here. A caller presenting only the shared
+// static service token is authenticated but anonymous, and is refused rather
+// than being allowed to nominate an identity.
 func resolveIdentity(r *http.Request) (requestIdentity, int, string) {
-	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
-		return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
+	claims, ok := auth.CanonicalClaims(r.Context())
+	if !ok {
+		return requestIdentity{}, http.StatusUnauthorized, "a bearer token carrying tenant_id and principal_id claims is required; X-SCOS-* identity headers are not accepted at this boundary"
 	}
-	tenantID := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
-	principalID := strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
-	if tenantID == "" || principalID == "" {
-		return requestIdentity{}, http.StatusUnauthorized, "X-SCOS-Tenant-ID and X-SCOS-Principal-ID are required (or an authenticated bearer token carrying tenant/principal claims)"
-	}
-	return requestIdentity{TenantID: tenantID, PrincipalID: principalID}, 0, ""
+	return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
 }
 
 // deriveSessionID gives scos_recall a stable UUID-shaped session bucket per
@@ -973,9 +982,12 @@ func governedTools() []map[string]any {
 			"name":        "scos_graphify_query",
 			"description": "Ask a plain-language question against the graphify knowledge graph and get back the scoped subgraph that answers it",
 			"inputSchema": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"q": map[string]any{"type": "string", "description": "The question to ask the graph"}},
-				"required":   []string{"q"},
+				"type": "object",
+				"properties": map[string]any{
+					"q":         map[string]any{"type": "string", "description": "The question to ask the graph"},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+				},
+				"required": []string{"q"},
 			},
 		},
 		{
@@ -984,8 +996,9 @@ func governedTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"from": map[string]any{"type": "string", "description": "Starting node name"},
-					"to":   map[string]any{"type": "string", "description": "Target node name"},
+					"from":      map[string]any{"type": "string", "description": "Starting node name"},
+					"to":        map[string]any{"type": "string", "description": "Target node name"},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
 				},
 				"required": []string{"from", "to"},
 			},
@@ -994,9 +1007,12 @@ func governedTools() []map[string]any {
 			"name":        "scos_graphify_explain",
 			"description": "Explain one node in the graphify knowledge graph and list its connections",
 			"inputSchema": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"node": map[string]any{"type": "string", "description": "Node name to explain"}},
-				"required":   []string{"node"},
+				"type": "object",
+				"properties": map[string]any{
+					"node":      map[string]any{"type": "string", "description": "Node name to explain"},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+				},
+				"required": []string{"node"},
 			},
 		},
 		{
