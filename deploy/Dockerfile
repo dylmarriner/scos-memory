@@ -22,7 +22,7 @@
 # `toolchain go1.26.6`, and the build should always reproduce with the same
 # toolchain rather than whatever patch Docker Hub resolves the tag to on a
 # given day.
-FROM golang:1.26.6-alpine AS build
+FROM golang:1.27.0-alpine AS build
 ENV GOFLAGS=-buildvcs=false CGO_ENABLED=0
 WORKDIR /src
 
