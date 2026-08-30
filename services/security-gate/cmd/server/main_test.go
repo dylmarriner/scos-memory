@@ -151,6 +151,39 @@ func TestNewTokenIDRoundTripsThroughValidToken(t *testing.T) {
 	}
 }
 
+// TestAuthRevokeRequiresProofOfPossession guards against revoking a token by
+// public id alone. handleAuthRevoke must reject a "token" that has the right
+// public id but an invalid (or missing) HMAC signature -- otherwise anyone
+// who merely learns a token's public id (e.g. from a same-tenant audit log
+// entry) could revoke it without ever having held the real bearer token.
+func TestAuthRevokeRequiresProofOfPossession(t *testing.T) {
+	t.Setenv("SCOS_SECURITY_ISSUER_SECRET", "issuer-secret")
+	s := newSecurityServer()
+	token, err := s.newTokenID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicID := tokenPublicPart(token)
+
+	for _, tc := range []struct {
+		name  string
+		token string
+	}{
+		{"public id alone, no signature", publicID},
+		{"public id with forged signature", publicID + ".forged-signature"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]string{"token": tc.token})
+			req := httptest.NewRequest(http.MethodPost, "/v1/auth/revoke", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			s.handleAuthRevoke(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401 without a valid signature, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestTokenPublicPart(t *testing.T) {
 	if got := tokenPublicPart("abc.def"); got != "abc" {
 		t.Fatalf("expected 'abc', got %q", got)

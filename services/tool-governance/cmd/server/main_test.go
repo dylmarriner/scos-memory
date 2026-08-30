@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 func TestCanTransition(t *testing.T) {
@@ -94,6 +96,41 @@ func TestResolveIdentityFromHeaders(t *testing.T) {
 	}
 	if identity.TenantID != "tenant-1" || identity.PrincipalID != "principal-1" {
 		t.Fatalf("unexpected identity: %+v", identity)
+	}
+}
+
+// TestResolveIdentityReachableForStaticServiceToken guards against a
+// production-breaking regression: execution-proxy and other internal
+// callers authenticate to tool-governance with the shared static
+// SCOS_INTERNAL_SERVICE_TOKEN (never a signed claims token -- only
+// cloud-control-plane calls auth.SignClaims) and pass tenant_id/
+// principal_id in the request body. This test drives the actual
+// auth.AuthenticatedHandler wrapper -- the same one ControlPlaneHandler
+// layers over every mutating route in main() -- rather than calling
+// resolveIdentity directly with a bare, unauthenticated context. A prior
+// version of resolveIdentity rejected any request where
+// auth.Identity(ctx) was non-empty but no claims were present, which is
+// exactly what AuthenticatedHandler produces for a static-token caller;
+// that made the body/header tenant-principal fallback permanently
+// unreachable in production while every existing unit test (which called
+// resolveIdentity directly, never through AuthenticatedHandler) kept
+// passing.
+func TestResolveIdentityReachableForStaticServiceToken(t *testing.T) {
+	cfg := auth.Config{Token: "static-token", Identity: "internal-service", ControlPlaneToken: "cp-token"}
+	var gotStatus int
+	var gotMsg string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, status, msg := resolveIdentity(r, "tenant-from-body", "principal-from-body")
+		gotStatus, gotMsg = status, msg
+		w.WriteHeader(http.StatusOK)
+	})
+	h := auth.AuthenticatedHandler(inner, cfg)
+	r := httptest.NewRequest(http.MethodPost, "/v1/operations/prepare", bytes.NewBufferString(`{}`))
+	r.Header.Set("Authorization", "Bearer static-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if gotStatus == http.StatusUnauthorized {
+		t.Fatalf("expected a static-service-token caller with body tenant/principal to resolve identity, got 401: %s", gotMsg)
 	}
 }
 

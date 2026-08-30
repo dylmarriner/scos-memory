@@ -10,7 +10,42 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
+
+// TestMutatingRecoveryRoutesRequireAdminScope guards the AUDIT-007 fix: the
+// three mutating routes must reject a caller authenticated with valid
+// claims but lacking "recovery:admin", and must accept one that has it.
+// This exercises the actual mux, not the handlers directly, so it fails if
+// the auth.RequireScope wrapping in newRecoveryMux is ever removed or
+// loosened to a blanket auth.AuthenticatedHandler-only gate.
+func TestMutatingRecoveryRoutesRequireAdminScope(t *testing.T) {
+	s := newRecoveryServer()
+	mux := newRecoveryMux(s)
+
+	for _, route := range []string{"/v1/recovery/start", "/v1/recovery/checklist", "/v1/recovery/complete"} {
+		t.Run(route, func(t *testing.T) {
+			body := bytes.NewBufferString(`{"service_id":"svc"}`)
+			r := httptest.NewRequest(http.MethodPost, route, body)
+			ctx := auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "tenant-1", PrincipalID: "principal-1"})
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, r.WithContext(ctx))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 for caller without recovery:admin scope on %s, got %d", route, rec.Code)
+			}
+		})
+	}
+
+	body := bytes.NewBufferString(`{"service_id":"svc"}`)
+	r := httptest.NewRequest(http.MethodPost, "/v1/recovery/start", body)
+	ctx := auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "tenant-1", PrincipalID: "principal-1", Scopes: []string{"recovery:admin"}})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, r.WithContext(ctx))
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("expected caller with recovery:admin scope to pass the scope gate, got 403")
+	}
+}
 
 func TestNewRecoveryServer(t *testing.T) {
 	s := newRecoveryServer()

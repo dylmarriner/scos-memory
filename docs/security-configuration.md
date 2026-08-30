@@ -11,7 +11,8 @@ or `.env` (never commit their values):
 - `SCOS_SECURITY_ISSUER_SECRET`
 - `POSTGRES_PASSWORD`
 - `SCOS_DATABASE_URL`, using `sslmode=require`, `verify-ca`, or `verify-full`
-- `SCOS_AGENT_ENDPOINT`
+- either `SCOS_AGENT_ENDPOINT`, or `DEEPSEEK_API_KEY` with
+  `DEEPSEEK_MODEL=deepseek-v4-flash` for the built-in DeepSeek dispatcher
 
 `POSTGRES_USER` and `POSTGRES_DB` default to `scos` and `scos_memory` for local
 development. Keep the password in `POSTGRES_PASSWORD` synchronized with the

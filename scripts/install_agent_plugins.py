@@ -73,6 +73,14 @@ def run(command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
 
+def run_if_installed(command: list[str]) -> None:
+    """Run an optional native installer only when that agent is present."""
+    if shutil.which(command[0]) is None:
+        print(f"skipped unavailable agent CLI: {command[0]}")
+        return
+    run(command)
+
+
 def install(skip_gemini: bool = False) -> None:
     BRIDGE.parent.mkdir(parents=True, exist_ok=True)
     backup(BRIDGE)
@@ -142,7 +150,9 @@ def install(skip_gemini: bool = False) -> None:
             shutil.copytree(skill_dir, openclaw_skills_target / skill_dir.name, dirs_exist_ok=True)
             print(f"installed skill -> {openclaw_skills_target / skill_dir.name}")
 
-    run(["codex", "plugin", "add", "scos-memory-fabric@scos-fabric-tools"])
+    run_if_installed(["codex", "plugin", "add", "scos-memory-fabric@scos-fabric-tools"])
+    run_if_installed(["claude", "plugin", "marketplace", "add", str(ROOT / "integrations/claude")])
+    run_if_installed(["claude", "plugin", "install", "scos-memory-fabric@scos-fabric-tools"])
 
 
 def main() -> None:

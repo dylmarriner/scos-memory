@@ -1363,6 +1363,24 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ctx := r.Context()
+		// A relation links two existing fact IDs supplied by the caller.
+		// Without verifying both belong to the caller's own tenant, a
+		// caller in tenant A who merely learns (or guesses) a fact UUID
+		// belonging to tenant B could link it into their own tenant's
+		// memory graph -- surfacing a foreign tenant's memory ID (and its
+		// existence) through GET /v1/relations and the dashboard memory
+		// graph. Both endpoints already trust every relation row they load
+		// as belonging to the caller, so ownership has to be enforced here,
+		// at write time, exactly as handleBeliefs already does for
+		// evidence_ids.
+		if _, err := getFact(ctx, s.db, identity.TenantID, req.SourceMemoryID); err != nil {
+			http.Error(w, fmt.Sprintf("source_memory_id references unknown fact %q", req.SourceMemoryID), http.StatusUnprocessableEntity)
+			return
+		}
+		if _, err := getFact(ctx, s.db, identity.TenantID, req.TargetMemoryID); err != nil {
+			http.Error(w, fmt.Sprintf("target_memory_id references unknown fact %q", req.TargetMemoryID), http.StatusUnprocessableEntity)
+			return
+		}
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)

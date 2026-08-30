@@ -92,6 +92,30 @@ func CanonicalClaims(ctx context.Context) (Claims, bool) {
 func ContextWithClaims(ctx context.Context, claims Claims) context.Context {
 	return context.WithValue(ctx, claimsKey{}, claims)
 }
+
+// SignClaims creates the short-lived HMAC bearer format consumed by
+// AuthenticatedHandler. Cloud ingress uses this after validating a customer
+// API key, keeping customer credentials out of the internal service mesh.
+func SignClaims(claims Claims, secret string) (string, error) {
+	if strings.TrimSpace(secret) == "" || strings.TrimSpace(claims.TenantID) == "" || strings.TrimSpace(claims.PrincipalID) == "" {
+		return "", errors.New("signing secret, tenant_id and principal_id are required")
+	}
+	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+	payload, err := json.Marshal(map[string]any{
+		"tenant_id": claims.TenantID, "principal_id": claims.PrincipalID,
+		"sub": claims.Subject, "agent_id": claims.AgentID,
+		"delegated_authority": claims.DelegatedAuthority,
+		"exp":                 claims.ExpiresAt.Unix(), "trace_id": claims.TraceID,
+		"scopes": claims.Scopes, "jti": claims.JTI,
+	})
+	if err != nil {
+		return "", err
+	}
+	body := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(header + "." + body))
+	return header + "." + body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
 func BearerToken(ctx context.Context) string {
 	token, _ := ctx.Value(bearerKey{}).(string)
 	return token

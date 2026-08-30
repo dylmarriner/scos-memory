@@ -36,7 +36,7 @@ type Client struct {
 }
 
 // FromEnvironment builds a Client from DEEPSEEK_API_KEY (required),
-// DEEPSEEK_BASE_URL (defaults to https://api.deepseek.com/v1) and
+// DEEPSEEK_BASE_URL (defaults to https://api.deepseek.com) and
 // DEEPSEEK_MODEL (defaults to deepseek-chat). It returns nil, not an error,
 // when no key is configured -- callers use Enabled() or a nil check, not
 // error handling, to detect that.
@@ -47,7 +47,7 @@ func FromEnvironment(httpClient *http.Client) *Client {
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("DEEPSEEK_BASE_URL")), "/")
 	if baseURL == "" {
-		baseURL = "https://api.deepseek.com/v1"
+		baseURL = "https://api.deepseek.com"
 	}
 	model := strings.TrimSpace(os.Getenv("DEEPSEEK_MODEL"))
 	if model == "" {
@@ -87,6 +87,63 @@ type chatResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// Chat asks the configured model for a plain-text assistant response. It is
+// used by the autonomous control plane when DeepSeek is the selected agent
+// backend. Structured callers should use ChatJSON instead.
+func (c *Client) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	if c == nil {
+		return "", ErrDisabled
+	}
+	reqBody := chatRequest{
+		Model: c.model,
+		Messages: []chatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		Temperature: 0.2,
+		MaxTokens:   4096,
+	}
+	encoded, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("encode deepseek request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(encoded))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("deepseek request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	var parsed chatResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("decode deepseek response: %w", err)
+	}
+	if resp.StatusCode/100 != 2 {
+		msg := resp.Status
+		if parsed.Error != nil && parsed.Error.Message != "" {
+			msg = parsed.Error.Message
+		}
+		return "", fmt.Errorf("deepseek returned %s", msg)
+	}
+	if len(parsed.Choices) == 0 {
+		return "", fmt.Errorf("deepseek returned no choices")
+	}
+	content := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	if content == "" {
+		return "", fmt.Errorf("deepseek returned an empty response")
+	}
+	return content, nil
 }
 
 // ChatJSON asks the model to respond with a single JSON object matching the

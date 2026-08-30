@@ -1,7 +1,7 @@
 {
   "name": "scos-memory-fabric",
   "version": "1.0.0",
-  "description": "Connects Codex CLI to the SCOS Memory Fabric (hermes-provider on rabuntu) via a bundled stdio bridge, exposing scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct and scos_forget.",
+  "description": "Connects Codex CLI to the full SCOS Memory Fabric through the governed MCP gateway via a bundled stdio bridge, with tenant-scoped memory, graph, code-intelligence, and governed tools.",
   "author": {
     "name": "SCOS Core Team"
   },
@@ -9,6 +9,5 @@
   "license": "UNLICENSED",
   "keywords": ["scos", "memory", "hermes", "mcp"],
   "skills": "./skills/",
-  "hooks": "./hooks.json",
   "mcpServers": "./.mcp.json"
 }

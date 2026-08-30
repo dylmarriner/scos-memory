@@ -10,7 +10,17 @@ ENV_EXAMPLE = (ROOT / ".env.example").read_text()
 
 class ComposeSecurityTests(unittest.TestCase):
     def test_no_plaintext_host_ports_or_password_fallbacks(self):
-        self.assertNotIn("ports:", COMPOSE)
+        # Host publication is intentional for the Tailscale-facing services
+        # and the loopback-bound creator console.  Reject only unbound or
+        # plaintext-style mappings that would expose services on all hosts.
+        for line in COMPOSE.splitlines():
+            if line.strip().startswith('- "') and ":" in line:
+                self.assertRegex(
+                    line,
+                    r"\$\{SCOS_(?:TAILSCALE_IP|CLOUD_BIND_ADDRESS)",
+                    line,
+                )
+        self.assertNotIn("0.0.0.0:", COMPOSE)
         self.assertNotIn("POSTGRES_PORT", COMPOSE)
         self.assertNotIn("change-me", COMPOSE)
         self.assertNotIn("sslmode=disable", COMPOSE)

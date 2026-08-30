@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +10,42 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
+
+// TestMutatingBackupRoutesRequireAdminScope guards the AUDIT-007 fix: the
+// four mutating routes must reject a caller authenticated with valid claims
+// but lacking "backups:admin", and must accept one that has it. This
+// exercises the actual mux, not the handlers directly, so it fails if the
+// auth.RequireScope wrapping in newBackupMux is ever removed or loosened to
+// a blanket auth.AuthenticatedHandler-only gate.
+func TestMutatingBackupRoutesRequireAdminScope(t *testing.T) {
+	s := newBackupServer()
+	mux := newBackupMux(s)
+
+	for _, route := range []string{"/v1/backups/start", "/v1/backups/complete", "/v1/restore-tests/start", "/v1/restore-tests/complete"} {
+		t.Run(route, func(t *testing.T) {
+			body := bytes.NewBufferString(`{}`)
+			r := httptest.NewRequest(http.MethodPost, route, body)
+			ctx := auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "tenant-1", PrincipalID: "principal-1"})
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, r.WithContext(ctx))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 for caller without backups:admin scope on %s, got %d", route, rec.Code)
+			}
+		})
+	}
+
+	body := bytes.NewBufferString(`{}`)
+	r := httptest.NewRequest(http.MethodPost, "/v1/backups/start", body)
+	ctx := auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "tenant-1", PrincipalID: "principal-1", Scopes: []string{"backups:admin"}})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, r.WithContext(ctx))
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("expected caller with backups:admin scope to pass the scope gate, got 403")
+	}
+}
 
 func TestNewBackupServer(t *testing.T) {
 	s := newBackupServer()

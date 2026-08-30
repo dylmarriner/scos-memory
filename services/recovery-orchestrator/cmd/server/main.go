@@ -102,6 +102,21 @@ func main() {
 		}
 		defer db.Close()
 	}
+	mux := newRecoveryMux(s)
+
+	addr := os.Getenv("SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR")
+	if addr == "" {
+		addr = ":8094"
+	}
+	log.Printf("recovery orchestrator listening on %s", addr)
+	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// newRecoveryMux wires the routes, kept separate from main so tests can
+// exercise the auth.RequireScope gates below without a listening server.
+func newRecoveryMux(s *recoveryServer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/ready", s.handleReady)
@@ -117,15 +132,7 @@ func main() {
 	mux.HandleFunc("/v1/recovery/status", s.handleRecoveryStatus)
 	mux.HandleFunc("/v1/recovery/status/", s.handleRecoveryStatusByID)
 	mux.HandleFunc("/v1/recovery/interrupted-turns", s.handleInterruptedTurns)
-
-	addr := os.Getenv("SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR")
-	if addr == "" {
-		addr = ":8094"
-	}
-	log.Printf("recovery orchestrator listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
-		log.Fatal(err)
-	}
+	return mux
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {

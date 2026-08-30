@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 func TestFuseResultsCombinesScores(t *testing.T) {
@@ -247,6 +249,71 @@ func TestContainsAllNamespacesFailsClosedForUnauthorizedRequest(t *testing.T) {
 func TestContainsAllNamespacesAcceptsAuthorizedRequest(t *testing.T) {
 	if !containsAllNamespaces([]string{"public"}, []string{"public", "other"}) {
 		t.Fatal("expected an authorized namespace request to pass")
+	}
+}
+
+// TestRetrieveRejectsCrossTenantBodyOverride proves the fix for the tenant
+// isolation gap in resolveIdentity: RetrieveRequest.TenantID/PrincipalID are
+// ordinary JSON fields that reach this service as mcp-gateway's scos_retrieve
+// tool-call arguments -- attacker-controlled, not authenticated. Before this
+// fix, handleRetrieve trusted req.TenantID/req.PrincipalID directly, so any
+// caller with a valid bearer token could search another tenant's memory by
+// naming a different tenant_id in the request body. This drives the request
+// through the actual mux (not a bare handler call) with real claims attached
+// to the context, exactly as auth.AuthenticatedHandler would leave them, and
+// asserts a body tenant/principal that disagrees with the authenticated
+// claims is rejected before any database access.
+func TestRetrieveRejectsCrossTenantBodyOverride(t *testing.T) {
+	mux := newRetrievalMux(&server{})
+	body := `{"tenant_id":"attacker-tenant","principal_id":"victim-principal","query":"secret"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(body))
+	req = req.WithContext(auth.ContextWithClaims(req.Context(), auth.Claims{
+		TenantID: "real-tenant", PrincipalID: "real-principal",
+	}))
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected %d for a body tenant/principal that disagrees with authenticated claims, got %d: %s",
+			http.StatusForbidden, recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestRetrieveIgnoresBodyIdentityWhenClaimsAgree confirms claims -- not the
+// body -- are what select whose memory is searched: an empty body
+// tenant/principal (the normal shape for a well-behaved caller) is accepted
+// and resolved from claims, never left unauthenticated.
+func TestResolveIdentityUsesClaimsIgnoringBody(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", nil)
+	req = req.WithContext(auth.ContextWithClaims(req.Context(), auth.Claims{
+		TenantID: "real-tenant", PrincipalID: "real-principal",
+	}))
+	tenantID, principalID, status, msg := resolveIdentity(req, "", "")
+	if status != 0 {
+		t.Fatalf("expected identity to resolve from claims, got status %d (%s)", status, msg)
+	}
+	if tenantID != "real-tenant" || principalID != "real-principal" {
+		t.Fatalf("expected identity from claims, got tenant=%q principal=%q", tenantID, principalID)
+	}
+}
+
+// TestRetrieveRequiresHeadersWhenAuthenticatedWithoutClaims exercises the
+// static-shared-token path (no claims on the context): the caller is
+// authenticated, but with no per-caller identity to trust, the handler must
+// still refuse to fall back to the request body and instead require the
+// X-SCOS-Tenant-ID/X-SCOS-Principal-ID headers that mcp-gateway sets
+// authoritatively.
+func TestRetrieveRequiresHeadersWhenAuthenticatedWithoutClaims(t *testing.T) {
+	handler := auth.AuthenticatedHandler(newRetrievalMux(&server{}), auth.Config{Token: "shared-secret", Identity: "internal-service"})
+	body := `{"tenant_id":"attacker-tenant","principal_id":"attacker-principal","query":"secret"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer shared-secret")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected %d without X-SCOS-Tenant-ID/X-SCOS-Principal-ID headers, got %d: %s",
+			http.StatusUnauthorized, recorder.Code, recorder.Body.String())
 	}
 }
 

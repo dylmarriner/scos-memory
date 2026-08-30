@@ -420,7 +420,26 @@ func main() {
 // or mutation (§19.10): every network request must carry the caller's
 // authenticated tenant scope, and results are always confined to that
 // tenant's own repositories.
+//
+// Verified bearer claims take precedence over the X-SCOS-Tenant-ID header
+// whenever they are present. This service is wrapped in
+// auth.ControlPlaneHandler, which additionally requires a shared
+// control-plane token, so its caller set is intended to be narrow (chiefly
+// mcp-gateway) -- but auth.AuthenticatedHandler also accepts the shared
+// static internal-service token, which carries no claims at all. Any caller
+// holding both the control-plane token and the static service token could
+// previously set X-SCOS-Tenant-ID to an arbitrary tenant and requireTenant
+// would trust it unconditionally, regardless of whatever an authenticated
+// claims-bearing token actually said -- a full cross-tenant IDOR across
+// repos/query/context/impact. When claims are present the header is now
+// ignored entirely; the header remains the fallback identity source only
+// for the legitimate no-claims service-to-service path, matching the
+// pattern already used by hermes-provider's resolveIdentity.
 func requireTenant(r *http.Request) (string, bool) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		tenant := strings.TrimSpace(claims.TenantID)
+		return tenant, tenant != ""
+	}
 	tenant := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
 	return tenant, tenant != ""
 }
@@ -710,11 +729,24 @@ func nextRepositoryID(repos map[string]*Repository) int {
 	return max
 }
 
+// handleIndexStatus previously returned every generation in the store with
+// no tenant filtering at all -- a caller from any tenant could see every
+// other tenant's indexing activity (repo IDs, commit IDs, file/symbol
+// counts). Generations carry no tenant of their own, so they are scoped the
+// same way handleRepoByID scopes a single repo: through the owning
+// repository's TenantID.
 func (s *server) handleIndexStatus(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
 	s.store.mu.RLock()
 	var gens []*IndexGeneration
-	for _, g := range s.store.generations {
-		gens = append(gens, g)
+	for repoID, g := range s.store.generations {
+		if repo, found := s.store.repos[repoID]; found && repo.TenantID == tenant {
+			gens = append(gens, g)
+		}
 	}
 	s.store.mu.RUnlock()
 	writeJSON(w, gens)

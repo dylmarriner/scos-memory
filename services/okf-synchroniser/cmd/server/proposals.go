@@ -257,6 +257,17 @@ func (s *okfServer) decideProposal(ctx context.Context, id string, approved bool
 	if role == "" {
 		role = p.ReviewRole
 	}
+	// reviewProposalAuthorized already rejects reviewer == p.Proposer at the
+	// 'review' step, but that only binds p.Reviewer; a caller of the
+	// 'decide' step could previously pass an explicit req.Reviewer equal to
+	// p.Proposer and, provided that principal also held a governance role,
+	// self-approve a proposal they authored -- defeating the
+	// separation-of-duties invariant the review step exists to establish,
+	// since decideProposal (unlike reviewProposalAuthorized) never checked
+	// identity against the proposer, only role membership via requireRole.
+	if strings.TrimSpace(reviewer) == "" || reviewer == p.Proposer {
+		return nil, errors.New("independent authorised review is required")
+	}
 	if err = s.requireRole(ctx, reviewer, role); err != nil {
 		return nil, err
 	}

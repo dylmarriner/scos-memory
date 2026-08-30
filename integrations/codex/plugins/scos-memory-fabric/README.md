@@ -1,19 +1,18 @@
 # scos-memory-fabric (Codex plugin)
 
-Wires Codex CLI to the SCOS Memory Fabric via a bundled, self-contained
-stdio bridge (`scripts/scos-mcp-bridge.py`, a copy of
-`~/.hermes/scripts/scos-mcp-bridge.py`) that talks directly to
-`hermes-provider` on kubuntux and `code-intelligence` on :8084 — see
-`docs/agent-connection-guide.md` §1/§3.
+Wires Codex CLI to the full SCOS Memory Fabric via a bundled, self-contained
+stdio bridge (`scripts/scos-mcp-bridge.py`) that talks to the governed
+`mcp-gateway` catalogue. The bridge discovers memory, graph, code-intelligence,
+and future governed tools without a second hardcoded tool list.
 
-Codex plugin `.mcp.json` entries (unlike Claude Code's) weren't confirmed to
+Codex plugin `.mcp.json` entries (unlike Claude Code's) don't template
 support templating a bearer token into `headers` from a per-install
 config prompt, so this follows the same pattern as the existing manual
 Codex setup and the bundled Python bridge: it reads
-`SCOS_HERMES_PROVIDER_URL` / `SCOS_HERMES_BEARER_TOKEN` / `SCOS_TENANT_ID` /
-`SCOS_PRINCIPAL_ID` / `SCOS_CONTROL_PLANE_TOKEN` / `SCOS_CODE_INTELLIGENCE_URL`
-from `~/.hermes/scos.env` on the machine it runs on,
-same as every other agent on this fleet.
+`SCOS_GATEWAY_URL` / `SCOS_BEARER_TOKEN` (or the legacy Hermes name) /
+`SCOS_TENANT_ID` / `SCOS_PRINCIPAL_ID` / `SCOS_TLS_CA_PATH` from
+`~/.hermes/scos.env` on the machine it runs on. Tenant/principal placeholders
+are not accepted and TLS verification is enabled by default.
 
 Tools exposed once connected: `scos_recall`, `scos_status`, `scos_explain`,
 `scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget`

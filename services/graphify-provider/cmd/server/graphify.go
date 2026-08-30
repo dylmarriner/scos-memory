@@ -110,7 +110,15 @@ func ensureCachedGraph(ctx context.Context, workDir, cacheDir, backend string) (
 	// repo with thousands of files, unbounded workers OOM-killed the
 	// container even with the memory limit raised. One worker is slower but
 	// bounded regardless of repo size or host core count.
-	args := []string{"extract", workDir, "--code-only", "--max-workers", "1", "--out", outDir}
+	//
+	// --no-cluster: even with AST extraction itself bounded, the default
+	// post-extraction community-detection pass over a several-thousand-node
+	// graph OOM-killed the container on its own (verified against paperclip:
+	// AST extraction reached 100% then the process was killed during
+	// clustering). query/path/explain traverse the raw node/edge graph and
+	// don't read community labels, so skipping clustering costs nothing
+	// those handlers use.
+	args := []string{"extract", workDir, "--code-only", "--max-workers", "1", "--no-cluster", "--out", outDir}
 	if backend != "" {
 		args = append(args, "--backend", backend)
 	}

@@ -27,11 +27,11 @@ import (
 // caller's own identity headers, to the service that actually owns that
 // tool's implementation. See governedTools() for the full, current catalogue
 // (memory/fact ops, agent-registry, autonomous-control-plane, backup-manager,
-// compatibility-gateway, context-optimisation, execution-proxy,
-// extension-manager, memory-gateway, okf-synchroniser, recovery-orchestrator,
-// retrieval-orchestrator, security-gate, tool-governance,
-// transparency-projection, and observability) and dispatchTool() for the
-// per-tool forwarding logic.
+// compatibility-gateway, context-optimisation, credential-vault,
+// execution-proxy, extension-manager, memory-gateway, okf-synchroniser,
+// recovery-orchestrator, retrieval-orchestrator, security-gate,
+// tool-governance, transparency-projection, and observability) and
+// dispatchTool() for the per-tool forwarding logic.
 const version = "0.1.0"
 
 type requestIdentity struct {
@@ -59,6 +59,7 @@ type gatewayServer struct {
 	transparencyProjectionURL string
 	observabilityURL          string
 	graphifyProviderURL       string
+	credentialVaultURL        string
 	controlPlaneToken         string
 	client                    *http.Client
 	startTime                 time.Time
@@ -97,6 +98,7 @@ func main() {
 		transparencyProjectionURL: resolveUpstream("SCOS_TRANSPARENCY_PROJECTION_URL", "https://transparency-projection:8097"),
 		observabilityURL:          resolveUpstream("SCOS_OBSERVABILITY_URL", "https://observability:8096"),
 		graphifyProviderURL:       resolveUpstream("SCOS_GRAPHIFY_PROVIDER_URL", "https://graphify-provider:8099"),
+		credentialVaultURL:        resolveUpstream("SCOS_CREDENTIAL_VAULT_URL", "https://credential-vault:8100"),
 		controlPlaneToken:         strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		client:                    client,
 		startTime:                 time.Now(),
@@ -568,6 +570,22 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/complete", args)
 	case "scos_operation_reconcile":
 		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/reconcile", args)
+
+	// ── credential-vault ─────────────────────────────────────────────────
+	case "scos_credential_list":
+		return s.forwardGET(ctx, r, s.credentialVaultURL+"/v1/credentials")
+	case "scos_credential_create":
+		return s.forwardPOST(ctx, r, s.credentialVaultURL+"/v1/credentials", args)
+	case "scos_credential_get":
+		return s.forwardGET(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"))
+	case "scos_credential_update":
+		return s.forwardWithBody(ctx, r, http.MethodPut, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"), args)
+	case "scos_credential_delete":
+		return s.forwardDELETE(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"))
+	case "scos_credential_acl_grant":
+		return s.forwardPOST(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id")+"/acl", args)
+	case "scos_credential_acl_revoke":
+		return s.forwardDELETE(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id")+"/acl/"+stringArg(args, "principal_id")+"?permission="+url.QueryEscape(stringArg(args, "permission")))
 
 	// ── transparency-projection ──────────────────────────────────────────
 	case "scos_transparency_snapshot":
@@ -1684,6 +1702,36 @@ func governedTools() []map[string]any {
 			"result":       strField("Result to reconcile to"),
 			"output":       objField("Operation output"),
 		}, "operation_id"),
+	)
+
+	// ── credential-vault ─────────────────────────────────────────────────
+	tools = append(tools,
+		tool("scos_credential_list", "List credentials the caller can read or write (metadata only, values are never included)", map[string]any{}),
+		tool("scos_credential_create", "Store a new encrypted credential (API key, password, token) for the tenant's agents to share", map[string]any{
+			"name":  strField("Credential name, unique per tenant"),
+			"value": strField("Secret value to encrypt and store"),
+			"acl":   objField("Optional extra grants: list of {principal_id, permission} where permission is read or write. The creator always receives both automatically."),
+		}, "name", "value"),
+		tool("scos_credential_get", "Read a credential's decrypted value (requires read permission on this credential)", map[string]any{
+			"id": strField("Credential ID"),
+		}, "id"),
+		tool("scos_credential_update", "Rotate a credential's value (requires write permission on this credential)", map[string]any{
+			"id":    strField("Credential ID"),
+			"value": strField("New secret value to encrypt and store"),
+		}, "id", "value"),
+		tool("scos_credential_delete", "Delete a credential permanently (requires write permission on this credential)", map[string]any{
+			"id": strField("Credential ID"),
+		}, "id"),
+		tool("scos_credential_acl_grant", "Grant another principal read or write access to a credential (requires write permission on this credential)", map[string]any{
+			"id":           strField("Credential ID"),
+			"principal_id": strField("Principal (agent) ID to grant access to"),
+			"permission":   strField("read or write"),
+		}, "id", "principal_id", "permission"),
+		tool("scos_credential_acl_revoke", "Revoke a principal's read or write access to a credential (requires write permission on this credential; refused if it would remove the last write holder)", map[string]any{
+			"id":           strField("Credential ID"),
+			"principal_id": strField("Principal (agent) ID to revoke access from"),
+			"permission":   strField("read or write"),
+		}, "id", "principal_id", "permission"),
 	)
 
 	// ── transparency-projection ──────────────────────────────────────────

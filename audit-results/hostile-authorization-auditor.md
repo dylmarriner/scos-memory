@@ -314,3 +314,7 @@ Recommended follow-up:
     TestResolveIdentityRequiresTenantAndPrincipal / TestResolveIdentityFromHeaders once
     the fix lands, to prevent silent regression back to header trust.
 ```
+
+## Cloud control-plane follow-up (2026-08-28)
+
+This follow-up preserves the prior audit above and adds the new cloud account/admin scope. Verified with `go test ./...`, `go build ./...`, Compose config validation, and `git diff --check`.

@@ -219,6 +219,25 @@ func (s *backupServer) production() bool {
 
 func main() {
 	s := newBackupServer()
+	mux := newBackupMux(s)
+	addr := os.Getenv("SCOS_BACKUP_MANAGER_HTTP_ADDR")
+	if addr == "" {
+		addr = ":8095"
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED")), "true") {
+		interval := restoreSchedulerInterval()
+		go s.runRestoreCadenceScheduler(context.Background(), interval)
+		log.Printf("restore-test cadence scheduler enabled, checking every %s", interval)
+	}
+	log.Printf("backup manager listening on %s", addr)
+	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// newBackupMux wires the routes, kept separate from main so tests can
+// exercise the auth.RequireScope gates below without a listening server.
+func newBackupMux(s *backupServer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/ready", s.handleReady)
@@ -234,19 +253,7 @@ func main() {
 	mux.HandleFunc("/v1/restore-tests/cadence", s.handleRestoreCadence)
 	mux.HandleFunc("/v1/plan", s.handlePlan)
 	mux.HandleFunc("/v1/retention", s.handleRetention)
-	addr := os.Getenv("SCOS_BACKUP_MANAGER_HTTP_ADDR")
-	if addr == "" {
-		addr = ":8095"
-	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED")), "true") {
-		interval := restoreSchedulerInterval()
-		go s.runRestoreCadenceScheduler(context.Background(), interval)
-		log.Printf("restore-test cadence scheduler enabled, checking every %s", interval)
-	}
-	log.Printf("backup manager listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
-		log.Fatal(err)
-	}
+	return mux
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {

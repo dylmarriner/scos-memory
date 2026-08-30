@@ -323,3 +323,7 @@ Recommended follow-up:
 5. Extend this pass to the remaining services not individually read, and to end-to-end
    async/outbox identity propagation, to close the coverage gaps above.
 ```
+
+## Cloud control-plane follow-up (2026-08-28)
+
+This follow-up preserves the prior audit above and adds the new cloud account/admin scope. Verified with `go test ./...`, `go build ./...`, Compose config validation, and `git diff --check`.
