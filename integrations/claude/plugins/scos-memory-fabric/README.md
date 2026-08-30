@@ -1,13 +1,14 @@
 # scos-memory-fabric (Claude Code plugin)
 
-Wires Claude Code to the SCOS Memory Fabric's `mcp-gateway` service
-(`services/mcp-gateway`, deployed at `https://100.93.75.87:8098/mcp` — see
+Wires Claude Code to the SCOS Memory Fabric's hosted gateway
+(`cloud-control-plane` fronting `services/mcp-gateway`, deployed at
+`https://scos.172.236.155.15.nip.io/mcp` — see
 `docs/agent-connection-guide.md`) over the native `http` MCP transport. No
 local bridge script; the gateway serves the full governed tool surface (136
-tools incl. the code indexer). The internal cert is self-signed for
-127.0.0.1, so remote clients use `claude mcp add --transport http` with the
-bearer/tenant headers (see the connection guide) or the `tls-external/`
-Tailscale cert recipe.
+tools incl. the code indexer). The public endpoint has a real Let's Encrypt
+certificate, so a plain `claude mcp add --transport http` with your API key
+in the `Authorization` header (see the connection guide) is all that's
+needed — no insecure/CA-pinning flags.
 
 Tools exposed once connected: the full gateway set, incl. `scos_recall`,
 `scos_status`, `scos_explain`, `scos_user_model`, `scos_memory_graph`,
@@ -29,19 +30,21 @@ claude
 /plugin install scos-memory-fabric@scos-fabric-tools
 ```
 
-Claude Code prompts for four values on enable — the same ones documented in
-`docs/agent-connection-guide.md` §2, read from your own `~/.hermes/scos.env`:
+Claude Code prompts for four values on enable — see
+`docs/agent-connection-guide.md` §2:
 
 | Prompt | Source |
 |---|---|
-| mcp-gateway URL | defaults to the rabuntu deployment; override only if pointed at a different environment |
-| SCOS bearer token | `SCOS_HERMES_BEARER_TOKEN` in `~/.hermes/scos.env` |
-| Tenant ID | `SCOS_TENANT_ID` in `~/.hermes/scos.env` |
-| Principal ID | `SCOS_PRINCIPAL_ID` in `~/.hermes/scos.env` |
+| SCOS gateway URL | defaults to the hosted deployment; override only if pointed at a different environment |
+| SCOS API key | your own `scos_live_...` key from the SCOS portal (`/api/keys`), or `SCOS_BEARER_TOKEN` in `~/.hermes/scos.env` |
+| Tenant ID | legacy/optional — leave blank, derived from the API key |
+| Principal ID | legacy/optional — leave blank, derived from the API key |
 
-The bearer token is marked `sensitive` — Claude Code stores it in your OS
+The API key is marked `sensitive` — Claude Code stores it in your OS
 keychain (or `~/.claude/.credentials.json` where no keychain is available),
-never in plaintext `settings.json`, and never in this repo.
+never in plaintext `settings.json`, and never in this repo. Each key is
+scoped to its own tenant workspace, so your memories are isolated from
+every other user's key.
 
 Verify with `/mcp` inside a session, or:
 
@@ -78,5 +81,5 @@ claude plugin uninstall scos-memory-fabric@scos-fabric-tools
 
 Same effect as the `claude mcp add --transport http scos-remote ...` command
 in `docs/agent-connection-guide.md`, minus retyping the URL and headers on
-every machine and minus the bearer token ever touching a config file that
+every machine and minus the API key ever touching a config file that
 could get synced or committed by mistake.
