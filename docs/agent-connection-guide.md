@@ -290,25 +290,26 @@ SCOS_AGENT_NAME = "codex"
 }
 ```
 
-### hermes-agent (brainsync)
+### hermes-agent
 
-hermes-agent's live MCP servers are declared one-per-file under
-`~/.bsync_core/hermes-agent/` (see `mcp-config.json` for the existing
-`brainsync` entry — single-object form, not wrapped in `mcpServers`). Add a
-sibling file, e.g. `~/.bsync_core/hermes-agent/mcp-config-scos.json`:
-```json
-{
-  "name": "scos",
-  "description": "SCOS Nexus Memory Fabric",
-  "command": "/usr/bin/python3",
-  "args": ["-E", "/home/kubuntux/.hermes/scripts/scos-mcp-bridge.py"],
-  "transport": "stdio",
-  "env": { "SCOS_AGENT_NAME": "hermes-agent" }
-}
+Despite what an earlier version of this doc said, hermes-agent does **not**
+read a sibling file dropped under `~/.bsync_core/hermes-agent/` for this —
+that directory holds its `brainsync` live-memory config, not general MCP
+server registration. hermes-agent manages its own MCP servers via its `mcp`
+subcommand, backed by `~/.hermes/config.yaml`:
+
+```bash
+hermes mcp add scos \
+  --command /usr/bin/python3 \
+  --args -E /home/kubuntux/.hermes/scripts/scos-mcp-bridge.py \
+  --env SCOS_AGENT_NAME=hermes-agent
 ```
-Confirm hermes-agent actually globs this directory (or whatever settings
-surface it reads) before relying on it — this repo can't see hermes-agent's
-loader code.
+
+It connects immediately and does tool discovery live, so it'll ask whether
+to enable all discovered tools (146 of them, the full gateway surface — say
+yes, or pipe `yes |` in front of the command for a non-interactive install).
+Verify any time with `hermes mcp list` (should show `scos` as `✓ enabled`)
+or `hermes mcp test scos`.
 
 ## 4. Verifying a new connection
 

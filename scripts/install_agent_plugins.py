@@ -145,6 +145,18 @@ def install(skip_gemini: bool = False) -> None:
 
     run(["codex", "plugin", "add", "scos-memory-fabric@scos-fabric-tools"])
 
+    if shutil.which("hermes"):
+        # hermes-agent manages MCP servers via its own CLI/config.yaml, not a
+        # file drop like the other agents -- and `mcp add` does live tool
+        # discovery with an interactive "enable all tools?" prompt, hence the
+        # piped "y\n" for non-interactive installs.
+        print("$ hermes mcp add scos ...")
+        subprocess.run(
+            ["hermes", "mcp", "add", "scos", "--command", "/usr/bin/python3",
+             "--args", "-E", str(BRIDGE), "--env", "SCOS_AGENT_NAME=hermes-agent"],
+            cwd=ROOT, input="y\n", text=True, check=False,
+        )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
