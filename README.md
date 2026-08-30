@@ -239,6 +239,9 @@ horizontal scale-out (stateless services, RLS-scoped Postgres access,
 graceful shutdown), what doesn't yet (a handful of services with local disk
 state), and the reference path to multi-node if it's ever needed.
 
+The verified Linode deployment location and client endpoint are recorded in
+[`docs/deployment-linode.md`](docs/deployment-linode.md).
+
 ## Contributing
 
 Issues and PRs are welcome. Start with

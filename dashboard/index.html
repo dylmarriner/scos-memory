@@ -3,197 +3,350 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SCOS Transparency</title>
+  <title>SCOS Memory Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0b0e13;
-      --bg-grid: radial-gradient(circle at 15% 0%, rgba(99,102,241,.08), transparent 45%),
-                 radial-gradient(circle at 85% 15%, rgba(45,212,191,.06), transparent 40%);
-      --panel: #141a24;
-      --panel-2: #10151e;
-      --border: #232c3a;
-      --border-soft: #1c2432;
-      --text: #edf2f7;
-      --text-dim: #8b98ac;
-      --text-faint: #5a6678;
-      --ok: #34d399;
-      --warn: #f6ad55;
-      --err: #f87171;
-      --link: #7dd3fc;
-      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.55);
-      --radius: .75rem;
+      --bg: #05060a;
+      --panel: rgba(13,17,28,.6);
+      --panel-2: rgba(11,14,22,.65);
+      --border: rgba(255,255,255,.08);
+      --border-soft: rgba(255,255,255,.05);
+      --text: #eef4fa;
+      --text-dim: #7c8aa0;
+      --text-faint: #47536b;
+      --cyan: #00f0ff;
+      --purple: #a78bfa;
+      --amber: #f6ad55;
+      --green: #22e0b0;
+      --red: #ff4d6d;
+      --radius: .8rem;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
     }
     * { box-sizing: border-box; }
     body {
-      font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
-      max-width: 1560px; margin: 0 auto; padding: 1.75rem 1.5rem 3rem;
-      background: var(--bg-grid), var(--bg);
-      background-attachment: fixed;
-      color: var(--text);
+      margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+      font: 15px/1.5 'IBM Plex Mono', ui-monospace, monospace;
+      overflow-x: hidden;
     }
-    header {
-      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .75rem;
-      margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-soft);
-    }
-    .brand { display: flex; align-items: center; gap: .65rem; }
-    .brand-mark {
-      width: 2.1rem; height: 2.1rem; border-radius: .55rem; flex: none;
-      background: conic-gradient(from 200deg, #6366f1, #2dd4bf, #6366f1);
-      box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 6px 16px -6px rgba(99,102,241,.55);
-      display: grid; place-items: center; font-size: 1.05rem;
-    }
-    h1 { margin: 0; font-size: 1.3rem; font-weight: 650; letter-spacing: -.01em; }
-    h1 small { display: block; font-weight: 500; font-size: .74rem; color: var(--text-faint); letter-spacing: .04em; text-transform: uppercase; margin-top: .1rem; }
-    .status {
-      display: inline-flex; align-items: center; gap: .45rem; margin: 0;
-      font-size: .82rem; color: var(--text-dim);
-      background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 999px; padding: .35rem .75rem;
-    }
-    .status::before { content: ''; width: .5rem; height: .5rem; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(52,211,153,.18); flex: none; }
-    .status.error::before { background: var(--err); box-shadow: 0 0 0 3px rgba(248,113,113,.18); animation: none; }
-    .status:not(.error)::before { animation: pulse-dot 2.4s ease-in-out infinite; }
-    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
-    .status.error { color: var(--err); }
-
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; }
-    .panel {
-      position: relative;
-      background: linear-gradient(180deg, var(--panel), var(--panel-2));
-      border: 1px solid var(--border); border-radius: var(--radius);
-      padding: .95rem 1.05rem 1.05rem; min-width: 0;
-      box-shadow: var(--shadow);
-      border-left: 3px solid hsl(var(--accent, 220) 70% 58%);
-      animation: rise .35s ease both;
-      transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
-    }
-    .panel:hover { border-color: color-mix(in srgb, hsl(var(--accent, 220) 70% 58%) 45%, var(--border)); }
+    @keyframes pulseDot { 0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(0,240,255,.35)} 50%{opacity:.5;box-shadow:0 0 0 5px rgba(0,240,255,0)} }
+    @keyframes scanSweep { 0%{transform:translateY(-100%)} 100%{transform:translateY(480px)} }
+    @keyframes drift1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(40px,-30px)} }
+    @keyframes drift2 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-50px,30px)} }
+    @keyframes marquee { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
+    @keyframes glowPulse { 0%,100%{opacity:.55} 50%{opacity:1} }
+    @keyframes dash { to { stroke-dashoffset: -24; } }
     @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-    .panel h2 {
-      margin: 0 0 .65rem; font-size: .82rem; font-weight: 650; letter-spacing: .02em; text-transform: uppercase;
-      color: hsl(var(--accent, 220) 78% 72%);
-      display: flex; justify-content: space-between; align-items: baseline; gap: .5rem;
-    }
-    .panel h2 small { color: var(--text-faint); font-weight: normal; font-size: .72rem; text-transform: none; letter-spacing: 0; }
-    .panel-body { max-height: 380px; overflow: auto; font-variant-numeric: tabular-nums; }
-    .panel-body::-webkit-scrollbar, dialog::-webkit-scrollbar { width: 9px; height: 9px; }
-    .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
-    .missing { color: var(--text-faint); font-style: italic; }
-    .wide { grid-column: 1 / -1; }
-    pre.raw {
-      white-space: pre-wrap; word-break: break-word; background: #080a0f; color: #a5f3c9;
-      padding: .7rem .8rem; border-radius: .5rem; overflow: auto; max-height: 320px; margin: 0;
-      font: .78rem/1.5 ui-monospace, "SF Mono", Menlo, monospace; border: 1px solid var(--border-soft);
-    }
 
-    /* Generic human-readable renderer: tables for lists of objects, key/value rows for objects. */
-    table.kv { width: 100%; border-collapse: collapse; font-size: .85rem; }
-    table.kv td { padding: .32rem .4rem; vertical-align: top; border-bottom: 1px solid var(--border-soft); }
+    .bg-fx { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+    .bg-fx .blob { position: absolute; border-radius: 50%; filter: blur(10px); }
+    .bg-fx .blob.a { top: -10%; left: 5%; width: 520px; height: 520px; background: radial-gradient(circle, rgba(124,58,237,.16), transparent 70%); animation: drift1 22s ease-in-out infinite; }
+    .bg-fx .blob.b { bottom: -15%; right: 0; width: 600px; height: 600px; background: radial-gradient(circle, rgba(0,240,255,.12), transparent 70%); animation: drift2 26s ease-in-out infinite; }
+    .bg-fx .grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px); background-size: 42px 42px; }
+
+    main { position: relative; z-index: 1; max-width: 1680px; margin: 0 auto; padding: 1.5rem 1.75rem 0; }
+
+    header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .9rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+    .brand { display: flex; align-items: center; gap: .85rem; }
+    .brand-mark { width: 2.4rem; height: 2.4rem; border-radius: 50%; flex: none; background: conic-gradient(from 210deg, var(--cyan), var(--purple), var(--cyan)); box-shadow: 0 0 24px -2px rgba(0,240,255,.6), 0 0 0 1px rgba(255,255,255,.08); }
+    .brand-title { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 1.15rem; letter-spacing: .03em; color: #fff; }
+    .brand-title span { color: var(--cyan); }
+    .brand-sub { font-size: .68rem; letter-spacing: .12em; color: var(--text-faint); text-transform: uppercase; margin-top: .15rem; }
+    .header-right { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+    .pill { display: inline-flex; align-items: center; gap: .5rem; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); background: rgba(13,17,28,.6); border: 1px solid var(--border); border-radius: 999px; padding: .4rem .8rem; }
+    .pill .dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--cyan); display: inline-block; animation: pulseDot 2.2s ease-in-out infinite; }
+    .pill.error { color: var(--red); }
+    .pill.error .dot { background: var(--red); animation: none; }
+    .edit-state { padding: .3rem .3rem .3rem .8rem; }
+    .edit-state.on { color: var(--amber); }
+    .edit-state button { font-family: inherit; font-size: .68rem; letter-spacing: .04em; text-transform: uppercase; background: #141a2b; color: var(--text); border: 1px solid rgba(255,255,255,.12); border-radius: .4rem; padding: .28rem .6rem; cursor: pointer; }
+    .edit-state button:hover { background: #1c2438; }
+
+    .status-line { font-size: .74rem; color: var(--text-faint); margin: .6rem 0 0; }
+    .status-line.error { color: var(--red); }
+
+    nav.tabs { display: flex; gap: .35rem; margin-top: 1rem; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+    nav.tabs button { font-family: 'Space Grotesk', sans-serif; font-size: .7rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--text-dim); background: rgba(13,17,28,.5); border: 1px solid rgba(255,255,255,.07); border-bottom: 2px solid transparent; border-radius: .45rem .45rem 0 0; padding: .5rem .95rem; cursor: pointer; margin-bottom: -1px; }
+    nav.tabs button.active { color: var(--cyan); background: rgba(0,240,255,.08); border-color: rgba(0,240,255,.3); border-bottom-color: var(--cyan); }
+
+    .tabpanel { padding-top: 1.1rem; padding-bottom: 1.5rem; }
+    .tabpanel.hidden { display: none; }
+
+    .cols3 { display: grid; grid-template-columns: 260px minmax(0,1fr) 260px; gap: 1rem; align-items: start; }
+    .cols2 { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 1rem; align-items: start; }
+    .colstack { display: flex; flex-direction: column; gap: .85rem; }
+    .col-label { font-size: .68rem; letter-spacing: .16em; text-transform: uppercase; font-family: 'Space Grotesk', sans-serif; font-weight: 600; padding-left: .15rem; }
+    .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: .85rem; margin-bottom: 1rem; }
+    @media (max-width: 900px) { .cols3, .cols2 { grid-template-columns: 1fr; } .stat-grid { grid-template-columns: repeat(2,1fr); } }
+
+    .stat-card { background: rgba(13,17,28,.55); border: 1px solid var(--border); border-top: 2px solid var(--cyan); border-radius: .6rem; padding: .85rem 1rem; }
+    .stat-card .label { font-size: .62rem; letter-spacing: .14em; text-transform: uppercase; color: var(--text-dim); }
+    .stat-card .value { font-family: 'Space Grotesk', sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--text); margin-top: .2rem; }
+    .stat-card .delta { font-size: .66rem; color: var(--green); }
+
+    /* HUD panel card (generic-data card, replaces the design's hardcoded HudPanel) */
+    .hud { position: relative; background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border); border-left: 2px solid var(--accent, var(--cyan)); border-radius: .6rem; padding: .75rem .85rem .85rem; min-width: 0; animation: rise .35s ease both; }
+    .hud-head { display: flex; align-items: baseline; gap: .4rem; margin-bottom: .55rem; }
+    .hud-tag { font-family: 'IBM Plex Mono', monospace; font-size: .62rem; letter-spacing: .05em; color: var(--accent, var(--cyan)); background: rgba(255,255,255,.05); border-radius: .25rem; padding: .1rem .35rem; }
+    .hud-title { font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: .78rem; color: var(--text); letter-spacing: .01em; }
+    .hud-meta { margin-left: auto; font-size: .64rem; color: var(--text-faint); }
+    .hud-body { font-size: .72rem; }
+    .hud-body .missing { color: var(--text-faint); font-style: italic; }
+
+    /* framed panel (graph, facts table, etc) with corner brackets */
+    .frame { position: relative; background: var(--panel-2); backdrop-filter: blur(14px); border: 1px solid rgba(0,240,255,.22); border-radius: .9rem; padding: 1.1rem 1.2rem 1.3rem; overflow: hidden; box-shadow: 0 0 40px -18px rgba(0,240,255,.35); }
+    .frame.amber { border-color: rgba(255,180,60,.22); box-shadow: none; }
+    .frame.purple { border-color: rgba(124,58,237,.25); box-shadow: none; }
+    .frame.green { border-color: rgba(34,224,176,.25); box-shadow: none; }
+    .frame::before, .frame::after { content: ''; position: absolute; width: 22px; height: 22px; border-color: var(--cyan); }
+    .frame::before { top: 0; left: 0; border-top: 2px solid; border-left: 2px solid; border-radius: .5rem 0 0 0; }
+    .frame::after { bottom: 0; right: 0; border-bottom: 2px solid; border-right: 2px solid; border-radius: 0 0 .5rem 0; }
+    .frame.amber::before, .frame.amber::after { border-color: var(--amber); }
+    .frame.purple::before, .frame.purple::after { border-color: var(--purple); }
+    .frame.green::before, .frame.green::after { border-color: var(--green); }
+    .frame-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: .7rem; }
+    .frame-title { font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: .95rem; letter-spacing: .05em; color: var(--cyan); text-transform: uppercase; }
+    .frame.amber .frame-title { color: var(--amber); }
+    .frame.purple .frame-title { color: var(--purple); }
+    .frame.green .frame-title { color: var(--green); }
+    .frame-meta { font-size: .7rem; color: var(--text-faint); }
+    .toggle-raw { font-size: .68rem; color: var(--text-faint); cursor: pointer; user-select: none; margin-left: .6rem; }
+
+    table.kv, table.records { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    table.kv td { padding: .28rem .4rem; vertical-align: top; border-bottom: 1px solid var(--border-soft); }
     table.kv tr:last-child td { border-bottom: none; }
-    table.kv td.key { color: var(--text-dim); white-space: nowrap; width: 1%; padding-right: .75rem; font-size: .78rem; letter-spacing: .01em; }
-    table.records { width: 100%; border-collapse: collapse; font-size: .82rem; }
-    table.records th {
-      text-align: left; color: var(--text-dim); font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
-      border-bottom: 1px solid var(--border); padding: .4rem .5rem; position: sticky; top: 0; background: var(--panel);
-    }
-    table.records td { padding: .42rem .5rem; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
-    table.records tbody tr { transition: background .1s ease; }
-    table.records tbody tr:nth-child(even) { background: rgba(255,255,255,.012); }
-    table.records tr:hover td { background: rgba(125,211,252,.05); }
+    table.kv td.key { color: var(--text-dim); white-space: nowrap; width: 1%; padding-right: .75rem; font-size: .74rem; }
+    table.records th { text-align: left; color: var(--text-dim); font-weight: 500; font-size: .65rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--border); padding: .4rem .5rem; }
+    table.records td { padding: .5rem .5rem; border-bottom: 1px solid rgba(255,255,255,.04); vertical-align: top; color: #c3cbdb; }
+    table.records tr:hover td { background: rgba(0,240,255,.04); }
     .cell-actions { white-space: nowrap; }
-    .scalar { color: var(--text); }
     .scalar.null { color: var(--text-faint); font-style: italic; }
-    .scalar.bool-true { color: var(--ok); font-weight: 600; }
-    .scalar.bool-false { color: var(--err); font-weight: 600; }
+    .scalar.bool-true { color: var(--green); font-weight: 600; }
+    .scalar.bool-false { color: var(--red); font-weight: 600; }
+    ul.plain-list { margin: 0; padding-left: 1rem; font-size: .72rem; color: #c3cbdb; }
+    ul.plain-list li { padding: .12rem 0; }
 
-    button, .btn {
-      font: inherit; background: #1c2433; color: var(--text); border: 1px solid var(--border);
-      border-radius: .4rem; padding: .32rem .65rem; cursor: pointer; transition: background .12s ease, border-color .12s ease, transform .05s ease;
-    }
-    button:hover, .btn:hover { background: #263047; border-color: #37455c; }
-    button:active, .btn:active { transform: translateY(1px); }
-    button.primary { background: #4f46e5; border-color: #4f46e5; }
-    button.primary:hover { background: #6366f1; border-color: #6366f1; }
-    button.danger { background: #7f1d1d; border-color: #7f1d1d; }
-    button.danger:hover { background: #991b1b; border-color: #991b1b; }
-    button.link { background: none; border: none; color: var(--link); padding: 0 .25rem; }
-    button.small, .btn.small { padding: .16rem .5rem; font-size: .76rem; }
+    button, .btn { font: inherit; background: #141a2b; color: var(--text); border: 1px solid rgba(255,255,255,.1); border-radius: .35rem; padding: .2rem .5rem; cursor: pointer; font-size: .66rem; }
+    button:hover { background: #1c2438; }
+    button.primary { background: #00b8cc; color: #05070d; font-weight: 600; border-color: #00b8cc; }
+    button.primary:hover { background: #00d3ea; }
+    button.danger { background: #2a1018; color: var(--red); border-color: rgba(255,77,109,.3); }
+    button.danger:hover { background: #3a1620; }
+    button.small { padding: .2rem .5rem; font-size: .66rem; margin-right: .3rem; }
 
-    .edit-state { font-size: .78rem; color: var(--text-dim); display: flex; align-items: center; gap: .55rem; background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 999px; padding: .3rem .3rem .3rem .75rem; }
-    .edit-state.on { color: var(--warn); }
-    .edit-state.on::before { content: '●'; color: var(--warn); font-size: .55rem; }
-
-    dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.35rem; max-width: 420px; width: 90vw; box-shadow: 0 24px 64px -20px rgba(0,0,0,.7); }
-    dialog::backdrop { background: rgba(5,7,11,.72); backdrop-filter: blur(2px); }
-    dialog h3 { margin: 0 0 .75rem; font-size: 1.02rem; letter-spacing: -.01em; }
-    dialog label { display: block; font-size: .82rem; color: var(--text-dim); margin: .6rem 0 .3rem; }
-    dialog input, dialog textarea { width: 100%; background: #0b0f16; color: var(--text); border: 1px solid var(--border); border-radius: .4rem; padding: .5rem .6rem; font: inherit; transition: border-color .12s ease; }
-    dialog input:focus, dialog textarea:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.18); }
-    dialog textarea { min-height: 4.5rem; resize: vertical; }
-    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1.1rem; }
-    .dialog-error { color: var(--err); font-size: .82rem; margin-top: .5rem; min-height: 1.1em; }
-
-    /* Memory graph: force-directed node/link visualization. */
-    .graph-body { max-height: none; overflow: hidden; }
+    /* memory graph */
     .graph-wrap { position: relative; }
-    .graph-svg {
-      width: 100%; height: 420px; display: block; touch-action: none; cursor: grab;
-      background: radial-gradient(circle at 50% 40%, rgba(167,139,250,.045), transparent 65%);
-      border-radius: .5rem;
-    }
+    .graph-scan { position: absolute; left: 0; right: 0; height: 70px; background: linear-gradient(180deg, transparent, rgba(0,240,255,.08), transparent); animation: scanSweep 5.5s linear infinite; pointer-events: none; z-index: 2; }
+    .graph-inner { position: relative; border-radius: .6rem; overflow: hidden; background: radial-gradient(circle at 50% 40%, rgba(124,58,237,.08), transparent 65%); }
+    .graph-svg { width: 100%; height: 440px; display: block; position: relative; z-index: 1; touch-action: none; cursor: grab; }
     .graph-svg.panning { cursor: grabbing; }
-    .graph-edge { stroke: #4a5568; stroke-width: 1; opacity: .55; transition: opacity .12s ease, stroke .12s ease; }
-    .graph-edge.mentions { stroke-dasharray: 2 3; opacity: .35; }
+    .graph-edge { stroke: #4a5568; stroke-width: 1.1; opacity: .35; stroke-dasharray: 4 6; animation: dash 3.2s linear infinite; transition: opacity .12s ease, stroke .12s ease; }
+    .graph-edge.mentions { stroke-dasharray: 2 3; opacity: .25; }
     .graph-edge.dim { opacity: .06; }
-    .graph-edge.active { stroke: #a78bfa; stroke-width: 1.6; opacity: .95; }
-    .graph-node circle { stroke-width: 1.5; transition: opacity .12s ease, r .12s ease; }
-    .graph-node.fact circle { fill: #2a2416; stroke: #fbbf24; }
-    .graph-node.entity circle { fill: #241f36; stroke: #a78bfa; }
-    .graph-node.dim { opacity: .18; }
+    .graph-edge.active { stroke: var(--purple); stroke-width: 1.6; opacity: .95; }
+    .graph-node circle { stroke-width: 1.4; animation: glowPulse 3s ease-in-out infinite; transition: opacity .12s ease, r .12s ease; }
+    .graph-node.fact circle { fill: #0a2230; stroke: var(--cyan); filter: drop-shadow(0 0 6px rgba(0,240,255,.7)); }
+    .graph-node.entity circle { fill: #1c1230; stroke: var(--purple); filter: drop-shadow(0 0 6px rgba(167,139,250,.7)); }
+    .graph-node.dim { opacity: .15; }
     .graph-node:hover circle { filter: brightness(1.3); }
     .graph-label { fill: var(--text-dim); font-size: 8.5px; text-anchor: middle; pointer-events: none; user-select: none; }
-    .graph-tooltip {
-      display: none; position: absolute; z-index: 5; pointer-events: none; max-width: 190px;
-      background: #0b0f16; border: 1px solid var(--border); border-radius: .4rem; padding: .4rem .55rem;
-      font-size: .74rem; line-height: 1.4; color: var(--text); box-shadow: var(--shadow);
-    }
+    .graph-tooltip { display: none; position: absolute; z-index: 5; pointer-events: none; max-width: 190px; background: #0d1120; border: 1px solid var(--border); border-radius: .4rem; padding: .4rem .55rem; font-size: .72rem; line-height: 1.4; color: var(--text); box-shadow: var(--shadow); }
     .graph-tooltip span { color: var(--text-faint); }
-    .graph-legend { display: flex; flex-wrap: wrap; align-items: center; gap: .9rem; margin-top: .5rem; font-size: .74rem; color: var(--text-dim); }
-    .graph-legend span { display: inline-flex; align-items: center; gap: .35rem; }
-    .graph-dot { width: .55rem; height: .55rem; border-radius: 50%; display: inline-block; border: 1.5px solid; }
-    .graph-dot.fact { background: #2a2416; border-color: #fbbf24; }
-    .graph-dot.entity { background: #241f36; border-color: #a78bfa; }
-    .graph-count { color: var(--text-faint); }
+    .graph-legend { display: flex; gap: 1rem; margin-top: .6rem; font-size: .7rem; color: var(--text-dim); letter-spacing: .03em; flex-wrap: wrap; }
+    .graph-legend .dot { width: .55rem; height: .55rem; border-radius: 50%; display: inline-block; border: 1.5px solid; margin-right: .35rem; }
+    .graph-legend .dot.fact { background: #0a2230; border-color: var(--cyan); }
+    .graph-legend .dot.entity { background: #1c1230; border-color: var(--purple); }
     .graph-hint { margin-left: auto; color: var(--text-faint); font-style: italic; }
-    .graph-truncated { margin: .4rem 0 0; font-size: .74rem; }
+    .missing { color: var(--text-faint); font-style: italic; }
+    .bar-row { margin-bottom: .55rem; }
+    .bar-row .bar-labels { display: flex; justify-content: space-between; font-size: .72rem; color: #c3cbdb; }
+    .bar-track { height: 4px; background: rgba(255,255,255,.06); border-radius: 99px; margin-top: .25rem; }
+    .bar-fill { height: 4px; border-radius: 99px; background: var(--cyan); box-shadow: 0 0 8px rgba(0,240,255,.6); }
+    .mesh-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); gap: .5rem; }
+    .mesh-item { display: flex; align-items: center; gap: .5rem; background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); border-radius: .4rem; padding: .45rem .6rem; }
+    .mesh-dot { width: .45rem; height: .45rem; border-radius: 50%; flex: none; }
+    .mesh-name { font-size: .72rem; color: #c3cbdb; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .trace-log { max-height: 300px; overflow: auto; font-size: .72rem; line-height: 1.65; color: #9fe8b0; }
+    .trace-log .line { border-bottom: 1px solid rgba(255,255,255,.03); padding: .1rem 0; }
+    .trace-log .event { color: var(--amber); font-weight: 600; }
 
-    .trace-panel { grid-column: 1 / -1; --accent: 265; }
-    .trace-panel h2 #trace-meta.live::before { content: '● '; color: var(--ok); }
-    #trace-log { max-height: 220px; }
-    .trace-line { color: var(--text-dim); border-bottom: 1px solid rgba(255,255,255,.03); padding: .12rem 0; }
-    .trace-line .event { color: var(--warn); font-weight: 600; }
-    .toggle-raw { font-size: .72rem; color: var(--text-faint); cursor: pointer; user-select: none; }
+    /* sticky live-trace marquee footer */
+    .footer-trace { position: sticky; bottom: 0; z-index: 2; margin-top: 1.5rem; background: rgba(5,7,12,.92); backdrop-filter: blur(10px); border-top: 1px solid rgba(0,240,255,.2); padding: .55rem 0; overflow: hidden; }
+    .footer-trace-inner { display: flex; align-items: center; gap: .6rem; max-width: 1680px; margin: 0 auto; padding: 0 1.75rem; }
+    .footer-trace-label { font-size: .65rem; letter-spacing: .1em; color: var(--cyan); text-transform: uppercase; flex: none; font-family: 'Space Grotesk', sans-serif; font-weight: 600; }
+    .footer-trace-mask { overflow: hidden; white-space: nowrap; flex: 1; -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
+    .footer-trace-scroll { display: inline-block; animation: marquee 32s linear infinite; color: #9fe8b0; font-size: .74rem; letter-spacing: .01em; }
 
-    @media (max-width: 640px) { body { padding: 1.1rem .9rem 2.5rem; } }
+    dialog { background: #0d1120; color: var(--text); border: 1px solid rgba(0,240,255,.3); border-radius: .8rem; padding: 1.4rem; max-width: 460px; width: 90vw; box-shadow: 0 0 60px -10px rgba(0,240,255,.3); }
+    dialog::backdrop { background: rgba(3,4,8,.75); backdrop-filter: blur(3px); }
+    dialog.danger { border-color: rgba(255,77,109,.35); box-shadow: 0 0 60px -10px rgba(255,77,109,.25); }
+    dialog h3 { margin: 0 0 .6rem; font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 1rem; letter-spacing: .03em; color: var(--cyan); text-transform: uppercase; }
+    dialog.danger h3 { color: var(--red); }
+    dialog p { color: var(--text-dim); font-size: .82rem; margin: 0; }
+    dialog label { display: block; font-size: .78rem; color: var(--text-dim); margin: .7rem 0 .3rem; text-transform: uppercase; letter-spacing: .05em; }
+    dialog input, dialog textarea { width: 100%; background: #05070d; color: var(--text); border: 1px solid rgba(255,255,255,.12); border-radius: .4rem; padding: .55rem .65rem; font: inherit; box-sizing: border-box; }
+    dialog textarea { min-height: 5rem; resize: vertical; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1.15rem; }
+    .dialog-error { color: var(--red); font-size: .8rem; margin-top: .5rem; min-height: 1.1em; }
+    .history-row { padding: .5rem 0; border-bottom: 1px solid rgba(255,255,255,.06); }
+    .history-row .when { color: var(--text-faint); font-size: .7rem; }
+
+    @media (max-width: 640px) { main { padding: 1rem 1rem 0; } }
   </style>
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <div class="brand-mark">🜂</div>
-      <h1>SCOS Transparency<small>Nexus Memory Fabric &middot; live operational state</small></h1>
+  <div class="bg-fx"><div class="blob a"></div><div class="blob b"></div><div class="grid"></div></div>
+
+  <main>
+    <header>
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <div>
+          <div class="brand-title">SCOS <span>// MEMORY COMMAND</span></div>
+          <div class="brand-sub">Nexus Memory Fabric &middot; live command deck</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <span class="pill" id="status-pill"><span class="dot"></span><span id="status-text">loading&hellip;</span></span>
+        <span class="pill edit-state" id="edit-state">
+          <span id="edit-state-text">view only</span>
+          <button id="edit-toggle">Enable editing</button>
+        </span>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="memory">Memory</button>
+      <button data-tab="facts">Facts</button>
+      <button data-tab="agents">Agents</button>
+      <button data-tab="system">System</button>
+      <button data-tab="flow">Flow</button>
+    </nav>
+
+    <!-- OVERVIEW -->
+    <section id="tab-overview" class="tabpanel">
+      <div class="cols3">
+        <div class="colstack">
+          <div class="col-label" style="color:var(--purple)">Identity // System</div>
+          <div id="ov-left"></div>
+        </div>
+        <div class="colstack">
+          <div class="frame">
+            <div class="frame-head">
+              <div class="frame-title">MEM &middot; Memory Graph</div>
+              <div class="frame-meta" id="ov-graph-stats"></div>
+            </div>
+            <div class="graph-inner"><div class="graph-scan"></div><div id="ov-graph"></div></div>
+          </div>
+          <div class="frame amber">
+            <div class="frame-head">
+              <div class="frame-title">FCT &middot; Facts</div>
+              <div class="frame-meta" id="ov-facts-count"></div>
+            </div>
+            <div id="ov-facts-table"></div>
+          </div>
+        </div>
+        <div class="colstack">
+          <div class="col-label" style="color:var(--cyan)">Activity // Ops</div>
+          <div id="ov-right"></div>
+        </div>
+      </div>
+      <div style="margin-top:1.1rem">
+        <div class="col-label" style="color:var(--green);margin-bottom:.6rem">Signals // Analysis</div>
+        <div class="mesh-grid" id="ov-signals" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))"></div>
+      </div>
+    </section>
+
+    <!-- MEMORY -->
+    <section id="tab-memory" class="tabpanel hidden">
+      <div class="stat-grid" id="mem-stats"></div>
+      <div class="cols2">
+        <div class="frame">
+          <div class="frame-head"><div class="frame-title">Graph — full topology</div><div class="frame-meta" id="mem-graph-stats"></div></div>
+          <div class="graph-inner"><div class="graph-scan"></div><div id="mem-graph" style="min-height:520px"></div></div>
+        </div>
+        <div class="colstack">
+          <div class="hud" style="--accent:var(--purple)"><div class="hud-head"><span class="hud-title" style="color:var(--purple);text-transform:uppercase">Entities</span></div><div class="hud-body" id="mem-entities"></div></div>
+          <div class="hud" style="--accent:var(--cyan)"><div class="hud-head"><span class="hud-title" style="color:var(--cyan);text-transform:uppercase">Link types</span></div><div class="hud-body" id="mem-linktypes"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FACTS -->
+    <section id="tab-facts" class="tabpanel hidden">
+      <div class="stat-grid" id="facts-stats"></div>
+      <div class="frame amber">
+        <div class="frame-head"><div class="frame-title">Facts &middot; full ledger</div><label class="toggle-raw"><input type="checkbox" id="facts-raw-toggle"> raw</label></div>
+        <div id="facts-table"></div>
+      </div>
+      <div class="mesh-grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:1rem">
+        <div class="hud" style="--accent:var(--red)"><div class="hud-head"><span class="hud-title" style="color:var(--red);text-transform:uppercase">Contradictions</span></div><div class="hud-body" id="facts-contradictions"></div></div>
+        <div class="hud" style="--accent:var(--green)"><div class="hud-head"><span class="hud-title" style="color:var(--green);text-transform:uppercase">Learnings queue</span></div><div class="hud-body" id="facts-learnings"></div></div>
+      </div>
+    </section>
+
+    <!-- AGENTS -->
+    <section id="tab-agents" class="tabpanel hidden">
+      <div class="cols2" style="grid-template-columns:minmax(0,1.4fr) minmax(0,1fr)">
+        <div class="frame">
+          <div class="frame-head"><div class="frame-title">Connected agents</div></div>
+          <div id="agents-table"></div>
+        </div>
+        <div class="hud" style="--accent:var(--cyan)"><div class="hud-head"><span class="hud-title" style="color:var(--cyan);text-transform:uppercase">Tool operations</span></div><div class="hud-body" id="agents-tools"></div></div>
+      </div>
+      <div class="cols2" style="margin-top:1rem;grid-template-columns:minmax(0,1fr) 300px">
+        <div class="frame purple">
+          <div class="frame-head"><div class="frame-title">Routing decisions</div></div>
+          <div id="agents-routing"></div>
+        </div>
+        <div class="colstack" id="agents-side"></div>
+      </div>
+    </section>
+
+    <!-- SYSTEM -->
+    <section id="tab-system" class="tabpanel hidden">
+      <div class="frame purple">
+        <div class="frame-head"><div class="frame-title">Service mesh</div><div class="frame-meta" id="sys-meta"></div></div>
+        <div id="sys-mesh"></div>
+      </div>
+      <div class="mesh-grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-top:1rem" id="sys-left"></div>
+    </section>
+
+    <!-- FLOW -->
+    <section id="tab-flow" class="tabpanel hidden">
+      <div class="cols2" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr)">
+        <div class="frame green">
+          <div class="frame-head"><div class="frame-title">Token flow</div></div>
+          <div id="flow-tokens"></div>
+        </div>
+        <div class="frame">
+          <div class="frame-head"><div class="frame-title">Cost breakdown</div></div>
+          <div id="flow-costs"></div>
+        </div>
+      </div>
+      <div class="cols2" style="margin-top:1rem;grid-template-columns:320px minmax(0,1fr)">
+        <div class="hud" style="--accent:var(--green)"><div class="hud-head"><span class="hud-title" style="color:var(--green);text-transform:uppercase">Timeline</span></div><div class="hud-body" id="flow-timeline"></div></div>
+        <div class="frame" style="background:#04060b">
+          <div class="frame-head"><div class="frame-title">Live trace — full log</div></div>
+          <div class="trace-log" id="flow-trace"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="footer-trace">
+    <div class="footer-trace-inner">
+      <span class="footer-trace-label">Live Trace</span>
+      <div class="footer-trace-mask"><div class="footer-trace-scroll" id="footer-marquee">connecting&hellip;</div></div>
     </div>
-    <span class="edit-state" id="edit-state">
-      <span id="edit-state-text">view only</span>
-      <button id="edit-toggle" class="small">Enable editing</button>
-    </span>
-  </header>
-  <p class="status" id="status">Loading authorised operational state&hellip;</p>
-  <div class="grid" id="panels"></div>
+  </div>
 
   <dialog id="login-dialog">
     <h3>Enable editing</h3>
-    <p style="color:#a0aec0;font-size:.85rem;margin:0">Corrections and deletions are recorded permanently in the fact history — this is not a hidden edit.</p>
+    <p>Corrections and deletions are recorded permanently in the fact history — this is not a hidden edit.</p>
     <label for="login-passphrase">Dashboard passphrase</label>
     <input type="password" id="login-passphrase" autocomplete="current-password">
     <div class="dialog-error" id="login-error"></div>
@@ -216,9 +369,9 @@
     </div>
   </dialog>
 
-  <dialog id="forget-dialog">
+  <dialog id="forget-dialog" class="danger">
     <h3>Forget fact</h3>
-    <p style="color:#a0aec0;font-size:.85rem;margin:0">This marks the fact as forgotten. It stays in history — nothing is destroyed.</p>
+    <p>This marks the fact as forgotten. It stays in history — nothing is destroyed.</p>
     <label for="forget-reason">Reason (recorded in history)</label>
     <input type="text" id="forget-reason" placeholder="why is this being forgotten?">
     <div class="dialog-error" id="forget-error"></div>
@@ -240,16 +393,10 @@
     const snapshotEndpoint = window.SCOS_TRANSPARENCY_ENDPOINT || '/v1/transparency/snapshot';
     const streamEndpoint = window.SCOS_TRANSPARENCY_STREAM_ENDPOINT || '/v1/transparency/stream';
     const loginEndpoint = '/v1/transparency/login';
-    const factsEndpoint = (id) => `/v1/transparency/facts/${encodeURIComponent(id)}`;
+    const factsEndpoint = (id) => '/v1/transparency/facts/' + encodeURIComponent(id);
 
     // ── edit session ──────────────────────────────────────────────────────
-    // The edit token lives only in sessionStorage: it clears when the tab
-    // closes, and is never written to disk. Viewing needs no token at all
-    // (see transparency-projection's public /v1/transparency/* routes);
-    // only PATCH/DELETE against a fact requires it.
-    function getEditToken() {
-      return sessionStorage.getItem('scos_dashboard_edit_token') || '';
-    }
+    function getEditToken() { return sessionStorage.getItem('scos_dashboard_edit_token') || ''; }
     function setEditToken(token) {
       if (token) sessionStorage.setItem('scos_dashboard_edit_token', token);
       else sessionStorage.removeItem('scos_dashboard_edit_token');
@@ -260,7 +407,7 @@
       document.getElementById('edit-state').classList.toggle('on', on);
       document.getElementById('edit-state-text').textContent = on ? 'editing enabled' : 'view only';
       document.getElementById('edit-toggle').textContent = on ? 'Lock' : 'Enable editing';
-      refreshSnapshot().catch(() => {});
+      if (lastSnapshot) paintAll(lastSnapshot);
     }
 
     document.getElementById('edit-toggle').addEventListener('click', () => {
@@ -283,7 +430,7 @@
           body: JSON.stringify({ passphrase }),
         });
         const payload = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(payload.error || `login failed (${resp.status})`);
+        if (!resp.ok) throw new Error(payload.error || ('login failed (' + resp.status + ')'));
         setEditToken(payload.token);
         document.getElementById('login-dialog').close();
       } catch (error) {
@@ -315,7 +462,7 @@
           body: JSON.stringify({ content, reason }),
         });
         const payload = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(payload.error || `correction failed (${resp.status})`);
+        if (!resp.ok) throw new Error(payload.error || ('correction failed (' + resp.status + ')'));
         document.getElementById('correct-dialog').close();
         await refreshSnapshot();
       } catch (error) {
@@ -334,13 +481,13 @@
       const reason = document.getElementById('forget-reason').value.trim();
       const errEl = document.getElementById('forget-error');
       try {
-        const resp = await fetch(factsEndpoint(forgetTargetID) + (reason ? `?reason=${encodeURIComponent(reason)}` : ''), {
+        const resp = await fetch(factsEndpoint(forgetTargetID) + (reason ? ('?reason=' + encodeURIComponent(reason)) : ''), {
           method: 'DELETE',
           headers: { 'X-SCOS-Dashboard-Edit-Token': getEditToken() },
         });
         if (!resp.ok) {
           const payload = await resp.json().catch(() => ({}));
-          throw new Error(payload.error || `forget failed (${resp.status})`);
+          throw new Error(payload.error || ('forget failed (' + resp.status + ')'));
         }
         document.getElementById('forget-dialog').close();
         await refreshSnapshot();
@@ -356,28 +503,43 @@
       try {
         const resp = await fetch(factsEndpoint(id) + '/history');
         const payload = await resp.json();
-        if (!resp.ok) throw new Error(payload.error || `history failed (${resp.status})`);
+        if (!resp.ok) throw new Error(payload.error || ('history failed (' + resp.status + ')'));
+        const rows = payload.history || payload;
         body.innerHTML = '';
-        body.appendChild(render(payload.history || payload));
+        if (Array.isArray(rows) && rows.length) {
+          for (const h of rows) {
+            const div = document.createElement('div');
+            div.className = 'history-row';
+            const when = document.createElement('div');
+            when.className = 'when';
+            when.textContent = h.when || h.recorded_at || h.observed_at || '';
+            const text = document.createElement('div');
+            text.textContent = h.text || h.content || JSON.stringify(h);
+            div.append(when, text);
+            body.appendChild(div);
+          }
+        } else {
+          body.appendChild(render(rows));
+        }
       } catch (error) {
-        body.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`;
+        body.innerHTML = '<p class="missing">' + escapeHtml(error.message) + '</p>';
       }
     }
     document.getElementById('history-close').addEventListener('click', () => document.getElementById('history-dialog').close());
 
+    // ── tab switching ────────────────────────────────────────────────────
+    document.getElementById('tabs').addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-tab]');
+      if (!btn) return;
+      for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b === btn);
+      for (const sec of document.querySelectorAll('.tabpanel')) sec.classList.toggle('hidden', sec.id !== 'tab-' + btn.dataset.tab);
+    });
+
     // ── generic human-readable renderer ─────────────────────────────────
-    // Every panel's data comes straight from a backend projection with no
-    // fixed shape guaranteed ahead of time, so rather than hand-writing a
-    // renderer per view, this turns any JSON value into readable markup:
-    // arrays-of-objects become tables, objects become key/value rows,
-    // scalars render inline. A raw-JSON toggle stays available per panel
-    // for anyone who wants the exact wire payload.
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
-    function humanizeKey(key) {
-      return String(key).replace(/_/g, ' ');
-    }
+    function humanizeKey(key) { return String(key).replace(/_/g, ' '); }
     function renderScalar(value) {
       const span = document.createElement('span');
       if (value === null || value === undefined) { span.className = 'scalar null'; span.textContent = 'none'; return span; }
@@ -393,48 +555,27 @@
       return span;
     }
     function isPlainObject(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+    function looksLikeFact(obj) { return isPlainObject(obj) && typeof obj.id === 'string' && ('content' in obj || 'memory' in obj); }
+    function looksLikeGraph(v) { return isPlainObject(v) && Array.isArray(v.nodes) && Array.isArray(v.edges); }
 
-    // Recognizes a fact record well enough to attach edit affordances,
-    // without hard-coding assumptions about every other record shape.
-    function looksLikeFact(obj) {
-      return isPlainObject(obj) && typeof obj.id === 'string' && ('content' in obj || 'memory' in obj);
-    }
-
-    // Recognizes a node/edge graph projection (memory-intelligence's
-    // /v1/dashboard/memory-graph shape today; any future panel returning the
-    // same {nodes, edges} shape gets the visual graph for free).
-    function looksLikeGraph(v) {
-      return isPlainObject(v) && Array.isArray(v.nodes) && Array.isArray(v.edges);
-    }
-
-    // ── force-directed graph layout ─────────────────────────────────────
-    // Textbook Fruchterman-Reingold: mutual repulsion between every pair,
-    // spring attraction along edges, a light centering pull so disconnected
-    // components don't drift off-canvas, and per-iteration displacement
-    // capped by a cooling "temperature" (rather than raw force magnitude) —
-    // that cap is what keeps the layout converging to an organic spread
-    // instead of oscillating or pinning every node against the walls.
+    // ── force-directed graph layout (Fruchterman-Reingold) ──────────────
     function forceLayout(nodes, edges, width, height, iterations) {
       const index = new Map(nodes.map((n, i) => [n.id, i]));
       const pos = nodes.map(() => ({
-        x: width / 2 + (Math.random() - 0.5) * width * 0.8,
-        y: height / 2 + (Math.random() - 0.5) * height * 0.8,
+        x: width / 2 + (Math.random() - 0.5) * width * 0.85,
+        y: height / 2 + (Math.random() - 0.5) * height * 0.85,
       }));
-      const links = edges
-        .map((e) => ({ s: index.get(e.source), t: index.get(e.target) }))
-        .filter((l) => l.s !== undefined && l.t !== undefined && l.s !== l.t);
+      const links = edges.map((e) => ({ s: index.get(e.source), t: index.get(e.target) })).filter((l) => l.s !== undefined && l.t !== undefined && l.s !== l.t);
       const k = Math.sqrt((width * height) / Math.max(nodes.length, 1));
       let temperature = Math.max(width, height) / 8;
       const cooling = temperature / iterations;
-
       for (let iter = 0; iter < iterations; iter++) {
         const disp = pos.map(() => ({ x: 0, y: 0 }));
         for (let i = 0; i < pos.length; i++) {
           for (let j = i + 1; j < pos.length; j++) {
             const dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y;
             const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-            const force = (k * k) / d;
-            const ux = dx / d, uy = dy / d;
+            const force = (k * k) / d, ux = dx / d, uy = dy / d;
             disp[i].x += ux * force; disp[i].y += uy * force;
             disp[j].x -= ux * force; disp[j].y -= uy * force;
           }
@@ -443,14 +584,13 @@
           const a = pos[l.s], b = pos[l.t];
           const dx = a.x - b.x, dy = a.y - b.y;
           const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-          const force = (d * d) / k;
-          const ux = dx / d, uy = dy / d;
+          const force = (d * d) / k, ux = dx / d, uy = dy / d;
           disp[l.s].x -= ux * force; disp[l.s].y -= uy * force;
           disp[l.t].x += ux * force; disp[l.t].y += uy * force;
         }
         for (let i = 0; i < pos.length; i++) {
-          disp[i].x += (width / 2 - pos[i].x) * 0.01;
-          disp[i].y += (height / 2 - pos[i].y) * 0.01;
+          disp[i].x += (width / 2 - pos[i].x) * 0.012;
+          disp[i].y += (height / 2 - pos[i].y) * 0.012;
         }
         for (let i = 0; i < pos.length; i++) {
           const dx = disp[i].x, dy = disp[i].y;
@@ -467,7 +607,12 @@
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const GRAPH_MAX_NODES = 220;
 
-    function renderGraph(data) {
+    // renderGraph draws the same {nodes,edges} shape as before, styled with
+    // glowing cyan/purple nodes and curved bezier edges to match the new
+    // HUD look; behavior (pan/zoom/hover/click-for-history) is unchanged.
+    function renderGraph(data, opts) {
+      opts = opts || {};
+      const height = opts.height || 440;
       const wrap = document.createElement('div');
       wrap.className = 'graph-wrap';
 
@@ -482,9 +627,6 @@
         return wrap;
       }
 
-      // Cap for layout/render cost on large graphs, keeping the most
-      // connected nodes (and every edge between kept nodes). Truncation is
-      // surfaced, never silent.
       let nodes = allNodes, edges = allEdges, truncated = false;
       const rawDegree = new Map();
       for (const e of allEdges) {
@@ -498,7 +640,7 @@
         truncated = true;
       }
 
-      const width = 780, height = 460;
+      const width = 720;
       const degree = new Map();
       for (const e of edges) {
         degree.set(e.source, (degree.get(e.source) || 0) + 1);
@@ -508,7 +650,7 @@
       const index = new Map(nodes.map((n, i) => [n.id, i]));
 
       const svg = document.createElementNS(SVG_NS, 'svg');
-      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
       svg.setAttribute('class', 'graph-svg');
       const g = document.createElementNS(SVG_NS, 'g');
       svg.appendChild(g);
@@ -520,16 +662,21 @@
       for (const e of edges) {
         const si = index.get(e.source), ti = index.get(e.target);
         if (si === undefined || ti === undefined) continue;
-        const line = document.createElementNS(SVG_NS, 'line');
-        line.setAttribute('class', 'graph-edge' + (e.type === 'mentions' ? ' mentions' : ''));
-        line.setAttribute('x1', pos[si].x); line.setAttribute('y1', pos[si].y);
-        line.setAttribute('x2', pos[ti].x); line.setAttribute('y2', pos[ti].y);
-        line.dataset.s = si; line.dataset.t = ti;
+        const s = pos[si], t = pos[ti];
+        const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+        const dx = t.x - s.x, dy = t.y - s.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = -dy / len, ny = dx / len, bend = Math.min(30, len * 0.18);
+        const cx = mx + nx * bend, cy = my + ny * bend;
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('class', 'graph-edge' + (e.type === 'mentions' ? ' mentions' : ''));
+        path.setAttribute('d', 'M' + s.x + ',' + s.y + ' Q' + cx + ',' + cy + ' ' + t.x + ',' + t.y);
+        path.setAttribute('fill', 'none');
+        path.dataset.s = si; path.dataset.t = ti;
         const title = document.createElementNS(SVG_NS, 'title');
         title.textContent = e.type || 'related';
-        line.appendChild(title);
-        edgeGroup.appendChild(line);
-        edgeEls.push(line);
+        path.appendChild(title);
+        edgeGroup.appendChild(path);
+        edgeEls.push(path);
       }
 
       const neighbors = nodes.map(() => new Set());
@@ -543,9 +690,7 @@
       tooltip.className = 'graph-tooltip';
       function showTooltip(ev, n, isEntity) {
         tooltip.style.display = 'block';
-        tooltip.innerHTML = `<strong>${escapeHtml(n.label || n.id)}</strong><br><span>${
-          isEntity ? 'entity' : (n.network ? 'fact &middot; ' + escapeHtml(n.network) : 'fact')
-        }</span>`;
+        tooltip.innerHTML = '<strong>' + escapeHtml(n.label || n.id) + '</strong><br><span>' + (isEntity ? 'entity' : (n.network ? 'fact &middot; ' + escapeHtml(n.network) : 'fact')) + '</span>';
         const rect = wrap.getBoundingClientRect();
         tooltip.style.left = Math.min(rect.width - 190, Math.max(0, ev.clientX - rect.left + 14)) + 'px';
         tooltip.style.top = Math.max(0, ev.clientY - rect.top - 8) + 'px';
@@ -559,7 +704,7 @@
         const r = Math.min(17, 5 + Math.sqrt(degree.get(n.id) || 0) * 2.3);
         const nodeEl = document.createElementNS(SVG_NS, 'g');
         nodeEl.setAttribute('class', 'graph-node' + (isEntity ? ' entity' : ' fact'));
-        nodeEl.setAttribute('transform', `translate(${p.x},${p.y})`);
+        nodeEl.setAttribute('transform', 'translate(' + p.x + ',' + p.y + ')');
         const circle = document.createElementNS(SVG_NS, 'circle');
         circle.setAttribute('r', r);
         nodeEl.appendChild(circle);
@@ -595,26 +740,11 @@
         edgeEls.forEach((el) => el.classList.remove('dim', 'active'));
       }
 
-      // Pan (drag) & zoom (wheel), entirely local to this SVG — the panel
-      // body itself stays non-scrolling for graphs (see .graph-body CSS).
       let scale = 1, tx = 0, ty = 0, dragging = false, lastX = 0, lastY = 0;
-      function applyTransform() { g.setAttribute('transform', `translate(${tx},${ty}) scale(${scale})`); }
-      svg.addEventListener('wheel', (ev) => {
-        ev.preventDefault();
-        scale = Math.min(4, Math.max(0.35, scale * (ev.deltaY < 0 ? 1.12 : 0.89)));
-        applyTransform();
-      }, { passive: false });
-      svg.addEventListener('pointerdown', (ev) => {
-        dragging = true; lastX = ev.clientX; lastY = ev.clientY;
-        svg.setPointerCapture(ev.pointerId);
-        svg.classList.add('panning');
-      });
-      svg.addEventListener('pointermove', (ev) => {
-        if (!dragging) return;
-        tx += ev.clientX - lastX; ty += ev.clientY - lastY;
-        lastX = ev.clientX; lastY = ev.clientY;
-        applyTransform();
-      });
+      function applyTransform() { g.setAttribute('transform', 'translate(' + tx + ',' + ty + ') scale(' + scale + ')'); }
+      svg.addEventListener('wheel', (ev) => { ev.preventDefault(); scale = Math.min(4, Math.max(0.35, scale * (ev.deltaY < 0 ? 1.12 : 0.89))); applyTransform(); }, { passive: false });
+      svg.addEventListener('pointerdown', (ev) => { dragging = true; lastX = ev.clientX; lastY = ev.clientY; svg.setPointerCapture(ev.pointerId); svg.classList.add('panning'); });
+      svg.addEventListener('pointermove', (ev) => { if (!dragging) return; tx += ev.clientX - lastX; ty += ev.clientY - lastY; lastX = ev.clientX; lastY = ev.clientY; applyTransform(); });
       svg.addEventListener('pointerup', () => { dragging = false; svg.classList.remove('panning'); });
       svg.addEventListener('pointerleave', () => { dragging = false; svg.classList.remove('panning'); });
 
@@ -622,17 +752,16 @@
 
       const legend = document.createElement('div');
       legend.className = 'graph-legend';
-      legend.innerHTML =
-        '<span><i class="graph-dot fact"></i>fact</span>' +
-        '<span><i class="graph-dot entity"></i>entity</span>' +
-        `<span class="graph-count">${nodes.length} node${nodes.length === 1 ? '' : 's'} &middot; ${edges.length} link${edges.length === 1 ? '' : 's'}</span>` +
+      legend.innerHTML = '<span><i class="dot fact"></i>fact</span><span><i class="dot entity"></i>entity</span>' +
+        '<span>' + nodes.length + ' node' + (nodes.length === 1 ? '' : 's') + ' &middot; ' + edges.length + ' link' + (edges.length === 1 ? '' : 's') + '</span>' +
         '<span class="graph-hint">scroll to zoom &middot; drag to pan &middot; click a fact for history</span>';
       wrap.appendChild(legend);
 
       if (truncated) {
         const note = document.createElement('p');
-        note.className = 'missing graph-truncated';
-        note.textContent = `showing the ${nodes.length} most-connected of ${allNodes.length} nodes`;
+        note.className = 'missing';
+        note.style.marginTop = '.4rem';
+        note.textContent = 'showing the ' + nodes.length + ' most-connected of ' + allNodes.length + ' nodes';
         wrap.appendChild(note);
       }
 
@@ -646,7 +775,7 @@
         if (value.length === 0) { const p = document.createElement('p'); p.className = 'missing'; p.textContent = 'empty'; return p; }
         if (value.every(isPlainObject)) return renderTable(value);
         const ul = document.createElement('ul');
-        ul.style.margin = '0'; ul.style.paddingLeft = '1.1rem';
+        ul.className = 'plain-list';
         for (const item of value) {
           const li = document.createElement('li');
           li.appendChild(isPlainObject(item) || Array.isArray(item) ? render(item, depth + 1) : renderScalar(item));
@@ -688,15 +817,16 @@
       const wrap = document.createElement('span');
       wrap.className = 'cell-actions';
       const historyBtn = document.createElement('button');
-      historyBtn.className = 'small'; historyBtn.textContent = 'History';
+      historyBtn.className = 'small'; historyBtn.textContent = 'history';
       historyBtn.addEventListener('click', () => openHistory(fact.id));
       wrap.appendChild(historyBtn);
       if (getEditToken()) {
         const editBtn = document.createElement('button');
-        editBtn.className = 'small'; editBtn.textContent = 'Correct'; editBtn.style.marginLeft = '.3rem';
+        editBtn.className = 'small'; editBtn.textContent = 'correct';
+        editBtn.style.color = 'var(--cyan)';
         editBtn.addEventListener('click', () => openCorrect(fact.id, fact.content || fact.memory));
         const forgetBtn = document.createElement('button');
-        forgetBtn.className = 'small danger'; forgetBtn.textContent = 'Forget'; forgetBtn.style.marginLeft = '.3rem';
+        forgetBtn.className = 'small danger'; forgetBtn.textContent = 'forget';
         forgetBtn.addEventListener('click', () => openForget(fact.id));
         wrap.append(editBtn, forgetBtn);
       }
@@ -704,8 +834,6 @@
     }
 
     function renderTable(rows) {
-      // Column set = union of keys across rows, in first-seen order, capped
-      // so a record with one huge nested field doesn't blow out the table.
       const columns = [];
       const seen = new Set();
       for (const row of rows) {
@@ -747,119 +875,280 @@
       return table;
     }
 
-    // Panel labels are illustrative only; every value rendered comes from an
-    // authoritative backend projection. A view that the backend could not
-    // reach is shown as explicitly missing, never filled with fabricated data.
-    const PANELS = [
-      { key: 'system', title: 'System Map', icon: '🗺️', hue: 220 },
-      { key: 'memory', title: 'Memory Graph', icon: '🧠', hue: 265, wide: true },
-      { key: 'user_model', title: 'User Model', icon: '🪪', hue: 190 },
-      { key: 'facts', title: 'Facts', wide: true, icon: '📌', hue: 38 },
-      { key: 'learnings', title: 'Learnings', icon: '💡', hue: 152 },
-      { key: 'contradictions', title: 'Contradictions', icon: '⚡', hue: 355 },
-      { key: 'timeline', title: 'Timeline', icon: '📈', hue: 200 },
-      { key: 'diary', title: 'Diary', icon: '📓', hue: 320 },
-      { key: 'agents', title: 'Agents', icon: '🤖', hue: 245 },
-      { key: 'tool_operations', title: 'Tool Operations', icon: '🛠️', hue: 25 },
-      { key: 'plugins', title: 'Plugins', icon: '🧩', hue: 95 },
-      { key: 'skills', title: 'Skills', icon: '🎯', hue: 210 },
-      { key: 'hooks', title: 'Hooks', icon: '🪝', hue: 280 },
-      { key: 'code_intelligence', title: 'Code Intelligence', icon: '🧬', hue: 230 },
-      { key: 'routing', title: 'Routing', icon: '🧭', hue: 175 },
-      { key: 'recovery', title: 'Recovery', icon: '🩹', hue: 140 },
-      { key: 'security', title: 'Security', icon: '🛡️', hue: 5 },
-      { key: 'token_flow', title: 'Token Flow', icon: '🌊', hue: 45 },
-      { key: 'costs', title: 'Costs', icon: '💰', hue: 340 },
-    ];
-
-    const panelsEl = document.getElementById('panels');
-    const statusEl = document.getElementById('status');
-    const panelState = new Map();
-
-    for (const panel of PANELS) {
-      const el = document.createElement('div');
-      el.className = 'panel' + (panel.wide ? ' wide' : '');
-      el.style.setProperty('--accent', panel.hue);
-      el.style.animationDelay = (PANELS.indexOf(panel) * 25) + 'ms';
-      el.innerHTML = `<h2>${panel.icon ? panel.icon + ' ' : ''}${panel.title} <small><label class="toggle-raw"><input type="checkbox" data-role="raw-toggle"> raw</label> <span data-role="meta"></span></small></h2><div class="panel-body" data-role="body"><p class="missing">Waiting for projection&hellip;</p></div>`;
-      panelsEl.appendChild(el);
-      const body = el.querySelector('[data-role="body"]');
-      const rawToggle = el.querySelector('[data-role="raw-toggle"]');
-      const state = { body, metaEl: el.querySelector('[data-role="meta"]'), raw: false, lastValue: null };
-      rawToggle.addEventListener('change', () => { state.raw = rawToggle.checked; paintPanel(state); });
-      panelState.set(panel.key, state);
+    // ── HUD card: generic-data card matching the new visual design ──────
+    function renderHud(el, title, tag, accent, value, unavailableMsg) {
+      el.innerHTML = '';
+      const card = document.createElement('div');
+      card.className = 'hud';
+      card.style.setProperty('--accent', accent);
+      const head = document.createElement('div');
+      head.className = 'hud-head';
+      head.innerHTML = '<span class="hud-tag" style="color:' + accent + '">' + escapeHtml(tag) + '</span><span class="hud-title">' + escapeHtml(title) + '</span>';
+      const body = document.createElement('div');
+      body.className = 'hud-body';
+      if (value === null || value === undefined) {
+        const p = document.createElement('p');
+        p.className = 'missing';
+        p.textContent = unavailableMsg || 'no signal';
+        body.appendChild(p);
+      } else {
+        body.appendChild(render(value));
+      }
+      card.append(head, body);
+      el.appendChild(card);
     }
 
-    function paintPanel(state) {
-      if (state.lastValue === null) return;
-      state.body.innerHTML = '';
-      state.body.classList.toggle('graph-body', !state.raw && looksLikeGraph(state.lastValue));
-      if (state.raw) {
-        const pre = document.createElement('pre');
-        pre.className = 'raw';
-        pre.textContent = JSON.stringify(state.lastValue, null, 2);
-        state.body.appendChild(pre);
-      } else {
-        state.body.appendChild(render(state.lastValue));
+    // ── snapshot state & per-tab painting ────────────────────────────────
+    const PANEL_META = {
+      system: { title: 'System Map', tag: 'SYS', accent: 'var(--purple)' },
+      user_model: { title: 'User Model', tag: 'USR', accent: 'var(--purple)' },
+      code_intelligence: { title: 'Code Intelligence', tag: 'COD', accent: 'var(--purple)' },
+      recovery: { title: 'Recovery', tag: 'REC', accent: 'var(--purple)' },
+      security: { title: 'Security', tag: 'SEC', accent: 'var(--purple)' },
+      agents: { title: 'Agents', tag: 'AGT', accent: 'var(--cyan)' },
+      tool_operations: { title: 'Tool Operations', tag: 'TOL', accent: 'var(--cyan)' },
+      routing: { title: 'Routing', tag: 'RTG', accent: 'var(--cyan)' },
+      plugins: { title: 'Plugins', tag: 'PLG', accent: 'var(--cyan)' },
+      skills: { title: 'Skills', tag: 'SKL', accent: 'var(--cyan)' },
+      hooks: { title: 'Hooks', tag: 'HKS', accent: 'var(--cyan)' },
+      learnings: { title: 'Learnings', tag: 'LRN', accent: 'var(--green)' },
+      contradictions: { title: 'Contradictions', tag: 'CTD', accent: 'var(--red)' },
+      timeline: { title: 'Timeline', tag: 'TML', accent: 'var(--green)' },
+      diary: { title: 'Diary', tag: 'DRY', accent: 'var(--green)' },
+      token_flow: { title: 'Token Flow', tag: 'TKN', accent: 'var(--green)' },
+      costs: { title: 'Costs', tag: 'CST', accent: 'var(--green)' },
+    };
+    const OV_LEFT = ['system', 'user_model', 'code_intelligence', 'recovery', 'security'];
+    const OV_RIGHT = ['agents', 'tool_operations', 'routing', 'plugins', 'skills', 'hooks'];
+    const OV_SIGNAL = ['learnings', 'contradictions', 'timeline', 'diary', 'token_flow', 'costs'];
+
+    function hudGroup(container, keys, views, unavailable) {
+      container.innerHTML = '';
+      for (const key of keys) {
+        const meta = PANEL_META[key] || { title: key, tag: key.slice(0, 3).toUpperCase(), accent: 'var(--cyan)' };
+        const wrap = document.createElement('div');
+        wrap.style.marginBottom = '.6rem';
+        renderHud(wrap, meta.title, meta.tag, meta.accent, key in views ? views[key] : null, unavailable[key] ? ('unavailable: ' + unavailable[key]) : 'no data reported');
+        container.appendChild(wrap);
       }
     }
 
-    const tracePanel = document.createElement('div');
-    tracePanel.className = 'panel trace-panel';
-    tracePanel.innerHTML = '<h2>📡 Live Trace <small id="trace-meta">connecting&hellip;</small></h2><pre id="trace-log" class="raw"></pre>';
-    panelsEl.appendChild(tracePanel);
-    const traceLog = document.getElementById('trace-log');
-    const traceMeta = document.getElementById('trace-meta');
+    let lastSnapshot = null;
+
+    function factsList(views) {
+      const view = views.facts;
+      if (!view) return null;
+      return Array.isArray(view) ? view : (view.entries || null);
+    }
+
+    function paintAll(payload) {
+      const views = payload.views || {};
+      const unavailable = payload.unavailable || {};
+
+      // Overview
+      hudGroup(document.getElementById('ov-left'), OV_LEFT, views, unavailable);
+      hudGroup(document.getElementById('ov-right'), OV_RIGHT, views, unavailable);
+      hudGroup(document.getElementById('ov-signals'), OV_SIGNAL, views, unavailable);
+      const ovGraph = document.getElementById('ov-graph');
+      ovGraph.innerHTML = '';
+      if (looksLikeGraph(views.memory)) {
+        ovGraph.appendChild(renderGraph(views.memory, { height: 440 }));
+        document.getElementById('ov-graph-stats').textContent = views.memory.nodes.length + ' nodes · ' + views.memory.edges.length + ' links';
+      } else {
+        ovGraph.innerHTML = '<p class="missing">' + (unavailable.memory ? 'unavailable: ' + escapeHtml(unavailable.memory) : 'no data reported') + '</p>';
+      }
+      const ovFacts = factsList(views);
+      const ovFactsEl = document.getElementById('ov-facts-table');
+      ovFactsEl.innerHTML = '';
+      if (ovFacts) {
+        ovFactsEl.appendChild(renderTable(ovFacts.slice(0, 8)));
+        document.getElementById('ov-facts-count').textContent = ovFacts.length + ' indexed';
+      } else {
+        ovFactsEl.innerHTML = '<p class="missing">' + (unavailable.facts ? 'unavailable: ' + escapeHtml(unavailable.facts) : 'no data reported') + '</p>';
+        document.getElementById('ov-facts-count').textContent = '';
+      }
+
+      // Memory tab: full graph + entities/link-types derived from the real graph
+      const memGraph = document.getElementById('mem-graph');
+      memGraph.innerHTML = '';
+      const memStats = document.getElementById('mem-stats');
+      if (looksLikeGraph(views.memory)) {
+        const g = views.memory;
+        memGraph.appendChild(renderGraph(g, { height: 520 }));
+        document.getElementById('mem-graph-stats').textContent = g.nodes.length + ' nodes · ' + g.edges.length + ' links';
+        const entities = g.nodes.filter((n) => n.type === 'entity');
+        const degree = new Map();
+        for (const e of g.edges) { degree.set(e.source, (degree.get(e.source) || 0) + 1); degree.set(e.target, (degree.get(e.target) || 0) + 1); }
+        const entityRows = entities.map((n) => ({ name: n.label || n.id, links: degree.get(n.id) || 0 })).sort((a, b) => b.links - a.links).slice(0, 12);
+        document.getElementById('mem-entities').innerHTML = '';
+        document.getElementById('mem-entities').appendChild(entityRows.length ? render(entityRows) : (() => { const p = document.createElement('p'); p.className = 'missing'; p.textContent = 'no entities yet'; return p; })());
+        const typeCounts = new Map();
+        for (const e of g.edges) typeCounts.set(e.type || 'related', (typeCounts.get(e.type || 'related') || 0) + 1);
+        const maxCount = Math.max(1, ...typeCounts.values());
+        const ltEl = document.getElementById('mem-linktypes');
+        ltEl.innerHTML = '';
+        if (typeCounts.size === 0) {
+          const p = document.createElement('p'); p.className = 'missing'; p.textContent = 'no links yet'; ltEl.appendChild(p);
+        } else {
+          for (const [type, count] of [...typeCounts.entries()].sort((a, b) => b[1] - a[1])) {
+            const row = document.createElement('div');
+            row.className = 'bar-row';
+            const pct = Math.round((count / maxCount) * 100) + '%';
+            row.innerHTML = '<div class="bar-labels"><span>' + escapeHtml(type) + '</span><span>' + count + '</span></div><div class="bar-track"><div class="bar-fill" style="width:' + pct + '"></div></div>';
+            ltEl.appendChild(row);
+          }
+        }
+        const fCount = ovFacts ? ovFacts.length : 0;
+        memStats.innerHTML = '';
+        for (const s of [
+          { label: 'nodes', value: String(g.nodes.length) },
+          { label: 'links', value: String(g.edges.length) },
+          { label: 'entities', value: String(entities.length) },
+          { label: 'facts', value: String(fCount) },
+        ]) {
+          const c = document.createElement('div');
+          c.className = 'stat-card';
+          c.innerHTML = '<div class="label">' + escapeHtml(s.label) + '</div><div class="value">' + escapeHtml(s.value) + '</div>';
+          memStats.appendChild(c);
+        }
+      } else {
+        memGraph.innerHTML = '<p class="missing">' + (unavailable.memory ? 'unavailable: ' + escapeHtml(unavailable.memory) : 'no data reported') + '</p>';
+        document.getElementById('mem-entities').innerHTML = '<p class="missing">no data</p>';
+        document.getElementById('mem-linktypes').innerHTML = '<p class="missing">no data</p>';
+        memStats.innerHTML = '';
+      }
+
+      // Facts tab
+      const factsStats = document.getElementById('facts-stats');
+      const factsTableEl = document.getElementById('facts-table');
+      factsTableEl.innerHTML = '';
+      if (ovFacts) {
+        if (document.getElementById('facts-raw-toggle').checked) {
+          const pre = document.createElement('pre');
+          pre.className = 'trace-log';
+          pre.textContent = JSON.stringify(ovFacts, null, 2);
+          factsTableEl.appendChild(pre);
+        } else {
+          factsTableEl.appendChild(renderTable(ovFacts));
+        }
+        const networks = new Set(ovFacts.map((f) => f.network).filter(Boolean));
+        const confidences = ovFacts.map((f) => parseFloat(f.confidence)).filter((n) => !isNaN(n));
+        const avgConf = confidences.length ? (confidences.reduce((a, b) => a + b, 0) / confidences.length).toFixed(2) : '—';
+        const active = ovFacts.filter((f) => !f.status || f.status === 'active').length;
+        factsStats.innerHTML = '';
+        for (const s of [
+          { label: 'total facts', value: String(ovFacts.length) },
+          { label: 'networks', value: String(networks.size) },
+          { label: 'avg confidence', value: avgConf },
+          { label: 'active', value: String(active) },
+        ]) {
+          const c = document.createElement('div');
+          c.className = 'stat-card';
+          c.innerHTML = '<div class="label">' + escapeHtml(s.label) + '</div><div class="value">' + escapeHtml(s.value) + '</div>';
+          factsStats.appendChild(c);
+        }
+      } else {
+        factsTableEl.innerHTML = '<p class="missing">' + (unavailable.facts ? 'unavailable: ' + escapeHtml(unavailable.facts) : 'no data reported') + '</p>';
+        factsStats.innerHTML = '';
+      }
+      renderHud(document.getElementById('facts-contradictions'), 'Contradictions', 'CTD', 'var(--red)', 'contradictions' in views ? views.contradictions : null, unavailable.contradictions ? 'unavailable: ' + unavailable.contradictions : 'no data reported');
+      renderHud(document.getElementById('facts-learnings'), 'Learnings queue', 'LRN', 'var(--green)', 'learnings' in views ? views.learnings : null, unavailable.learnings ? 'unavailable: ' + unavailable.learnings : 'no data reported');
+
+      // Agents tab
+      const agentsTableEl = document.getElementById('agents-table');
+      agentsTableEl.innerHTML = '';
+      if ('agents' in views) agentsTableEl.appendChild(render(views.agents));
+      else agentsTableEl.innerHTML = '<p class="missing">' + (unavailable.agents ? 'unavailable: ' + escapeHtml(unavailable.agents) : 'no data reported') + '</p>';
+      renderHud(document.getElementById('agents-tools'), 'Tool Operations', 'TOL', 'var(--cyan)', 'tool_operations' in views ? views.tool_operations : null, unavailable.tool_operations ? 'unavailable: ' + unavailable.tool_operations : 'no data reported');
+      const routingEl = document.getElementById('agents-routing');
+      routingEl.innerHTML = '';
+      if ('routing' in views) routingEl.appendChild(render(views.routing));
+      else routingEl.innerHTML = '<p class="missing">' + (unavailable.routing ? 'unavailable: ' + escapeHtml(unavailable.routing) : 'no data reported') + '</p>';
+      hudGroup(document.getElementById('agents-side'), ['plugins', 'skills', 'hooks'], views, unavailable);
+
+      // System tab
+      const meshEl = document.getElementById('sys-mesh');
+      meshEl.innerHTML = '';
+      if ('system' in views) {
+        const sys = views.system;
+        if (Array.isArray(sys) && sys.every(isPlainObject) && sys.some((s) => 'service' in s || 'status' in s)) {
+          const grid = document.createElement('div');
+          grid.className = 'mesh-grid';
+          for (const s of sys) {
+            const status = String(s.status || '').toLowerCase();
+            const dotColor = status === 'ok' || status === 'healthy' ? 'var(--green)' : (status === 'degraded' || status === 'warn' ? 'var(--amber)' : (status ? 'var(--red)' : 'var(--text-faint)'));
+            const item = document.createElement('div');
+            item.className = 'mesh-item';
+            item.innerHTML = '<span class="mesh-dot" style="background:' + dotColor + ';box-shadow:0 0 8px ' + dotColor + '"></span>' +
+              '<span class="mesh-name">' + escapeHtml(s.service || s.name || '?') + '</span>' +
+              '<span style="font-size:.66rem;color:var(--text-dim)">' + escapeHtml(s.version || s.status || '') + '</span>';
+            grid.appendChild(item);
+          }
+          meshEl.appendChild(grid);
+          document.getElementById('sys-meta').textContent = sys.length + ' services reporting';
+        } else {
+          meshEl.appendChild(render(sys));
+          document.getElementById('sys-meta').textContent = '';
+        }
+      } else {
+        meshEl.innerHTML = '<p class="missing">' + (unavailable.system ? 'unavailable: ' + escapeHtml(unavailable.system) : 'no data reported') + '</p>';
+        document.getElementById('sys-meta').textContent = '';
+      }
+      hudGroup(document.getElementById('sys-left'), OV_LEFT, views, unavailable);
+
+      // Flow tab
+      const tokensEl = document.getElementById('flow-tokens');
+      tokensEl.innerHTML = '';
+      if ('token_flow' in views) tokensEl.appendChild(render(views.token_flow));
+      else tokensEl.innerHTML = '<p class="missing">' + (unavailable.token_flow ? 'unavailable: ' + escapeHtml(unavailable.token_flow) : 'no data reported') + '</p>';
+      const costsEl = document.getElementById('flow-costs');
+      costsEl.innerHTML = '';
+      if ('costs' in views) costsEl.appendChild(render(views.costs));
+      else costsEl.innerHTML = '<p class="missing">' + (unavailable.costs ? 'unavailable: ' + escapeHtml(unavailable.costs) : 'no data reported') + '</p>';
+      renderHud(document.getElementById('flow-timeline'), 'Timeline', 'TML', 'var(--green)', 'timeline' in views ? views.timeline : null, unavailable.timeline ? 'unavailable: ' + unavailable.timeline : 'no data reported');
+    }
+
+    document.getElementById('facts-raw-toggle').addEventListener('change', () => { if (lastSnapshot) paintAll(lastSnapshot); });
 
     function setStatus(text, isError) {
-      statusEl.textContent = text;
-      statusEl.className = isError ? 'status error' : 'status';
+      document.getElementById('status-text').textContent = text;
+      document.getElementById('status-pill').classList.toggle('error', !!isError);
     }
 
     async function refreshSnapshot() {
       const response = await fetch(snapshotEndpoint, { credentials: 'same-origin' });
-      if (response.status === 401) {
-        throw new Error('unauthorized (the transparency API should be public)');
-      }
-      if (!response.ok) throw new Error(`projection returned ${response.status}`);
+      if (response.status === 401) throw new Error('unauthorized (the transparency API should be public)');
+      if (!response.ok) throw new Error('projection returned ' + response.status);
       const payload = await response.json();
-      const views = payload.views || {};
-      const unavailable = payload.unavailable || {};
-      for (const panel of PANELS) {
-        const state = panelState.get(panel.key);
-        if (panel.key in views) {
-          state.lastValue = views[panel.key];
-          state.metaEl.textContent = '';
-          paintPanel(state);
-        } else {
-          state.lastValue = null;
-          state.body.innerHTML = `<p class="missing">${escapeHtml(unavailable[panel.key] ? `unavailable: ${unavailable[panel.key]}` : 'no data reported')}</p>`;
-          state.metaEl.textContent = 'unavailable';
-        }
-      }
-      setStatus(`Live projection refreshed ${new Date().toISOString()}`, false);
+      lastSnapshot = payload;
+      paintAll(payload);
+      setStatus('live · refreshed ' + new Date().toLocaleTimeString(), false);
     }
+
+    // ── live trace (footer marquee + Flow-tab full log) ─────────────────
+    const traceLines = [];
+    const traceLogEl = document.getElementById('flow-trace');
+    const footerMarquee = document.getElementById('footer-marquee');
 
     function appendTraceLine(eventName, data) {
+      const text = '[' + new Date().toISOString().slice(11, 19) + '] ' + eventName + ' ' + data;
+      traceLines.push(text);
+      while (traceLines.length > 200) traceLines.shift();
       const line = document.createElement('div');
-      line.className = 'trace-line';
-      line.textContent = `[${new Date().toISOString()}] `;
-      const eventLabel = document.createElement('span');
-      eventLabel.className = 'event';
-      eventLabel.textContent = eventName;
-      line.appendChild(eventLabel);
-      line.append(' ' + data);
-      traceLog.appendChild(line);
-      while (traceLog.childElementCount > 200) {
-        traceLog.removeChild(traceLog.firstChild);
-      }
-      traceLog.scrollTop = traceLog.scrollHeight;
+      line.className = 'line';
+      const evSpan = document.createElement('span');
+      evSpan.className = 'event';
+      evSpan.textContent = eventName;
+      line.appendChild(document.createTextNode('[' + new Date().toISOString() + '] '));
+      line.appendChild(evSpan);
+      line.appendChild(document.createTextNode(' ' + data));
+      traceLogEl.appendChild(line);
+      while (traceLogEl.childElementCount > 200) traceLogEl.removeChild(traceLogEl.firstChild);
+      traceLogEl.scrollTop = traceLogEl.scrollHeight;
+      const marquee = traceLines.slice(-12).join('   //   ');
+      footerMarquee.textContent = marquee + '   //   ' + marquee;
     }
 
-    // The stream endpoint is public like every other transparency route
-    // (see transparency-projection's handler comment); the browser
-    // EventSource API just can't be used here because a reconnect needs
-    // Last-Event-ID replay, so the raw fetch+ReadableStream is read manually.
     function parseSSEFrame(frame) {
       let eventName = 'message';
       const dataLines = [];
@@ -872,17 +1161,13 @@
 
     async function connectTrace() {
       if (typeof fetch === 'undefined' || !window.ReadableStream) {
-        traceMeta.textContent = 'unsupported by this browser';
+        footerMarquee.textContent = 'live trace unsupported by this browser';
         return;
       }
       try {
         const response = await fetch(streamEndpoint, { credentials: 'same-origin' });
-        if (response.status === 401) {
-          throw new Error('unauthorized');
-        }
-        if (!response.ok || !response.body) throw new Error(`stream returned ${response.status}`);
-        traceMeta.textContent = 'connected';
-        traceMeta.classList.add('live');
+        if (response.status === 401) throw new Error('unauthorized');
+        if (!response.ok || !response.body) throw new Error('stream returned ' + response.status);
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -897,24 +1182,20 @@
             if (!frame.trim()) continue;
             const { eventName, data } = parseSSEFrame(frame);
             appendTraceLine(eventName, data);
-            // A live trace event about a fact touches the same data the
-            // Facts panel shows -- keep it in sync instead of waiting for
-            // the next 15s poll.
             if (/fact/i.test(eventName)) refreshSnapshot().catch(() => {});
           }
         }
         throw new Error('stream closed');
       } catch (error) {
-        traceMeta.classList.remove('live');
-        traceMeta.textContent = `reconnecting… (${error.message})`;
+        footerMarquee.textContent = 'reconnecting… (' + error.message + ')';
       } finally {
         setTimeout(connectTrace, 5000);
       }
     }
 
     renderEditState();
-    refreshSnapshot().catch((error) => setStatus(`Projection unavailable: ${error.message}`, true));
-    setInterval(() => refreshSnapshot().catch((error) => setStatus(`Projection unavailable: ${error.message}`, true)), 15000);
+    refreshSnapshot().catch((error) => setStatus('unavailable: ' + error.message, true));
+    setInterval(() => refreshSnapshot().catch((error) => setStatus('unavailable: ' + error.message, true)), 15000);
     connectTrace();
   </script>
 </body>
