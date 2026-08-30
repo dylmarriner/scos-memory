@@ -708,6 +708,51 @@ services:
       start_period: 30s
       retries: 10
 
+  cloud-control-plane:
+    <<: [*service-limits, *fabric-image]
+    command: ["cloud-control-plane"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_CLOUD_HTTP_ADDR: ${SCOS_CLOUD_HTTP_ADDR:-:8079}
+      SCOS_MCP_GATEWAY_URL: ${SCOS_MCP_GATEWAY_URL:-https://mcp-gateway:8098}
+      SCOS_CREDENTIAL_VAULT_URL: ${SCOS_CREDENTIAL_VAULT_URL:-https://credential-vault:8100}
+      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
+      SCOS_OKF_SYNCHRONISER_URL: ${SCOS_OKF_SYNCHRONISER_URL:-https://okf-synchroniser:8090}
+      SCOS_GRAPHIFY_PROVIDER_URL: ${SCOS_GRAPHIFY_PROVIDER_URL:-https://graphify-provider:8099}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      # Keep the creator/customer console off every host interface by default.
+      # Put it behind an authenticated reverse proxy or explicitly set this
+      # to the intended ingress/Tailscale address in production.
+      - "${SCOS_CLOUD_BIND_ADDRESS:-127.0.0.1}:${SCOS_CLOUD_PORT:-8079}:8079"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      migrations:
+        condition: service_completed_successfully
+      mcp-gateway:
+        condition: service_healthy
+      memory-intelligence:
+        condition: service_healthy
+      credential-vault:
+        condition: service_healthy
+      code-intelligence:
+        condition: service_healthy
+      okf-synchroniser:
+        condition: service_healthy
+      graphify-provider:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8079/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
   memory-intelligence:
     <<: [*service-limits, *fabric-image]
     command: ["memory-intelligence"]
@@ -1051,6 +1096,33 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8097/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  credential-vault:
+    <<: [*service-limits, *fabric-image]
+    command: ["credential-vault"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_CREDENTIAL_VAULT_HTTP_ADDR: ${SCOS_CREDENTIAL_VAULT_HTTP_ADDR:-:8100}
+      SCOS_CREDENTIAL_VAULT_MASTER_KEY: ${SCOS_CREDENTIAL_VAULT_MASTER_KEY:?SCOS_CREDENTIAL_VAULT_MASTER_KEY must be a base64-encoded 32-byte AES-256 key}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8100:8100"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8100/health/ready"]
       interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
       timeout: 5s
       start_period: 30s

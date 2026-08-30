@@ -41,10 +41,11 @@ COPY services ./services
 # them one at a time into explicitly named outputs, in a single layer that
 # shares one warm build cache across all of them.
 ARG SERVICES="agent-registry autonomous-control-plane backup-manager \
-code-intelligence compatibility-gateway context-optimisation execution-proxy \
-extension-manager graphify-provider hermes-provider mcp-gateway memory-gateway \
-memory-intelligence observability okf-synchroniser recovery-orchestrator \
-retrieval-orchestrator security-gate tool-governance transparency-projection"
+cloud-control-plane code-intelligence compatibility-gateway context-optimisation \
+credential-vault execution-proxy extension-manager graphify-provider hermes-provider \
+mcp-gateway memory-gateway memory-intelligence observability okf-synchroniser \
+recovery-orchestrator retrieval-orchestrator security-gate tool-governance \
+transparency-projection"
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     set -eu; \
