@@ -64,6 +64,9 @@ var upstreamDefaults = []upstreamDefault{
 	{"recovery_orchestrator", "SCOS_RECOVERY_ORCHESTRATOR_URL", "http://recovery-orchestrator:8094"},
 	{"security_gate", "SCOS_SECURITY_GATE_URL", "http://security-gate:8091"},
 	{"observability", "SCOS_OBSERVABILITY_URL", "http://observability:8096"},
+	{"credential_vault", "SCOS_CREDENTIAL_VAULT_URL", "http://credential-vault:8100"},
+	{"okf_synchroniser", "SCOS_OKF_SYNCHRONISER_URL", "http://okf-synchroniser:8090"},
+	{"graphify_provider", "SCOS_GRAPHIFY_PROVIDER_URL", "http://graphify-provider:8099"},
 }
 
 func resolveUpstreams() map[string]string {
@@ -108,6 +111,7 @@ func main() {
 	mux.HandleFunc("/v1/transparency/stream", s.events)
 	mux.HandleFunc("/v1/transparency/login", s.login)
 	mux.HandleFunc("/v1/transparency/facts/", s.factByID)
+	mux.HandleFunc("/v1/transparency/graphify/", s.graphify)
 	authenticated := auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
 
 	// The dashboard shell carries no authoritative data of its own: every
@@ -213,6 +217,14 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		"token_flow":           {s.upstreams["observability"], "/v1/metrics?metric=token"},
 		"costs":                {s.upstreams["observability"], "/v1/metrics?metric=cost"},
 		"costs_and_token_flow": {s.upstreams["observability"], "/v1/metrics"},
+		"memory_summary":       {s.upstream, "/v1/dashboard/summary"},
+		"code_repos":           {s.upstreams["code_intelligence"], "/v1/repos"},
+		// credential-vault's list route returns metadata only (name,
+		// key_version, created_by, timestamps) -- never a decrypted secret
+		// value -- so it's safe to surface on this otherwise-unauthenticated
+		// operator dashboard alongside the security audit log it already shows.
+		"credentials":   {s.upstreams["credential_vault"], "/v1/credentials"},
+		"okf_documents": {s.upstreams["okf_synchroniser"], "/v1/documents"},
 	}
 	result := make(map[string]json.RawMessage, len(views))
 	errored := make(map[string]string)
@@ -404,6 +416,39 @@ func (s *projectionServer) factByID(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "application/json")
 	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
+}
+
+// graphify proxies the dashboard's interactive "ask" / "explain" / "path"
+// box straight through to graphify-provider. Unlike the snapshot's passive
+// views, these take a caller-supplied question, so there's no polling list
+// endpoint to aggregate -- the dashboard calls this directly on submit.
+func (s *projectionServer) graphify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	upstreamPath := "/v1/graphify" + strings.TrimPrefix(r.URL.Path, "/v1/transparency/graphify")
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.upstreams["graphify_provider"]+upstreamPath, r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.copyIdentityHeaders(r, req)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream unavailable"})
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }

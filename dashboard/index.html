@@ -284,6 +284,20 @@
           </div>
         </div>
       </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start">
+        <div class="hud-panel" style="--hud-accent:var(--green)">
+          <div class="hud-panel-head"><span class="hud-tag">SUM</span><span class="hud-title">Memory Summary</span></div>
+          <div class="panel-body" id="mem-summary-mount"></div>
+        </div>
+        <div class="glass-card violet">
+          <div class="card-title violet" style="margin-bottom:.6rem">Graphify — ask</div>
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+            <input type="text" id="graphify-question" placeholder="ask a question about the code graph&hellip;" style="flex:1;min-width:200px;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.5rem .65rem;font:inherit">
+            <button id="graphify-ask-btn" class="primary">ask</button>
+          </div>
+          <div class="panel-body" id="graphify-result" style="margin-top:.7rem"></div>
+        </div>
+      </div>
     </section>
 
     <section class="tab-panel" data-tab="facts" id="tab-facts" hidden>
@@ -300,6 +314,10 @@
         <div class="hud-panel" style="--hud-accent:var(--green)">
           <div class="hud-panel-head"><span class="hud-tag">LRN</span><span class="hud-title">Learnings</span></div>
           <div class="panel-body" id="facts-learnings"></div>
+        </div>
+        <div class="hud-panel" style="--hud-accent:var(--amber)">
+          <div class="hud-panel-head"><span class="hud-tag">OKF</span><span class="hud-title">OKF Documents</span></div>
+          <div class="panel-body" id="facts-okf"></div>
         </div>
       </div>
     </section>
@@ -975,6 +993,10 @@
       { key: 'security',          title: 'Security',             tag: 'SEC', group: 'identity' },
       { key: 'token_flow',        title: 'Token Flow',         tag: 'TKN', group: 'signal' },
       { key: 'costs',             title: 'Costs',                 tag: 'CST', group: 'signal' },
+      { key: 'memory_summary',    title: 'Memory Summary',     tag: 'SUM', group: 'signal' },
+      { key: 'code_repos',        title: 'Code Repos',           tag: 'REP', group: 'identity' },
+      { key: 'credentials',       title: 'Vault',                 tag: 'VLT', group: 'identity' },
+      { key: 'okf_documents',     title: 'OKF Documents',      tag: 'OKF', group: 'signal' },
     ];
     const GROUP_ACCENT = { identity: 'var(--violet)', ops: 'var(--cyan)', signal: 'var(--green)', center: 'var(--cyan)' };
 
@@ -1180,6 +1202,37 @@
     });
     mountPanel('contradictions', null, document.getElementById('facts-contradictions'), defaultPaint);
     mountPanel('learnings', null, document.getElementById('facts-learnings'), defaultPaint);
+    mountPanel('okf_documents', null, document.getElementById('facts-okf'), defaultPaint);
+    mountPanel('memory_summary', null, document.getElementById('mem-summary-mount'), defaultPaint);
+
+    // Graphify is interactive (a caller-supplied question), not a passive
+    // polled view, so it isn't part of the snapshot -- this calls straight
+    // through transparency-projection's proxy to graphify-provider on submit.
+    (function () {
+      const input = document.getElementById('graphify-question');
+      const btn = document.getElementById('graphify-ask-btn');
+      const out = document.getElementById('graphify-result');
+      async function ask() {
+        const query = input.value.trim();
+        if (!query) return;
+        out.innerHTML = '<p class="missing">asking&hellip;</p>';
+        try {
+          const resp = await fetch('/v1/transparency/graphify/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ q: query }),
+          });
+          const payload = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(payload.error || `graphify returned ${resp.status}`);
+          out.innerHTML = '';
+          out.appendChild(render(payload));
+        } catch (error) {
+          out.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`;
+        }
+      }
+      btn.addEventListener('click', ask);
+      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') ask(); });
+    })();
 
     // ── Agents tab ───────────────────────────────────────────────────────
     mountPanel('agents', null, document.getElementById('agt-agents-mount'), defaultPaint);
@@ -1209,7 +1262,7 @@
         bodyEl.appendChild(chip);
       }
     });
-    for (const key of ['user_model', 'code_intelligence', 'recovery', 'security']) {
+    for (const key of ['user_model', 'code_intelligence', 'code_repos', 'credentials', 'recovery', 'security']) {
       const panel = PANELS.find((p) => p.key === key);
       const { el, bodyEl } = makeHudPanel(panel.key, panel.tag, 'var(--violet)');
       el.querySelector('.hud-title').textContent = panel.title;

@@ -695,7 +695,10 @@ services:
       GRAPHIFY_BACKEND: ${GRAPHIFY_BACKEND:-}
     volumes:
       - tls-certs:/etc/scos/tls:ro
-      - ${GRAPHIFY_REPO_HOST_PATH:-..}:/repo:ro
+      # Relative to this compose file's own directory (deploy/compose/), so
+      # the default resolves to the repo root -- not deploy/ itself, which
+      # is what "../.." vs. a bare ".." would silently get wrong.
+      - ${GRAPHIFY_REPO_HOST_PATH:-../..}:/repo:ro
     depends_on:
       tls-certs:
         condition: service_completed_successfully
