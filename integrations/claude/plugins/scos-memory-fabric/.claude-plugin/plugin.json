@@ -2,7 +2,7 @@
   "name": "scos-memory-fabric",
   "displayName": "SCOS Memory Fabric",
   "description": "Connects Claude Code to the SCOS Memory Fabric via the mcp-gateway service, exposing scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct and scos_forget. Includes /scos-recall, /scos-status, /scos-explain commands, a scos-memory skill, and a SessionStart hook.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": {
     "name": "SCOS Core Team"
   },

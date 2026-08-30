@@ -149,6 +149,36 @@ so recalls don't collide across tools.
 ```
 *(Already configured on this machine.)*
 
+**Editing the Claude Code plugin (`integrations/claude/plugins/scos-memory-fabric/`)
+does not take effect on its own.** Claude Code runs plugins from an installed
+cache at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, copied
+from the source directory at install time — it does not re-read the live
+source on every session. `claude plugin marketplace update` and
+`claude plugin disable`/`enable` do **not** refresh this cache when the
+plugin's version string is unchanged; `claude plugin install` short-circuits
+with "already installed" for the same reason. Verified the hard way: hook
+edits sat unused for an entire session (SessionStart-only cache) while every
+other check suggested they were live.
+
+The only way found to force a real refresh:
+```bash
+# bump "version" in .claude-plugin/plugin.json, then:
+claude plugin marketplace remove scos-fabric-tools
+claude plugin marketplace add /path/to/scos-memory-fabric/integrations/claude
+claude plugin install scos-memory-fabric@scos-fabric-tools
+claude plugin enable scos-memory-fabric@scos-fabric-tools
+```
+Removing the marketplace also clears `pluginConfigs` and `enabledPlugins` for
+it in `~/.claude/settings.json` — restore `gateway_url`/`bearer_token` (or
+whatever `userConfig` the plugin declares) afterward, and re-enable it.
+
+After any hook/script change, verify against the cache directly rather than
+trusting the edit:
+```bash
+diff -u integrations/claude/plugins/scos-memory-fabric/hooks/hooks.json \
+        ~/.claude/plugins/cache/scos-fabric-tools/scos-memory-fabric/<version>/hooks/hooks.json
+```
+
 To share this with teammates instead of configuring it per-machine, put the
 same block in a project-scoped **`.mcp.json`** at the repo root (checked
 into git) — Claude Code auto-loads it for anyone who opens this project,
@@ -240,6 +270,36 @@ args = ["-E", "/home/kubuntux/.hermes/scripts/scos-mcp-bridge.py"]
 SCOS_AGENT_NAME = "codex"
 ```
 *(Already configured on this machine.)*
+
+**Codex's native plugin at `integrations/codex/plugins/scos-memory-fabric/`
+now implements the same automatic-lifecycle pattern as Claude Code** —
+`UserPromptSubmit` calls `scos_recall` before the model sees the prompt,
+`Stop` persists the exchange via `hermes-provider`'s `memory_write`, and
+`PostToolUse` surfaces known-fix guidance on `scos_*` tool failures. Verified
+with the same two-separate-`codex exec`-processes test used for Claude Code
+(GOVERNANCE.md 21.4/4.14 — automatic pre-turn retrieval and post-turn
+persistence, no explicit tool call required).
+
+Two things that differ from the Claude Code integration, found the hard way:
+- **Codex's transcript format is not Claude Code's.** Codex's Stop hook
+  payload already includes `last_assistant_message` directly (no transcript
+  parsing needed for that half), but the user's message still has to come
+  from the transcript — and Codex's "rollout" JSONL nests everything under
+  `payload: {type: "message", role, content: [{type, text}]}`, not Claude
+  Code's flatter `message: {role, content}`. It also interleaves
+  plugin-injected wrapper messages (skill lists, other plugins' banners, this
+  plugin's own `[scos-auto-recall]` injection) under the same `role: "user"`/
+  `"developer"` as the real prompt — `scripts/scos-auto-persist.py` filters
+  these out by prefix rather than trusting "last user-role message."
+- **The plugin cache still needs a forced refresh after editing hooks/scripts**,
+  same as Claude Code (see the note above) — `codex plugin remove
+  scos-memory-fabric@scos-fabric-tools` then `codex plugin add
+  scos-memory-fabric@scos-fabric-tools` (no version bump needed here; unlike
+  Claude Code, a plain reinstall does pick up source changes).
+- Hooks are trust-gated per content hash (`~/.codex/config.toml`'s
+  `[hooks.state]` table) — a session run non-interactively needs
+  `codex exec --dangerously-bypass-hook-trust` the first time after any hook
+  edit, or an interactive session to accept the new trust prompt.
 
 ### Kilo Code
 
