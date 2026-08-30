@@ -64,9 +64,9 @@ var upstreamDefaults = []upstreamDefault{
 	{"recovery_orchestrator", "SCOS_RECOVERY_ORCHESTRATOR_URL", "http://recovery-orchestrator:8094"},
 	{"security_gate", "SCOS_SECURITY_GATE_URL", "http://security-gate:8091"},
 	{"observability", "SCOS_OBSERVABILITY_URL", "http://observability:8096"},
-	{"credential_vault", "SCOS_CREDENTIAL_VAULT_URL", "http://credential-vault:8100"},
-	{"okf_synchroniser", "SCOS_OKF_SYNCHRONISER_URL", "http://okf-synchroniser:8090"},
-	{"graphify_provider", "SCOS_GRAPHIFY_PROVIDER_URL", "http://graphify-provider:8099"},
+	{"credential_vault", "SCOS_CREDENTIAL_VAULT_URL", "https://credential-vault:8100"},
+	{"okf_synchroniser", "SCOS_OKF_SYNCHRONISER_URL", "https://okf-synchroniser:8090"},
+	{"graphify_provider", "SCOS_GRAPHIFY_PROVIDER_URL", "https://graphify-provider:8099"},
 }
 
 func resolveUpstreams() map[string]string {

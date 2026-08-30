@@ -698,7 +698,16 @@ services:
       # Relative to this compose file's own directory (deploy/compose/), so
       # the default resolves to the repo root -- not deploy/ itself, which
       # is what "../.." vs. a bare ".." would silently get wrong.
-      - ${GRAPHIFY_REPO_HOST_PATH:-../..}:/repo:ro
+      # Read-write: `graphify extract` (query/path/explain all read its
+      # cached graphify-out/graph.json) writes into the repo root itself,
+      # the same way running graphify locally in your own checkout would.
+      - ${GRAPHIFY_REPO_HOST_PATH:-../..}:/repo:rw
+      # graphify's own AST-parse cache (per-repo, hashed by path), separate
+      # from graphify-out/ -- query/explain/path re-run extraction on every
+      # call and rely on this to skip re-parsing unchanged files. Without a
+      # writable mount here the process can't create it under /var/lib
+      # (owned by root, not the container's non-root scos user) at all.
+      - graphify-cache:/var/lib/graphify-cache
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -1070,6 +1079,9 @@ services:
       SCOS_RECOVERY_ORCHESTRATOR_URL: ${SCOS_RECOVERY_ORCHESTRATOR_URL:-https://recovery-orchestrator:8094}
       SCOS_SECURITY_GATE_URL: ${SCOS_SECURITY_GATE_URL:-https://security-gate:8091}
       SCOS_OBSERVABILITY_URL: ${SCOS_OBSERVABILITY_URL:-https://observability:8096}
+      SCOS_CREDENTIAL_VAULT_URL: ${SCOS_CREDENTIAL_VAULT_URL:-https://credential-vault:8100}
+      SCOS_OKF_SYNCHRONISER_URL: ${SCOS_OKF_SYNCHRONISER_URL:-https://okf-synchroniser:8090}
+      SCOS_GRAPHIFY_PROVIDER_URL: ${SCOS_GRAPHIFY_PROVIDER_URL:-https://graphify-provider:8099}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -1132,6 +1144,7 @@ services:
       retries: 10
 
 volumes:
+  graphify-cache:
   tls-certs:
   postgres-tls-certs:
   postgres-data:
