@@ -3,203 +3,378 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SCOS Transparency</title>
+  <title>SCOS Memory Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0b0e13;
-      --bg-grid: radial-gradient(circle at 15% 0%, rgba(99,102,241,.08), transparent 45%),
-                 radial-gradient(circle at 85% 15%, rgba(45,212,191,.06), transparent 40%);
-      --panel: #141a24;
-      --panel-2: #10151e;
-      --border: #232c3a;
-      --border-soft: #1c2432;
-      --text: #edf2f7;
-      --text-dim: #8b98ac;
-      --text-faint: #5a6678;
-      --ok: #34d399;
-      --warn: #f6ad55;
-      --err: #f87171;
-      --link: #7dd3fc;
+      --bg: #05060a;
+      --panel: rgba(13,17,28,.6);
+      --panel-2: rgba(11,14,22,.65);
+      --border: rgba(255,255,255,.08);
+      --border-soft: rgba(255,255,255,.06);
+      --text: #eef4fa;
+      --text-dim: #7c8aa0;
+      --text-faint: #47536b;
+      --cyan: #00f0ff;
+      --violet: #a78bfa;
+      --violet-strong: #7c3aed;
+      --green: #22e0b0;
+      --amber: #f6ad55;
+      --red: #ff4d6d;
       --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.55);
-      --radius: .75rem;
+      --radius: .8rem;
     }
     * { box-sizing: border-box; }
     body {
-      font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
-      max-width: 1560px; margin: 0 auto; padding: 1.75rem 1.5rem 3rem;
-      background: var(--bg-grid), var(--bg);
-      background-attachment: fixed;
-      color: var(--text);
+      margin: 0; font: 15px/1.5 'IBM Plex Mono', ui-monospace, monospace;
+      background: var(--bg); color: var(--text); overflow-x: hidden;
     }
-    header {
-      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .75rem;
-      margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-soft);
-    }
-    .brand { display: flex; align-items: center; gap: .65rem; }
-    .brand-mark {
-      width: 2.1rem; height: 2.1rem; border-radius: .55rem; flex: none;
-      background: conic-gradient(from 200deg, #6366f1, #2dd4bf, #6366f1);
-      box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 6px 16px -6px rgba(99,102,241,.55);
-      display: grid; place-items: center; font-size: 1.05rem;
-    }
-    h1 { margin: 0; font-size: 1.3rem; font-weight: 650; letter-spacing: -.01em; }
-    h1 small { display: block; font-weight: 500; font-size: .74rem; color: var(--text-faint); letter-spacing: .04em; text-transform: uppercase; margin-top: .1rem; }
-    .status {
-      display: inline-flex; align-items: center; gap: .45rem; margin: 0;
-      font-size: .82rem; color: var(--text-dim);
-      background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 999px; padding: .35rem .75rem;
-    }
-    .status::before { content: ''; width: .5rem; height: .5rem; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(52,211,153,.18); flex: none; }
-    .status.error::before { background: var(--err); box-shadow: 0 0 0 3px rgba(248,113,113,.18); animation: none; }
-    .status:not(.error)::before { animation: pulse-dot 2.4s ease-in-out infinite; }
-    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
-    .status.error { color: var(--err); }
-
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; }
-    .panel {
-      position: relative;
-      background: linear-gradient(180deg, var(--panel), var(--panel-2));
-      border: 1px solid var(--border); border-radius: var(--radius);
-      padding: .95rem 1.05rem 1.05rem; min-width: 0;
-      box-shadow: var(--shadow);
-      border-left: 3px solid hsl(var(--accent, 220) 70% 58%);
-      animation: rise .35s ease both;
-      transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
-    }
-    .panel:hover { border-color: color-mix(in srgb, hsl(var(--accent, 220) 70% 58%) 45%, var(--border)); }
+    .bg-fx { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+    .bg-blob { position: absolute; border-radius: 50%; filter: blur(10px); }
+    .bg-blob.a { top: -10%; left: 5%; width: 520px; height: 520px; background: radial-gradient(circle, rgba(124,58,237,.16), transparent 70%); animation: drift1 22s ease-in-out infinite; }
+    .bg-blob.b { bottom: -15%; right: 0; width: 600px; height: 600px; background: radial-gradient(circle, rgba(0,240,255,.12), transparent 70%); animation: drift2 26s ease-in-out infinite; }
+    .bg-grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px); background-size: 42px 42px; }
+    @keyframes drift1 { 0%,100% { transform: translate(0,0); } 50% { transform: translate(40px,-30px); } }
+    @keyframes drift2 { 0%,100% { transform: translate(0,0); } 50% { transform: translate(-50px,30px); } }
+    @keyframes pulseDot { 0%,100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0,240,255,.35); } 50% { opacity: .5; box-shadow: 0 0 0 5px rgba(0,240,255,0); } }
+    @keyframes scanSweep { 0% { transform: translateY(-100%); } 100% { transform: translateY(480px); } }
+    @keyframes marquee { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+    @keyframes glowPulse { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
+    @keyframes dash { to { stroke-dashoffset: -24; } }
     @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-    .panel h2 {
-      margin: 0 0 .65rem; font-size: .82rem; font-weight: 650; letter-spacing: .02em; text-transform: uppercase;
-      color: hsl(var(--accent, 220) 78% 72%);
-      display: flex; justify-content: space-between; align-items: baseline; gap: .5rem;
+
+    .shell { position: relative; z-index: 1; max-width: 1680px; margin: 0 auto; padding: 1.5rem 1.75rem 5.5rem; }
+    header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .9rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+    .brand { display: flex; align-items: center; gap: .85rem; }
+    .brand-mark { width: 2.4rem; height: 2.4rem; border-radius: 50%; flex: none; background: conic-gradient(from 210deg, var(--cyan), var(--violet-strong), var(--cyan)); box-shadow: 0 0 24px -2px rgba(0,240,255,.6), 0 0 0 1px rgba(255,255,255,.08); }
+    .brand-name { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 1.15rem; letter-spacing: .03em; color: #fff; }
+    .brand-name em { color: var(--cyan); font-style: normal; }
+    .brand-sub { font-size: .68rem; letter-spacing: .12em; color: var(--text-faint); text-transform: uppercase; margin-top: .15rem; }
+    .pill { display: inline-flex; align-items: center; gap: .5rem; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); background: rgba(13,17,28,.6); border: 1px solid var(--border); border-radius: 999px; padding: .4rem .8rem; }
+    .pill-dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--green); display: inline-block; animation: pulseDot 2.2s ease-in-out infinite; }
+    .pill.error .pill-dot { background: var(--red); animation: none; }
+    .pill.error { color: var(--red); }
+    .header-actions { display: flex; align-items: center; gap: .6rem; }
+    .edit-state { display: inline-flex; align-items: center; gap: .55rem; font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim); background: rgba(13,17,28,.6); border: 1px solid var(--border); border-radius: 999px; padding: .3rem .3rem .3rem .8rem; }
+    .edit-state.on { color: var(--amber); }
+
+    button, .btn { font-family: inherit; font-size: .72rem; letter-spacing: .02em; background: #141a2b; color: var(--text); border: 1px solid var(--border); border-radius: .4rem; padding: .3rem .65rem; cursor: pointer; transition: background .12s ease, border-color .12s ease, transform .05s ease; }
+    button:hover, .btn:hover { background: #1c2438; border-color: rgba(255,255,255,.2); }
+    button:active, .btn:active { transform: translateY(1px); }
+    button.primary { background: #00b8cc; color: #05070d; font-weight: 600; border-color: #00b8cc; }
+    button.primary:hover { background: #23d4e8; }
+    button.danger { background: #2a1018; color: var(--red); border-color: rgba(255,77,109,.3); }
+    button.danger:hover { background: #3a1620; }
+    button.link { background: none; border: none; color: var(--cyan); padding: 0 .25rem; }
+    button.small, .btn.small { padding: .2rem .5rem; font-size: .66rem; }
+
+    /* ── tabs ─────────────────────────────────────────────────────────── */
+    .tabs { display: flex; gap: .35rem; margin-top: 1rem; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+    .tab-btn {
+      font-family: 'Space Grotesk', sans-serif; font-size: .7rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+      color: var(--text-dim); background: rgba(13,17,28,.5); border: 1px solid var(--border-soft); border-bottom: 2px solid transparent;
+      border-radius: .45rem .45rem 0 0; padding: .5rem .95rem; cursor: pointer; margin-bottom: -1px;
     }
-    .panel h2 small { color: var(--text-faint); font-weight: normal; font-size: .72rem; text-transform: none; letter-spacing: 0; }
+    .tab-btn[aria-current="true"] { color: var(--cyan); background: rgba(0,240,255,.08); border-color: rgba(0,240,255,.3); border-bottom-color: var(--cyan); }
+    .tab-panel { margin-top: 1.1rem; }
+    .tab-panel[hidden] { display: none; }
+
+    /* ── HUD panel (compact sidebar card) ────────────────────────────── */
+    .hud-panel { position: relative; background: rgba(13,17,28,.55); backdrop-filter: blur(10px); border: 1px solid var(--border-soft); border-left: 2px solid var(--hud-accent, var(--cyan)); border-radius: .6rem; padding: .75rem .85rem .85rem; min-width: 0; animation: rise .3s ease both; }
+    .hud-panel-head { display: flex; align-items: baseline; gap: .4rem; margin-bottom: .55rem; }
+    .hud-tag { font-family: 'IBM Plex Mono', monospace; font-size: .62rem; letter-spacing: .05em; color: var(--hud-accent, var(--cyan)); background: rgba(255,255,255,.05); border-radius: .25rem; padding: .1rem .35rem; flex: none; }
+    .hud-title { font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: .78rem; color: var(--text); letter-spacing: .01em; }
+    .hud-meta { margin-left: auto; font-size: .62rem; color: var(--text-faint); }
+    .hud-empty { font-size: .72rem; color: var(--text-faint); font-style: italic; }
+
+    /* ── column headers ("Identity // System" etc) ───────────────────── */
+    .col-label { font-size: .68rem; letter-spacing: .16em; text-transform: uppercase; font-family: 'Space Grotesk', sans-serif; font-weight: 600; padding-left: .15rem; margin-bottom: .85rem; }
+    .col-stack { display: flex; flex-direction: column; gap: .85rem; }
+
+    /* ── glass cards (graph / facts / big tables) ────────────────────── */
+    .glass-card { position: relative; background: var(--panel-2); backdrop-filter: blur(14px); border-radius: var(--radius); padding: 1.1rem 1.2rem 1.3rem; overflow: hidden; box-shadow: var(--shadow); }
+    .glass-card.cyan { border: 1px solid rgba(0,240,255,.22); box-shadow: 0 0 40px -18px rgba(0,240,255,.35); }
+    .glass-card.amber { border: 1px solid rgba(255,180,60,.22); }
+    .glass-card.violet { border: 1px solid rgba(124,58,237,.25); }
+    .glass-card.green { border: 1px solid rgba(34,224,176,.25); }
+    .glass-card.red { border: 1px solid rgba(255,77,109,.25); }
+    .glass-card.plain { border: 1px solid var(--border); }
+    .corner { position: absolute; width: 20px; height: 20px; pointer-events: none; }
+    .corner.tl { top: 0; left: 0; border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan); border-radius: .5rem 0 0 0; }
+    .corner.br { bottom: 0; right: 0; border-bottom: 2px solid var(--cyan); border-right: 2px solid var(--cyan); border-radius: 0 0 .5rem 0; }
+    .card-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: .7rem; gap: .5rem; }
+    .card-title { font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: .85rem; letter-spacing: .05em; text-transform: uppercase; }
+    .card-title.cyan { color: var(--cyan); } .card-title.amber { color: var(--amber); } .card-title.violet { color: var(--violet); }
+    .card-title.green { color: var(--green); } .card-title.red { color: var(--red); } .card-title.plain { color: var(--text); }
+    .card-meta { font-size: .7rem; color: var(--text-faint); }
+
+    /* ── stat tiles ───────────────────────────────────────────────────── */
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap: .85rem; }
+    .stat-tile { background: rgba(13,17,28,.55); border: 1px solid var(--border-soft); border-top: 2px solid var(--hud-accent, var(--cyan)); border-radius: .6rem; padding: .85rem 1rem; }
+    .stat-label { font-size: .62rem; letter-spacing: .14em; text-transform: uppercase; color: var(--text-dim); }
+    .stat-value { font-family: 'Space Grotesk', sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--text); margin-top: .2rem; }
+    .stat-delta { font-size: .66rem; color: var(--text-dim); margin-top: .1rem; }
+
+    /* ── generic renderer output (kv / records tables) ───────────────── */
     .panel-body { max-height: 380px; overflow: auto; font-variant-numeric: tabular-nums; }
     .panel-body::-webkit-scrollbar, dialog::-webkit-scrollbar { width: 9px; height: 9px; }
     .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
     .missing { color: var(--text-faint); font-style: italic; }
-    .wide { grid-column: 1 / -1; }
-    pre.raw {
-      white-space: pre-wrap; word-break: break-word; background: #080a0f; color: #a5f3c9;
-      padding: .7rem .8rem; border-radius: .5rem; overflow: auto; max-height: 320px; margin: 0;
-      font: .78rem/1.5 ui-monospace, "SF Mono", Menlo, monospace; border: 1px solid var(--border-soft);
-    }
+    pre.raw { white-space: pre-wrap; word-break: break-word; background: #04060b; color: #9fe8b0; padding: .7rem .8rem; border-radius: .5rem; overflow: auto; max-height: 320px; margin: 0; font: .78rem/1.5 ui-monospace, 'SF Mono', Menlo, monospace; border: 1px solid var(--border-soft); }
 
-    /* Generic human-readable renderer: tables for lists of objects, key/value rows for objects. */
-    table.kv { width: 100%; border-collapse: collapse; font-size: .85rem; }
-    table.kv td { padding: .32rem .4rem; vertical-align: top; border-bottom: 1px solid var(--border-soft); }
+    table.kv { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    table.kv td { padding: .28rem .4rem; vertical-align: top; border-bottom: 1px solid var(--border-soft); }
     table.kv tr:last-child td { border-bottom: none; }
-    table.kv td.key { color: var(--text-dim); white-space: nowrap; width: 1%; padding-right: .75rem; font-size: .78rem; letter-spacing: .01em; }
-    table.records { width: 100%; border-collapse: collapse; font-size: .82rem; }
-    table.records th {
-      text-align: left; color: var(--text-dim); font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
-      border-bottom: 1px solid var(--border); padding: .4rem .5rem; position: sticky; top: 0; background: var(--panel);
-    }
-    table.records td { padding: .42rem .5rem; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
-    table.records tbody tr { transition: background .1s ease; }
-    table.records tbody tr:nth-child(even) { background: rgba(255,255,255,.012); }
-    table.records tr:hover td { background: rgba(125,211,252,.05); }
+    table.kv td.key { color: var(--text-dim); white-space: nowrap; width: 1%; padding-right: .7rem; font-size: .72rem; letter-spacing: .01em; }
+    table.records { width: 100%; border-collapse: collapse; font-size: .8rem; }
+    table.records th { text-align: left; color: var(--text-dim); font-weight: 500; font-size: .65rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--border); padding: .4rem .5rem; position: sticky; top: 0; background: #10141f; }
+    table.records td { padding: .5rem .5rem; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+    table.records tbody tr:hover td { background: rgba(0,240,255,.04); }
     .cell-actions { white-space: nowrap; }
+    .cell-actions button { margin-right: .3rem; }
     .scalar { color: var(--text); }
     .scalar.null { color: var(--text-faint); font-style: italic; }
-    .scalar.bool-true { color: var(--ok); font-weight: 600; }
-    .scalar.bool-false { color: var(--err); font-weight: 600; }
+    .scalar.bool-true { color: var(--green); font-weight: 600; }
+    .scalar.bool-false { color: var(--red); font-weight: 600; }
+    .simple-list { margin: 0; padding-left: 1.1rem; font-size: .74rem; color: #c3cbdb; }
+    .simple-list li { padding: .15rem 0; }
 
-    button, .btn {
-      font: inherit; background: #1c2433; color: var(--text); border: 1px solid var(--border);
-      border-radius: .4rem; padding: .32rem .65rem; cursor: pointer; transition: background .12s ease, border-color .12s ease, transform .05s ease;
-    }
-    button:hover, .btn:hover { background: #263047; border-color: #37455c; }
-    button:active, .btn:active { transform: translateY(1px); }
-    button.primary { background: #4f46e5; border-color: #4f46e5; }
-    button.primary:hover { background: #6366f1; border-color: #6366f1; }
-    button.danger { background: #7f1d1d; border-color: #7f1d1d; }
-    button.danger:hover { background: #991b1b; border-color: #991b1b; }
-    button.link { background: none; border: none; color: var(--link); padding: 0 .25rem; }
-    button.small, .btn.small { padding: .16rem .5rem; font-size: .76rem; }
-
-    .edit-state { font-size: .78rem; color: var(--text-dim); display: flex; align-items: center; gap: .55rem; background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 999px; padding: .3rem .3rem .3rem .75rem; }
-    .edit-state.on { color: var(--warn); }
-    .edit-state.on::before { content: '●'; color: var(--warn); font-size: .55rem; }
-
-    dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.35rem; max-width: 420px; width: 90vw; box-shadow: 0 24px 64px -20px rgba(0,0,0,.7); }
-    dialog::backdrop { background: rgba(5,7,11,.72); backdrop-filter: blur(2px); }
-    dialog h3 { margin: 0 0 .75rem; font-size: 1.02rem; letter-spacing: -.01em; }
-    dialog label { display: block; font-size: .82rem; color: var(--text-dim); margin: .6rem 0 .3rem; }
-    dialog input, dialog textarea { width: 100%; background: #0b0f16; color: var(--text); border: 1px solid var(--border); border-radius: .4rem; padding: .5rem .6rem; font: inherit; transition: border-color .12s ease; }
-    dialog input:focus, dialog textarea:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.18); }
-    dialog textarea { min-height: 4.5rem; resize: vertical; }
-    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1.1rem; }
-    .dialog-error { color: var(--err); font-size: .82rem; margin-top: .5rem; min-height: 1.1em; }
-
-    /* Memory graph: force-directed node/link visualization. */
-    .graph-body { max-height: none; overflow: hidden; }
-    .graph-wrap { position: relative; }
-    .graph-svg {
-      width: 100%; height: 420px; display: block; touch-action: none; cursor: grab;
-      background: radial-gradient(circle at 50% 40%, rgba(167,139,250,.045), transparent 65%);
-      border-radius: .5rem;
-    }
+    /* ── memory graph ─────────────────────────────────────────────────── */
+    .graph-wrap { position: relative; border-radius: .6rem; overflow: hidden; background: radial-gradient(circle at 50% 40%, rgba(124,58,237,.08), transparent 65%); }
+    .graph-sweep { position: absolute; left: 0; right: 0; height: 70px; background: linear-gradient(180deg, transparent, rgba(0,240,255,.08), transparent); animation: scanSweep 5.5s linear infinite; pointer-events: none; z-index: 2; }
+    .graph-svg { width: 100%; height: 420px; display: block; touch-action: none; cursor: grab; position: relative; z-index: 1; }
     .graph-svg.panning { cursor: grabbing; }
-    .graph-edge { stroke: #4a5568; stroke-width: 1; opacity: .55; transition: opacity .12s ease, stroke .12s ease; }
-    .graph-edge.mentions { stroke-dasharray: 2 3; opacity: .35; }
-    .graph-edge.dim { opacity: .06; }
-    .graph-edge.active { stroke: #a78bfa; stroke-width: 1.6; opacity: .95; }
-    .graph-node circle { stroke-width: 1.5; transition: opacity .12s ease, r .12s ease; }
-    .graph-node.fact circle { fill: #2a2416; stroke: #fbbf24; }
-    .graph-node.entity circle { fill: #241f36; stroke: #a78bfa; }
-    .graph-node.dim { opacity: .18; }
-    .graph-node:hover circle { filter: brightness(1.3); }
+    .graph-edge { stroke: #3fd9e8; stroke-width: 1.1; opacity: .5; transition: opacity .12s ease, stroke .12s ease; }
+    .graph-edge.mentions { stroke-dasharray: 4 6; }
+    .graph-edge.dim { opacity: .05; }
+    .graph-edge.active { stroke: var(--violet); stroke-width: 1.7; opacity: .95; }
+    .graph-node circle { stroke-width: 1.4; transition: opacity .12s ease, filter .12s ease; filter: drop-shadow(0 0 5px var(--glow, rgba(0,240,255,.6))); animation: glowPulse 3s ease-in-out infinite; }
+    .graph-node.fact circle { fill: #0a2230; stroke: var(--cyan); --glow: rgba(0,240,255,.6); }
+    .graph-node.entity circle { fill: #1c1230; stroke: var(--violet); --glow: rgba(167,139,250,.6); }
+    .graph-node.dim { opacity: .15; }
+    .graph-node:hover circle { filter: brightness(1.3) drop-shadow(0 0 8px var(--glow)); }
     .graph-label { fill: var(--text-dim); font-size: 8.5px; text-anchor: middle; pointer-events: none; user-select: none; }
-    .graph-tooltip {
-      display: none; position: absolute; z-index: 5; pointer-events: none; max-width: 190px;
-      background: #0b0f16; border: 1px solid var(--border); border-radius: .4rem; padding: .4rem .55rem;
-      font-size: .74rem; line-height: 1.4; color: var(--text); box-shadow: var(--shadow);
-    }
+    .graph-tooltip { display: none; position: absolute; z-index: 5; pointer-events: none; max-width: 190px; background: #05070d; border: 1px solid var(--border); border-radius: .4rem; padding: .4rem .55rem; font-size: .74rem; line-height: 1.4; color: var(--text); box-shadow: var(--shadow); }
     .graph-tooltip span { color: var(--text-faint); }
-    .graph-legend { display: flex; flex-wrap: wrap; align-items: center; gap: .9rem; margin-top: .5rem; font-size: .74rem; color: var(--text-dim); }
+    .graph-legend { display: flex; flex-wrap: wrap; align-items: center; gap: .9rem; margin-top: .6rem; font-size: .72rem; color: var(--text-dim); }
     .graph-legend span { display: inline-flex; align-items: center; gap: .35rem; }
     .graph-dot { width: .55rem; height: .55rem; border-radius: 50%; display: inline-block; border: 1.5px solid; }
-    .graph-dot.fact { background: #2a2416; border-color: #fbbf24; }
-    .graph-dot.entity { background: #241f36; border-color: #a78bfa; }
-    .graph-count { color: var(--text-faint); }
+    .graph-dot.fact { background: #0a2230; border-color: var(--cyan); }
+    .graph-dot.entity { background: #1c1230; border-color: var(--violet); }
     .graph-hint { margin-left: auto; color: var(--text-faint); font-style: italic; }
     .graph-truncated { margin: .4rem 0 0; font-size: .74rem; }
 
-    .trace-panel { grid-column: 1 / -1; --accent: 265; }
-    .trace-panel h2 #trace-meta.live::before { content: '● '; color: var(--ok); }
-    #trace-log { max-height: 220px; }
-    .trace-line { color: var(--text-dim); border-bottom: 1px solid rgba(255,255,255,.03); padding: .12rem 0; }
-    .trace-line .event { color: var(--warn); font-weight: 600; }
-    .toggle-raw { font-size: .72rem; color: var(--text-faint); cursor: pointer; user-select: none; }
+    /* ── bars / meters ────────────────────────────────────────────────── */
+    .meter-row { margin-bottom: .55rem; }
+    .meter-row-head { display: flex; justify-content: space-between; font-size: .72rem; color: #c3cbdb; }
+    .meter-track { height: 4px; background: rgba(255,255,255,.06); border-radius: 99px; margin-top: .25rem; }
+    .meter-fill { height: 4px; border-radius: 99px; background: var(--cyan); box-shadow: 0 0 8px rgba(0,240,255,.6); }
 
-    @media (max-width: 640px) { body { padding: 1.1rem .9rem 2.5rem; } }
+    /* ── system service mesh ──────────────────────────────────────────── */
+    .service-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px,1fr)); gap: .5rem; }
+    .service-chip { display: flex; align-items: center; gap: .5rem; background: rgba(255,255,255,.03); border: 1px solid var(--border-soft); border-radius: .4rem; padding: .45rem .6rem; }
+    .service-dot { width: .45rem; height: .45rem; border-radius: 50%; flex: none; }
+    .service-name { font-size: .72rem; color: #c3cbdb; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .service-meta { font-size: .64rem; color: var(--text-dim); text-align: right; }
+
+    /* ── modals ───────────────────────────────────────────────────────── */
+    dialog { background: #0d1120; color: var(--text); border: 1px solid rgba(0,240,255,.3); border-radius: .8rem; padding: 1.4rem; max-width: 460px; width: 90vw; box-shadow: 0 0 60px -10px rgba(0,240,255,.3); font-family: inherit; }
+    dialog.danger { border-color: rgba(255,77,109,.35); box-shadow: 0 0 60px -10px rgba(255,77,109,.25); }
+    dialog::backdrop { background: rgba(3,4,8,.75); backdrop-filter: blur(3px); }
+    dialog h3 { margin: 0 0 .6rem; font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 1rem; letter-spacing: .03em; text-transform: uppercase; color: var(--cyan); }
+    dialog.danger h3 { color: var(--red); }
+    dialog p { color: var(--text-dim); font-size: .82rem; margin: 0; }
+    dialog label { display: block; font-size: .78rem; color: var(--text-dim); margin: .7rem 0 .3rem; text-transform: uppercase; letter-spacing: .05em; }
+    dialog input, dialog textarea { width: 100%; background: #05070d; color: var(--text); border: 1px solid rgba(255,255,255,.12); border-radius: .4rem; padding: .55rem .65rem; font: inherit; box-sizing: border-box; transition: border-color .12s ease; }
+    dialog input:focus, dialog textarea:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(0,240,255,.15); }
+    dialog textarea { min-height: 5rem; resize: vertical; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1.15rem; }
+    .dialog-error { color: var(--red); font-size: .82rem; margin-top: .5rem; min-height: 1.1em; }
+
+    /* ── bottom live-trace marquee ────────────────────────────────────── */
+    .marquee-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2; background: rgba(5,7,12,.92); backdrop-filter: blur(10px); border-top: 1px solid rgba(0,240,255,.2); padding: .55rem 0; overflow: hidden; }
+    .marquee-inner { display: flex; align-items: center; gap: .6rem; max-width: 1680px; margin: 0 auto; padding: 0 1.75rem; }
+    .marquee-label { font-size: .65rem; letter-spacing: .1em; color: var(--cyan); text-transform: uppercase; flex: none; font-family: 'Space Grotesk', sans-serif; font-weight: 600; }
+    .marquee-label.live::before { content: '● '; color: var(--green); }
+    .marquee-track { overflow: hidden; white-space: nowrap; flex: 1; -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
+    .marquee-scroll { display: inline-block; padding-left: 100%; animation: marquee 38s linear infinite; color: #9fe8b0; font-size: .74rem; letter-spacing: .01em; }
+
+    @media (max-width: 1100px) {
+      .overview-grid { grid-template-columns: 1fr !important; }
+      .memory-grid, .agents-grid, .flow-grid { grid-template-columns: 1fr !important; }
+    }
+    @media (max-width: 640px) { .shell { padding: 1.1rem .9rem 5.5rem; } }
   </style>
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <div class="brand-mark">🜂</div>
-      <h1>SCOS Transparency<small>Nexus Memory Fabric &middot; live operational state</small></h1>
+  <div class="bg-fx"><div class="bg-blob a"></div><div class="bg-blob b"></div><div class="bg-grid"></div></div>
+
+  <div class="shell">
+    <header>
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <div>
+          <div class="brand-name">SCOS <em>// MEMORY COMMAND</em></div>
+          <div class="brand-sub">Nexus Memory Fabric &middot; live command deck</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="pill" id="status-pill"><span class="pill-dot"></span><span id="status-text">connecting&hellip;</span></span>
+        <span class="edit-state" id="edit-state">
+          <span id="edit-state-text">view only</span>
+          <button id="edit-toggle" class="small">Enable editing</button>
+        </span>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs" role="tablist"></nav>
+
+    <section class="tab-panel" data-tab="overview" id="tab-overview">
+      <div class="overview-grid" style="display:grid;grid-template-columns:230px minmax(0,1fr) 230px;gap:1rem;align-items:start">
+        <div>
+          <div class="col-label" style="color:var(--violet)">Identity // System</div>
+          <div class="col-stack" id="ov-left"></div>
+        </div>
+        <div class="col-stack">
+          <div class="glass-card cyan">
+            <span class="corner tl"></span><span class="corner br"></span>
+            <div class="card-head">
+              <div class="card-title cyan">MEM &middot; Memory Graph</div>
+              <div class="card-meta" id="ov-graph-stats">&nbsp;</div>
+            </div>
+            <div class="graph-wrap" id="ov-graph-mount"></div>
+          </div>
+          <div class="glass-card amber">
+            <div class="card-head">
+              <div class="card-title amber">FCT &middot; Facts</div>
+              <div class="card-meta" id="ov-facts-count">&nbsp;</div>
+            </div>
+            <div class="panel-body" id="ov-facts-mount"></div>
+          </div>
+        </div>
+        <div>
+          <div class="col-label" style="color:var(--cyan)">Activity // Ops</div>
+          <div class="col-stack" id="ov-right"></div>
+        </div>
+      </div>
+      <div style="margin-top:1.1rem">
+        <div class="col-label" style="color:var(--green)">Signals // Analysis</div>
+        <div class="stat-grid" id="ov-signals" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))"></div>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-tab="memory" id="tab-memory" hidden>
+      <div class="stat-grid" id="mem-stats"></div>
+      <div class="memory-grid" style="display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:1rem;margin-top:1rem;align-items:start">
+        <div class="glass-card cyan">
+          <span class="corner tl"></span>
+          <div class="card-title cyan" style="margin-bottom:.6rem">Graph — full topology</div>
+          <div class="graph-wrap" id="mem-graph-mount"></div>
+        </div>
+        <div class="col-stack">
+          <div class="hud-panel" style="--hud-accent:var(--violet)">
+            <div class="hud-panel-head"><span class="hud-tag">ENT</span><span class="hud-title">Entities</span></div>
+            <table class="kv" id="mem-entities"></table>
+          </div>
+          <div class="hud-panel">
+            <div class="hud-panel-head"><span class="hud-tag">LNK</span><span class="hud-title">Link types</span></div>
+            <div id="mem-linktypes"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-tab="facts" id="tab-facts" hidden>
+      <div class="stat-grid" id="facts-stats"></div>
+      <div class="glass-card amber" style="margin-top:1rem">
+        <div class="card-title amber" style="margin-bottom:.65rem">All facts</div>
+        <div class="panel-body" id="facts-table-mount" style="max-height:none"></div>
+      </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:.85rem">
+        <div class="hud-panel" style="--hud-accent:var(--red)">
+          <div class="hud-panel-head"><span class="hud-tag">CTD</span><span class="hud-title">Contradictions</span></div>
+          <div class="panel-body" id="facts-contradictions"></div>
+        </div>
+        <div class="hud-panel" style="--hud-accent:var(--green)">
+          <div class="hud-panel-head"><span class="hud-tag">LRN</span><span class="hud-title">Learnings</span></div>
+          <div class="panel-body" id="facts-learnings"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-tab="agents" id="tab-agents" hidden>
+      <div class="agents-grid" style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:1rem;align-items:start">
+        <div class="glass-card cyan">
+          <div class="card-title cyan" style="margin-bottom:.65rem">Connected agents</div>
+          <div class="panel-body" id="agt-agents-mount"></div>
+        </div>
+        <div class="hud-panel">
+          <div class="hud-panel-head"><span class="hud-tag">TOL</span><span class="hud-title">Tool operations</span></div>
+          <div class="panel-body" id="agt-tools-mount"></div>
+        </div>
+      </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:1rem;align-items:start">
+        <div class="glass-card violet">
+          <div class="card-title violet" style="margin-bottom:.65rem">Routing decisions</div>
+          <div class="panel-body" id="agt-routing-mount"></div>
+        </div>
+        <div class="col-stack" id="agt-right"></div>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-tab="system" id="tab-system" hidden>
+      <div class="glass-card violet">
+        <div class="card-head">
+          <div class="card-title violet">Service mesh</div>
+          <div class="card-meta" id="sys-service-count">&nbsp;</div>
+        </div>
+        <div class="service-grid" id="sys-services"></div>
+      </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:.85rem" id="sys-panels"></div>
+    </section>
+
+    <section class="tab-panel" data-tab="flow" id="tab-flow" hidden>
+      <div class="flow-grid" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start">
+        <div class="glass-card green">
+          <div class="card-title green" style="margin-bottom:.8rem">Token flow</div>
+          <div class="panel-body" id="flow-tokens-mount"></div>
+        </div>
+        <div class="glass-card plain">
+          <div class="card-title plain" style="margin-bottom:.7rem">Cost breakdown</div>
+          <div class="panel-body" id="flow-costs-mount"></div>
+        </div>
+      </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:320px minmax(0,1fr);gap:1rem;align-items:start">
+        <div class="hud-panel" style="--hud-accent:var(--green)">
+          <div class="hud-panel-head"><span class="hud-tag">TML</span><span class="hud-title">Timeline</span></div>
+          <div class="panel-body" id="flow-timeline-mount"></div>
+        </div>
+        <div class="glass-card cyan" style="background:#04060b">
+          <div class="card-title cyan" style="margin-bottom:.5rem">Live trace — full log</div>
+          <pre class="raw" id="flow-trace-log" style="color:#9fe8b0"></pre>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="marquee-bar">
+    <div class="marquee-inner">
+      <span class="marquee-label" id="marquee-label">Live Trace</span>
+      <div class="marquee-track"><div class="marquee-scroll" id="marquee-scroll">connecting&hellip;</div></div>
     </div>
-    <span class="edit-state" id="edit-state">
-      <span id="edit-state-text">view only</span>
-      <button id="edit-toggle" class="small">Enable editing</button>
-    </span>
-  </header>
-  <p class="status" id="status">Loading authorised operational state&hellip;</p>
-  <div class="grid" id="panels"></div>
+  </div>
 
   <dialog id="login-dialog">
     <h3>Enable editing</h3>
-    <p style="color:#a0aec0;font-size:.85rem;margin:0">Corrections and deletions are recorded permanently in the fact history — this is not a hidden edit.</p>
+    <p>Corrections and deletions are recorded permanently in the fact history — this is not a hidden edit.</p>
     <label for="login-passphrase">Dashboard passphrase</label>
     <input type="password" id="login-passphrase" autocomplete="current-password">
     <div class="dialog-error" id="login-error"></div>
     <div class="dialog-actions">
-      <button id="login-cancel">Cancel</button>
-      <button id="login-submit" class="primary">Unlock</button>
+      <button id="login-cancel">cancel</button>
+      <button id="login-submit" class="primary">unlock</button>
     </div>
   </dialog>
 
@@ -211,20 +386,20 @@
     <input type="text" id="correct-reason" placeholder="why is this being corrected?">
     <div class="dialog-error" id="correct-error"></div>
     <div class="dialog-actions">
-      <button id="correct-cancel">Cancel</button>
-      <button id="correct-submit" class="primary">Save correction</button>
+      <button id="correct-cancel">cancel</button>
+      <button id="correct-submit" class="primary">save correction</button>
     </div>
   </dialog>
 
-  <dialog id="forget-dialog">
+  <dialog id="forget-dialog" class="danger">
     <h3>Forget fact</h3>
-    <p style="color:#a0aec0;font-size:.85rem;margin:0">This marks the fact as forgotten. It stays in history — nothing is destroyed.</p>
+    <p>This marks the fact as forgotten. It stays in history — nothing is destroyed.</p>
     <label for="forget-reason">Reason (recorded in history)</label>
     <input type="text" id="forget-reason" placeholder="why is this being forgotten?">
     <div class="dialog-error" id="forget-error"></div>
     <div class="dialog-actions">
-      <button id="forget-cancel">Cancel</button>
-      <button id="forget-submit" class="danger">Forget fact</button>
+      <button id="forget-cancel">cancel</button>
+      <button id="forget-submit" class="danger">forget fact</button>
     </div>
   </dialog>
 
@@ -232,7 +407,7 @@
     <h3>Fact history</h3>
     <div id="history-body" style="max-height:50vh;overflow:auto"></div>
     <div class="dialog-actions">
-      <button id="history-close">Close</button>
+      <button id="history-close">close</button>
     </div>
   </dialog>
 
@@ -370,8 +545,8 @@
     // fixed shape guaranteed ahead of time, so rather than hand-writing a
     // renderer per view, this turns any JSON value into readable markup:
     // arrays-of-objects become tables, objects become key/value rows,
-    // scalars render inline. A raw-JSON toggle stays available per panel
-    // for anyone who wants the exact wire payload.
+    // scalars render inline. Reused across every tab in this dashboard —
+    // never per-tab bespoke parsing of a view's fields.
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
@@ -467,9 +642,17 @@
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const GRAPH_MAX_NODES = 220;
 
-    function renderGraph(data) {
+    // curved edge path -- purely cosmetic (matches the command-center
+    // design's animated dashed arcs instead of straight lines).
+    function edgePath(sx, sy, tx, ty) {
+      const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+      const dx = tx - sx, dy = ty - sy, len = Math.sqrt(dx * dx + dy * dy) || 1;
+      const nx = -dy / len, ny = dx / len, bend = Math.min(24, len * 0.15);
+      return `M${sx},${sy} Q${mx + nx * bend},${my + ny * bend} ${tx},${ty}`;
+    }
+
+    function renderGraph(data, heightPx) {
       const wrap = document.createElement('div');
-      wrap.className = 'graph-wrap';
 
       const allNodes = (data.nodes || []).filter((n) => n && n.id != null);
       const allEdges = (data.edges || []).filter((e) => e && e.source != null && e.target != null);
@@ -498,7 +681,7 @@
         truncated = true;
       }
 
-      const width = 780, height = 460;
+      const width = 720, height = 460;
       const degree = new Map();
       for (const e of edges) {
         degree.set(e.source, (degree.get(e.source) || 0) + 1);
@@ -507,9 +690,16 @@
       const pos = forceLayout(nodes, edges, width, height, Math.min(220, 4000 / Math.max(nodes.length, 1) + 60));
       const index = new Map(nodes.map((n, i) => [n.id, i]));
 
+      const graphBox = document.createElement('div');
+      graphBox.className = 'graph-wrap';
+      const sweep = document.createElement('div');
+      sweep.className = 'graph-sweep';
+      graphBox.appendChild(sweep);
+
       const svg = document.createElementNS(SVG_NS, 'svg');
       svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
       svg.setAttribute('class', 'graph-svg');
+      svg.style.height = (heightPx || 420) + 'px';
       const g = document.createElementNS(SVG_NS, 'g');
       svg.appendChild(g);
       const edgeGroup = document.createElementNS(SVG_NS, 'g');
@@ -520,16 +710,16 @@
       for (const e of edges) {
         const si = index.get(e.source), ti = index.get(e.target);
         if (si === undefined || ti === undefined) continue;
-        const line = document.createElementNS(SVG_NS, 'line');
-        line.setAttribute('class', 'graph-edge' + (e.type === 'mentions' ? ' mentions' : ''));
-        line.setAttribute('x1', pos[si].x); line.setAttribute('y1', pos[si].y);
-        line.setAttribute('x2', pos[ti].x); line.setAttribute('y2', pos[ti].y);
-        line.dataset.s = si; line.dataset.t = ti;
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('class', 'graph-edge' + (e.type === 'mentions' ? ' mentions' : ''));
+        path.setAttribute('d', edgePath(pos[si].x, pos[si].y, pos[ti].x, pos[ti].y));
+        path.setAttribute('fill', 'none');
+        path.dataset.s = si; path.dataset.t = ti;
         const title = document.createElementNS(SVG_NS, 'title');
         title.textContent = e.type || 'related';
-        line.appendChild(title);
-        edgeGroup.appendChild(line);
-        edgeEls.push(line);
+        path.appendChild(title);
+        edgeGroup.appendChild(path);
+        edgeEls.push(path);
       }
 
       const neighbors = nodes.map(() => new Set());
@@ -546,7 +736,7 @@
         tooltip.innerHTML = `<strong>${escapeHtml(n.label || n.id)}</strong><br><span>${
           isEntity ? 'entity' : (n.network ? 'fact &middot; ' + escapeHtml(n.network) : 'fact')
         }</span>`;
-        const rect = wrap.getBoundingClientRect();
+        const rect = graphBox.getBoundingClientRect();
         tooltip.style.left = Math.min(rect.width - 190, Math.max(0, ev.clientX - rect.left + 14)) + 'px';
         tooltip.style.top = Math.max(0, ev.clientY - rect.top - 8) + 'px';
       }
@@ -595,8 +785,7 @@
         edgeEls.forEach((el) => el.classList.remove('dim', 'active'));
       }
 
-      // Pan (drag) & zoom (wheel), entirely local to this SVG — the panel
-      // body itself stays non-scrolling for graphs (see .graph-body CSS).
+      // Pan (drag) & zoom (wheel), entirely local to this SVG.
       let scale = 1, tx = 0, ty = 0, dragging = false, lastX = 0, lastY = 0;
       function applyTransform() { g.setAttribute('transform', `translate(${tx},${ty}) scale(${scale})`); }
       svg.addEventListener('wheel', (ev) => {
@@ -618,14 +807,15 @@
       svg.addEventListener('pointerup', () => { dragging = false; svg.classList.remove('panning'); });
       svg.addEventListener('pointerleave', () => { dragging = false; svg.classList.remove('panning'); });
 
-      wrap.append(svg, tooltip);
+      graphBox.append(svg, tooltip);
+      wrap.appendChild(graphBox);
 
       const legend = document.createElement('div');
       legend.className = 'graph-legend';
       legend.innerHTML =
         '<span><i class="graph-dot fact"></i>fact</span>' +
         '<span><i class="graph-dot entity"></i>entity</span>' +
-        `<span class="graph-count">${nodes.length} node${nodes.length === 1 ? '' : 's'} &middot; ${edges.length} link${edges.length === 1 ? '' : 's'}</span>` +
+        `<span>${nodes.length} node${nodes.length === 1 ? '' : 's'} &middot; ${edges.length} link${edges.length === 1 ? '' : 's'}</span>` +
         '<span class="graph-hint">scroll to zoom &middot; drag to pan &middot; click a fact for history</span>';
       wrap.appendChild(legend);
 
@@ -646,7 +836,7 @@
         if (value.length === 0) { const p = document.createElement('p'); p.className = 'missing'; p.textContent = 'empty'; return p; }
         if (value.every(isPlainObject)) return renderTable(value);
         const ul = document.createElement('ul');
-        ul.style.margin = '0'; ul.style.paddingLeft = '1.1rem';
+        ul.className = 'simple-list';
         for (const item of value) {
           const li = document.createElement('li');
           li.appendChild(isPlainObject(item) || Array.isArray(item) ? render(item, depth + 1) : renderScalar(item));
@@ -688,15 +878,16 @@
       const wrap = document.createElement('span');
       wrap.className = 'cell-actions';
       const historyBtn = document.createElement('button');
-      historyBtn.className = 'small'; historyBtn.textContent = 'History';
+      historyBtn.className = 'small'; historyBtn.textContent = 'history';
       historyBtn.addEventListener('click', () => openHistory(fact.id));
       wrap.appendChild(historyBtn);
       if (getEditToken()) {
         const editBtn = document.createElement('button');
-        editBtn.className = 'small'; editBtn.textContent = 'Correct'; editBtn.style.marginLeft = '.3rem';
+        editBtn.className = 'small'; editBtn.textContent = 'correct';
+        editBtn.style.color = 'var(--cyan)';
         editBtn.addEventListener('click', () => openCorrect(fact.id, fact.content || fact.memory));
         const forgetBtn = document.createElement('button');
-        forgetBtn.className = 'small danger'; forgetBtn.textContent = 'Forget'; forgetBtn.style.marginLeft = '.3rem';
+        forgetBtn.className = 'small danger'; forgetBtn.textContent = 'forget';
         forgetBtn.addEventListener('click', () => openForget(fact.id));
         wrap.append(editBtn, forgetBtn);
       }
@@ -747,74 +938,291 @@
       return table;
     }
 
-    // Panel labels are illustrative only; every value rendered comes from an
-    // authoritative backend projection. A view that the backend could not
-    // reach is shown as explicitly missing, never filled with fabricated data.
-    const PANELS = [
-      { key: 'system', title: 'System Map', icon: '🗺️', hue: 220 },
-      { key: 'memory', title: 'Memory Graph', icon: '🧠', hue: 265, wide: true },
-      { key: 'user_model', title: 'User Model', icon: '🪪', hue: 190 },
-      { key: 'facts', title: 'Facts', wide: true, icon: '📌', hue: 38 },
-      { key: 'learnings', title: 'Learnings', icon: '💡', hue: 152 },
-      { key: 'contradictions', title: 'Contradictions', icon: '⚡', hue: 355 },
-      { key: 'timeline', title: 'Timeline', icon: '📈', hue: 200 },
-      { key: 'diary', title: 'Diary', icon: '📓', hue: 320 },
-      { key: 'agents', title: 'Agents', icon: '🤖', hue: 245 },
-      { key: 'tool_operations', title: 'Tool Operations', icon: '🛠️', hue: 25 },
-      { key: 'plugins', title: 'Plugins', icon: '🧩', hue: 95 },
-      { key: 'skills', title: 'Skills', icon: '🎯', hue: 210 },
-      { key: 'hooks', title: 'Hooks', icon: '🪝', hue: 280 },
-      { key: 'code_intelligence', title: 'Code Intelligence', icon: '🧬', hue: 230 },
-      { key: 'routing', title: 'Routing', icon: '🧭', hue: 175 },
-      { key: 'recovery', title: 'Recovery', icon: '🩹', hue: 140 },
-      { key: 'security', title: 'Security', icon: '🛡️', hue: 5 },
-      { key: 'token_flow', title: 'Token Flow', icon: '🌊', hue: 45 },
-      { key: 'costs', title: 'Costs', icon: '💰', hue: 340 },
-    ];
+    // ── HUD panel (compact sidebar card) ─────────────────────────────────
+    // Renders a panel's live value as one of the SCOS command-center's
+    // small accent-tagged cards. `mounts` on panelState (below) lets the
+    // exact same live value be shown on more than one tab at once — e.g.
+    // "Security" appears both on Overview and on System — without a second
+    // fetch or a duplicated render path.
+    function makeHudPanel(key, tag, accent) {
+      const el = document.createElement('div');
+      el.className = 'hud-panel';
+      el.style.setProperty('--hud-accent', accent);
+      el.innerHTML = `<div class="hud-panel-head"><span class="hud-tag">${tag}</span><span class="hud-title"></span></div><div class="hud-body"></div>`;
+      return { el, titleEl: el.querySelector('.hud-title'), bodyEl: el.querySelector('.hud-body') };
+    }
 
-    const panelsEl = document.getElementById('panels');
-    const statusEl = document.getElementById('status');
-    const panelState = new Map();
+    // Panel labels are illustrative only; every value rendered comes from an
+    // authoritative backend projection. A view the backend could not reach
+    // is shown as explicitly missing, never filled with fabricated data.
+    const PANELS = [
+      { key: 'system',            title: 'System Map',        tag: 'SYS', group: 'identity' },
+      { key: 'memory',            title: 'Memory Graph',      tag: 'MEM', group: 'center' },
+      { key: 'user_model',        title: 'User Model',        tag: 'USR', group: 'identity' },
+      { key: 'facts',             title: 'Facts',              tag: 'FCT', group: 'center' },
+      { key: 'learnings',         title: 'Learnings',          tag: 'LRN', group: 'signal' },
+      { key: 'contradictions',    title: 'Contradictions',     tag: 'CTD', group: 'signal' },
+      { key: 'timeline',          title: 'Timeline',           tag: 'TML', group: 'signal' },
+      { key: 'diary',             title: 'Diary',               tag: 'DRY', group: 'signal' },
+      { key: 'agents',            title: 'Agents',              tag: 'AGT', group: 'ops' },
+      { key: 'tool_operations',   title: 'Tool Operations',    tag: 'TOL', group: 'ops' },
+      { key: 'plugins',           title: 'Plugins',             tag: 'PLG', group: 'ops' },
+      { key: 'skills',            title: 'Skills',               tag: 'SKL', group: 'ops' },
+      { key: 'hooks',             title: 'Hooks',                 tag: 'HKS', group: 'ops' },
+      { key: 'code_intelligence', title: 'Code Intelligence',  tag: 'COD', group: 'identity' },
+      { key: 'routing',           title: 'Routing',              tag: 'RTG', group: 'ops' },
+      { key: 'recovery',          title: 'Recovery',             tag: 'REC', group: 'identity' },
+      { key: 'security',          title: 'Security',             tag: 'SEC', group: 'identity' },
+      { key: 'token_flow',        title: 'Token Flow',         tag: 'TKN', group: 'signal' },
+      { key: 'costs',             title: 'Costs',                 tag: 'CST', group: 'signal' },
+    ];
+    const GROUP_ACCENT = { identity: 'var(--violet)', ops: 'var(--cyan)', signal: 'var(--green)', center: 'var(--cyan)' };
+
+    const statusPill = document.getElementById('status-pill');
+    const statusText = document.getElementById('status-text');
+    const panelState = new Map(); // key -> { lastValue, raw, mounts: [{titleEl,bodyEl,paint}] }
 
     for (const panel of PANELS) {
-      const el = document.createElement('div');
-      el.className = 'panel' + (panel.wide ? ' wide' : '');
-      el.style.setProperty('--accent', panel.hue);
-      el.style.animationDelay = (PANELS.indexOf(panel) * 25) + 'ms';
-      el.innerHTML = `<h2>${panel.icon ? panel.icon + ' ' : ''}${panel.title} <small><label class="toggle-raw"><input type="checkbox" data-role="raw-toggle"> raw</label> <span data-role="meta"></span></small></h2><div class="panel-body" data-role="body"><p class="missing">Waiting for projection&hellip;</p></div>`;
-      panelsEl.appendChild(el);
-      const body = el.querySelector('[data-role="body"]');
-      const rawToggle = el.querySelector('[data-role="raw-toggle"]');
-      const state = { body, metaEl: el.querySelector('[data-role="meta"]'), raw: false, lastValue: null };
-      rawToggle.addEventListener('change', () => { state.raw = rawToggle.checked; paintPanel(state); });
-      panelState.set(panel.key, state);
+      panelState.set(panel.key, { lastValue: null, raw: false, mounts: [] });
     }
 
-    function paintPanel(state) {
-      if (state.lastValue === null) return;
-      state.body.innerHTML = '';
-      state.body.classList.toggle('graph-body', !state.raw && looksLikeGraph(state.lastValue));
-      if (state.raw) {
-        const pre = document.createElement('pre');
-        pre.className = 'raw';
-        pre.textContent = JSON.stringify(state.lastValue, null, 2);
-        state.body.appendChild(pre);
+    // Registers a DOM target that should be kept in sync with panel `key`'s
+    // live value. `paint(bodyEl, value)` renders one value into one target;
+    // the same panel can be mounted more than once (different tabs).
+    function mountPanel(key, titleEl, bodyEl, paint) {
+      const state = panelState.get(key);
+      if (!state) return;
+      state.mounts.push({ titleEl, bodyEl, paint });
+      paintMount(state, state.mounts[state.mounts.length - 1]);
+    }
+    function paintMount(state, mount) {
+      if (state.lastValue === null) {
+        mount.bodyEl.innerHTML = '<p class="missing">waiting for projection&hellip;</p>';
+        return;
+      }
+      mount.bodyEl.innerHTML = '';
+      mount.paint(mount.bodyEl, state.lastValue);
+    }
+    function paintAllMounts(key) {
+      const state = panelState.get(key);
+      if (!state) return;
+      for (const mount of state.mounts) paintMount(state, mount);
+    }
+
+    function defaultPaint(bodyEl, value) { bodyEl.appendChild(render(value)); }
+
+    // ── build the tab bar ────────────────────────────────────────────────
+    const TABS = [
+      { id: 'overview', label: 'Overview' },
+      { id: 'memory',   label: 'Memory' },
+      { id: 'facts',    label: 'Facts' },
+      { id: 'agents',   label: 'Agents' },
+      { id: 'system',   label: 'System' },
+      { id: 'flow',     label: 'Flow' },
+    ];
+    const tabsEl = document.getElementById('tabs');
+    let currentTab = 'overview';
+    function setTab(id) {
+      currentTab = id;
+      document.querySelectorAll('.tab-panel').forEach((el) => { el.hidden = el.dataset.tab !== id; });
+      document.querySelectorAll('.tab-btn').forEach((btn) => btn.setAttribute('aria-current', String(btn.dataset.tab === id)));
+    }
+    for (const tab of TABS) {
+      const btn = document.createElement('button');
+      btn.className = 'tab-btn';
+      btn.type = 'button';
+      btn.dataset.tab = tab.id;
+      btn.textContent = tab.label;
+      btn.setAttribute('role', 'tab');
+      btn.addEventListener('click', () => setTab(tab.id));
+      tabsEl.appendChild(btn);
+    }
+    setTab('overview');
+
+    // ── Overview tab: identity/ops HUD columns + memory graph + facts ──
+    const ovLeft = document.getElementById('ov-left');
+    const ovRight = document.getElementById('ov-right');
+    const ovSignals = document.getElementById('ov-signals');
+    for (const panel of PANELS) {
+      if (panel.group === 'center') continue;
+      const accent = GROUP_ACCENT[panel.group];
+      if (panel.group === 'signal') {
+        const tile = document.createElement('div');
+        tile.className = 'hud-panel';
+        tile.style.setProperty('--hud-accent', accent);
+        tile.innerHTML = `<div class="hud-panel-head"><span class="hud-tag">${panel.tag}</span><span class="hud-title">${escapeHtml(panel.title)}</span></div><div class="hud-body panel-body" style="max-height:140px"></div>`;
+        ovSignals.appendChild(tile);
+        mountPanel(panel.key, null, tile.querySelector('.hud-body'), defaultPaint);
       } else {
-        state.body.appendChild(render(state.lastValue));
+        const { el, bodyEl } = makeHudPanel(panel.key, panel.tag, accent);
+        el.querySelector('.hud-title').textContent = panel.title;
+        (panel.group === 'identity' ? ovLeft : ovRight).appendChild(el);
+        mountPanel(panel.key, null, bodyEl, defaultPaint);
       }
     }
+    mountPanel('memory', null, document.getElementById('ov-graph-mount'), (bodyEl, value) => {
+      bodyEl.appendChild(renderGraph(value, 300));
+      const meta = document.getElementById('ov-graph-stats');
+      if (looksLikeGraph(value)) meta.textContent = `${value.nodes.length} nodes · ${value.edges.length} links`;
+    });
+    mountPanel('facts', null, document.getElementById('ov-facts-mount'), (bodyEl, value) => {
+      bodyEl.appendChild(render(value));
+      document.getElementById('ov-facts-count').textContent = Array.isArray(value) ? `${value.length} indexed` : '';
+    });
 
-    const tracePanel = document.createElement('div');
-    tracePanel.className = 'panel trace-panel';
-    tracePanel.innerHTML = '<h2>📡 Live Trace <small id="trace-meta">connecting&hellip;</small></h2><pre id="trace-log" class="raw"></pre>';
-    panelsEl.appendChild(tracePanel);
-    const traceLog = document.getElementById('trace-log');
-    const traceMeta = document.getElementById('trace-meta');
-
-    function setStatus(text, isError) {
-      statusEl.textContent = text;
-      statusEl.className = isError ? 'status error' : 'status';
+    // ── Memory tab: full graph + derived stats (all real, computed from
+    // the same live graph payload — connected components for "clusters",
+    // degree-zero fact nodes for "orphans", edge.type grouping for link
+    // types). No numbers here are invented. ─────────────────────────────
+    function countConnectedComponents(nodes, edges) {
+      const adjacency = new Map(nodes.map((n) => [n.id, []]));
+      for (const e of edges) {
+        if (adjacency.has(e.source) && adjacency.has(e.target)) {
+          adjacency.get(e.source).push(e.target);
+          adjacency.get(e.target).push(e.source);
+        }
+      }
+      const seen = new Set();
+      let components = 0;
+      for (const n of nodes) {
+        if (seen.has(n.id)) continue;
+        components++;
+        const stack = [n.id];
+        while (stack.length) {
+          const id = stack.pop();
+          if (seen.has(id)) continue;
+          seen.add(id);
+          for (const next of adjacency.get(id) || []) if (!seen.has(next)) stack.push(next);
+        }
+      }
+      return components;
     }
+    function statTile(label, value, delta, accent) {
+      const el = document.createElement('div');
+      el.className = 'stat-tile';
+      if (accent) el.style.setProperty('--hud-accent', accent);
+      el.innerHTML = `<div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(value)}</div><div class="stat-delta">${escapeHtml(delta || '')}</div>`;
+      return el;
+    }
+    mountPanel('memory', null, document.getElementById('mem-graph-mount'), (bodyEl, value) => {
+      bodyEl.appendChild(renderGraph(value, 520));
+    });
+    mountPanel('memory', null, document.getElementById('mem-stats'), (bodyEl, value) => {
+      if (!looksLikeGraph(value)) { bodyEl.appendChild(render(value)); return; }
+      const degree = new Map();
+      for (const e of value.edges) {
+        degree.set(e.source, (degree.get(e.source) || 0) + 1);
+        degree.set(e.target, (degree.get(e.target) || 0) + 1);
+      }
+      const orphanFacts = value.nodes.filter((n) => n.type !== 'entity' && !degree.get(n.id)).length;
+      const clusters = countConnectedComponents(value.nodes, value.edges);
+      bodyEl.append(
+        statTile('nodes', String(value.nodes.length), 'facts + entities', 'var(--cyan)'),
+        statTile('links', String(value.edges.length), 'relations', 'var(--cyan)'),
+        statTile('clusters', String(clusters), 'connected components', 'var(--violet)'),
+        statTile('orphan facts', String(orphanFacts), 'no linked entity', 'var(--amber)'),
+      );
+    });
+    mountPanel('memory', null, document.getElementById('mem-entities'), (bodyEl, value) => {
+      if (!looksLikeGraph(value)) { bodyEl.appendChild(render(value)); return; }
+      const degree = new Map();
+      for (const e of value.edges) {
+        degree.set(e.source, (degree.get(e.source) || 0) + 1);
+        degree.set(e.target, (degree.get(e.target) || 0) + 1);
+      }
+      const table = document.createElement('table');
+      table.className = 'kv';
+      const entities = value.nodes.filter((n) => n.type === 'entity')
+        .sort((a, b) => (degree.get(b.id) || 0) - (degree.get(a.id) || 0)).slice(0, 12);
+      if (entities.length === 0) { bodyEl.innerHTML = '<p class="hud-empty">no signal</p>'; return; }
+      for (const en of entities) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td style="padding:.28rem 0;color:#c3cbdb">${escapeHtml(en.label || en.id)}</td><td style="padding:.28rem 0;color:var(--text-dim);text-align:right">${degree.get(en.id) || 0} links</td>`;
+        table.appendChild(tr);
+      }
+      bodyEl.appendChild(table);
+    });
+    mountPanel('memory', null, document.getElementById('mem-linktypes'), (bodyEl, value) => {
+      if (!looksLikeGraph(value)) { bodyEl.appendChild(render(value)); return; }
+      const counts = new Map();
+      for (const e of value.edges) {
+        const t = e.type || 'related';
+        counts.set(t, (counts.get(t) || 0) + 1);
+      }
+      const total = value.edges.length || 1;
+      const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+      if (rows.length === 0) { bodyEl.innerHTML = '<p class="hud-empty">no signal</p>'; return; }
+      for (const [label, count] of rows) {
+        const row = document.createElement('div');
+        row.className = 'meter-row';
+        const pct = Math.round((count / total) * 100) + '%';
+        row.innerHTML = `<div class="meter-row-head"><span>${escapeHtml(label)}</span><span>${count}</span></div><div class="meter-track"><div class="meter-fill" style="width:${pct}"></div></div>`;
+        bodyEl.appendChild(row);
+      }
+    });
+
+    // ── Facts tab: full table + honest stat tiles (total / distinct
+    // networks / average confidence / forgotten — every one of these comes
+    // straight off the fetched fact records, nothing invented). ─────────
+    mountPanel('facts', null, document.getElementById('facts-table-mount'), defaultPaint);
+    mountPanel('facts', null, document.getElementById('facts-stats'), (bodyEl, value) => {
+      if (!Array.isArray(value)) { bodyEl.appendChild(render(value)); return; }
+      const networks = new Set(value.map((f) => f.network).filter(Boolean));
+      const confidences = value.map((f) => Number(f.confidence)).filter((n) => !isNaN(n));
+      const avgConfidence = confidences.length ? (confidences.reduce((a, b) => a + b, 0) / confidences.length) : null;
+      const forgotten = value.filter((f) => f.status === 'revoked' || f.status === 'forgotten').length;
+      bodyEl.append(
+        statTile('total facts', String(value.length), networks.size ? `across ${networks.size} network${networks.size === 1 ? '' : 's'}` : '', 'var(--amber)'),
+        statTile('avg confidence', avgConfidence === null ? '—' : avgConfidence.toFixed(2), confidences.length ? `${confidences.length} scored` : 'no data', 'var(--amber)'),
+        statTile('networks', String(networks.size), [...networks].slice(0, 3).join(', '), 'var(--amber)'),
+        statTile('forgotten', String(forgotten), 'retained in history', 'var(--red)'),
+      );
+    });
+    mountPanel('contradictions', null, document.getElementById('facts-contradictions'), defaultPaint);
+    mountPanel('learnings', null, document.getElementById('facts-learnings'), defaultPaint);
+
+    // ── Agents tab ───────────────────────────────────────────────────────
+    mountPanel('agents', null, document.getElementById('agt-agents-mount'), defaultPaint);
+    mountPanel('tool_operations', null, document.getElementById('agt-tools-mount'), defaultPaint);
+    mountPanel('routing', null, document.getElementById('agt-routing-mount'), defaultPaint);
+    for (const key of ['plugins', 'skills', 'hooks']) {
+      const panel = PANELS.find((p) => p.key === key);
+      const { el, bodyEl } = makeHudPanel(panel.key, panel.tag, 'var(--cyan)');
+      el.querySelector('.hud-title').textContent = panel.title;
+      document.getElementById('agt-right').appendChild(el);
+      mountPanel(panel.key, null, bodyEl, defaultPaint);
+    }
+
+    // ── System tab: real service-mesh entries (status/version/uptime,
+    // freshly probed by memory-intelligence's /v1/dashboard/system — not
+    // simulated), plus the remaining identity panels. ───────────────────
+    const STATUS_DOT = { healthy: 'var(--green)', degraded: 'var(--amber)', unreachable: 'var(--red)' };
+    mountPanel('system', null, document.getElementById('sys-services'), (bodyEl, value) => {
+      const entries = Array.isArray(value && value.entries) ? value.entries : (Array.isArray(value) ? value : null);
+      if (!entries) { bodyEl.appendChild(render(value)); return; }
+      document.getElementById('sys-service-count').textContent = `${entries.length} governed service${entries.length === 1 ? '' : 's'}`;
+      for (const svc of entries) {
+        const chip = document.createElement('div');
+        chip.className = 'service-chip';
+        const dot = STATUS_DOT[svc.status] || 'var(--text-faint)';
+        chip.innerHTML = `<span class="service-dot" style="background:${dot};box-shadow:0 0 8px ${dot}"></span><span class="service-name">${escapeHtml(svc.service || '?')}</span><span class="service-meta">${escapeHtml(svc.version || '')}${svc.uptime ? ' · ' + escapeHtml(svc.uptime) : ''}</span>`;
+        bodyEl.appendChild(chip);
+      }
+    });
+    for (const key of ['user_model', 'code_intelligence', 'recovery', 'security']) {
+      const panel = PANELS.find((p) => p.key === key);
+      const { el, bodyEl } = makeHudPanel(panel.key, panel.tag, 'var(--violet)');
+      el.querySelector('.hud-title').textContent = panel.title;
+      document.getElementById('sys-panels').appendChild(el);
+      mountPanel(panel.key, null, bodyEl, defaultPaint);
+    }
+
+    // ── Flow tab ─────────────────────────────────────────────────────────
+    mountPanel('token_flow', null, document.getElementById('flow-tokens-mount'), defaultPaint);
+    mountPanel('costs', null, document.getElementById('flow-costs-mount'), defaultPaint);
+    mountPanel('timeline', null, document.getElementById('flow-timeline-mount'), defaultPaint);
+
+    function paintPanel(key) { paintAllMounts(key); }
 
     async function refreshSnapshot() {
       const response = await fetch(snapshotEndpoint, { credentials: 'same-origin' });
@@ -825,35 +1233,58 @@
       const payload = await response.json();
       const views = payload.views || {};
       const unavailable = payload.unavailable || {};
+      let anyUnavailable = false;
       for (const panel of PANELS) {
         const state = panelState.get(panel.key);
         if (panel.key in views) {
           state.lastValue = views[panel.key];
-          state.metaEl.textContent = '';
-          paintPanel(state);
         } else {
           state.lastValue = null;
-          state.body.innerHTML = `<p class="missing">${escapeHtml(unavailable[panel.key] ? `unavailable: ${unavailable[panel.key]}` : 'no data reported')}</p>`;
-          state.metaEl.textContent = 'unavailable';
+          anyUnavailable = true;
+        }
+        for (const mount of state.mounts) {
+          if (state.lastValue === null) {
+            mount.bodyEl.innerHTML = `<p class="missing">${escapeHtml(unavailable[panel.key] ? `unavailable: ${unavailable[panel.key]}` : 'no data reported')}</p>`;
+          } else {
+            paintMount(state, mount);
+          }
         }
       }
-      setStatus(`Live projection refreshed ${new Date().toISOString()}`, false);
+      statusPill.classList.remove('error');
+      statusText.textContent = `refreshed ${new Date().toISOString()}`;
+      if (anyUnavailable) statusText.textContent += ' (partial)';
     }
 
+    function setStatusError(message) {
+      statusPill.classList.add('error');
+      statusText.textContent = message;
+    }
+
+    // ── live trace (SSE) → both the Flow tab's full log and the sticky
+    // bottom marquee, from the same real event stream. ──────────────────
+    const traceLog = document.getElementById('flow-trace-log');
+    const marqueeLabel = document.getElementById('marquee-label');
+    const marqueeScroll = document.getElementById('marquee-scroll');
+    const traceBuffer = [];
+
     function appendTraceLine(eventName, data) {
+      const ts = new Date().toISOString();
+      traceBuffer.push(`[${ts}] ${eventName} ${data}`);
+      while (traceBuffer.length > 200) traceBuffer.shift();
+
       const line = document.createElement('div');
-      line.className = 'trace-line';
-      line.textContent = `[${new Date().toISOString()}] `;
-      const eventLabel = document.createElement('span');
-      eventLabel.className = 'event';
-      eventLabel.textContent = eventName;
-      line.appendChild(eventLabel);
-      line.append(' ' + data);
+      line.textContent = `[${ts}] ${eventName} ${data}`;
       traceLog.appendChild(line);
-      while (traceLog.childElementCount > 200) {
-        traceLog.removeChild(traceLog.firstChild);
-      }
+      while (traceLog.childElementCount > 200) traceLog.removeChild(traceLog.firstChild);
       traceLog.scrollTop = traceLog.scrollHeight;
+
+      const recent = traceBuffer.slice(-12).join('   //   ');
+      marqueeScroll.textContent = recent + '   //   ' + recent;
+
+      // A live trace event about a fact touches the same data the Facts
+      // panel shows -- keep it in sync instead of waiting for the next
+      // 15s poll.
+      if (/fact/i.test(eventName)) refreshSnapshot().catch(() => {});
     }
 
     // The stream endpoint is public like every other transparency route
@@ -872,7 +1303,7 @@
 
     async function connectTrace() {
       if (typeof fetch === 'undefined' || !window.ReadableStream) {
-        traceMeta.textContent = 'unsupported by this browser';
+        marqueeScroll.textContent = 'unsupported by this browser';
         return;
       }
       try {
@@ -881,8 +1312,7 @@
           throw new Error('unauthorized');
         }
         if (!response.ok || !response.body) throw new Error(`stream returned ${response.status}`);
-        traceMeta.textContent = 'connected';
-        traceMeta.classList.add('live');
+        marqueeLabel.classList.add('live');
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -897,24 +1327,20 @@
             if (!frame.trim()) continue;
             const { eventName, data } = parseSSEFrame(frame);
             appendTraceLine(eventName, data);
-            // A live trace event about a fact touches the same data the
-            // Facts panel shows -- keep it in sync instead of waiting for
-            // the next 15s poll.
-            if (/fact/i.test(eventName)) refreshSnapshot().catch(() => {});
           }
         }
         throw new Error('stream closed');
       } catch (error) {
-        traceMeta.classList.remove('live');
-        traceMeta.textContent = `reconnecting… (${error.message})`;
+        marqueeLabel.classList.remove('live');
+        marqueeScroll.textContent = `reconnecting… (${error.message})`;
       } finally {
         setTimeout(connectTrace, 5000);
       }
     }
 
     renderEditState();
-    refreshSnapshot().catch((error) => setStatus(`Projection unavailable: ${error.message}`, true));
-    setInterval(() => refreshSnapshot().catch((error) => setStatus(`Projection unavailable: ${error.message}`, true)), 15000);
+    refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`));
+    setInterval(() => refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`)), 15000);
     connectTrace();
   </script>
 </body>
