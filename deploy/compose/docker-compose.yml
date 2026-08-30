@@ -836,6 +836,10 @@ services:
       - ../../tls-external:/etc/scos/tls-external:ro
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8098:8098"
+    networks:
+      default:
+        aliases:
+          - scos.172.236.155.15.nip.io
     depends_on:
       tls-certs:
         condition: service_completed_successfully
