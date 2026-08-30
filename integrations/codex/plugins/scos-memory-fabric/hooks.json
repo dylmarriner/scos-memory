@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"SCOS Memory Fabric plugin is active (stdio bridge to hermes-provider). Before answering questions that depend on prior sessions or stated preferences, call scos_recall first instead of assuming. scos_status/scos_explain/scos_user_model/scos_memory_graph are read-only and safe to call freely. scos_correct and scos_forget mutate stored memory - always confirm the exact memory_id with the user before attempting either.\"}}'"
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"SCOS Memory Fabric plugin is active (stdio bridge to the Linode MCP gateway, https://scos.172.236.155.15.nip.io/mcp). Before answering questions that depend on prior sessions or stated preferences, call scos_recall first instead of assuming. scos_status/scos_explain/scos_user_model/scos_memory_graph are read-only and safe to call freely. scos_correct and scos_forget mutate stored memory - always confirm the exact memory_id with the user before attempting either.\"}}'"
           }
         ]
       }

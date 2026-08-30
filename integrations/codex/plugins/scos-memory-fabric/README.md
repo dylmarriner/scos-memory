@@ -2,18 +2,20 @@
 
 Wires Codex CLI to the SCOS Memory Fabric via a bundled, self-contained
 stdio bridge (`scripts/scos-mcp-bridge.py`, a copy of
-`~/.hermes/scripts/scos-mcp-bridge.py`) that talks directly to
-`hermes-provider` on kubuntux and `code-intelligence` on :8084 — see
-`docs/agent-connection-guide.md` §1/§3.
+`~/.hermes/scripts/scos-mcp-bridge.py`) that relays to the public MCP
+gateway on the Linode VPS — `https://scos.172.236.155.15.nip.io/mcp`
+(account API key `scos_live_*`, 146 governed tools).
 
 Codex plugin `.mcp.json` entries (unlike Claude Code's) weren't confirmed to
 support templating a bearer token into `headers` from a per-install
 config prompt, so this follows the same pattern as the existing manual
 Codex setup and the bundled Python bridge: it reads
-`SCOS_HERMES_PROVIDER_URL` / `SCOS_HERMES_BEARER_TOKEN` / `SCOS_TENANT_ID` /
-`SCOS_PRINCIPAL_ID` / `SCOS_CONTROL_PLANE_TOKEN` / `SCOS_CODE_INTELLIGENCE_URL`
+`SCOS_GATEWAY_URL` / `SCOS_BEARER_TOKEN` / `SCOS_TENANT_ID` /
+`SCOS_PRINCIPAL_ID` / `SCOS_TLS_CA_PATH`
 from `~/.hermes/scos.env` on the machine it runs on,
-same as every other agent on this fleet.
+same as every other agent on this fleet. The bridge's baked-in defaults
+point at the Linode gateway and Dylan's workspace identity
+(tenant 8e2edc7a-..., principal 6a11c3f9-...).
 
 Tools exposed once connected: `scos_recall`, `scos_status`, `scos_explain`,
 `scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget`

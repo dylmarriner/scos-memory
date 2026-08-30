@@ -375,6 +375,102 @@
         </div>
       </div>
     </section>
+
+    <section class="tab-panel" data-tab="account" id="tab-account" hidden>
+      <div id="acct-signed-out" class="glass-card violet" style="max-width:420px">
+        <div class="card-title violet" style="margin-bottom:.7rem">Sign in</div>
+        <div id="acct-tabs" style="display:flex;gap:.4rem;margin-bottom:.9rem">
+          <button id="acct-tab-signup" class="tab-btn" type="button" aria-current="true" style="flex:1">create account</button>
+          <button id="acct-tab-login" class="tab-btn" type="button" style="flex:1">sign in</button>
+        </div>
+        <div id="acct-signup-form">
+          <label style="display:block;font-size:.72rem;color:var(--text-dim);margin:.5rem 0 .25rem;text-transform:uppercase;letter-spacing:.05em">Full name</label>
+          <input type="text" id="su-name" placeholder="Ada Lovelace" style="width:100%;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.5rem .6rem;font:inherit;box-sizing:border-box">
+          <label style="display:block;font-size:.72rem;color:var(--text-dim);margin:.5rem 0 .25rem;text-transform:uppercase;letter-spacing:.05em">Email</label>
+          <input type="email" id="su-email" placeholder="you@example.com" style="width:100%;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.5rem .6rem;font:inherit;box-sizing:border-box">
+          <label style="display:block;font-size:.72rem;color:var(--text-dim);margin:.5rem 0 .25rem;text-transform:uppercase;letter-spacing:.05em">Password (12+ characters)</label>
+          <input type="password" id="su-password" style="width:100%;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.5rem .6rem;font:inherit;box-sizing:border-box">
+          <button id="su-submit" class="primary" style="width:100%;margin-top:.8rem">create account</button>
+        </div>
+        <div id="acct-login-form" hidden>
+          <label style="display:block;font-size:.72rem;color:var(--text-dim);margin:.5rem 0 .25rem;text-transform:uppercase;letter-spacing:.05em">Email</label>
+          <input type="email" id="li-email" placeholder="you@example.com" style="width:100%;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.5rem .6rem;font:inherit;box-sizing:border-box">
+          <label style="display:block;font-size:.72rem;color:var(--text-dim);margin:.5rem 0 .25rem;text-transform:uppercase;letter-spacing:.05em">Password</label>
+          <input type="password" id="li-password" style="width:100%;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.5rem .6rem;font:inherit;box-sizing:border-box">
+          <button id="li-submit" class="primary" style="width:100%;margin-top:.8rem">sign in</button>
+        </div>
+        <div class="dialog-error" id="acct-auth-error"></div>
+      </div>
+
+      <div id="acct-signed-in" hidden>
+        <div class="pill" style="margin-bottom:1rem">
+          <span class="pill-dot"></span><span id="acct-welcome"></span>
+          <button id="acct-logout" class="small" style="margin-left:.6rem">sign out</button>
+        </div>
+        <div class="stat-grid" id="acct-usage-stats"></div>
+        <div style="margin-top:1rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:.85rem">
+          <div class="hud-panel" style="--hud-accent:var(--cyan)">
+            <div class="hud-panel-head"><span class="hud-tag">BIL</span><span class="hud-title">Billing</span></div>
+            <div id="acct-billing"></div>
+          </div>
+          <div class="hud-panel" style="--hud-accent:var(--violet)">
+            <div class="hud-panel-head"><span class="hud-tag">PLN</span><span class="hud-title">Plans</span></div>
+            <div id="acct-plans"></div>
+          </div>
+          <div class="hud-panel" style="--hud-accent:var(--green)">
+            <div class="hud-panel-head"><span class="hud-tag">SET</span><span class="hud-title">Settings</span></div>
+            <label style="display:block;font-size:.68rem;color:var(--text-dim);margin:.2rem 0 .25rem;text-transform:uppercase">Display name</label>
+            <div style="display:flex;gap:.4rem">
+              <input type="text" id="set-display-name" style="flex:1;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.4rem .55rem;font:inherit">
+              <button id="set-save" class="small">save</button>
+            </div>
+            <div class="dialog-error" id="acct-settings-error"></div>
+          </div>
+        </div>
+        <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start">
+          <div class="glass-card cyan">
+            <div class="card-title cyan" style="margin-bottom:.6rem">API Keys</div>
+            <div style="display:flex;gap:.4rem;margin-bottom:.6rem">
+              <input type="text" id="key-name" placeholder="key name, e.g. laptop-agent" style="flex:1;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.4rem .55rem;font:inherit">
+              <button id="key-create" class="primary small">create</button>
+            </div>
+            <div class="dialog-error" id="acct-key-error"></div>
+            <pre class="raw" id="acct-key-out" style="display:none"></pre>
+            <div class="panel-body" id="acct-keys-list"></div>
+          </div>
+          <div class="glass-card violet">
+            <div class="card-title violet" style="margin-bottom:.6rem">Teams</div>
+            <div style="display:flex;gap:.4rem;margin-bottom:.6rem">
+              <input type="text" id="team-name" placeholder="team name" style="flex:1;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.4rem .55rem;font:inherit">
+              <button id="team-create" class="primary small">create</button>
+            </div>
+            <div class="dialog-error" id="acct-team-error"></div>
+            <div class="panel-body" id="acct-teams-list"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-tab="admin" id="tab-admin" hidden>
+      <div class="stat-grid" id="admin-overview-stats"></div>
+      <div class="glass-card violet" style="margin-top:1rem">
+        <div class="card-head">
+          <div class="card-title violet">Users</div>
+          <input type="text" id="admin-user-search" placeholder="search email / name&hellip;" style="background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.35rem .6rem;font:inherit;font-size:.78rem">
+        </div>
+        <div class="panel-body" id="admin-users-table" style="max-height:none"></div>
+      </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:1rem;align-items:start">
+        <div class="glass-card amber">
+          <div class="card-title amber" style="margin-bottom:.6rem">Audit Log</div>
+          <div class="panel-body" id="admin-audit-log"></div>
+        </div>
+        <div class="hud-panel" style="--hud-accent:var(--red)">
+          <div class="hud-panel-head"><span class="hud-tag">SYS</span><span class="hud-title">Platform Overview</span></div>
+          <div id="admin-overview-kv"></div>
+        </div>
+      </div>
+    </section>
   </div>
 
   <div class="marquee-bar">
@@ -1041,6 +1137,8 @@
       { id: 'agents',   label: 'Agents' },
       { id: 'system',   label: 'System' },
       { id: 'flow',     label: 'Flow' },
+      { id: 'account',  label: 'Account' },
+      { id: 'admin',    label: 'Admin', creatorOnly: true },
     ];
     const tabsEl = document.getElementById('tabs');
     let currentTab = 'overview';
@@ -1056,6 +1154,7 @@
       btn.dataset.tab = tab.id;
       btn.textContent = tab.label;
       btn.setAttribute('role', 'tab');
+      if (tab.creatorOnly) btn.hidden = true;
       btn.addEventListener('click', () => setTab(tab.id));
       tabsEl.appendChild(btn);
     }
@@ -1391,10 +1490,267 @@
       }
     }
 
+    // ── Account / Admin: real per-user auth against cloud-control-plane,
+    // proxied same-origin at /api/* so its HttpOnly session cookie works.
+    // Everything here is a genuine authenticated call -- no fabricated
+    // billing/plan/team data, same rule as every other panel. ────────────
+    let session = null; // null = unknown/signed-out; object = /api/me response
+
+    async function apiFetch(path, opts) {
+      const resp = await fetch(path, Object.assign({ credentials: 'include', headers: { 'Content-Type': 'application/json' } }, opts || {}));
+      const text = await resp.text();
+      let body = {};
+      try { body = text ? JSON.parse(text) : {}; } catch (e) { /* non-JSON error page */ }
+      if (!resp.ok) throw new Error(body.error || text || `${resp.status} ${resp.statusText}`);
+      return body;
+    }
+
+    function renderAccountState() {
+      const signedOut = document.getElementById('acct-signed-out');
+      const signedIn = document.getElementById('acct-signed-in');
+      const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]');
+      if (session) {
+        signedOut.hidden = true;
+        signedIn.hidden = false;
+        document.getElementById('acct-welcome').textContent = `${session.display_name} · ${session.email} · ${session.platform_role}`;
+        if (adminBtn) adminBtn.hidden = session.platform_role !== 'creator';
+        loadAccountData();
+      } else {
+        signedOut.hidden = false;
+        signedIn.hidden = true;
+        if (adminBtn) adminBtn.hidden = true;
+      }
+    }
+
+    async function checkSession() {
+      try {
+        session = await apiFetch('/api/me');
+      } catch (e) {
+        session = null;
+      }
+      renderAccountState();
+    }
+
+    document.getElementById('acct-tab-signup').addEventListener('click', () => {
+      document.getElementById('acct-tab-signup').setAttribute('aria-current', 'true');
+      document.getElementById('acct-tab-login').setAttribute('aria-current', 'false');
+      document.getElementById('acct-signup-form').hidden = false;
+      document.getElementById('acct-login-form').hidden = true;
+    });
+    document.getElementById('acct-tab-login').addEventListener('click', () => {
+      document.getElementById('acct-tab-login').setAttribute('aria-current', 'true');
+      document.getElementById('acct-tab-signup').setAttribute('aria-current', 'false');
+      document.getElementById('acct-login-form').hidden = false;
+      document.getElementById('acct-signup-form').hidden = true;
+    });
+    document.getElementById('su-submit').addEventListener('click', async () => {
+      const errEl = document.getElementById('acct-auth-error');
+      errEl.textContent = '';
+      try {
+        await apiFetch('/api/auth/signup', { method: 'POST', body: JSON.stringify({
+          display_name: document.getElementById('su-name').value,
+          email: document.getElementById('su-email').value,
+          password: document.getElementById('su-password').value,
+        }) });
+        await checkSession();
+      } catch (error) { errEl.textContent = error.message; }
+    });
+    document.getElementById('li-submit').addEventListener('click', async () => {
+      const errEl = document.getElementById('acct-auth-error');
+      errEl.textContent = '';
+      try {
+        await apiFetch('/api/auth/login', { method: 'POST', body: JSON.stringify({
+          email: document.getElementById('li-email').value,
+          password: document.getElementById('li-password').value,
+        }) });
+        await checkSession();
+      } catch (error) { errEl.textContent = error.message; }
+    });
+    document.getElementById('acct-logout').addEventListener('click', async () => {
+      await apiFetch('/api/auth/logout', { method: 'POST', body: '{}' }).catch(() => {});
+      session = null;
+      renderAccountState();
+    });
+
+    async function loadAccountData() {
+      // Usage
+      try {
+        const u = await apiFetch('/api/usage');
+        const el = document.getElementById('acct-usage-stats');
+        el.innerHTML = '';
+        el.append(
+          statTile('api requests', String(u.api_requests), 'all time', 'var(--cyan)'),
+          statTile('memory reads', String(u.memory_reads), '', 'var(--cyan)'),
+          statTile('memory writes', String(u.memory_writes), '', 'var(--cyan)'),
+          statTile('bytes stored', String(u.bytes_stored), '', 'var(--cyan)'),
+        );
+      } catch (error) { document.getElementById('acct-usage-stats').innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
+
+      // Billing
+      try {
+        const b = await apiFetch('/api/billing');
+        document.getElementById('acct-billing').innerHTML = '';
+        document.getElementById('acct-billing').appendChild(render(b));
+      } catch (error) { document.getElementById('acct-billing').innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
+
+      // Plans (public, but shown here for the logged-in context)
+      try {
+        const plans = await apiFetch('/api/plans');
+        document.getElementById('acct-plans').innerHTML = '';
+        document.getElementById('acct-plans').appendChild(render(plans));
+      } catch (error) { document.getElementById('acct-plans').innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
+
+      // Settings prefill
+      document.getElementById('set-display-name').value = session.display_name || '';
+
+      await loadKeys();
+      await loadTeams();
+    }
+
+    document.getElementById('set-save').addEventListener('click', async () => {
+      const errEl = document.getElementById('acct-settings-error');
+      errEl.textContent = '';
+      try {
+        await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ display_name: document.getElementById('set-display-name').value }) });
+        await checkSession();
+      } catch (error) { errEl.textContent = error.message; }
+    });
+
+    async function loadKeys() {
+      const list = document.getElementById('acct-keys-list');
+      try {
+        const keys = await apiFetch('/api/keys');
+        list.innerHTML = '';
+        if (!keys.length) { list.innerHTML = '<p class="missing">no API keys yet</p>'; return; }
+        for (const k of keys) {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:.78rem';
+          row.innerHTML = `<span>${escapeHtml(k.name)} <span style="color:var(--text-faint)">${escapeHtml(k.prefix)}&hellip;</span></span>`;
+          const revokeBtn = document.createElement('button');
+          revokeBtn.className = 'small danger'; revokeBtn.textContent = 'revoke';
+          revokeBtn.addEventListener('click', async () => {
+            try { await apiFetch('/api/keys/revoke', { method: 'POST', body: JSON.stringify({ id: k.id }) }); await loadKeys(); }
+            catch (error) { document.getElementById('acct-key-error').textContent = error.message; }
+          });
+          row.appendChild(revokeBtn);
+          list.appendChild(row);
+        }
+      } catch (error) { list.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
+    }
+    document.getElementById('key-create').addEventListener('click', async () => {
+      const errEl = document.getElementById('acct-key-error');
+      const out = document.getElementById('acct-key-out');
+      errEl.textContent = ''; out.style.display = 'none';
+      const name = document.getElementById('key-name').value.trim();
+      if (!name) { errEl.textContent = 'name is required'; return; }
+      try {
+        const created = await apiFetch('/api/keys', { method: 'POST', body: JSON.stringify({ name }) });
+        out.style.display = 'block';
+        out.textContent = `${created.key}\n\n${created.warning}`;
+        document.getElementById('key-name').value = '';
+        await loadKeys();
+      } catch (error) { errEl.textContent = error.message; }
+    });
+
+    async function loadTeams() {
+      const list = document.getElementById('acct-teams-list');
+      try {
+        const teams = await apiFetch('/api/teams');
+        list.innerHTML = '';
+        if (!teams.length) { list.innerHTML = '<p class="missing">no teams yet</p>'; return; }
+        for (const t of teams) {
+          const row = document.createElement('div');
+          row.style.cssText = 'padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:.78rem';
+          row.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><span>${escapeHtml(t.name)}</span><span style="color:var(--text-faint)">${escapeHtml(t.role || '')}</span></div>`;
+          list.appendChild(row);
+        }
+      } catch (error) { list.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
+    }
+    document.getElementById('team-create').addEventListener('click', async () => {
+      const errEl = document.getElementById('acct-team-error');
+      errEl.textContent = '';
+      const name = document.getElementById('team-name').value.trim();
+      if (!name) { errEl.textContent = 'name is required'; return; }
+      try {
+        await apiFetch('/api/teams/create', { method: 'POST', body: JSON.stringify({ name }) });
+        document.getElementById('team-name').value = '';
+        await loadTeams();
+      } catch (error) { errEl.textContent = error.message; }
+    });
+
+    // ── Admin (creator role only) ───────────────────────────────────────
+    async function loadAdminData() {
+      try {
+        const overview = await apiFetch('/api/admin/overview');
+        const el = document.getElementById('admin-overview-stats');
+        el.innerHTML = '';
+        el.append(
+          statTile('users', String(overview.users), '', 'var(--violet)'),
+          statTile('tenants', String(overview.tenants), '', 'var(--violet)'),
+          statTile('active api keys', String(overview.active_api_keys), '', 'var(--violet)'),
+        );
+        document.getElementById('admin-overview-kv').innerHTML = '';
+        document.getElementById('admin-overview-kv').appendChild(render(overview));
+      } catch (error) {
+        document.getElementById('admin-overview-stats').innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`;
+      }
+      await loadAdminUsers();
+      try {
+        const audit = await apiFetch('/api/admin/audit');
+        document.getElementById('admin-audit-log').innerHTML = '';
+        document.getElementById('admin-audit-log').appendChild(render(audit));
+      } catch (error) {
+        document.getElementById('admin-audit-log').innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`;
+      }
+    }
+    async function loadAdminUsers() {
+      const q = document.getElementById('admin-user-search').value.trim();
+      const table = document.getElementById('admin-users-table');
+      try {
+        const users = await apiFetch('/api/admin/users' + (q ? `?q=${encodeURIComponent(q)}` : ''));
+        table.innerHTML = '';
+        if (!users.length) { table.innerHTML = '<p class="missing">no users</p>'; return; }
+        const wrap = document.createElement('table');
+        wrap.className = 'records';
+        wrap.innerHTML = '<thead><tr><th>email</th><th>name</th><th>role</th><th>plan</th><th>status</th><th>actions</th></tr></thead>';
+        const tbody = document.createElement('tbody');
+        for (const u of users) {
+          const tr = document.createElement('tr');
+          const actions = document.createElement('td');
+          const roleBtn = document.createElement('button');
+          roleBtn.className = 'small'; roleBtn.textContent = u.platform_role === 'creator' ? 'make user' : 'make creator';
+          roleBtn.addEventListener('click', async () => {
+            try { await apiFetch('/api/admin/set-role', { method: 'POST', body: JSON.stringify({ user_id: u.id, role: u.platform_role === 'creator' ? 'user' : 'creator' }) }); await loadAdminUsers(); }
+            catch (error) { alert(error.message); }
+          });
+          actions.appendChild(roleBtn);
+          tr.innerHTML = `<td>${escapeHtml(u.email)}</td><td>${escapeHtml(u.display_name)}</td><td>${escapeHtml(u.platform_role)}</td><td>${escapeHtml(u.plan)}</td><td>${escapeHtml(u.status)}</td>`;
+          tr.appendChild(actions);
+          tbody.appendChild(tr);
+        }
+        wrap.appendChild(tbody);
+        table.appendChild(wrap);
+      } catch (error) { table.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
+    }
+    document.getElementById('admin-user-search').addEventListener('input', () => {
+      clearTimeout(window.__adminSearchDebounce);
+      window.__adminSearchDebounce = setTimeout(loadAdminUsers, 350);
+    });
+
+    // Lazy-load account/admin data the first time their tab is opened,
+    // rather than on every page load before anyone has signed in.
+    const originalSetTab = setTab;
+    setTab = function (id) {
+      originalSetTab(id);
+      if (id === 'account' && session) loadAccountData();
+      if (id === 'admin' && session && session.platform_role === 'creator') loadAdminData();
+    };
+
     renderEditState();
     refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`));
     setInterval(() => refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`)), 15000);
     connectTrace();
+    checkSession();
   </script>
 </body>
 </html>

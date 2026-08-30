@@ -128,7 +128,6 @@ func main() {
 	mux.HandleFunc("/api/okf/documents", s.okfDocuments)
 	mux.HandleFunc("/api/graphify/query", s.graphifyQuery)
 	mux.HandleFunc("/api/graphify/explain", s.graphifyExplain)
-	mux.HandleFunc("/", portal)
 	mux.HandleFunc("/admin", adminPortal)
 	mux.HandleFunc("/api/teams", s.teams)
 	mux.HandleFunc("/api/teams/create", s.createTeam)

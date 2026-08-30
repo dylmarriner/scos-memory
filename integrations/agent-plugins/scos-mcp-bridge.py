@@ -38,8 +38,8 @@ ENV_PATH = os.path.expanduser("~/.hermes/scos.env")
 
 DEFAULTS = {
     "SCOS_GATEWAY_URL": "https://scos.172.236.155.15.nip.io/mcp",
-    "SCOS_TENANT_ID": "11111111-2222-3333-4444-555555555555",
-    "SCOS_PRINCIPAL_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "SCOS_TENANT_ID": "8e2edc7a-60f6-4841-8837-a99ea5b9cedf",
+    "SCOS_PRINCIPAL_ID": "6a11c3f9-58f4-41f3-a1c7-cccdf6275b70",
     "SCOS_TLS_CA_PATH": os.path.expanduser("~/.hermes/scos-ca.crt"),
 }
 

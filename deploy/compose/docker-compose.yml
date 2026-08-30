@@ -1068,6 +1068,8 @@ services:
     restart: unless-stopped
     environment:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_SERVICE_TENANT_ID: ${SCOS_SERVICE_TENANT_ID:-8e2edc7a-60f6-4841-8837-a99ea5b9cedf}
+      SCOS_SERVICE_PRINCIPAL_ID: ${SCOS_SERVICE_PRINCIPAL_ID:-6a11c3f9-58f4-41f3-a1c7-cccdf6275b70}
       SCOS_TRANSPARENCY_HTTP_ADDR: ${SCOS_TRANSPARENCY_HTTP_ADDR:-:8097}
       SCOS_DASHBOARD_EDIT_PASSPHRASE: ${SCOS_DASHBOARD_EDIT_PASSPHRASE:-}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
