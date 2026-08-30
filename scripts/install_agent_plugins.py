@@ -88,6 +88,7 @@ def install(skip_gemini: bool = False) -> None:
         run(["gemini", "extensions", "link", str(ROOT / "integrations/agent-plugins/gemini")])
 
     # MCP-capable agents: preserve each host's native config shape.
+    merge_json(HOME / ".copilot" / "mcp-config.json", "mcpServers", "scos", server("copilot"))
     merge_json(HOME / ".cline" / "mcp.json", "mcpServers", "scos", server("cline"))
     merge_json(HOME / ".cline" / "data/settings/cline_mcp_settings.json", "mcpServers", "scos", server("cline"))
     merge_json(HOME / ".cursor" / "mcp.json", "mcpServers", "scos", server("cursor"))

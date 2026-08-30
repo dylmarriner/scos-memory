@@ -43,7 +43,7 @@ FALLBACK_TOOLS = [
 
 def _load_env():
     values = {
-        "SCOS_GATEWAY_URL": "https://100.93.75.87:8098/mcp",
+        "SCOS_GATEWAY_URL": "https://scos.172.236.155.15.nip.io/mcp",
         "SCOS_TLS_CA_PATH": str(Path.home() / ".hermes" / "scos-ca.crt"),
     }
     if ENV_PATH.exists():

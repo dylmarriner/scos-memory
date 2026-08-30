@@ -15,7 +15,7 @@ the stdio<->HTTP relay used by the Claude Desktop extension
 
 Config comes from ~/.hermes/scos.env:
   SCOS_GATEWAY_URL        mcp-gateway MCP endpoint (default
-                           https://100.93.75.87:8098/mcp)
+                           https://scos.172.236.155.15.nip.io/mcp)
   SCOS_BEARER_TOKEN        internal service token / claims JWT (falls back
                            to the legacy SCOS_HERMES_BEARER_TOKEN name)
   SCOS_TENANT_ID / SCOS_PRINCIPAL_ID  identity
@@ -33,7 +33,7 @@ import urllib.request
 ENV_PATH = os.path.expanduser("~/.hermes/scos.env")
 
 DEFAULTS = {
-    "SCOS_GATEWAY_URL": "https://100.93.75.87:8098/mcp",
+    "SCOS_GATEWAY_URL": "https://scos.172.236.155.15.nip.io/mcp",
     "SCOS_TENANT_ID": "11111111-2222-3333-4444-555555555555",
     "SCOS_PRINCIPAL_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     "SCOS_TLS_CA_PATH": os.path.expanduser("~/.hermes/scos-ca.crt"),
