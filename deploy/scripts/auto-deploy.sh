@@ -74,7 +74,15 @@ git merge --ff-only origin/main
 # named loudly and the script exits non-zero so the systemd timer's own
 # failure state surfaces it, rather than a container quietly running the
 # previous commit until someone happens to notice.
+# `docker compose images -q` prints the bare digest ("78bb4cdc...");
+# `docker inspect --format '{{.Image}}'` prints it "sha256:"-prefixed. Both
+# name the same image, but compared as strings they never match -- every
+# service failed this check on 2026-09-01 with running_image and
+# EXPECTED_IMAGE printed identically in the log, which is what actually
+# gave this away. Stripping the prefix from both sides makes the
+# comparison compare the digest, not incidental formatting.
 EXPECTED_IMAGE="$(${COMPOSE[@]} images -q agent-registry)"
+EXPECTED_IMAGE="${EXPECTED_IMAGE#sha256:}"
 DRIFTED=""
 for svc in $FABRIC_SERVICES; do
   container_id="$(${COMPOSE[@]} ps -q "$svc")"
@@ -84,6 +92,7 @@ for svc in $FABRIC_SERVICES; do
     continue
   fi
   running_image="$(docker inspect --format '{{.Image}}' "$container_id")"
+  running_image="${running_image#sha256:}"
   if [ "$running_image" != "$EXPECTED_IMAGE" ]; then
     echo "$(date -Iseconds) parity check: $svc is running image $running_image, expected $EXPECTED_IMAGE"
     DRIFTED="$DRIFTED $svc"
