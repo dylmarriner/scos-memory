@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -40,20 +42,136 @@ func runExtract(ctx context.Context, workDir, backend string) (string, error) {
 	return filepath.Join(workDir, "graphify-out", "graph.json"), nil
 }
 
-// cacheKey turns an absolute repo path into a filesystem-safe directory
-// name so each repo's cached graph lives in its own subdirectory of the
-// shared cache volume, keyed by the repo's own path rather than a mutable
-// per-request identifier.
-func cacheKey(workDir string) string {
-	// Hash rather than flatten. Replacing separators with underscores made
-	// "/a/b" and "/a_b" collide onto the same cache directory, which serves
-	// one repository's graph in answer to a question about another. A digest
-	// of the cleaned path is collision-free and still filesystem-safe; the
-	// trailing basename is kept only so the directory is recognisable to a
-	// human clearing the cache by hand.
+// cacheKey turns a repo's identity plus everything that can change what
+// graphify would produce for it -- current content state, the graphify
+// binary's own version, and the backend flag -- into a filesystem-safe
+// directory name. Any one of those changing yields a different key, so a
+// stale cache entry is never returned; it just becomes unreachable and gets
+// rebuilt on next use. Old generations are not garbage-collected here.
+func cacheKey(workDir, snapshotID, extractorVersion, backend string) string {
+	// Hash rather than flatten. Replacing path separators with underscores
+	// made "/a/b" and "/a_b" collide onto the same cache directory, which
+	// served one repository's graph in answer to a question about another. A
+	// digest of the cleaned path plus state is collision-free and still
+	// filesystem-safe; the trailing basename is kept only so the directory is
+	// recognisable to a human clearing the cache by hand.
 	clean := filepath.Clean(workDir)
-	sum := sha256.Sum256([]byte(clean))
+	h := sha256.New()
+	h.Write([]byte(clean))
+	h.Write([]byte{0})
+	h.Write([]byte(snapshotID))
+	h.Write([]byte{0})
+	h.Write([]byte(extractorVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(backend))
+	sum := h.Sum(nil)
 	return sanitiseComponent(filepath.Base(clean)) + "-" + hex.EncodeToString(sum[:8])
+}
+
+// repoSnapshotID fingerprints workDir's current on-disk state so a graph
+// built from one snapshot is never served in answer to a question about a
+// later, changed one. Git is authoritative when available: HEAD identifies
+// every committed byte, but a bare HEAD says nothing about uncommitted
+// edits, so status is consulted for anything git itself considers changed
+// and those paths are content-hashed individually -- an edit made without a
+// commit still changes the fingerprint. Only when workDir isn't a git
+// checkout at all does this fall back to hashing every file's path/size/
+// mtime, which is coarser but doesn't require git.
+func repoSnapshotID(ctx context.Context, workDir string) (string, error) {
+	if id, ok, err := gitSnapshotID(ctx, workDir); ok {
+		return id, err
+	}
+	return treeSnapshotID(workDir)
+}
+
+// gitSnapshotID returns (id, true, err) when workDir is a git checkout --
+// err non-nil there means git itself failed after confirming a checkout, a
+// real error the caller should surface -- or ("", false, nil) when workDir
+// isn't a git checkout at all, telling the caller to fall back.
+func gitSnapshotID(ctx context.Context, workDir string) (string, bool, error) {
+	head, err := runGitCapture(ctx, workDir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", false, nil
+	}
+	status, err := runGitCapture(ctx, workDir, "status", "--porcelain=v1", "--untracked-files=all")
+	if err != nil {
+		return "", true, fmt.Errorf("git status: %w", err)
+	}
+	if status == "" {
+		return "git:" + head, true, nil
+	}
+	lines := strings.Split(status, "\n")
+	sort.Strings(lines)
+	h := sha256.New()
+	h.Write([]byte(head))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		h.Write([]byte(line))
+		h.Write([]byte{'\n'})
+		if len(line) < 4 {
+			continue
+		}
+		path := strings.TrimSpace(line[3:])
+		if path == "" {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(workDir, path))
+		if err != nil {
+			// Deleted path, submodule, or anything else that isn't a
+			// readable regular file: the status line itself already changed
+			// the hash, so there's nothing further to add.
+			continue
+		}
+		sum := sha256.Sum256(content)
+		h.Write(sum[:])
+	}
+	return "git:" + head + ":dirty:" + hex.EncodeToString(h.Sum(nil)[:8]), true, nil
+}
+
+func runGitCapture(ctx context.Context, workDir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// treeSnapshotID fingerprints every regular file's path, size and mtime
+// under workDir. It's the fallback for a workDir that isn't a git checkout;
+// content isn't hashed here because doing so over an entire non-git
+// directory tree (rather than just the handful of paths git status reports
+// as changed) would make every cache lookup pay for a full read of the tree.
+func treeSnapshotID(workDir string) (string, error) {
+	h := sha256.New()
+	err := filepath.WalkDir(workDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(workDir, path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s:%d:%d\n", rel, info.Size(), info.ModTime().UnixNano())
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("fingerprint %s: %w", workDir, err)
+	}
+	return "tree:" + hex.EncodeToString(h.Sum(nil)[:8]), nil
 }
 
 // sanitiseComponent reduces a path element to characters that are safe as a
@@ -87,16 +205,22 @@ func rejectFlagLike(field, value string) error {
 	return nil
 }
 
-// ensureCachedGraph builds workDir's graph.json under cacheDir on first use,
-// so query/path/explain work against any repo without a separate manual
-// extract call -- and without needing write access to workDir itself, which
-// this service only ever mounts read-only. It only checks existence, not
-// staleness: a repo that has changed since its last extract needs its cache
-// subdirectory removed (or GRAPHIFY_FORCE=1) to pick up the new source --
-// this is a one-time bootstrap, not a cache-invalidation mechanism. Returns
+// ensureCachedGraph returns workDir's graph.json, building it under
+// cacheDir if no cache entry exists for the repo's *current* state -- so
+// query/path/explain work against any repo without a separate manual
+// extract call, and without needing write access to workDir itself, which
+// this service only ever mounts read-only. The cache key folds in a content
+// fingerprint of workDir (see repoSnapshotID), the graphify binary's own
+// version, and the backend flag, so a repo that has changed since its last
+// extract -- even by an uncommitted edit -- misses the cache and triggers a
+// fresh extraction instead of silently serving stale graph data. Returns
 // the path to the resulting graph.json.
-func ensureCachedGraph(ctx context.Context, workDir, cacheDir, backend string) (string, error) {
-	outDir := filepath.Join(cacheDir, cacheKey(workDir))
+func (s *graphifyServer) ensureCachedGraph(ctx context.Context, workDir string) (string, error) {
+	snapshotID, err := repoSnapshotID(ctx, workDir)
+	if err != nil {
+		return "", fmt.Errorf("fingerprint repo state: %w", err)
+	}
+	outDir := filepath.Join(s.cacheDir, cacheKey(workDir, snapshotID, s.extractorVersion(ctx), s.backend))
 	graphPath := filepath.Join(outDir, "graphify-out", "graph.json")
 	if _, err := os.Stat(graphPath); err == nil {
 		return graphPath, nil
@@ -119,8 +243,8 @@ func ensureCachedGraph(ctx context.Context, workDir, cacheDir, backend string) (
 	// don't read community labels, so skipping clustering costs nothing
 	// those handlers use.
 	args := []string{"extract", workDir, "--code-only", "--max-workers", "1", "--no-cluster", "--out", outDir}
-	if backend != "" {
-		args = append(args, "--backend", backend)
+	if s.backend != "" {
+		args = append(args, "--backend", s.backend)
 	}
 	if _, err := runGraphify(ctx, outDir, args...); err != nil {
 		return "", err

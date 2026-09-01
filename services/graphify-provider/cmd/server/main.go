@@ -1,4 +1,5 @@
 package main
+import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dylmarriner/scos-memory/services/readiness"
@@ -36,6 +38,27 @@ type graphifyServer struct {
 	tenantID              string
 	principalID           string
 	backend               string
+
+	extractorVersionOnce   sync.Once
+	extractorVersionCached string
+}
+
+// extractorVersion identifies which graphify build this process will run,
+// memoized since the binary on disk doesn't change while the service is up.
+// A cache key derived from it is still correct across a deploy that
+// upgrades graphify: entries built under the old version simply become
+// unreachable under the new one and get rebuilt on next use, rather than a
+// newer binary's differently-shaped graph being served from an older entry.
+func (s *graphifyServer) extractorVersion(ctx context.Context) string {
+	s.extractorVersionOnce.Do(func() {
+		out, err := exec.CommandContext(ctx, "graphify", "--version").Output()
+		if err != nil {
+			s.extractorVersionCached = "unknown"
+			return
+		}
+		s.extractorVersionCached = strings.TrimSpace(string(out))
+	})
+	return s.extractorVersionCached
 }
 
 // resolveWorkDir picks the directory query/path/explain operate on: the
@@ -133,6 +156,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/version", release.Handler("graphify-provider"))
 	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
 		return srv.readinessCheck()
 	}))
@@ -311,7 +335,7 @@ func (s *graphifyServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := ensureCachedGraph(r.Context(), workDir, s.cacheDir, s.backend)
+	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
 	if err != nil {
 		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -351,7 +375,7 @@ func (s *graphifyServer) handlePath(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := ensureCachedGraph(r.Context(), workDir, s.cacheDir, s.backend)
+	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
 	if err != nil {
 		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -386,7 +410,7 @@ func (s *graphifyServer) handleExplain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := ensureCachedGraph(r.Context(), workDir, s.cacheDir, s.backend)
+	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
 	if err != nil {
 		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
 		return
