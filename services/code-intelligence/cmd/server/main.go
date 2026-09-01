@@ -6,6 +6,7 @@ import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -407,6 +408,16 @@ func main() {
 	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
 		if len(store.adapters) == 0 {
 			return fmt.Errorf("language adapters are not configured")
+		}
+		// Only checked when SCOS_DATABASE_URL is configured: an instance with
+		// no durable store configured has nothing to verify here, and must
+		// not be reported unready for a dependency it doesn't have.
+		if srv.pgStore != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := srv.pgStore.db.PingContext(ctx); err != nil {
+				return fmt.Errorf("durable code store is unreachable: %w", err)
+			}
 		}
 		return nil
 	}))
