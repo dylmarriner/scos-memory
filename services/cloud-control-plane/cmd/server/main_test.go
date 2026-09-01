@@ -158,6 +158,38 @@ func TestVaultRequiresSession(t *testing.T) {
 	}
 }
 
+// TestCodeSettingsRequiresSession mirrors TestVaultRequiresSession: the
+// failure path (no session cookie) returns before touching any upstream,
+// so it needs no live code-intelligence. The success path -- proxying a
+// GET/PUT to code-intelligence's /v2/code/settings with a signed claims
+// token -- needs a real code-intelligence upstream, a shared issuer
+// secret and control-plane token, so it is exercised by an integration
+// run rather than this unit test (see
+// services/code-intelligence/cmd/server/pghandlers_integration_test.go's
+// TestHandlePGSettingsGetDefaultsEnabledThenRoundTrips for the handler
+// this proxies to).
+func TestCodeSettingsRequiresSession(t *testing.T) {
+	s := &server{}
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		r := httptest.NewRequest(method, "/api/code/settings", nil)
+		rec := httptest.NewRecorder()
+		s.codeSettings(rec, r)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: expected 401 without a session cookie, got %d", method, rec.Code)
+		}
+	}
+}
+
+func TestCodeSettingsRejectsUnsupportedMethod(t *testing.T) {
+	s := &server{}
+	r := httptest.NewRequest(http.MethodDelete, "/api/code/settings", nil)
+	rec := httptest.NewRecorder()
+	s.codeSettings(rec, r)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for DELETE, got %d", rec.Code)
+	}
+}
+
 func TestRandomTokenHasPrefixAndLength(t *testing.T) {
 	tok, err := randomToken("scos_live_")
 	if err != nil {

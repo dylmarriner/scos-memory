@@ -128,6 +128,7 @@ func main() {
 	mux.HandleFunc("/api/memory/facts", s.memoryFacts)
 	mux.HandleFunc("/api/code/repos", s.codeRepos)
 	mux.HandleFunc("/api/code/index-status", s.codeIndexStatus)
+	mux.HandleFunc("/api/code/settings", s.codeSettings)
 	mux.HandleFunc("/api/okf/documents", s.okfDocuments)
 	mux.HandleFunc("/api/graphify/query", s.graphifyQuery)
 	mux.HandleFunc("/api/graphify/explain", s.graphifyExplain)

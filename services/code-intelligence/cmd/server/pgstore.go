@@ -407,3 +407,36 @@ func (s *pgCodeStore) ActiveSnapshotID(ctx context.Context, repositoryID, branch
 	}
 	return id, nil
 }
+
+// IsUserEnabled reports whether (tenantID, principalID) has the durable
+// store's v2 routes enabled. The store itself always runs -- DATABASE_URL
+// is required at startup -- but a user can opt out individually from the
+// dashboard settings tab (SetUserEnabled). No row means enabled: this
+// table only ever records an explicit opt-out.
+func (s *pgCodeStore) IsUserEnabled(ctx context.Context, tenantID, principalID string) (bool, error) {
+	var enabled bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT durable_store_enabled FROM code_intelligence_user_settings
+		WHERE tenant_id = $1 AND principal_id = $2`, tenantID, principalID).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load user settings: %w", err)
+	}
+	return enabled, nil
+}
+
+// SetUserEnabled records (tenantID, principalID)'s explicit preference.
+func (s *pgCodeStore) SetUserEnabled(ctx context.Context, tenantID, principalID string, enabled bool) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO code_intelligence_user_settings (tenant_id, principal_id, durable_store_enabled)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (tenant_id, principal_id)
+		DO UPDATE SET durable_store_enabled = EXCLUDED.durable_store_enabled, updated_at = now()`,
+		tenantID, principalID, enabled)
+	if err != nil {
+		return fmt.Errorf("set user settings: %w", err)
+	}
+	return nil
+}

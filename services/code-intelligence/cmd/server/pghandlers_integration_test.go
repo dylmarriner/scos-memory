@@ -17,6 +17,11 @@ import (
 
 func pgRequest(t *testing.T, srv *server, method, path, tenant string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+	return pgRequestAs(t, srv, method, path, tenant, "p", body)
+}
+
+func pgRequestAs(t *testing.T, srv *server, method, path, tenant, principal string, body any) *httptest.ResponseRecorder {
+	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -28,7 +33,7 @@ func pgRequest(t *testing.T, srv *server, method, path, tenant string, body any)
 		reader = bytes.NewReader(nil)
 	}
 	r := httptest.NewRequest(method, path, reader)
-	r = r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: tenant, PrincipalID: "p"}))
+	r = r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: tenant, PrincipalID: principal}))
 	w := httptest.NewRecorder()
 	switch path {
 	case "/v2/code/repos":
@@ -39,6 +44,8 @@ func pgRequest(t *testing.T, srv *server, method, path, tenant string, body any)
 		srv.handlePGQuery(w, r)
 	case "/v2/code/snapshots/diff":
 		srv.handlePGSnapshotDiff(w, r)
+	case "/v2/code/settings":
+		srv.handlePGSettings(w, r)
 	default:
 		t.Fatalf("unhandled path %s", path)
 	}
@@ -47,7 +54,7 @@ func pgRequest(t *testing.T, srv *server, method, path, tenant string, body any)
 
 func TestHandlePGRoutesReturnUnavailableWithoutStoreConfigured(t *testing.T) {
 	srv := &server{}
-	for _, path := range []string{"/v2/code/repos", "/v2/code/index", "/v2/code/query", "/v2/code/snapshots/diff"} {
+	for _, path := range []string{"/v2/code/repos", "/v2/code/index", "/v2/code/query", "/v2/code/snapshots/diff", "/v2/code/settings"} {
 		w := pgRequest(t, srv, http.MethodPost, path, "tenant-a", map[string]any{})
 		if w.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s: expected 503 without a configured store, got %d: %s", path, w.Code, w.Body.String())
@@ -307,5 +314,67 @@ func TestHandlePGSnapshotDiffRejectsCrossTenantSnapshot(t *testing.T) {
 	})
 	if diffResp.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for another tenant's snapshot, got %d: %s", diffResp.Code, diffResp.Body.String())
+	}
+}
+
+func TestHandlePGSettingsGetDefaultsEnabledThenRoundTrips(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	getResp := pgRequest(t, srv, http.MethodGet, "/v2/code/settings", tenant, nil)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("get settings: %d: %s", getResp.Code, getResp.Body.String())
+	}
+	var out struct {
+		DurableStoreEnabled bool `json:"durable_store_enabled"`
+	}
+	if err := json.Unmarshal(getResp.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.DurableStoreEnabled {
+		t.Fatal("expected a user with no recorded preference to default to enabled")
+	}
+
+	putResp := pgRequest(t, srv, http.MethodPut, "/v2/code/settings", tenant, map[string]any{"durable_store_enabled": false})
+	if putResp.Code != http.StatusOK {
+		t.Fatalf("put settings: %d: %s", putResp.Code, putResp.Body.String())
+	}
+
+	getResp2 := pgRequest(t, srv, http.MethodGet, "/v2/code/settings", tenant, nil)
+	if err := json.Unmarshal(getResp2.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.DurableStoreEnabled {
+		t.Fatal("expected the preference to persist as disabled after PUT")
+	}
+}
+
+// The core assertion this whole feature exists for: once a user disables
+// the durable store for themselves, every v2 route rejects their calls --
+// but another user in the same tenant, who never opted out, is unaffected.
+func TestHandlePGRoutesRejectCallsFromUserWhoDisabledStore(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	putResp := pgRequestAs(t, srv, http.MethodPut, "/v2/code/settings", tenant, "opted-out-user", map[string]any{"durable_store_enabled": false})
+	if putResp.Code != http.StatusOK {
+		t.Fatalf("put settings: %d: %s", putResp.Code, putResp.Body.String())
+	}
+
+	reposResp := pgRequestAs(t, srv, http.MethodPost, "/v2/code/repos", tenant, "opted-out-user", map[string]any{
+		"canonical_path": "/repo/" + t.Name(),
+	})
+	if reposResp.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for a user who disabled the store, got %d: %s", reposResp.Code, reposResp.Body.String())
+	}
+
+	// The unaffected user in the same tenant can still use it normally.
+	okResp := pgRequestAs(t, srv, http.MethodPost, "/v2/code/repos", tenant, "other-user", map[string]any{
+		"canonical_path": "/repo/" + t.Name() + "-other",
+	})
+	if okResp.Code != http.StatusOK {
+		t.Fatalf("expected a user who never opted out to be unaffected, got %d: %s", okResp.Code, okResp.Body.String())
 	}
 }

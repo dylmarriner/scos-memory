@@ -369,10 +369,10 @@ func cloneRelations(in map[string][]string) map[string][]string {
 type server struct {
 	store  *codeStore
 	nextID int
-	// pgStore is the durable, snapshot-based store (see pgstore.go). It is
-	// nil unless SCOS_DATABASE_URL is configured, in which case the v2
-	// handlers in pghandlers.go become usable alongside the existing v1
-	// routes, which remain backed by store above unconditionally.
+	// pgStore is the durable, snapshot-based store (see pgstore.go), backing
+	// the /v2 routes in pghandlers.go. Required and always initialized, the
+	// same as every other Postgres-backed service in this fleet -- DATABASE_URL
+	// missing or unreachable fails startup rather than degrading quietly.
 	pgStore *pgCodeStore
 }
 
@@ -385,22 +385,19 @@ func main() {
 	}
 	srv := &server{store: store, nextID: nextRepositoryID(store.repos)}
 
-	// The durable store is opt-in: an instance with no SCOS_DATABASE_URL
-	// configured runs exactly as it did before pgstore.go existed, serving
-	// only the in-memory-backed /v1 routes. See pghandlers.go's doc comment
-	// for why flipping this on by default for /v1 callers is a separate,
-	// coordinated change rather than something to do here.
-	if databaseURL := strings.TrimSpace(os.Getenv("SCOS_DATABASE_URL")); databaseURL != "" {
-		if err := database.RequireTLS(databaseURL); err != nil {
-			log.Fatal(err)
-		}
-		db, err := sql.Open("pgx", databaseURL)
-		if err != nil {
-			log.Fatalf("connect to database: %v", err)
-		}
-		database.TuneSQLDB(db)
-		srv.pgStore = newPGCodeStore(db)
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
 	}
+	if err := database.RequireTLS(databaseURL); err != nil {
+		log.Fatal(err)
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		log.Fatalf("connect to database: %v", err)
+	}
+	database.TuneSQLDB(db)
+	srv.pgStore = newPGCodeStore(db)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -409,9 +406,10 @@ func main() {
 		if len(store.adapters) == 0 {
 			return fmt.Errorf("language adapters are not configured")
 		}
-		// Only checked when SCOS_DATABASE_URL is configured: an instance with
-		// no durable store configured has nothing to verify here, and must
-		// not be reported unready for a dependency it doesn't have.
+		// srv.pgStore is always set in main() (DATABASE_URL is required at
+		// startup); the nil check only matters for tests that construct a
+		// *server directly without a database, which must not be reported
+		// unready for a dependency they never configured.
 		if srv.pgStore != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -451,6 +449,7 @@ func main() {
 	mux.HandleFunc("/v2/code/index", srv.handlePGIndex)
 	mux.HandleFunc("/v2/code/query", srv.handlePGQuery)
 	mux.HandleFunc("/v2/code/snapshots/diff", srv.handlePGSnapshotDiff)
+	mux.HandleFunc("/v2/code/settings", srv.handlePGSettings)
 
 	addr := os.Getenv("SCOS_CODE_INTELLIGENCE_HTTP_ADDR")
 	if addr == "" {
@@ -488,6 +487,20 @@ func requireTenant(r *http.Request) (string, bool) {
 	}
 	tenant := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
 	return tenant, tenant != ""
+}
+
+// requirePrincipal mirrors requireTenant for the caller's own principal ID
+// -- used only to look up or write *that caller's own* durable-store
+// preference (see pghandlers.go's settings routes), never to scope
+// someone else's data, so there is no cross-tenant/cross-principal
+// exposure to guard against the way requireTenant does for repositories.
+func requirePrincipal(r *http.Request) (string, bool) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		principal := strings.TrimSpace(claims.PrincipalID)
+		return principal, principal != ""
+	}
+	principal := strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
+	return principal, principal != ""
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {

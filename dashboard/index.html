@@ -425,6 +425,11 @@
               <button id="set-save" class="small">save</button>
             </div>
             <div class="dialog-error" id="acct-settings-error"></div>
+            <label style="display:flex;align-items:center;gap:.5rem;margin-top:.75rem;font-size:.78rem;cursor:pointer">
+              <input type="checkbox" id="set-code-store-enabled">
+              Durable code search (snapshots, rename tracking, lexical search)
+            </label>
+            <div class="dialog-error" id="acct-code-store-error"></div>
           </div>
         </div>
         <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start">
@@ -1602,6 +1607,14 @@
 
       // Settings prefill
       document.getElementById('set-display-name').value = session.display_name || '';
+      try {
+        const codeStoreSettings = await apiFetch('/api/code/settings');
+        document.getElementById('set-code-store-enabled').checked = codeStoreSettings.durable_store_enabled !== false;
+      } catch (error) {
+        // Non-fatal: leave the toggle at its default (checked) rather than
+        // blocking the rest of the account tab on one proxied service.
+        document.getElementById('acct-code-store-error').textContent = error.message;
+      }
 
       await loadKeys();
       await loadTeams();
@@ -1614,6 +1627,18 @@
         await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ display_name: document.getElementById('set-display-name').value }) });
         await checkSession();
       } catch (error) { errEl.textContent = error.message; }
+    });
+
+    document.getElementById('set-code-store-enabled').addEventListener('change', async (event) => {
+      const errEl = document.getElementById('acct-code-store-error');
+      errEl.textContent = '';
+      const enabled = event.target.checked;
+      try {
+        await apiFetch('/api/code/settings', { method: 'PUT', body: JSON.stringify({ durable_store_enabled: enabled }) });
+      } catch (error) {
+        event.target.checked = !enabled; // revert the visible toggle on a failed save
+        errEl.textContent = error.message;
+      }
     });
 
     async function loadKeys() {

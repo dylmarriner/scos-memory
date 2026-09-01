@@ -25,6 +25,22 @@ func (s *server) codeIndexStatus(w http.ResponseWriter, r *http.Request) {
 	s.proxyTenantScopedGet(w, r, s.codeIntelligenceURL, "/v1/index/status", "dashboard-code-status", true)
 }
 
+// codeSettings proxies the dashboard settings tab's durable-code-store
+// toggle: GET reads the caller's own current preference, PUT records one.
+// code-intelligence resolves whose preference this is entirely from the
+// claims token minted below (never a client-supplied identity), so there
+// is no way for this proxy to read or change another user's setting.
+func (s *server) codeSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.proxyTenantScopedGet(w, r, s.codeIntelligenceURL, "/v2/code/settings", "dashboard-code-settings", true)
+	case http.MethodPut:
+		s.proxyTenantScopedPut(w, r, s.codeIntelligenceURL, "/v2/code/settings", "dashboard-code-settings", true)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // okfDocuments proxies to okf-synchroniser's document list. That list is
 // shared platform knowledge, not per-tenant private data (okf-synchroniser
 // applies no tenant filter of its own), so every signed-in account sees the
@@ -62,6 +78,29 @@ func (s *server) proxyTenantScopedGet(w http.ResponseWriter, r *http.Request, ba
 		http.Error(w, "upstream unavailable", 503)
 		return
 	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if needsControlPlaneToken {
+		req.Header.Set("X-SCOS-Control-Plane-Token", s.controlPlaneToken)
+	}
+	s.forward(w, req)
+}
+
+func (s *server) proxyTenantScopedPut(w http.ResponseWriter, r *http.Request, base, upstreamPath, jtiPrefix string, needsControlPlaneToken bool) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	token, err := s.callerClaimsToken(r, jtiPrefix)
+	if err != nil {
+		http.Error(w, err.Error(), errStatus(err))
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPut, base+upstreamPath, io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "upstream unavailable", 503)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	if needsControlPlaneToken {
 		req.Header.Set("X-SCOS-Control-Plane-Token", s.controlPlaneToken)

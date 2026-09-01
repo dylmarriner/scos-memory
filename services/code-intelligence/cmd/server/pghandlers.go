@@ -8,22 +8,96 @@ import (
 	"strings"
 )
 
-// v2 handlers expose pgCodeStore over HTTP. They are additive: every
-// existing /v1/* route keeps working unchanged against the in-memory
-// codeStore, and these only activate when SCOS_DATABASE_URL /
-// DATABASE_URL is configured (srv.pgStore is nil otherwise, and every
-// handler here checks for that before touching it). This is deliberate --
-// see pgstore.go's doc comment for why the /v1 wire protocol (bare path
-// strings, no content hash) can't drive rename detection, and why
-// switching the default store for existing callers is a separate,
-// coordinated change rather than something to do silently here.
+// v2 handlers expose pgCodeStore over HTTP, additive alongside every
+// existing /v1/* route, which keeps working unchanged against the
+// in-memory codeStore -- see pgstore.go's doc comment for why the /v1 wire
+// protocol (bare path strings, no content hash) can't drive rename
+// detection, and why migrating existing /v1 callers onto the durable store
+// is a separate, coordinated change rather than something to do here.
+//
+// The durable store itself always runs (DATABASE_URL is required at
+// startup, main.go), but an individual user can opt out of these routes
+// from the dashboard settings tab (handlePGSettings, SetUserEnabled in
+// pgstore.go) -- requireEnabled below is what every mutating/reading v2
+// route checks before touching the store.
 
 func (s *server) requirePGStore(w http.ResponseWriter) bool {
 	if s.pgStore == nil {
-		http.Error(w, "the durable code store is not configured on this instance (SCOS_DATABASE_URL is unset)", http.StatusServiceUnavailable)
+		http.Error(w, "the durable code store is not configured on this instance (DATABASE_URL is unset)", http.StatusServiceUnavailable)
 		return false
 	}
 	return true
+}
+
+// requireEnabled checks the *caller's own* opt-out preference, resolved the
+// same way requireTenant/requirePrincipal resolve identity elsewhere in
+// this service -- never a client-supplied tenant/principal, so a caller
+// can only ever read or act on their own preference. Writes a response and
+// returns false when the caller has disabled the durable store for
+// themselves.
+func (s *server) requireEnabled(w http.ResponseWriter, r *http.Request, tenant, principal string) bool {
+	enabled, err := s.pgStore.IsUserEnabled(r.Context(), tenant, principal)
+	if err != nil {
+		http.Error(w, "load user settings: "+err.Error(), http.StatusInternalServerError)
+		return false
+	}
+	if !enabled {
+		http.Error(w, "the durable code store is disabled for this user (see dashboard settings)", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// handlePGSettings is GET/PUT for the caller's own durable-store
+// preference: GET returns the current value (true when no preference has
+// ever been recorded), PUT records an explicit one. This is what the
+// dashboard settings tab's toggle calls (through cloud-control-plane's
+// proxy, matching how the dashboard reaches every other backend service).
+func (s *server) handlePGSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePGStore(w) {
+		return
+	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+	principal, ok := requirePrincipal(r)
+	if !ok {
+		http.Error(w, "authenticated principal header is required", http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		enabled, err := s.pgStore.IsUserEnabled(r.Context(), tenant, principal)
+		if err != nil {
+			http.Error(w, "load user settings: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"durable_store_enabled": enabled})
+	case http.MethodPut:
+		var req struct {
+			DurableStoreEnabled *bool `json:"durable_store_enabled"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.DurableStoreEnabled == nil {
+			http.Error(w, "durable_store_enabled is required", http.StatusBadRequest)
+			return
+		}
+		if err := s.pgStore.SetUserEnabled(r.Context(), tenant, principal, *req.DurableStoreEnabled); err != nil {
+			http.Error(w, "set user settings: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"durable_store_enabled": *req.DurableStoreEnabled})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *server) handlePGRepos(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +111,14 @@ func (s *server) handlePGRepos(w http.ResponseWriter, r *http.Request) {
 	tenant, ok := requireTenant(r)
 	if !ok {
 		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+	principal, ok := requirePrincipal(r)
+	if !ok {
+		http.Error(w, "authenticated principal header is required", http.StatusUnauthorized)
+		return
+	}
+	if !s.requireEnabled(w, r, tenant, principal) {
 		return
 	}
 	var req struct {
@@ -77,6 +159,14 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 	tenant, ok := requireTenant(r)
 	if !ok {
 		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+	principal, ok := requirePrincipal(r)
+	if !ok {
+		http.Error(w, "authenticated principal header is required", http.StatusUnauthorized)
+		return
+	}
+	if !s.requireEnabled(w, r, tenant, principal) {
 		return
 	}
 	var req struct {
@@ -173,6 +263,14 @@ func (s *server) handlePGSnapshotDiff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
 		return
 	}
+	principal, ok := requirePrincipal(r)
+	if !ok {
+		http.Error(w, "authenticated principal header is required", http.StatusUnauthorized)
+		return
+	}
+	if !s.requireEnabled(w, r, tenant, principal) {
+		return
+	}
 	var req struct {
 		SnapshotID string `json:"snapshot_id"`
 	}
@@ -224,6 +322,14 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	tenant, ok := requireTenant(r)
 	if !ok {
 		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+	principal, ok := requirePrincipal(r)
+	if !ok {
+		http.Error(w, "authenticated principal header is required", http.StatusUnauthorized)
+		return
+	}
+	if !s.requireEnabled(w, r, tenant, principal) {
 		return
 	}
 	var req struct {

@@ -30,11 +30,13 @@ import (
 // TestPGRenamePreservesSymbolIdentity and TestPGBranchesCoexistIndependently
 // against a real PostgreSQL database. The assertions here are intentionally
 // NOT flipped: they document the in-memory codeStore's actual behavior on
-// the /v1 API, which is genuinely unchanged -- the durable store is wired
-// in additively as /v2/code/* (pghandlers.go), opt-in via SCOS_DATABASE_URL,
-// specifically because the /v1 wire protocol (bare path strings, no content
-// hash) cannot supply what rename detection needs. These assertions should
-// flip only once /v1 itself is migrated onto the durable store.
+// the /v1 API, which is genuinely unchanged -- the durable store runs
+// always (DATABASE_URL is required at startup, same as every other
+// Postgres-backed service) but is wired in additively as /v2/code/*
+// (pghandlers.go), specifically because the /v1 wire protocol (bare path
+// strings, no content hash) cannot supply what rename detection needs.
+// These assertions should flip only once /v1 itself is migrated onto the
+// durable store.
 
 func indexRequest(t *testing.T, srv *server, tenant, repoID, commitID string, files []string) *httptest.ResponseRecorder {
 	t.Helper()

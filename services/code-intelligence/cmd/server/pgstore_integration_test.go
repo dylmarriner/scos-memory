@@ -501,3 +501,77 @@ func TestPGCreateSnapshotLinksParent(t *testing.T) {
 		t.Fatalf("expected snap2's parent to be snap1, got %+v", parent)
 	}
 }
+
+// A user with no recorded preference is enabled by default -- the store
+// always runs, and this table only ever records an explicit opt-out.
+func TestPGIsUserEnabledDefaultsTrueWithNoRow(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	enabled, err := store.IsUserEnabled(ctx, tenantID, "principal-with-no-row")
+	if err != nil {
+		t.Fatalf("is user enabled: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected a user with no recorded preference to be enabled by default")
+	}
+}
+
+func TestPGSetUserEnabledRoundTrips(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+	principalID := "principal-a"
+
+	if err := store.SetUserEnabled(ctx, tenantID, principalID, false); err != nil {
+		t.Fatalf("set disabled: %v", err)
+	}
+	enabled, err := store.IsUserEnabled(ctx, tenantID, principalID)
+	if err != nil {
+		t.Fatalf("is user enabled: %v", err)
+	}
+	if enabled {
+		t.Fatal("expected the user to be disabled after SetUserEnabled(false)")
+	}
+
+	if err := store.SetUserEnabled(ctx, tenantID, principalID, true); err != nil {
+		t.Fatalf("set enabled: %v", err)
+	}
+	enabled, err = store.IsUserEnabled(ctx, tenantID, principalID)
+	if err != nil {
+		t.Fatalf("is user enabled: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected the user to be enabled again after SetUserEnabled(true)")
+	}
+}
+
+// One user's preference must never affect another's, or another tenant's
+// user with the same principal_id string.
+func TestPGUserSettingsAreIsolatedPerTenantAndPrincipal(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantA := testTenant(t, db)
+	tenantB := testTenant(t, db)
+
+	if err := store.SetUserEnabled(ctx, tenantA, "shared-principal-id", false); err != nil {
+		t.Fatalf("disable for tenant A: %v", err)
+	}
+
+	enabledOtherPrincipalSameTenant, err := store.IsUserEnabled(ctx, tenantA, "different-principal")
+	if err != nil {
+		t.Fatalf("check other principal: %v", err)
+	}
+	if !enabledOtherPrincipalSameTenant {
+		t.Fatal("expected a different principal in the same tenant to be unaffected")
+	}
+
+	enabledSamePrincipalOtherTenant, err := store.IsUserEnabled(ctx, tenantB, "shared-principal-id")
+	if err != nil {
+		t.Fatalf("check same principal id in other tenant: %v", err)
+	}
+	if !enabledSamePrincipalOtherTenant {
+		t.Fatal("expected the same principal_id string in a different tenant to be unaffected")
+	}
+}
