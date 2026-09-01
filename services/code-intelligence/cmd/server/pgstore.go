@@ -97,16 +97,25 @@ func (s *pgCodeStore) EnsureRepository(ctx context.Context, tenantID, canonicalP
 // commitID, extractorVersion, configHash), or returns the existing one's
 // id if that exact identity was already registered -- the same
 // existence-by-full-identity rule ensureCachedGraph now uses for Graphify,
-// applied to the primary store.
+// applied to the primary store. The new snapshot's parent_snapshot_id is
+// set to whatever snapshot is currently active for (repositoryID, branch),
+// if any -- this is what DiffSnapshot walks to compute what actually
+// changed, and what a future incremental indexer would walk to decide
+// which files it can skip re-parsing (blueprint §35's "for every new
+// snapshot: find parent").
 func (s *pgCodeStore) CreateSnapshot(ctx context.Context, repositoryID, tenantID, branch, commitID, extractorVersion, configHash string) (string, error) {
+	parentID, err := s.ActiveSnapshotID(ctx, repositoryID, branch)
+	if err != nil {
+		return "", fmt.Errorf("resolve parent snapshot: %w", err)
+	}
 	var id string
-	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO code_repository_snapshots (repository_id, tenant_id, branch, commit_id, extractor_version, configuration_hash)
-		VALUES ($1, $2, $3, $4, $5, $6)
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO code_repository_snapshots (repository_id, tenant_id, branch, commit_id, extractor_version, configuration_hash, parent_snapshot_id)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid)
 		ON CONFLICT (repository_id, branch, commit_id, extractor_version, configuration_hash)
 		DO UPDATE SET branch = EXCLUDED.branch
 		RETURNING id`,
-		repositoryID, tenantID, branch, commitID, extractorVersion, configHash).Scan(&id)
+		repositoryID, tenantID, branch, commitID, extractorVersion, configHash, parentID).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create snapshot: %w", err)
 	}
@@ -272,6 +281,114 @@ func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, te
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// SnapshotDiffEntry is one changed path in a SnapshotDiff.
+type SnapshotDiffEntry struct {
+	Path         string
+	PreviousPath string // set only for a Renamed entry
+	SymbolID     string
+}
+
+// SnapshotDiff is what changed between a snapshot and its parent
+// (blueprint §35's incremental pipeline: "diff symbol graph"). A snapshot
+// with no parent (the repository's first index, or a new branch's first
+// commit) reports everything as Added.
+type SnapshotDiff struct {
+	SnapshotID       string
+	ParentSnapshotID string
+	Added            []SnapshotDiffEntry
+	Modified         []SnapshotDiffEntry
+	Removed          []SnapshotDiffEntry
+	Renamed          []SnapshotDiffEntry
+}
+
+type snapshotSymbolRow struct {
+	SymbolID    string
+	Path        string
+	ContentHash string
+}
+
+func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT symbol_id, path, content_hash FROM code_symbol_versions WHERE snapshot_id = $1`, snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("load snapshot symbols: %w", err)
+	}
+	defer rows.Close()
+	var out []snapshotSymbolRow
+	for rows.Next() {
+		var r snapshotSymbolRow
+		if err := rows.Scan(&r.SymbolID, &r.Path, &r.ContentHash); err != nil {
+			return nil, fmt.Errorf("scan snapshot symbol: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DiffSnapshot computes what changed between snapshotID and its parent
+// (see CreateSnapshot). A path present in both with the same content hash
+// is unchanged and not reported at all -- this is the set the incremental
+// pipeline's "skip unchanged files" step (blueprint §35) would act on, made
+// inspectable rather than left implicit. A path present under a different
+// name but the *same* stable symbol identity (content-hash-keyed, see
+// pgCodeStore's doc comment) is Renamed rather than Removed+Added; same
+// path with a different content hash is Modified; everything else is
+// Added or Removed.
+func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (SnapshotDiff, error) {
+	var parentID sql.NullString
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT parent_snapshot_id FROM code_repository_snapshots WHERE id = $1`, snapshotID).Scan(&parentID); err != nil {
+		return SnapshotDiff{}, fmt.Errorf("load snapshot: %w", err)
+	}
+	diff := SnapshotDiff{SnapshotID: snapshotID, ParentSnapshotID: parentID.String}
+
+	newRows, err := s.loadSnapshotSymbols(ctx, snapshotID)
+	if err != nil {
+		return diff, err
+	}
+	if !parentID.Valid {
+		for _, r := range newRows {
+			diff.Added = append(diff.Added, SnapshotDiffEntry{Path: r.Path, SymbolID: r.SymbolID})
+		}
+		return diff, nil
+	}
+
+	oldRows, err := s.loadSnapshotSymbols(ctx, parentID.String)
+	if err != nil {
+		return diff, err
+	}
+	oldByPath := make(map[string]snapshotSymbolRow, len(oldRows))
+	oldBySymbol := make(map[string]snapshotSymbolRow, len(oldRows))
+	for _, r := range oldRows {
+		oldByPath[r.Path] = r
+		oldBySymbol[r.SymbolID] = r
+	}
+
+	consumedOldPaths := make(map[string]bool, len(oldRows))
+	for _, r := range newRows {
+		if old, ok := oldByPath[r.Path]; ok {
+			consumedOldPaths[r.Path] = true
+			if old.ContentHash != r.ContentHash {
+				diff.Modified = append(diff.Modified, SnapshotDiffEntry{Path: r.Path, SymbolID: r.SymbolID})
+			}
+			continue
+		}
+		if old, ok := oldBySymbol[r.SymbolID]; ok {
+			consumedOldPaths[old.Path] = true
+			diff.Renamed = append(diff.Renamed, SnapshotDiffEntry{Path: r.Path, PreviousPath: old.Path, SymbolID: r.SymbolID})
+			continue
+		}
+		diff.Added = append(diff.Added, SnapshotDiffEntry{Path: r.Path, SymbolID: r.SymbolID})
+	}
+	for _, r := range oldRows {
+		if consumedOldPaths[r.Path] {
+			continue
+		}
+		diff.Removed = append(diff.Removed, SnapshotDiffEntry{Path: r.Path, SymbolID: r.SymbolID})
+	}
+	return diff, nil
 }
 
 // ActiveSnapshotID returns the currently active snapshot for

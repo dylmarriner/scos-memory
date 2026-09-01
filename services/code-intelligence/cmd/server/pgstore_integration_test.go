@@ -337,3 +337,167 @@ func TestPGLexicalSearchFindsSubstringMatches(t *testing.T) {
 		t.Fatalf("expected no matches for an unrelated term, got %v", noise)
 	}
 }
+
+func findDiffEntry(entries []SnapshotDiffEntry, path string) (SnapshotDiffEntry, bool) {
+	for _, e := range entries {
+		if e.Path == path {
+			return e, true
+		}
+	}
+	return SnapshotDiffEntry{}, false
+}
+
+// TestPGDiffSnapshotClassifiesEveryChangeKind exercises all four diff
+// classifications (added, modified, removed, renamed) in one pair of
+// snapshots, and confirms an unchanged file is reported in none of them --
+// the set blueprint §35's "skip unchanged files" step would act on.
+func TestPGDiffSnapshotClassifiesEveryChangeKind(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+
+	snap1, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 1: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+		{Path: "pkg/unchanged.go", ContentHash: hashContent("unchanged")},
+		{Path: "pkg/to_modify.go", ContentHash: hashContent("v1")},
+		{Path: "pkg/old_name.go", ContentHash: hashContent("rename-me")},
+		{Path: "pkg/to_remove.go", ContentHash: hashContent("goodbye")},
+	}); err != nil {
+		t.Fatalf("index snapshot 1: %v", err)
+	}
+
+	snap2, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-2", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 2: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+		{Path: "pkg/unchanged.go", ContentHash: hashContent("unchanged")},
+		{Path: "pkg/to_modify.go", ContentHash: hashContent("v2")},
+		{Path: "pkg/new_name.go", ContentHash: hashContent("rename-me")},
+		{Path: "pkg/newly_added.go", ContentHash: hashContent("brand new")},
+	}); err != nil {
+		t.Fatalf("index snapshot 2: %v", err)
+	}
+
+	diff, err := store.DiffSnapshot(ctx, snap2)
+	if err != nil {
+		t.Fatalf("diff snapshot: %v", err)
+	}
+	if diff.ParentSnapshotID != snap1 {
+		t.Fatalf("expected parent snapshot to be snap1, got %q", diff.ParentSnapshotID)
+	}
+
+	if _, ok := findDiffEntry(diff.Added, "pkg/newly_added.go"); !ok {
+		t.Fatalf("expected pkg/newly_added.go in Added, got %+v", diff.Added)
+	}
+	if len(diff.Added) != 1 {
+		t.Fatalf("expected exactly one Added entry, got %+v", diff.Added)
+	}
+
+	if _, ok := findDiffEntry(diff.Modified, "pkg/to_modify.go"); !ok {
+		t.Fatalf("expected pkg/to_modify.go in Modified, got %+v", diff.Modified)
+	}
+	if len(diff.Modified) != 1 {
+		t.Fatalf("expected exactly one Modified entry, got %+v", diff.Modified)
+	}
+
+	if _, ok := findDiffEntry(diff.Removed, "pkg/to_remove.go"); !ok {
+		t.Fatalf("expected pkg/to_remove.go in Removed, got %+v", diff.Removed)
+	}
+	if len(diff.Removed) != 1 {
+		t.Fatalf("expected exactly one Removed entry, got %+v", diff.Removed)
+	}
+
+	renamed, ok := findDiffEntry(diff.Renamed, "pkg/new_name.go")
+	if !ok {
+		t.Fatalf("expected pkg/new_name.go in Renamed, got %+v", diff.Renamed)
+	}
+	if renamed.PreviousPath != "pkg/old_name.go" {
+		t.Fatalf("expected renamed entry's previous path to be pkg/old_name.go, got %q", renamed.PreviousPath)
+	}
+	if len(diff.Renamed) != 1 {
+		t.Fatalf("expected exactly one Renamed entry, got %+v", diff.Renamed)
+	}
+
+	for _, entries := range [][]SnapshotDiffEntry{diff.Added, diff.Modified, diff.Removed, diff.Renamed} {
+		if _, ok := findDiffEntry(entries, "pkg/unchanged.go"); ok {
+			t.Fatalf("expected pkg/unchanged.go to appear in no diff category, found in %+v", entries)
+		}
+	}
+}
+
+// The very first snapshot for a repository has no parent, so everything in
+// it is Added -- there is nothing to diff against.
+func TestPGDiffSnapshotWithNoParentReportsEverythingAdded(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/a.go", ContentHash: hashContent("a")},
+		{Path: "pkg/b.go", ContentHash: hashContent("b")},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	diff, err := store.DiffSnapshot(ctx, snap)
+	if err != nil {
+		t.Fatalf("diff snapshot: %v", err)
+	}
+	if diff.ParentSnapshotID != "" {
+		t.Fatalf("expected no parent snapshot, got %q", diff.ParentSnapshotID)
+	}
+	if len(diff.Added) != 2 || len(diff.Modified) != 0 || len(diff.Removed) != 0 || len(diff.Renamed) != 0 {
+		t.Fatalf("expected everything Added and nothing else, got %+v", diff)
+	}
+}
+
+// CreateSnapshot must link parent_snapshot_id to whatever was active for
+// the branch at creation time, and must leave that link alone on a repeat
+// call for the same (branch, commit, extractor, config) identity rather
+// than resetting it.
+func TestPGCreateSnapshotLinksParent(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap1, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 1: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "a.go", ContentHash: hashContent("a")}}); err != nil {
+		t.Fatalf("index snapshot 1: %v", err)
+	}
+
+	snap2, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-2", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 2: %v", err)
+	}
+	var parent sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT parent_snapshot_id FROM code_repository_snapshots WHERE id = $1`, snap2).Scan(&parent); err != nil {
+		t.Fatalf("load parent: %v", err)
+	}
+	if !parent.Valid || parent.String != snap1 {
+		t.Fatalf("expected snap2's parent to be snap1, got %+v", parent)
+	}
+}

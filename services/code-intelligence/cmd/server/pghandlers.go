@@ -141,10 +141,76 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "index snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// The diff against whatever was previously active for this branch is
+	// returned inline rather than requiring a second round-trip: it's the
+	// cheapest possible way for a caller to confirm an incremental index
+	// actually stayed incremental (blueprint §35's completion gate -- "a
+	// one-line change in one file must not trigger a full repository
+	// re-index" -- is directly checkable from this response: Modified
+	// should have one entry, not len(files)).
+	diff, err := s.pgStore.DiffSnapshot(r.Context(), snapshotID)
+	if err != nil {
+		http.Error(w, "diff snapshot: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"snapshot_id": snapshotID,
 		"file_count":  len(files),
+		"diff":        diff,
 	})
+}
+
+func (s *server) handlePGSnapshotDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requirePGStore(w) {
+		return
+	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SnapshotID string `json:"snapshot_id"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.SnapshotID == "" {
+		http.Error(w, "snapshot_id is required", http.StatusBadRequest)
+		return
+	}
+
+	var owningTenant string
+	if err := s.pgStore.db.QueryRowContext(r.Context(), `
+		SELECT repo.tenant_id::text
+		FROM code_repository_snapshots snap
+		JOIN code_repositories repo ON repo.id = snap.repository_id
+		WHERE snap.id = $1`, req.SnapshotID).Scan(&owningTenant); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "snapshot not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "load snapshot: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if owningTenant != tenant {
+		http.Error(w, "snapshot not found", http.StatusNotFound)
+		return
+	}
+
+	diff, err := s.pgStore.DiffSnapshot(r.Context(), req.SnapshotID)
+	if err != nil {
+		http.Error(w, "diff snapshot: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, diff)
 }
 
 func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {

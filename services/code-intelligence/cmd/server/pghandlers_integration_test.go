@@ -37,6 +37,8 @@ func pgRequest(t *testing.T, srv *server, method, path, tenant string, body any)
 		srv.handlePGIndex(w, r)
 	case "/v2/code/query":
 		srv.handlePGQuery(w, r)
+	case "/v2/code/snapshots/diff":
+		srv.handlePGSnapshotDiff(w, r)
 	default:
 		t.Fatalf("unhandled path %s", path)
 	}
@@ -45,7 +47,7 @@ func pgRequest(t *testing.T, srv *server, method, path, tenant string, body any)
 
 func TestHandlePGRoutesReturnUnavailableWithoutStoreConfigured(t *testing.T) {
 	srv := &server{}
-	for _, path := range []string{"/v2/code/repos", "/v2/code/index", "/v2/code/query"} {
+	for _, path := range []string{"/v2/code/repos", "/v2/code/index", "/v2/code/query", "/v2/code/snapshots/diff"} {
 		w := pgRequest(t, srv, http.MethodPost, path, "tenant-a", map[string]any{})
 		if w.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s: expected 503 without a configured store, got %d: %s", path, w.Code, w.Body.String())
@@ -195,5 +197,115 @@ func TestHandlePGQueryFallsBackToLexicalSearch(t *testing.T) {
 	}
 	if len(queryOut.Results) != 1 || queryOut.Results[0].MatchType != "lexical" {
 		t.Fatalf("expected exactly one lexical match, got %+v", queryOut.Results)
+	}
+}
+
+// The index response's inline diff, and the standalone diff endpoint, must
+// agree -- and a one-line change to one file (of several indexed) must
+// show up as exactly one Modified entry, not a full re-index, through the
+// actual HTTP surface a caller uses.
+func TestHandlePGIndexReturnsDiffAndDiffEndpointAgrees(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{
+		"canonical_path": "/repo/" + t.Name(),
+	})
+	var reposOut struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &reposOut); err != nil {
+		t.Fatal(err)
+	}
+
+	pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"commit_id":     "commit-1",
+		"files": []map[string]any{
+			{"path": "pkg/a.go", "content_hash": hashContent("a-v1")},
+			{"path": "pkg/b.go", "content_hash": hashContent("b")},
+			{"path": "pkg/c.go", "content_hash": hashContent("c")},
+		},
+	})
+
+	indexResp := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"commit_id":     "commit-2",
+		"files": []map[string]any{
+			{"path": "pkg/a.go", "content_hash": hashContent("a-v2")}, // one-line change
+			{"path": "pkg/b.go", "content_hash": hashContent("b")},
+			{"path": "pkg/c.go", "content_hash": hashContent("c")},
+		},
+	})
+	if indexResp.Code != http.StatusOK {
+		t.Fatalf("index: %d: %s", indexResp.Code, indexResp.Body.String())
+	}
+	var indexOut struct {
+		SnapshotID string       `json:"snapshot_id"`
+		Diff       SnapshotDiff `json:"diff"`
+	}
+	if err := json.Unmarshal(indexResp.Body.Bytes(), &indexOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(indexOut.Diff.Modified) != 1 || indexOut.Diff.Modified[0].Path != "pkg/a.go" {
+		t.Fatalf("expected a single-file change to produce exactly one Modified entry for pkg/a.go, got %+v", indexOut.Diff)
+	}
+	if len(indexOut.Diff.Added) != 0 || len(indexOut.Diff.Removed) != 0 || len(indexOut.Diff.Renamed) != 0 {
+		t.Fatalf("expected no other diff categories for an unrelated one-file change, got %+v", indexOut.Diff)
+	}
+
+	diffResp := pgRequest(t, srv, http.MethodPost, "/v2/code/snapshots/diff", tenant, map[string]any{
+		"snapshot_id": indexOut.SnapshotID,
+	})
+	if diffResp.Code != http.StatusOK {
+		t.Fatalf("diff endpoint: %d: %s", diffResp.Code, diffResp.Body.String())
+	}
+	var standaloneDiff SnapshotDiff
+	if err := json.Unmarshal(diffResp.Body.Bytes(), &standaloneDiff); err != nil {
+		t.Fatal(err)
+	}
+	if len(standaloneDiff.Modified) != 1 || standaloneDiff.Modified[0].Path != "pkg/a.go" {
+		t.Fatalf("expected the standalone diff endpoint to agree with the inline diff, got %+v", standaloneDiff)
+	}
+}
+
+// A snapshot belonging to another tenant must 404 from the diff endpoint,
+// the same rule enforced for /v2/code/index and /v2/code/query.
+func TestHandlePGSnapshotDiffRejectsCrossTenantSnapshot(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	ownerTenant := testTenant(t, db)
+	attackerTenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", ownerTenant, map[string]any{
+		"canonical_path": "/repo/" + t.Name(),
+	})
+	var reposOut struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &reposOut); err != nil {
+		t.Fatal(err)
+	}
+	indexResp := pgRequest(t, srv, http.MethodPost, "/v2/code/index", ownerTenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"commit_id":     "commit-1",
+		"files":         []map[string]any{{"path": "a.go", "content_hash": hashContent("a")}},
+	})
+	var indexOut struct {
+		SnapshotID string `json:"snapshot_id"`
+	}
+	if err := json.Unmarshal(indexResp.Body.Bytes(), &indexOut); err != nil {
+		t.Fatal(err)
+	}
+
+	diffResp := pgRequest(t, srv, http.MethodPost, "/v2/code/snapshots/diff", attackerTenant, map[string]any{
+		"snapshot_id": indexOut.SnapshotID,
+	})
+	if diffResp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for another tenant's snapshot, got %d: %s", diffResp.Code, diffResp.Body.String())
 	}
 }

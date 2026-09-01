@@ -439,6 +439,7 @@ func main() {
 	mux.HandleFunc("/v2/code/repos", srv.handlePGRepos)
 	mux.HandleFunc("/v2/code/index", srv.handlePGIndex)
 	mux.HandleFunc("/v2/code/query", srv.handlePGQuery)
+	mux.HandleFunc("/v2/code/snapshots/diff", srv.handlePGSnapshotDiff)
 
 	addr := os.Getenv("SCOS_CODE_INTELLIGENCE_HTTP_ADDR")
 	if addr == "" {
