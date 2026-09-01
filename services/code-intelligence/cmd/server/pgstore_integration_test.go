@@ -837,6 +837,39 @@ func TestPGIndexSnapshotSkipsAmbiguousCallNames(t *testing.T) {
 	}
 }
 
+const treeSitterPythonSource = `class User:
+    def save(self):
+        return True
+
+def load_user(identifier):
+    return User()
+`
+
+func TestPGIndexSnapshotUsesTreeSitterForPython(t *testing.T) {
+	store, _ := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, store.db)
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-python-1", "tree-sitter-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{{
+		Path: "models.py", Language: "python", ContentHash: hashContent(treeSitterPythonSource), Content: treeSitterPythonSource,
+	}}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+	for _, name := range []string{"models.User", "models.User.save", "models.load_user"} {
+		results, err := store.QueryByPathOrFQN(ctx, repoID, "main", name)
+		if err != nil || len(results) != 1 {
+			t.Fatalf("expected Tree-sitter symbol %s, got %v (err %v)", name, results, err)
+		}
+	}
+}
+
 func hasFQN(symbols []PGSymbolVersion, fqn string) bool {
 	for _, s := range symbols {
 		if s.FullyQualifiedName == fqn {

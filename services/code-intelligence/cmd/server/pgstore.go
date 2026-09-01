@@ -33,12 +33,9 @@ import (
 //
 // This type is complete and integration-tested against a real PostgreSQL
 // database (pgstore_integration_test.go, gated on SCOS_CODE_STORE_TEST_DSN).
-// It is intentionally not wired into the HTTP handlers in this change: the
-// wire protocol handleIndex accepts today is bare path strings with no
-// content, which cannot supply what rename detection here needs -- a
-// content hash per file. Wiring this in as the live store requires a
-// coordinated request-shape change across every caller (mcp-gateway,
-// hermes, any direct integration), which is out of scope here.
+// Its v2 wire protocol accepts content and content hashes, allowing parser
+// adapters such as Go's AST extractor and Tree-sitter to populate immutable
+// snapshot projections without changing the legacy v1 request shape.
 type pgCodeStore struct {
 	db *sql.DB
 }
@@ -272,7 +269,41 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		}
 		return decls, nil
 	}
+	if f.Content != "" {
+		if err := s.indexTreeSitterDeclarationsLocked(ctx, tx, snapshotID, repositoryID, fileID, f); err != nil {
+			return nil, fmt.Errorf("index %s declarations: %w", f.Language, err)
+		}
+	}
 	return nil, nil
+}
+
+func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, fileID string, f PGFileInput) error {
+	symbols, err := extractTreeSitterSymbols(f.Path, f.Language, f.Content, repositoryID)
+	if err != nil {
+		// Tree-sitter is a fallback adapter. A syntax error must not discard the
+		// already-indexed Tier 0 file symbol or block another file in the same
+		// snapshot from being indexed.
+		return nil
+	}
+	for _, symbol := range symbols {
+		stableKey := "treesitter:" + f.Language + ":" + symbol.FullyQualifiedName + ":" + symbol.ContentHash
+		var symbolID string
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO code_symbols (repository_id, stable_key, kind, language, first_snapshot_id)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
+			RETURNING id`, repositoryID, stableKey, symbol.Kind, f.Language, snapshotID).Scan(&symbolID); err != nil {
+			return fmt.Errorf("upsert %s: %w", symbol.FullyQualifiedName, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO code_symbol_versions
+			(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, confidence_class, extractor)
+			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, 'syntax', $10)`,
+			symbolID, snapshotID, fileID, symbol.FullyQualifiedName, symbol.Path, symbol.Kind, symbol.Range, symbol.Signature, symbol.ContentHash, "tree-sitter:"+f.Language); err != nil {
+			return fmt.Errorf("insert %s version: %w", symbol.FullyQualifiedName, err)
+		}
+	}
+	return nil
 }
 
 // indexGoDeclarationsLocked indexes f's real top-level Go declarations
