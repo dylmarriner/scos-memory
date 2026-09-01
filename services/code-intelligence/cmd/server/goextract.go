@@ -20,9 +20,13 @@ import (
 // repeated finding across both competitive-audit passes: "symbol
 // extraction is driven by language/filename conventions rather than a real
 // parser." It stops short of type-checking (go/types' checker, which needs
-// a fully loaded package/module) or resolving call targets, so it reports
-// exactly what full-file syntax proves: declarations, not references or
-// call graphs. Those remain a further tier.
+// a fully loaded package/module), so CalledNames below are bare syntactic
+// names, not resolved targets -- pgstore.go's edge-building pass only
+// turns one into a CALLS edge when exactly one declaration in the same
+// package/snapshot has that name, and drops it otherwise rather than
+// guess among several candidates (e.g. two types with same-named
+// methods). References to anything outside the indexed package (stdlib,
+// other modules) are never turned into edges at all.
 type GoDeclaration struct {
 	// Name is the declared identifier alone (e.g. "CreateUser"), Receiver
 	// is the method receiver's type expression rendered as source (e.g.
@@ -35,6 +39,13 @@ type GoDeclaration struct {
 	// most editors report ranges.
 	StartLine int
 	EndLine   int
+	// CalledNames lists the bare function/method names this declaration's
+	// body calls syntactically (only set for function/method kinds). A
+	// direct call "Foo()" contributes "Foo"; a selector call "x.Bar()"
+	// contributes "Bar" regardless of what x actually is -- deliberately
+	// permissive here because the ambiguity this could introduce is
+	// resolved later, once every declaration in the package is known.
+	CalledNames []string
 	// ContentHash is over this declaration's own source span, not the
 	// whole file -- so editing one function doesn't change every other
 	// symbol in the file's identity the way file-level content hashing
@@ -138,7 +149,43 @@ func funcDeclaration(fset *token.FileSet, src []byte, decl *ast.FuncDecl) GoDecl
 		EndLine:     endLine,
 		ContentHash: spanHash(text),
 		DocComment:  docText(decl.Doc),
+		CalledNames: calledNames(decl.Body),
 	}
+}
+
+// calledNames walks body for call expressions and collects the bare name
+// of each call's target: "Foo()" contributes "Foo", "x.Bar()" contributes
+// "Bar" (whatever x is -- not resolved here), "pkg.Baz()" also contributes
+// "Baz" (indistinguishable at this stage from a method call; the edge
+// pass in pgstore.go only keeps it if a same-named declaration actually
+// exists in the indexed package, so an unresolvable or wrong-looking name
+// simply produces no edge rather than a wrong one). A nil body (an
+// external/assembly function declared but not defined) yields nil.
+func calledNames(body *ast.BlockStmt) []string {
+	if body == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var names []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		var name string
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			name = fn.Name
+		case *ast.SelectorExpr:
+			name = fn.Sel.Name
+		}
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+		return true
+	})
+	return names
 }
 
 // genDeclarations handles `type`/`const`/`var` blocks, which can each

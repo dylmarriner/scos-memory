@@ -724,3 +724,114 @@ func TestPGIndexSnapshotIsolatesGoFunctionEditToThatSymbol(t *testing.T) {
 		t.Fatal("expected UserService's identity to be unaffected by an edit inside Close")
 	}
 }
+
+func countEdges(t *testing.T, db *sql.DB, snapshotID, sourceSymbolID, targetSymbolID string) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT count(*) FROM code_edges
+		WHERE snapshot_id = $1 AND source_symbol_version_id = $2 AND target_symbol_version_id = $3
+		  AND relation = 'CALLS' AND confidence_class = 'static_analysis'`,
+		snapshotID, sourceSymbolID, targetSymbolID).Scan(&count); err != nil {
+		t.Fatalf("count edges: %v", err)
+	}
+	return count
+}
+
+const callEdgeSource = `package sample
+
+func helper() int {
+	return 1
+}
+
+func Run() int {
+	return helper()
+}
+`
+
+// TestPGIndexSnapshotCreatesUnambiguousCallEdges proves the real, if
+// syntactic, call graph the audit's competitive matrix marked "Missing"
+// for the heuristic extractor: Run calling helper() produces an actual
+// code_edges row once both are indexed, not just two isolated symbols.
+func TestPGIndexSnapshotCreatesUnambiguousCallEdges(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(callEdgeSource), Content: callEdgeSource},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	run, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.Run")
+	if err != nil || len(run) != 1 {
+		t.Fatalf("expected Run to resolve: %v (err %v)", run, err)
+	}
+	helper, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.helper")
+	if err != nil || len(helper) != 1 {
+		t.Fatalf("expected helper to resolve: %v (err %v)", helper, err)
+	}
+
+	if got := countEdges(t, db, snap, run[0].SymbolVersionID, helper[0].SymbolVersionID); got != 1 {
+		t.Fatalf("expected exactly one CALLS edge from Run to helper, got %d", got)
+	}
+}
+
+const ambiguousCallSource = `package sample
+
+type A struct{}
+
+func (a *A) Validate() bool { return true }
+
+type B struct{}
+
+func (b *B) Validate() bool { return false }
+
+func Run(a *A) bool {
+	return a.Validate()
+}
+`
+
+// TestPGIndexSnapshotSkipsAmbiguousCallNames is the other half of the same
+// guarantee: when a bare call name matches more than one same-named
+// declaration in the package (two unrelated Validate methods), no edge is
+// created for either -- guessing between A.Validate and B.Validate would
+// be worse than reporting nothing, per the confidence-class philosophy
+// insertGoCallEdgesLocked documents.
+func TestPGIndexSnapshotSkipsAmbiguousCallNames(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(ambiguousCallSource), Content: ambiguousCallSource},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	var edgeCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM code_edges WHERE snapshot_id = $1 AND relation = 'CALLS'`, snap).Scan(&edgeCount); err != nil {
+		t.Fatalf("count edges: %v", err)
+	}
+	if edgeCount != 0 {
+		t.Fatalf("expected no CALLS edges for an ambiguous name, got %d", edgeCount)
+	}
+}

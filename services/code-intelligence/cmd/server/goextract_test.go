@@ -203,6 +203,91 @@ func TestExtractGoDeclarationsIsolatesChangesToOneFunction(t *testing.T) {
 	}
 }
 
+func containsName(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+const callGraphSource = `package sample
+
+func helper() int {
+	return 1
+}
+
+type Service struct{}
+
+func (s *Service) Validate() bool {
+	return true
+}
+
+func Run(s *Service) int {
+	if !s.Validate() {
+		return 0
+	}
+	return helper() + external.Unrelated()
+}
+
+func Leaf() int {
+	return 42
+}
+`
+
+func TestExtractGoDeclarationsCollectsDirectCallNames(t *testing.T) {
+	_, decls, err := extractGoDeclarations("sample.go", callGraphSource)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	run, ok := findDecl(decls, "Run")
+	if !ok {
+		t.Fatalf("expected to find Run, got %+v", decls)
+	}
+	if !containsName(run.CalledNames, "helper") {
+		t.Fatalf("expected Run to call helper, got %v", run.CalledNames)
+	}
+}
+
+func TestExtractGoDeclarationsCollectsSelectorCallNames(t *testing.T) {
+	_, decls, err := extractGoDeclarations("sample.go", callGraphSource)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	run, ok := findDecl(decls, "Run")
+	if !ok {
+		t.Fatalf("expected to find Run, got %+v", decls)
+	}
+	// s.Validate() -- a selector call -- contributes the bare method name
+	// "Validate", indistinguishable at this stage from a call to an
+	// unrelated function also named Validate; that ambiguity is resolved
+	// later, in pgstore.go's edge-building pass, not here.
+	if !containsName(run.CalledNames, "Validate") {
+		t.Fatalf("expected Run to call Validate via a selector, got %v", run.CalledNames)
+	}
+	// external.Unrelated() is a selector call on a name that isn't even a
+	// local variable -- still just contributes "Unrelated" syntactically;
+	// nothing here tries to determine that "external" is an import.
+	if !containsName(run.CalledNames, "Unrelated") {
+		t.Fatalf("expected Run to call Unrelated via a selector, got %v", run.CalledNames)
+	}
+}
+
+func TestExtractGoDeclarationsLeafFunctionHasNoCalls(t *testing.T) {
+	_, decls, err := extractGoDeclarations("sample.go", callGraphSource)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	leaf, ok := findDecl(decls, "Leaf")
+	if !ok {
+		t.Fatalf("expected to find Leaf, got %+v", decls)
+	}
+	if len(leaf.CalledNames) != 0 {
+		t.Fatalf("expected Leaf to have no calls, got %v", leaf.CalledNames)
+	}
+}
+
 func TestExtractGoDeclarationsRejectsInvalidSyntax(t *testing.T) {
 	if _, _, err := extractGoDeclarations("broken.go", "package broken\nfunc ("); err == nil {
 		t.Fatal("expected a syntax error for invalid Go source")

@@ -71,7 +71,13 @@ type PGFileInput struct {
 // content-hash-keyed identity was first seen under a different path in an
 // earlier snapshot of the same branch) the path it was renamed from.
 type PGSymbolVersion struct {
+	// SymbolID is the stable identity (code_symbols.id), consistent across
+	// renamed/unchanged snapshots. SymbolVersionID is this specific
+	// snapshot's occurrence (code_symbol_versions.id) -- what code_edges
+	// actually references, since an edge is a claim about one snapshot's
+	// state, not about the identity's whole history.
 	SymbolID            string
+	SymbolVersionID     string
 	FullyQualifiedName  string
 	Path                string
 	ContentHash         string
@@ -149,10 +155,16 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	var allDecls []indexedGoDecl
 	for _, f := range files {
-		if err := s.indexFileLocked(ctx, tx, snapshotID, repositoryID, f); err != nil {
+		decls, err := s.indexFileLocked(ctx, tx, snapshotID, repositoryID, f)
+		if err != nil {
 			return fmt.Errorf("index %s: %w", f.Path, err)
 		}
+		allDecls = append(allDecls, decls...)
+	}
+	if err := insertGoCallEdgesLocked(ctx, tx, snapshotID, allDecls); err != nil {
+		return fmt.Errorf("index call edges: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -166,18 +178,74 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	return tx.Commit()
 }
 
-func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, f PGFileInput) error {
+// indexedGoDecl is what indexFileLocked reports back about each Go
+// declaration it indexed, so IndexSnapshot can resolve call edges once
+// every file in the snapshot -- and therefore every declaration a call
+// might target -- has actually been indexed. A call inside file A to a
+// function defined in file B of the same package could not be resolved
+// while file A was still being processed on its own.
+type indexedGoDecl struct {
+	SymbolID    string
+	SymbolVerID string
+	Package     string
+	Name        string
+	Kind        string
+	CalledNames []string
+}
+
+// insertGoCallEdgesLocked turns each declaration's syntactic CalledNames
+// into a code_edges row, but only when exactly one function/method in the
+// same package (within this snapshot) has that name -- two candidates
+// means the bare name is genuinely ambiguous at this extraction tier (no
+// type-checking), and the honest answer is no edge, not a guess between
+// them. This is why the audit and blueprint both call for an explicit
+// confidence class per edge: 'static_analysis' here is real syntax-derived
+// signal, weaker than a type-checked reference but categorically better
+// than the heuristic filename-convention extractor's total absence of any
+// call graph.
+func insertGoCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, decls []indexedGoDecl) error {
+	targets := make(map[string][]indexedGoDecl, len(decls))
+	for _, d := range decls {
+		if d.Kind != "function" && d.Kind != "method" {
+			continue
+		}
+		key := d.Package + "." + d.Name
+		targets[key] = append(targets[key], d)
+	}
+
+	for _, caller := range decls {
+		if caller.Kind != "function" && caller.Kind != "method" {
+			continue
+		}
+		for _, calledName := range caller.CalledNames {
+			candidates := targets[caller.Package+"."+calledName]
+			if len(candidates) != 1 {
+				continue // unresolved (0) or ambiguous (2+): no edge, not a guess
+			}
+			target := candidates[0]
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO code_edges (snapshot_id, source_symbol_version_id, target_symbol_version_id, relation, confidence_class, extractor)
+				VALUES ($1, $2, $3, 'CALLS', 'static_analysis', 'go/parser')`,
+				snapshotID, caller.SymbolVerID, target.SymbolVerID); err != nil {
+				return fmt.Errorf("insert call edge %s -> %s: %w", caller.Name, target.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, f PGFileInput) ([]indexedGoDecl, error) {
 	var fileID string
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO code_files (repository_id, first_snapshot_id) VALUES ($1, $2) RETURNING id`,
 		repositoryID, snapshotID).Scan(&fileID); err != nil {
-		return fmt.Errorf("create file: %w", err)
+		return nil, fmt.Errorf("create file: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO code_file_versions (file_id, snapshot_id, path, language, content_hash)
 		VALUES ($1, $2, $3, $4, $5)`,
 		fileID, snapshotID, f.Path, f.Language, f.ContentHash); err != nil {
-		return fmt.Errorf("create file version: %w", err)
+		return nil, fmt.Errorf("create file version: %w", err)
 	}
 
 	var symbolID string
@@ -187,21 +255,23 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
 		RETURNING id`,
 		repositoryID, f.ContentHash, f.Language, snapshotID).Scan(&symbolID); err != nil {
-		return fmt.Errorf("upsert symbol identity: %w", err)
+		return nil, fmt.Errorf("upsert symbol identity: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO code_symbol_versions (symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, content_hash)
 		VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $4, 'file', $5)`,
 		symbolID, snapshotID, fileID, f.Path, f.ContentHash); err != nil {
-		return fmt.Errorf("create symbol version: %w", err)
+		return nil, fmt.Errorf("create symbol version: %w", err)
 	}
 
 	if f.Language == "go" && f.Content != "" {
-		if err := s.indexGoDeclarationsLocked(ctx, tx, snapshotID, repositoryID, fileID, f); err != nil {
-			return fmt.Errorf("index go declarations: %w", err)
+		decls, err := s.indexGoDeclarationsLocked(ctx, tx, snapshotID, repositoryID, fileID, f)
+		if err != nil {
+			return nil, fmt.Errorf("index go declarations: %w", err)
 		}
+		return decls, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // indexGoDeclarationsLocked indexes f's real top-level Go declarations
@@ -212,11 +282,12 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 // whole index: an unparseable file (a syntax error mid-edit, a generated
 // file with unusual syntax) should not block the Tier 0 file-level symbol
 // every other language already gets by the same rule.
-func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, fileID string, f PGFileInput) error {
+func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, fileID string, f PGFileInput) ([]indexedGoDecl, error) {
 	pkgName, decls, err := extractGoDeclarations(f.Path, f.Content)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
+	out := make([]indexedGoDecl, 0, len(decls))
 	for _, d := range decls {
 		stableKey := "go:" + d.Kind + ":" + d.ContentHash
 		var symbolID string
@@ -226,18 +297,28 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 			ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
 			RETURNING id`,
 			repositoryID, stableKey, d.Kind, snapshotID).Scan(&symbolID); err != nil {
-			return fmt.Errorf("upsert go declaration identity for %s: %w", d.Name, err)
+			return nil, fmt.Errorf("upsert go declaration identity for %s: %w", d.Name, err)
 		}
 		rangeText := fmt.Sprintf("%d-%d", d.StartLine, d.EndLine)
-		if _, err := tx.ExecContext(ctx, `
+		var symbolVersionID string
+		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO code_symbol_versions
 				(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, doc_comment)
-			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, NULLIF($10, ''))`,
-			symbolID, snapshotID, fileID, d.FullyQualifiedName(pkgName), f.Path, d.Kind, rangeText, d.Signature, d.ContentHash, d.DocComment); err != nil {
-			return fmt.Errorf("create go declaration version for %s: %w", d.Name, err)
+			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, NULLIF($10, ''))
+			RETURNING id`,
+			symbolID, snapshotID, fileID, d.FullyQualifiedName(pkgName), f.Path, d.Kind, rangeText, d.Signature, d.ContentHash, d.DocComment).Scan(&symbolVersionID); err != nil {
+			return nil, fmt.Errorf("create go declaration version for %s: %w", d.Name, err)
 		}
+		out = append(out, indexedGoDecl{
+			SymbolID:    symbolID,
+			SymbolVerID: symbolVersionID,
+			Package:     pkgName,
+			Name:        d.Name,
+			Kind:        d.Kind,
+			CalledNames: d.CalledNames,
+		})
 	}
-	return nil
+	return out, nil
 }
 
 // ErrSymbolNotFound is returned when a query matches no symbol in the
@@ -253,7 +334,7 @@ var ErrSymbolNotFound = errors.New("symbol not found")
 // active snapshot, RenamedFromPath/RenamedFromSnapshot report it.
 func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch, query string) ([]PGSymbolVersion, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
+		SELECT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
 		       prior.path AS renamed_from_path, prior.snapshot_id AS renamed_from_snapshot
 		FROM code_symbol_versions sv
 		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
@@ -282,7 +363,7 @@ func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch
 	for rows.Next() {
 		var r PGSymbolVersion
 		var renamedFromPath, renamedFromSnapshot sql.NullString
-		if err := rows.Scan(&r.SymbolID, &r.FullyQualifiedName, &r.Path, &r.ContentHash, &r.SnapshotID, &r.CommitID, &r.Branch,
+		if err := rows.Scan(&r.SymbolVersionID, &r.SymbolID, &r.FullyQualifiedName, &r.Path, &r.ContentHash, &r.SnapshotID, &r.CommitID, &r.Branch,
 			&renamedFromPath, &renamedFromSnapshot); err != nil {
 			return nil, fmt.Errorf("scan symbol row: %w", err)
 		}
@@ -308,7 +389,7 @@ func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, te
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
+		SELECT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
 		       ts_rank(sv.search_vector, query) AS rank
 		FROM code_symbol_versions sv
 		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id,
@@ -326,7 +407,7 @@ func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, te
 	var results []PGSymbolVersion
 	for rows.Next() {
 		var r PGSymbolVersion
-		if err := rows.Scan(&r.SymbolID, &r.FullyQualifiedName, &r.Path, &r.ContentHash, &r.SnapshotID, &r.CommitID, &r.Branch, &r.Relevance); err != nil {
+		if err := rows.Scan(&r.SymbolVersionID, &r.SymbolID, &r.FullyQualifiedName, &r.Path, &r.ContentHash, &r.SnapshotID, &r.CommitID, &r.Branch, &r.Relevance); err != nil {
 			return nil, fmt.Errorf("scan lexical row: %w", err)
 		}
 		r.MatchType = "lexical"
