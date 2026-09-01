@@ -1,4 +1,5 @@
 package main
+import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
@@ -208,6 +209,7 @@ func main() {
 	srv.loadLocalState()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/version", release.Handler("extension-manager"))
 	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
 		return srv.readinessCheck()
 	}))
@@ -659,6 +661,46 @@ type hookDispatchResult struct {
 	Reason      string `json:"reason,omitempty"`
 }
 
+type requestIdentity struct {
+	TenantID    string
+	PrincipalID string
+}
+
+// resolveIdentity mirrors the pattern shared by every other governed
+// service in this fabric (see services/tool-governance/cmd/server/main.go):
+// a signed bearer token's claims take precedence, and a request-supplied
+// tenant/principal must agree with whichever identity was authenticated.
+// handleHookDispatch used to trust req.TenantID/req.PrincipalID outright --
+// since a hook-dispatch request reaches this service as an MCP tool call
+// forwarded through mcp-gateway, and mcp-gateway only overwrites the
+// X-SCOS-Tenant-ID/X-SCOS-Principal-ID *headers* with the caller's verified
+// identity (not the JSON body), a caller authenticated as one tenant could
+// name any other tenant in the body and have hooks dispatched -- and
+// external webhook endpoints notified -- as that victim tenant.
+func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (requestIdentity, int, string) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		if (bodyTenant != "" && bodyTenant != claims.TenantID) || (bodyPrincipal != "" && bodyPrincipal != claims.PrincipalID) {
+			return requestIdentity{}, http.StatusForbidden, "request identity does not match authenticated identity"
+		}
+		return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
+	}
+	if auth.Identity(r.Context()) != "" {
+		return requestIdentity{}, http.StatusUnauthorized, "authenticated token has no tenant and principal claims"
+	}
+	tenantID := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
+	principalID := strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
+	if tenantID == "" {
+		tenantID = bodyTenant
+	}
+	if principalID == "" {
+		principalID = bodyPrincipal
+	}
+	if tenantID == "" || principalID == "" {
+		return requestIdentity{}, http.StatusUnauthorized, "tenant_id and principal_id are required"
+	}
+	return requestIdentity{TenantID: tenantID, PrincipalID: principalID}, 0, ""
+}
+
 func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -671,10 +713,16 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid hook dispatch: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Event) == "" || strings.TrimSpace(req.TenantID) == "" || strings.TrimSpace(req.PrincipalID) == "" {
-		http.Error(w, "event, tenant_id and principal_id are required", http.StatusBadRequest)
+	if strings.TrimSpace(req.Event) == "" {
+		http.Error(w, "event is required", http.StatusBadRequest)
 		return
 	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	req.TenantID, req.PrincipalID = identity.TenantID, identity.PrincipalID
 	dispatchStarted := time.Now()
 	results, err := s.dispatchHooks(r.Context(), req)
 	// §32 hook latency and failure. Latency covers the whole bounded dispatch;

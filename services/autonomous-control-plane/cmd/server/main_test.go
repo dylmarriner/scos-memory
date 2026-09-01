@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 func hasSystem(decision RouteDecision, system string) bool {
@@ -465,5 +467,39 @@ func TestAuthenticatedIdentityRejectsRequestHeaderMismatch(t *testing.T) {
 	_, _, status, _ := authenticatedIdentity(req, "other", "actor")
 	if status != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", status, http.StatusForbidden)
+	}
+}
+
+// authenticatedIdentity has the same claims-vs-header shape as
+// code-intelligence's requireTenant, where trusting a caller-supplied
+// header over verified claims was a confirmed cross-tenant IDOR (see that
+// service's TestRequireTenantPrefersClaimsOverSpoofedHeader). These are the
+// regression guards for the same bug class here: a caller authenticated as
+// one tenant must never be able to nominate a different tenant via the
+// request body or the X-SCOS-Tenant-ID/X-SCOS-Principal-ID headers.
+func TestAuthenticatedIdentityRejectsBodyMismatchWithClaims(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", nil)
+	ctx := auth.ContextWithClaims(req.Context(), auth.Claims{TenantID: "attacker-tenant", PrincipalID: "attacker"})
+	req = req.WithContext(ctx)
+
+	_, _, status, msg := authenticatedIdentity(req, "victim-tenant", "attacker")
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403 for a request tenant that doesn't match claims, got %d (%q)", status, msg)
+	}
+}
+
+func TestAuthenticatedIdentityIgnoresSpoofedHeaderWhenClaimsPresent(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/control/status", nil)
+	req.Header.Set("X-SCOS-Tenant-ID", "victim-tenant")
+	req.Header.Set("X-SCOS-Principal-ID", "victim")
+	ctx := auth.ContextWithClaims(req.Context(), auth.Claims{TenantID: "attacker-tenant", PrincipalID: "attacker"})
+	req = req.WithContext(ctx)
+
+	tenantID, actorID, status, msg := authenticatedIdentity(req, "", "")
+	if status != 0 {
+		t.Fatalf("expected success, got status %d (%q)", status, msg)
+	}
+	if tenantID != "attacker-tenant" || actorID != "attacker" {
+		t.Fatalf("expected the authenticated identity to win over the spoofed header, got tenant=%q actor=%q", tenantID, actorID)
 	}
 }
