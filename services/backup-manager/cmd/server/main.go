@@ -1,4 +1,5 @@
 package main
+import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
@@ -240,6 +241,7 @@ func main() {
 func newBackupMux(s *backupServer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/version", release.Handler("backup-manager"))
 	mux.HandleFunc("/health/ready", s.handleReady)
 	mux.HandleFunc("/v1/backups", s.handleBackups)
 	// Falsifying these is how a fleet ends up believing in a backup that

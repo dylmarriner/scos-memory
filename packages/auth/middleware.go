@@ -153,7 +153,7 @@ func FromEnvironment() (Config, error) {
 // bypassing the control-plane routing and policy stages.
 func ControlPlaneHandler(next http.Handler, config Config) http.Handler {
 	return AuthenticatedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" {
+		if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" || r.URL.Path == "/health/version" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -174,10 +174,12 @@ func MustFromEnvironment() Config {
 	return config
 }
 
-// AuthenticatedHandler protects every route except liveness/readiness probes.
+// AuthenticatedHandler protects every route except liveness/readiness probes
+// and the release-info endpoint (source SHA/build time only, not sensitive,
+// and deploy tooling needs to poll it without a token to verify parity).
 func AuthenticatedHandler(next http.Handler, config Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" {
+		if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" || r.URL.Path == "/health/version" {
 			next.ServeHTTP(w, r)
 			return
 		}

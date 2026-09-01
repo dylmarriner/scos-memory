@@ -45,12 +45,25 @@ code-intelligence compatibility-gateway context-optimisation credential-vault ex
 cloud-control-plane extension-manager graphify-provider hermes-provider mcp-gateway memory-gateway \
 memory-intelligence observability okf-synchroniser recovery-orchestrator \
 retrieval-orchestrator security-gate tool-governance transparency-projection"
+
+# Stamped into packages/release's SourceSHA/BuildTime via -X below, so every
+# running container can report exactly which commit it was built from at
+# GET /health/version -- the auto-deploy script checks this against the
+# commit it just deployed instead of trusting that `up -d --force-recreate`
+# actually landed the new image everywhere (see auto-deploy.sh's history:
+# it didn't, once, for six services, for 42+ hours). Left as "unknown" when
+# not supplied, which is the correct default for a local `docker build`
+# without --build-arg.
+ARG SOURCE_SHA=unknown
+ARG BUILD_TIME=unknown
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     set -eu; \
+    release_pkg="github.com/dylmarriner/scos-memory/packages/release"; \
+    ldflags="-s -w -X $release_pkg.SourceSHA=$SOURCE_SHA -X $release_pkg.BuildTime=$BUILD_TIME"; \
     for svc in $SERVICES; do \
       echo "building $svc"; \
-      go build -trimpath -ldflags="-s -w" -o "/out/$svc" "./services/$svc/cmd/server"; \
+      go build -trimpath -ldflags="$ldflags" -o "/out/$svc" "./services/$svc/cmd/server"; \
     done
 
 FROM alpine:3.21

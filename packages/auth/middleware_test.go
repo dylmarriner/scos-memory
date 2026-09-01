@@ -51,7 +51,7 @@ func TestAuthenticatedHandlerLeavesHealthRoutesPublic(t *testing.T) {
 	handler := AuthenticatedHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}), Config{Token: "secret"})
-	for _, path := range []string{"/health/live", "/health/ready"} {
+	for _, path := range []string{"/health/live", "/health/ready", "/health/version"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
 		if recorder.Code != http.StatusNoContent {
@@ -122,7 +122,7 @@ func TestControlPlaneHandlerLeavesHealthRoutesPublic(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}), Config{Token: "service", ControlPlaneToken: "control-plane"})
 
-	for _, path := range []string{"/health/live", "/health/ready"} {
+	for _, path := range []string{"/health/live", "/health/ready", "/health/version"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusNoContent {

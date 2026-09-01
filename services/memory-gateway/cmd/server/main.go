@@ -17,6 +17,7 @@ import (
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/httpmid"
+	"github.com/dylmarriner/scos-memory/packages/release"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -99,6 +100,7 @@ func (s server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", s.handleLive)
 	mux.HandleFunc("GET /health/ready", s.handleReady)
+	mux.HandleFunc("GET /health/version", release.Handler("memory-gateway"))
 	mux.HandleFunc("GET /v1/version", s.handleVersion)
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
 	mux.HandleFunc("POST /v1/sessions/{sessionID}/messages", s.handleAppendMessage)

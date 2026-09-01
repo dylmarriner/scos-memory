@@ -1,4 +1,5 @@
 package main
+import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
@@ -119,6 +120,7 @@ func main() {
 func newRecoveryMux(s *recoveryServer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/version", release.Handler("recovery-orchestrator"))
 	mux.HandleFunc("/health/ready", s.handleReady)
 
 	// Mutating recovery routes are operator-only: without a scope gate any

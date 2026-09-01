@@ -1,4 +1,5 @@
 package main
+import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
@@ -325,6 +326,7 @@ func main() {
 	s.mu.Unlock()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/version", release.Handler("observability"))
 	mux.HandleFunc("/health/ready", s.handleReady)
 
 	// Metrics

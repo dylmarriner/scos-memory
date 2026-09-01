@@ -1,4 +1,5 @@
 package main
+import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
@@ -502,6 +503,7 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/version", release.Handler("execution-proxy"))
 	mux.HandleFunc("/health/ready", readiness.Handler(srv.ready))
 	mux.HandleFunc("/v1/version", handleVersion)
 	mux.HandleFunc("/v1/plan", srv.handlePlan)

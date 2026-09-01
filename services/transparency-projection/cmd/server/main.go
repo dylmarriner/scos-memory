@@ -1,6 +1,7 @@
 package main
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/release"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
@@ -106,6 +107,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", s.live)
 	mux.HandleFunc("/health/ready", s.ready)
+	mux.HandleFunc("/health/version", release.Handler("transparency-projection"))
 	mux.HandleFunc("/v1/transparency/snapshot", s.snapshot)
 	mux.HandleFunc("/v1/transparency/events", s.events)
 	mux.HandleFunc("/v1/transparency/stream", s.events)

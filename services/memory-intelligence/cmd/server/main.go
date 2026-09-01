@@ -1,4 +1,5 @@
 package main
+import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
@@ -339,6 +340,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/version", release.Handler("memory-intelligence"))
 	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
 		return srv.readinessCheck()
 	}))

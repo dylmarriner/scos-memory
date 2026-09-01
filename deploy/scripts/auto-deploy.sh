@@ -43,7 +43,7 @@ flock -n 9 || { echo "$(date -Iseconds) deploy already in progress, skipping thi
 echo "$(date -Iseconds) deploying $BEFORE -> $AFTER"
 git merge --ff-only origin/main
 
-"${COMPOSE[@]}" build
+"${COMPOSE[@]}" build --build-arg "SOURCE_SHA=$AFTER" --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # shellcheck disable=SC2086
 "${COMPOSE[@]}" up -d --no-deps --force-recreate $FABRIC_SERVICES
@@ -53,4 +53,33 @@ git merge --ff-only origin/main
 # changes -- also lands, without bouncing postgres on every deploy.
 "${COMPOSE[@]}" up -d
 
-echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD)"
+# Verify parity instead of trusting that force-recreate landed everywhere:
+# every fabric service shares one built image (see deploy/Dockerfile), so
+# each running container's image ID must match what was just built. This is
+# the actual check for the failure mode this script exists to prevent --
+# force-recreate is a mechanism, not proof it worked. A drifted service is
+# named loudly and the script exits non-zero so the systemd timer's own
+# failure state surfaces it, rather than a container quietly running the
+# previous commit until someone happens to notice.
+EXPECTED_IMAGE="$(${COMPOSE[@]} images -q agent-registry)"
+DRIFTED=""
+for svc in $FABRIC_SERVICES; do
+  container_id="$(${COMPOSE[@]} ps -q "$svc")"
+  if [ -z "$container_id" ]; then
+    echo "$(date -Iseconds) parity check: $svc has no running container"
+    DRIFTED="$DRIFTED $svc"
+    continue
+  fi
+  running_image="$(docker inspect --format '{{.Image}}' "$container_id")"
+  if [ "$running_image" != "$EXPECTED_IMAGE" ]; then
+    echo "$(date -Iseconds) parity check: $svc is running image $running_image, expected $EXPECTED_IMAGE"
+    DRIFTED="$DRIFTED $svc"
+  fi
+done
+
+if [ -n "$DRIFTED" ]; then
+  echo "$(date -Iseconds) deploy to $AFTER FAILED parity check:$DRIFTED"
+  exit 1
+fi
+
+echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD), parity verified across$(printf ' %s' $FABRIC_SERVICES)"

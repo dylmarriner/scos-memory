@@ -24,9 +24,19 @@ echo "==> building ${SERVICES// /, }"
 cd "$REPO_ROOT"
 mkdir -p "$INSTALL_BIN_DIR.new"
 export CGO_ENABLED=0 GOFLAGS=-buildvcs=false
+
+# Stamped into packages/release's SourceSHA/BuildTime, mirroring
+# deploy/Dockerfile's build-arg handling, so a native install reports the
+# same GET /health/version provenance a container build would. Falls back to
+# "unknown" outside a git checkout rather than failing the build.
+SOURCE_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RELEASE_PKG="github.com/dylmarriner/scos-memory/packages/release"
+LDFLAGS="-s -w -X $RELEASE_PKG.SourceSHA=$SOURCE_SHA -X $RELEASE_PKG.BuildTime=$BUILD_TIME"
+
 for svc in $SERVICES; do
   echo "building $svc"
-  go build -trimpath -ldflags="-s -w" -o "$INSTALL_BIN_DIR.new/$svc" "./services/$svc/cmd/server"
+  go build -trimpath -ldflags="$LDFLAGS" -o "$INSTALL_BIN_DIR.new/$svc" "./services/$svc/cmd/server"
 done
 
 # Atomic swap: a build failure above never leaves a partially-overwritten

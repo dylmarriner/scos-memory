@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/release"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -171,6 +172,7 @@ func newRetrievalMux(s *server) http.Handler {
 	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
 		return s.readinessCheck()
 	}))
+	mux.HandleFunc("/health/version", release.Handler("retrieval-orchestrator"))
 	mux.HandleFunc("/v1/retrieve", s.handleRetrieve)
 	mux.HandleFunc("/v1/retrieval-runs", s.handleRetrieve)
 	mux.HandleFunc("/v1/version", handleVersion)

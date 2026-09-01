@@ -1,6 +1,7 @@
 package main
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
+import "github.com/dylmarriner/scos-memory/packages/release"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import capabilityregistry "github.com/dylmarriner/scos-memory/packages/capability-registry"
 
@@ -1235,6 +1236,7 @@ func main() {
 	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
 		return plane.readinessCheck()
 	}))
+	mux.HandleFunc("/health/version", release.Handler("autonomous-control-plane"))
 	decisionHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")

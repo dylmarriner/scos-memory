@@ -1,5 +1,7 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/release"
+
 import (
 	"context"
 	"crypto/rand"
@@ -94,6 +96,7 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", health)
+	mux.HandleFunc("/health/version", release.Handler("cloud-control-plane"))
 	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.PingContext(r.Context()); err != nil {
 			http.Error(w, "unready", 503)
