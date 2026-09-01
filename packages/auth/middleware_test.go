@@ -130,3 +130,78 @@ func TestControlPlaneHandlerLeavesHealthRoutesPublic(t *testing.T) {
 		}
 	}
 }
+
+// ── scope gate (ported from the scos-memory sibling's serviceauth) ────────
+
+func scopedRequest(claims *Claims) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/v1/backups/complete", nil)
+	if claims != nil {
+		r = r.WithContext(ContextWithClaims(r.Context(), *claims))
+	}
+	return r
+}
+
+func runScopeGate(t *testing.T, required string, claims *Claims) int {
+	t.Helper()
+	reached := false
+	handler := RequireScope(required, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, scopedRequest(claims))
+	if rec.Code == http.StatusOK && !reached {
+		t.Fatal("handler reported OK without being reached")
+	}
+	return rec.Code
+}
+
+// A caller authenticated by the shared static service token carries no
+// claims at all. It must not satisfy an operator-only route.
+func TestRequireScopeRejectsClaimlessToken(t *testing.T) {
+	if code := runScopeGate(t, "backups:admin", nil); code != http.StatusForbidden {
+		t.Fatalf("expected 403 for a claimless token, got %d", code)
+	}
+}
+
+func TestRequireScopeRejectsWrongScope(t *testing.T) {
+	claims := Claims{TenantID: "t", PrincipalID: "p", Scopes: []string{"memory:read"}}
+	if code := runScopeGate(t, "backups:admin", &claims); code != http.StatusForbidden {
+		t.Fatalf("expected 403 for an unrelated scope, got %d", code)
+	}
+}
+
+func TestRequireScopeAcceptsExactScope(t *testing.T) {
+	claims := Claims{TenantID: "t", PrincipalID: "p", Scopes: []string{"backups:admin"}}
+	if code := runScopeGate(t, "backups:admin", &claims); code != http.StatusOK {
+		t.Fatalf("expected 200 for the exact scope, got %d", code)
+	}
+}
+
+func TestRequireScopeAcceptsAdminEscapeHatch(t *testing.T) {
+	claims := Claims{TenantID: "t", PrincipalID: "p", Scopes: []string{"admin"}}
+	if code := runScopeGate(t, "recovery:admin", &claims); code != http.StatusOK {
+		t.Fatalf("expected admin to satisfy any scope, got %d", code)
+	}
+}
+
+func TestValidateClaimsCarriesScopesAndJTI(t *testing.T) {
+	secret := "test-issuer-secret"
+	payload := `{"tenant_id":"t","principal_id":"p","scopes":["backups:admin"],"jti":"token-1"}`
+	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+	body := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(header + "." + body))
+	token := header + "." + body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	claims, err := validateClaims(token, secret)
+	if err != nil {
+		t.Fatalf("validateClaims: %v", err)
+	}
+	if claims.JTI != "token-1" {
+		t.Fatalf("expected jti to survive parsing, got %q", claims.JTI)
+	}
+	if !HasScope(claims, "backups:admin") {
+		t.Fatalf("expected parsed scopes to satisfy the gate, got %v", claims.Scopes)
+	}
+}

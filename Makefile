@@ -37,7 +37,7 @@ validate:
 	@test -n "$${SCOS_INTERNAL_SERVICE_TOKEN}" || (printf '%s\n' 'SCOS_INTERNAL_SERVICE_TOKEN must be set for compose validation' >&2; exit 1)
 	@test -n "$${SCOS_CONTROL_PLANE_TOKEN}" || (printf '%s\n' 'SCOS_CONTROL_PLANE_TOKEN must be set for compose validation' >&2; exit 1)
 	@test -n "$${SCOS_DATABASE_URL}" || (printf '%s\n' 'SCOS_DATABASE_URL must be set for compose validation' >&2; exit 1)
-	@test -n "$${SCOS_AGENT_ENDPOINT}" || (printf '%s\n' 'SCOS_AGENT_ENDPOINT must be set for compose validation' >&2; exit 1)
+	@test -n "$${SCOS_AGENT_ENDPOINT}" || test -n "$${DEEPSEEK_API_KEY}" || (printf '%s\n' 'SCOS_AGENT_ENDPOINT or DEEPSEEK_API_KEY must be set for compose validation' >&2; exit 1)
 	@test -n "$${POSTGRES_PASSWORD}" || (printf '%s\n' 'POSTGRES_PASSWORD must be set for compose validation' >&2; exit 1)
 	@test -n "$${SCOS_CONTROL_PLANE_TOKEN}" || (printf '%s\n' 'SCOS_CONTROL_PLANE_TOKEN must be set for compose validation' >&2; exit 1)
 	docker compose -f deploy/compose/docker-compose.yml config >/dev/null

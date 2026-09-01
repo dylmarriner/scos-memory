@@ -1,10 +1,8 @@
-# Connecting Agents to the SCOS Memory Fabric
+# Connecting Agents to the SCOS Memory Fabric (kubuntux)
 
 This is the setup guide for pointing any MCP-capable coding agent at the
-hosted SCOS stack (Docker Compose, on the fleet's Linode VPS). One shared
-memory backbone, many clients — but **each user connects with their own
-per-user API key**, so each person's memories live in their own isolated
-tenant workspace, not a shared bucket.
+SCOS stack running locally on kubuntux (Tailscale IP `100.93.75.87`,
+Docker Compose). One shared memory backbone, many clients.
 
 ## 1. How it fits together
 
@@ -13,41 +11,19 @@ tenant workspace, not a shared bucket.
    │  stdio (JSON-RPC, MCP)
    ▼
  scos-mcp-bridge.py            ~/.hermes/scripts/scos-mcp-bridge.py
-   │  HTTPS + Bearer <your scos_live_... API key>
-   ▼
- https://scos.172.236.155.15.nip.io/mcp      (public, real TLS cert)
-   │
-   ▼
- cloud-control-plane (services/cloud-control-plane, :8079 internally)
-   │  looks up your API key -> your tenant/principal, signs a short-lived
-   │  internal claims token, proxies the call onward
-   ▼
- mcp-gateway (services/mcp-gateway, internal-only, :8098)
-   ├──► hermes-provider        (internal, :8088, TLS)  — memory tools
+   │  HTTPS + Bearer token
+   ├──► hermes-provider        (kubuntux, :8088, TLS)  — 7 memory tools
    │      └──► memory-gateway (:8080) ── PostgreSQL + pgvector
-   ├──► memory-intelligence   (internal, :8089, TLS) — facts/correct/forget/dashboard
-   ├──► graphify-provider     (internal, :8099, TLS) — knowledge-graph traversal
-   └──► code-intelligence     (internal, :8084, TLS, control-plane)  — code tools
+   └──► code-intelligence     (kubuntux, :8084, TLS, control-plane)  — 3 code tools
           └──► /v1/index, /v1/query, /v1/impact
 ```
 
 Every agent talks to the **same** bridge script, which talks to the **same**
-public gateway URL, so all agents you personally connect share your one
-memory and code index — but nobody else's, since the gateway derives your
-tenant/principal purely from your API key (`cloud-control-plane`'s
-`/mcp` handler, `cmd/server/main.go`). The bridge exists because most agent
-CLIs speak MCP over **stdio**, while the SCOS gateway speaks **HTTPS**. The
-bridge translates one to the other and injects the auth header so individual
-agent configs never need to embed the API key in plain JSON alongside
-everything else.
-
-`mcp-gateway` itself is **not** reachable directly from outside the VPS
-(bound to `127.0.0.1` there on purpose) — `cloud-control-plane` is the only
-sanctioned public entry point, because it's the layer that knows how to turn
-a per-user API key into the right tenant. Don't try to bypass it by hitting
-`mcp-gateway`'s port directly from a remote client; it won't be reachable,
-and even from inside the VPS's own Docker network it only accepts requests
-whose TLS hostname matches its certificate (see the SNI note in §5).
+services, so all agents share one memory and one code index. The bridge
+exists because most agent CLIs speak MCP over **stdio**, while the SCOS
+services speak **HTTPS**. The bridge translates one to the other and injects
+auth headers so individual agent configs never need to embed the bearer
+token in plain JSON alongside everything else.
 
 Tools exposed to every connected agent: `scos_recall`, `scos_status`,
 `scos_explain`, `scos_user_model`, `scos_memory_graph`, `scos_correct`,
@@ -63,71 +39,32 @@ repository must be registered with `scos_code_repo_register` (or `POST
 
 ## 2. One-time prerequisites (already done on this machine, listed for a fresh box)
 
-1. **Get your own API key.** Sign up / log in at the SCOS portal
-   (`cloud-control-plane`'s `/` and `/api/auth/signup` /
-   `/api/auth/login`) and create a key under `/api/keys` (`name` is just a
-   label, e.g. `"my-laptop"`). The response's `key` field
-   (`scos_live_...`) is shown **once** — copy it immediately, it's stored
-   server-side only as a hash. Each key is tied to your own tenant
-   workspace: your `scos_recall`/`scos_status`/etc. calls only ever see
-   memories your own key wrote.
-2. **Verify the gateway is reachable** (public HTTPS, real cert — no VPN or
-   Tailscale needed for this hop):
+1. **Network reachability to kubuntux.** Tailscale (`100.93.75.87`) must
+   reach the stack. Verify:
    ```bash
-   curl -s https://scos.172.236.155.15.nip.io/mcp \
-     -H "Authorization: Bearer <your scos_live_... key>" \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}'
+   curl -sk https://100.93.75.87:8088/health/live
+   curl -sk https://100.93.75.87:8084/health/live
    ```
-   A working key returns a JSON-RPC `result` with `serverInfo.name ==
-   "scos-mcp-gateway"`. `"API key required"` means the header is missing;
-   `"invalid API key"` means it's wrong/revoked; `"gateway unavailable"`
-   means the internal proxy hop from `cloud-control-plane` to `mcp-gateway`
-   is broken (an infra problem, not a credentials problem — see §5).
-3. **Shared bridge config** at `~/.hermes/scos.env` (mode `600`, never
-   commit this — it holds your API key):
+2. **Shared bridge config** at `~/.hermes/scos.env` (mode `600`, never commit
+   this — it holds the bearer token):
    ```bash
-   SCOS_GATEWAY_URL=https://scos.172.236.155.15.nip.io/mcp
-   SCOS_BEARER_TOKEN=<your scos_live_... API key>
+   SCOS_HERMES_PROVIDER_URL=https://100.93.75.87:8088
+   SCOS_HERMES_BEARER_TOKEN=<internal service token or claims JWT>
+   SCOS_CODE_INTELLIGENCE_URL=https://100.93.75.87:8084
+   SCOS_CONTROL_PLANE_TOKEN=<control plane token>
+   SCOS_TENANT_ID=<tenant uuid>
+   SCOS_PRINCIPAL_ID=<principal uuid>
+   SCOS_NAMESPACE_ID=<namespace uuid>
+   SCOS_TLS_CA_PATH=~/.hermes/scos-ca.crt
    ```
-   The other fields some older setups carry in this file
-   (`SCOS_HERMES_BEARER_TOKEN`, `SCOS_TENANT_ID`, `SCOS_PRINCIPAL_ID`,
-   `SCOS_TLS_CA_PATH`, ...) are legacy holdovers from a previous
-   shared-identity/direct-to-`mcp-gateway` setup — harmless to leave in
-   place, but only `SCOS_GATEWAY_URL` and `SCOS_BEARER_TOKEN` are read by
-   the current bridge/gateway auth path. No CA cert file is needed anymore:
-   the public gateway serves a real Let's Encrypt certificate, not a
-   self-signed one.
+3. **CA cert** at `~/.hermes/scos-ca.crt`. The internal cert is a self-signed
+   leaf (O=scos-internal-dev) and cannot verify as a trust anchor, so the
+   bridge matches the scos-nexus plugin and disables peer verification
+   (`CERT_NONE`) — the file is optional for compatibility.
 4. **The bridge script** itself: `~/.hermes/scripts/scos-mcp-bridge.py`.
 
-Steps 1–4 are per-machine (well, per-*person*, since your API key travels
-with you), not per-agent — set them up once, then every agent below just
-points at the same script with a different `SCOS_AGENT_NAME`.
-
-The fastest way to do all of this at once, across every agent installed on
-a machine, is `scripts/install_agent_plugins.py` — see §3a.
-
-## 3a. Installing for every agent at once
-
-`scripts/install_agent_plugins.py` wires up every MCP-capable agent
-installed on the machine in one pass: it installs the shared bridge script
-and `~/.hermes/plugins/scos-memory`, merges a `scos` MCP server entry into
-each agent's native config (Cline, Cursor, Windsurf, Devin, Antigravity,
-Qwen, OpenClaw, OpenCode, Continue, Kilo), links the Gemini extension, adds
-the Codex plugin, and copies rules/slash-commands/skills where each agent
-expects them. It's additive and takes a timestamped backup of every file it
-touches (`<file>.bak-scos-<timestamp>`) before writing.
-
-```bash
-python3 scripts/install_agent_plugins.py
-# if Gemini is already linked from a previous run:
-python3 scripts/install_agent_plugins.py --skip-gemini
-```
-
-It does **not** write your API key anywhere — that still comes from
-`~/.hermes/scos.env` (§2.3), which every agent's config reads indirectly
-through the shared bridge script. Run this once per machine after setting
-up `scos.env`; re-run it any time a new agent gets installed.
+Steps 2–4 are per-machine, not per-agent — set them up once, then every
+agent below just points at the same script with a different `SCOS_AGENT_NAME`.
 
 ## 3. Per-agent config
 
@@ -148,36 +85,6 @@ so recalls don't collide across tools.
 }
 ```
 *(Already configured on this machine.)*
-
-**Editing the Claude Code plugin (`integrations/claude/plugins/scos-memory-fabric/`)
-does not take effect on its own.** Claude Code runs plugins from an installed
-cache at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, copied
-from the source directory at install time — it does not re-read the live
-source on every session. `claude plugin marketplace update` and
-`claude plugin disable`/`enable` do **not** refresh this cache when the
-plugin's version string is unchanged; `claude plugin install` short-circuits
-with "already installed" for the same reason. Verified the hard way: hook
-edits sat unused for an entire session (SessionStart-only cache) while every
-other check suggested they were live.
-
-The only way found to force a real refresh:
-```bash
-# bump "version" in .claude-plugin/plugin.json, then:
-claude plugin marketplace remove scos-fabric-tools
-claude plugin marketplace add /path/to/scos-memory-fabric/integrations/claude
-claude plugin install scos-memory-fabric@scos-fabric-tools
-claude plugin enable scos-memory-fabric@scos-fabric-tools
-```
-Removing the marketplace also clears `pluginConfigs` and `enabledPlugins` for
-it in `~/.claude/settings.json` — restore `gateway_url`/`bearer_token` (or
-whatever `userConfig` the plugin declares) afterward, and re-enable it.
-
-After any hook/script change, verify against the cache directly rather than
-trusting the edit:
-```bash
-diff -u integrations/claude/plugins/scos-memory-fabric/hooks/hooks.json \
-        ~/.claude/plugins/cache/scos-fabric-tools/scos-memory-fabric/<version>/hooks/hooks.json
-```
 
 To share this with teammates instead of configuring it per-machine, put the
 same block in a project-scoped **`.mcp.json`** at the repo root (checked
@@ -219,41 +126,32 @@ whichever service actually owns it:
 | `scos_code_query` | `code-intelligence` `POST /v1/query` — query the code index by symbol/path/intent |
 | `scos_code_impact` | `code-intelligence` `POST /v1/impact` — change-impact set for modified symbols |
 
-`mcp-gateway` itself (`compose-mcp-gateway-1` on the VPS) is internal-only —
-it's bound to `127.0.0.1` on the host and only reachable from other
-containers on the same Docker network, never directly from your laptop.
-**Don't point any client at `mcp-gateway`'s port directly** (e.g. an old
-`https://<host>:8098/mcp` URL); it will refuse the connection or, from
-inside the VPS network, fail TLS verification (its certificate's SAN is the
-public gateway hostname, not the internal Docker DNS name — `mcp-gateway`
-is only reachable under the alias `scos.172.236.155.15.nip.io` that's been
-added to its Docker network config for exactly this reason). The **only**
-sanctioned entry point, for every client, is `cloud-control-plane`'s public
-endpoint:
-
-```
-https://scos.172.236.155.15.nip.io/mcp
-```
-
-This is the **full** governed tool surface (136 tools incl. the code
-indexer), unlike the bridge's 10. It serves a real Let's Encrypt
-certificate, so no `--insecure`/SSL-verify-off flag is needed anywhere in
-this section — that workaround only applied to the old self-signed setup.
+Deployed locally at `https://100.93.75.87:8098/mcp` (kubuntux, container
+`compose-mcp-gateway-1`) — this is the **full** governed tool surface (136
+tools incl. the code indexer), unlike the bridge's 10. The gateway serves a
+self-signed cert (valid for 127.0.0.1), so remote MCP clients need
+`--insecure`/SSL-verify-off or the `tls-external/` Tailscale-issued cert
+recipe from `deploy/scripts/renew-mcp-gateway-cert.sh` (gitignored — never
+commit it). Its outbound calls to `hermes-provider`/`memory-intelligence`/
+`code-intelligence` still verify against the shared internal dev CA via
+`SCOS_TLS_CA_FILE`.
 
 **Claude Code** (CLI, and Desktop's embedded Claude Code sessions, which
 share `~/.claude.json`):
 ```bash
 claude mcp add --transport http --scope user scos-remote \
-  https://scos.172.236.155.15.nip.io/mcp \
-  -H "Authorization: Bearer <your scos_live_... API key>"
+  https://100.93.75.87:8098/mcp \
+  -H "Authorization: Bearer <SCOS_...KEN>" \
+  -H "X-SCOS-Tenant-ID: <tenant uuid>" \
+  -H "X-SCOS-Principal-ID: <principal uuid>"
 ```
 Verify with `claude mcp get scos-remote` — should show `✔ Connected`.
 *(Already registered on this machine as `scos-remote`.)*
 
 **Claude Desktop's account-level Connectors** (Settings → Connectors, the
 same mechanism behind the `claude.ai *` remote tools — Notion, Vercel,
-Zapier, etc.) can point at `https://scos.172.236.155.15.nip.io/mcp` too.
-Whether that UI's "Add connector" flow accepts a static bearer header (vs.
+Zapier, etc.) can now point at `https://100.93.75.87:8098/mcp` too. Whether
+that UI's "Add connector" flow accepts static bearer/custom headers (vs.
 requiring OAuth) hasn't been confirmed — if it doesn't, the Claude Code path
 above already covers both CLI and Desktop's embedded sessions, which is the
 same tool access either way.
@@ -270,36 +168,6 @@ args = ["-E", "/home/kubuntux/.hermes/scripts/scos-mcp-bridge.py"]
 SCOS_AGENT_NAME = "codex"
 ```
 *(Already configured on this machine.)*
-
-**Codex's native plugin at `integrations/codex/plugins/scos-memory-fabric/`
-now implements the same automatic-lifecycle pattern as Claude Code** —
-`UserPromptSubmit` calls `scos_recall` before the model sees the prompt,
-`Stop` persists the exchange via `hermes-provider`'s `memory_write`, and
-`PostToolUse` surfaces known-fix guidance on `scos_*` tool failures. Verified
-with the same two-separate-`codex exec`-processes test used for Claude Code
-(GOVERNANCE.md 21.4/4.14 — automatic pre-turn retrieval and post-turn
-persistence, no explicit tool call required).
-
-Two things that differ from the Claude Code integration, found the hard way:
-- **Codex's transcript format is not Claude Code's.** Codex's Stop hook
-  payload already includes `last_assistant_message` directly (no transcript
-  parsing needed for that half), but the user's message still has to come
-  from the transcript — and Codex's "rollout" JSONL nests everything under
-  `payload: {type: "message", role, content: [{type, text}]}`, not Claude
-  Code's flatter `message: {role, content}`. It also interleaves
-  plugin-injected wrapper messages (skill lists, other plugins' banners, this
-  plugin's own `[scos-auto-recall]` injection) under the same `role: "user"`/
-  `"developer"` as the real prompt — `scripts/scos-auto-persist.py` filters
-  these out by prefix rather than trusting "last user-role message."
-- **The plugin cache still needs a forced refresh after editing hooks/scripts**,
-  same as Claude Code (see the note above) — `codex plugin remove
-  scos-memory-fabric@scos-fabric-tools` then `codex plugin add
-  scos-memory-fabric@scos-fabric-tools` (no version bump needed here; unlike
-  Claude Code, a plain reinstall does pick up source changes).
-- Hooks are trust-gated per content hash (`~/.codex/config.toml`'s
-  `[hooks.state]` table) — a session run non-interactively needs
-  `codex exec --dangerously-bypass-hook-trust` the first time after any hook
-  edit, or an interactive session to accept the new trust prompt.
 
 ### Kilo Code
 
@@ -350,26 +218,25 @@ Two things that differ from the Claude Code integration, found the hard way:
 }
 ```
 
-### hermes-agent
+### hermes-agent (brainsync)
 
-Despite what an earlier version of this doc said, hermes-agent does **not**
-read a sibling file dropped under `~/.bsync_core/hermes-agent/` for this —
-that directory holds its `brainsync` live-memory config, not general MCP
-server registration. hermes-agent manages its own MCP servers via its `mcp`
-subcommand, backed by `~/.hermes/config.yaml`:
-
-```bash
-hermes mcp add scos \
-  --command /usr/bin/python3 \
-  --args -E /home/kubuntux/.hermes/scripts/scos-mcp-bridge.py \
-  --env SCOS_AGENT_NAME=hermes-agent
+hermes-agent's live MCP servers are declared one-per-file under
+`~/.bsync_core/hermes-agent/` (see `mcp-config.json` for the existing
+`brainsync` entry — single-object form, not wrapped in `mcpServers`). Add a
+sibling file, e.g. `~/.bsync_core/hermes-agent/mcp-config-scos.json`:
+```json
+{
+  "name": "scos",
+  "description": "SCOS Nexus Memory Fabric",
+  "command": "/usr/bin/python3",
+  "args": ["-E", "/home/kubuntux/.hermes/scripts/scos-mcp-bridge.py"],
+  "transport": "stdio",
+  "env": { "SCOS_AGENT_NAME": "hermes-agent" }
+}
 ```
-
-It connects immediately and does tool discovery live, so it'll ask whether
-to enable all discovered tools (146 of them, the full gateway surface — say
-yes, or pipe `yes |` in front of the command for a non-interactive install).
-Verify any time with `hermes mcp list` (should show `scos` as `✓ enabled`)
-or `hermes mcp test scos`.
+Confirm hermes-agent actually globs this directory (or whatever settings
+surface it reads) before relying on it — this repo can't see hermes-agent's
+loader code.
 
 ## 4. Verifying a new connection
 
@@ -391,29 +258,20 @@ JSON-RPC traffic.
 | Symptom | Likely cause |
 |---|---|
 | Agent hangs on startup / MCP timeout | Bridge is fine (`tools/list` answers from a static list instantly) — check the agent's own MCP startup timeout instead. |
-| `transport error` in bridge stderr, or `curl` to the gateway just times out | Network reachability to `scos.172.236.155.15.nip.io` (public DNS/HTTPS, not VPN-gated) — check general internet connectivity first. |
-| `"API key required"` | `SCOS_BEARER_TOKEN` missing/empty in `~/.hermes/scos.env`. |
-| `"invalid API key"` | The key is wrong, or has been revoked — issue a fresh one via `/api/keys` and update `~/.hermes/scos.env`. |
-| `"gateway unavailable"` (with a valid key) | Not a credentials problem — `cloud-control-plane`'s internal proxy hop to `mcp-gateway` is broken. Check `docker logs compose-cloud-control-plane-1` / `compose-mcp-gateway-1` on the VPS; the usual cause is `mcp-gateway`'s Docker network alias (`scos.172.236.155.15.nip.io`, baked into `deploy/compose/docker-compose.yml`) having been dropped by a manual `docker network disconnect`/container recreation outside `docker compose up -d` — reapply it or just re-run `docker compose up -d mcp-gateway` from the compose file. |
-| HTTP 401/403 from code-intelligence on a `scos_code_*` call | `SCOS_CONTROL_PLANE_TOKEN` missing/mismatched in `~/.hermes/scos.env` — code tools need the control-plane token header in addition to the API key. |
-| TLS handshake failure | The public gateway serves a real Let's Encrypt cert (`scos.172.236.155.15.nip.io`), so a handshake failure here means something is actually wrong (stale DNS, wrong port, a corporate TLS-inspecting proxy) — it's not the old self-signed-cert situation this doc used to describe. |
+| `transport error` in bridge stderr | kubuntux unreachable — check Tailscale (`tailscale status`) or that the SCOS compose stack is up (`docker ps`). |
+| HTTP 401/403 from provider | `SCOS_HERMES_BEARER_TOKEN` missing/stale in `~/.hermes/scos.env`. |
+| HTTP 401/403 from code-intelligence on a `scos_code_*` call | `SCOS_CONTROL_PLANE_TOKEN` missing/mismatched in `~/.hermes/scos.env` — code tools need the control-plane token header in addition to the bearer. |
+| TLS handshake failure | the internal cert is a self-signed leaf (`O=scos-internal-dev`) and the bridge disables peer verification (`CERT_NONE`) to match the plugin; a handshake failure means something is actually wrong (wrong port, no TLS, etc.), not just a missing CA. |
 | `scos_recall` returns nothing / wrong bucket | Two agents sharing one `SCOS_AGENT_NAME` collide on the same session UUID — give each a unique name. |
 
 ## 6. Security notes
 
-- `~/.hermes/scos.env` holds your API key in plaintext — keep it `chmod
-  600`, never commit it, never echo it into a shared doc or chat. Anyone
-  with the key gets full read/write access to your memory tenant, so treat
-  it like a password — revoke and reissue via `/api/keys/revoke` +
-  `/api/keys` if it ever leaks.
+- `~/.hermes/scos.env` holds the bearer token in plaintext — keep it
+  `chmod 600`, never commit it, never echo it into a shared doc or chat.
 - All per-agent config snippets above reference the bridge script and env
-  file by path; none of them embed the key directly, so agent config files
-  (which are more likely to get synced/backed up/shared) stay secret-free.
-- The gateway (`scos.172.236.155.15.nip.io`) terminates TLS with a real,
-  publicly trusted certificate — no custom CA file or `--insecure` flag is
-  needed anywhere in this doc anymore. Internal service-to-service hops
-  (`cloud-control-plane` → `mcp-gateway` → `hermes-provider` /
-  `memory-intelligence` / `graphify-provider` / `code-intelligence`) use a
-  separate internal CA (`compose_tls-certs` Docker volume) that also now
-  trusts the public gateway's Let's Encrypt root, so those hops verify
-  correctly too.
+  file by path; none of them embed the token directly, so agent config
+  files (which are more likely to get synced/backed up/shared) stay
+  secret-free.
+- `hermes-provider` terminates TLS itself (`:8088`); don't add a second
+  reverse proxy in front of it without also updating `scos-ca.crt` on every
+  client machine.

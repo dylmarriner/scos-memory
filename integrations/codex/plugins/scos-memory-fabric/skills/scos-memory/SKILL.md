@@ -15,11 +15,11 @@ you calling the tool directly, never through a user-typed shortcut. If the
 user wants an explicit lookup, that request comes as plain text, not a
 `/command`.
 
-The bundled bridge (`scripts/scos-mcp-bridge.py`) talks to the hosted SCOS
-gateway (`cloud-control-plane` fronting `mcp-gateway`), reading your own
-per-user API key from `~/.hermes/scos.env` on this machine (see
+The bundled bridge (`scripts/scos-mcp-bridge.py`) talks directly to the SCOS
+Memory Fabric's `hermes-provider` on rabuntu, reading connection details
+from `~/.hermes/scos.env` on this machine (see
 `docs/agent-connection-guide.md` §2 for how that file is populated). It
-exposes ten tools, scoped to the tenant your API key belongs to.
+exposes ten tools, scoped to the tenant and principal in that file.
 
 ## Tools
 

@@ -355,9 +355,36 @@ func TestAgentLifecycleMissingAgentIsDegraded(t *testing.T) {
 
 func TestDispatchAgentDoesNotUseSyntheticProductionFallback(t *testing.T) {
 	t.Setenv("SCOS_AGENT_ENDPOINT", "")
+	t.Setenv("DEEPSEEK_API_KEY", "")
 	_, err := (&controlPlane{}).dispatchAgent(context.Background(), agentRequest{AgentID: "configured-agent", Input: "hello"})
 	if err == nil {
 		t.Fatal("expected missing agent endpoint to fail")
+	}
+}
+
+func TestDispatchAgentUsesDeepSeekWhenEndpointIsUnset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Fatalf("authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"deepseek reply"}}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("SCOS_AGENT_ENDPOINT", "")
+	t.Setenv("DEEPSEEK_API_KEY", "sk-test")
+	t.Setenv("DEEPSEEK_BASE_URL", server.URL)
+	t.Setenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+
+	reply, err := (&controlPlane{client: server.Client()}).dispatchAgent(context.Background(), agentRequest{AgentID: "configured-agent", Input: "hello", Context: "memory context"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Content != "deepseek reply" {
+		t.Fatalf("reply = %+v", reply)
 	}
 }
 

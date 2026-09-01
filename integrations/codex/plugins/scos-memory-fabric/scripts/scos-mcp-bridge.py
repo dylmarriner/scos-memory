@@ -15,7 +15,7 @@ the stdio<->HTTP relay used by the Claude Desktop extension
 
 Config comes from ~/.hermes/scos.env:
   SCOS_GATEWAY_URL        mcp-gateway MCP endpoint (default
-                           https://scos.172.236.155.15.nip.io/mcp)
+                           localhost development endpoint; set this for production)
   SCOS_BEARER_TOKEN        internal service token / claims JWT (falls back
                            to the legacy SCOS_HERMES_BEARER_TOKEN name)
   SCOS_TENANT_ID / SCOS_PRINCIPAL_ID  identity
@@ -33,10 +33,8 @@ import urllib.request
 ENV_PATH = os.path.expanduser("~/.hermes/scos.env")
 
 DEFAULTS = {
-    "SCOS_GATEWAY_URL": "https://scos.172.236.155.15.nip.io/mcp",
-    "SCOS_TENANT_ID": "8e2edc7a-60f6-4841-8837-a99ea5b9cedf",
-    "SCOS_PRINCIPAL_ID": "6a11c3f9-58f4-41f3-a1c7-cccdf6275b70",
-    "SCOS_TLS_CA_PATH": os.path.expanduser("~/.hermes/scos-ca.crt"),
+    "SCOS_GATEWAY_URL": "https://127.0.0.1:8098/mcp",
+    "SCOS_TLS_CA_PATH": "",
 }
 
 
@@ -61,8 +59,8 @@ GATEWAY_URL = ENV["SCOS_GATEWAY_URL"]
 # Prefer SCOS_BEARER_TOKEN; fall back to the legacy per-service token name so
 # existing ~/.hermes/scos.env files keep working without edits.
 TOKEN = ENV.get("SCOS_BEARER_TOKEN") or ENV.get("SCOS_HERMES_BEARER_TOKEN", "")
-TENANT_ID = ENV["SCOS_TENANT_ID"]
-PRINCIPAL_ID = ENV["SCOS_PRINCIPAL_ID"]
+TENANT_ID = ENV.get("SCOS_TENANT_ID", "")
+PRINCIPAL_ID = ENV.get("SCOS_PRINCIPAL_ID", "")
 CA_PATH = ENV.get("SCOS_TLS_CA_PATH", "")
 
 AGENT_NAME = os.getenv("SCOS_AGENT_NAME", "external-agent")
@@ -74,17 +72,18 @@ def log(msg):
 
 
 def ssl_ctx():
-    ctx = ssl.create_default_context(cafile=CA_PATH) if CA_PATH and os.path.exists(CA_PATH) else ssl.create_default_context()
-    ctx.check_hostname = False
-    # The internal cert is a self-signed leaf (O=scos-internal-dev); the
-    # "CA" file at ~/.hermes/scos-ca.crt is that same leaf, so it can never
-    # verify as a trust anchor. This is an internal tailnet service — skip
-    # peer verification entirely.
-    ctx.verify_mode = ssl.CERT_NONE
+    if CA_PATH and not os.path.exists(CA_PATH):
+        raise RuntimeError(f"SCOS_TLS_CA_PATH does not exist: {CA_PATH}")
+    ctx = ssl.create_default_context(cafile=CA_PATH or None)
+    if os.environ.get("SCOS_TLS_INSECURE_SKIP_VERIFY") == "1":
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
 def gateway_headers():
+    if not TOKEN or not TENANT_ID or not PRINCIPAL_ID:
+        raise RuntimeError("SCOS_BEARER_TOKEN, SCOS_TENANT_ID and SCOS_PRINCIPAL_ID are required")
     h = {
         "Content-Type": "application/json",
         "X-SCOS-Tenant-ID": TENANT_ID,
@@ -99,13 +98,13 @@ def gateway_headers():
 def relay(rpc_request, timeout=30.0):
     """POST one JSON-RPC message to mcp-gateway and return the decoded
     response, or a JSON-RPC error object on transport failure."""
-    req = urllib.request.Request(
-        GATEWAY_URL,
-        data=json.dumps(rpc_request).encode(),
-        headers=gateway_headers(),
-        method="POST",
-    )
     try:
+        req = urllib.request.Request(
+            GATEWAY_URL,
+            data=json.dumps(rpc_request).encode(),
+            headers=gateway_headers(),
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx()) as resp:
             body = resp.read().decode()
             if not body:

@@ -20,6 +20,7 @@ import (
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/httpmid"
+	"github.com/dylmarriner/scos-memory/packages/llmclient"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -84,6 +85,26 @@ type httpAgentDispatcher struct {
 	client   *http.Client
 }
 
+type deepseekAgentDispatcher struct {
+	client *llmclient.Client
+}
+
+func (d deepseekAgentDispatcher) Dispatch(ctx context.Context, input agentRequest) (agentReply, error) {
+	if d.client == nil {
+		return agentReply{}, llmclient.ErrDisabled
+	}
+	systemPrompt := "You are the SCOS agent selected for this interaction. Produce a useful, direct answer to the user. Do not claim that an action was completed unless the supplied context proves it. Agent ID: " + input.AgentID
+	userPrompt := input.Input
+	if strings.TrimSpace(input.Context) != "" {
+		userPrompt += "\n\nAuthoritative SCOS context:\n" + input.Context
+	}
+	content, err := d.client.Chat(ctx, systemPrompt, userPrompt)
+	if err != nil {
+		return agentReply{}, err
+	}
+	return agentReply{Content: content}, nil
+}
+
 func (d httpAgentDispatcher) Dispatch(ctx context.Context, input agentRequest) (agentReply, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -132,7 +153,10 @@ func (c *controlPlane) dispatchAgent(ctx context.Context, input agentRequest) (a
 		}
 		return (httpAgentDispatcher{endpoint: endpoint, client: client}).Dispatch(ctx, input)
 	}
-	return agentReply{}, errors.New("SCOS_AGENT_ENDPOINT is required; no agent dispatcher is configured")
+	if deepseek := llmclient.FromEnvironment(c.client); deepseek != nil {
+		return (deepseekAgentDispatcher{client: deepseek}).Dispatch(ctx, input)
+	}
+	return agentReply{}, errors.New("no agent dispatcher is configured: set SCOS_AGENT_ENDPOINT or DEEPSEEK_API_KEY")
 }
 
 type memoryGatewayCommitter struct {

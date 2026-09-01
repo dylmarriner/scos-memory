@@ -22,7 +22,7 @@
 # `toolchain go1.26.6`, and the build should always reproduce with the same
 # toolchain rather than whatever patch Docker Hub resolves the tag to on a
 # given day.
-FROM golang:1.27.0-alpine AS build
+FROM golang:1.26.6-alpine AS build
 ENV GOFLAGS=-buildvcs=false CGO_ENABLED=0
 WORKDIR /src
 
@@ -41,11 +41,10 @@ COPY services ./services
 # them one at a time into explicitly named outputs, in a single layer that
 # shares one warm build cache across all of them.
 ARG SERVICES="agent-registry autonomous-control-plane backup-manager \
-cloud-control-plane code-intelligence compatibility-gateway context-optimisation \
-credential-vault execution-proxy extension-manager graphify-provider hermes-provider \
-mcp-gateway memory-gateway memory-intelligence observability okf-synchroniser \
-recovery-orchestrator retrieval-orchestrator security-gate tool-governance \
-transparency-projection"
+code-intelligence compatibility-gateway context-optimisation credential-vault execution-proxy \
+cloud-control-plane extension-manager graphify-provider hermes-provider mcp-gateway memory-gateway \
+memory-intelligence observability okf-synchroniser recovery-orchestrator \
+retrieval-orchestrator security-gate tool-governance transparency-projection"
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     set -eu; \
@@ -54,7 +53,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       go build -trimpath -ldflags="-s -w" -o "/out/$svc" "./services/$svc/cmd/server"; \
     done
 
-FROM alpine:3.24
+FROM alpine:3.21
 # graphify-provider execs the `graphify` CLI (PyPI `graphifyy`) as a
 # subprocess -- python3/pipx are added here, once, for the whole shared
 # image, rather than giving that one service its own base image.

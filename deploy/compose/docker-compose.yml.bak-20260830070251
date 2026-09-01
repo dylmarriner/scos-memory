@@ -1,0 +1,1172 @@
+x-service-auth-environment: &service-auth-environment
+  SCOS_INTERNAL_SERVICE_TOKEN: ${SCOS_INTERNAL_SERVICE_TOKEN:?SCOS_INTERNAL_SERVICE_TOKEN must be set}
+  SCOS_CONTROL_PLANE_TOKEN: ${SCOS_CONTROL_PLANE_TOKEN:?SCOS_CONTROL_PLANE_TOKEN must be set}
+  SCOS_SERVICE_IDENTITY: ${SCOS_SERVICE_IDENTITY_PREFIX:-scos-service}
+  # packages/auth.AuthenticatedHandler only populates claims (tenant_id,
+  # principal_id) on the request context when it can validate a claims-bearing
+  # bearer token against this secret. Several handlers (for example
+  # autonomous-control-plane's /v1/control/* routes, execution-proxy's
+  # /v1/plan) require those claims and have no working fallback once any
+  # identity has been authenticated -- without this var those routes are
+  # unreachable by any caller, not just probes, regardless of which headers
+  # are sent. It was previously wired only into security-gate, which issues
+  # the tokens but never needs to verify one of its own.
+  SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
+
+# Every governed HTTP service terminates TLS using a certificate shared from
+# the tls-certs volume (see the tls-certs service below). SCOS_TLS_REQUIRED
+# makes this fail closed: a service that cannot find its certificate refuses
+# to fall back to plaintext. The generated certificate is a self-signed dev
+# certificate valid for this compose network's internal hostnames only -- a
+# production deployment MUST replace the tls-certs service and volume with a
+# real certificate authority (e.g. cert-manager, ACME, or an operator-issued
+# certificate) rather than relying on this generator.
+x-service-tls-environment: &service-tls-environment
+  SCOS_TLS_REQUIRED: ${SCOS_TLS_REQUIRED:-true}
+  SCOS_TLS_CERT_FILE: ${SCOS_TLS_CERT_FILE:-/etc/scos/tls/tls.crt}
+  SCOS_TLS_KEY_FILE: ${SCOS_TLS_KEY_FILE:-/etc/scos/tls/tls.key}
+  SCOS_TLS_CA_FILE: ${SCOS_TLS_CA_FILE:-/etc/scos/tls/tls.crt}
+
+# Small-host runtime budget.
+#
+# The reference deployment is a single Raspberry Pi 5 (8 GB, 4 cores) running
+# ~20 Go services plus Postgres, and the stack is sized to fit inside ~4 GB so
+# the rest of the board stays available for page cache and whatever else the
+# operator runs. The binding constraint is the AGGREGATE idle footprint, not any
+# single service's working set, and every library default here is sized for a
+# server:
+#
+#   - GOMAXPROCS defaults to the core count, so each of twenty processes builds
+#     four per-P allocator caches and runs four GC workers -- for four cores
+#     total. These services are I/O bound on Postgres and on each other, so
+#     GOMAXPROCS=2 costs them no meaningful throughput and removes most of that
+#     duplication along with the scheduler contention of 80 runnable Ps.
+#   - GOGC=100 lets every heap double before collecting. GOGC=50 trades a small
+#     amount of CPU, which this box has spare, for RAM.
+#   - GOMEMLIMIT is a soft target: the runtime collects harder as the heap
+#     approaches it rather than failing, so a loaded service degrades in latency
+#     instead of being OOM-killed. mem_limit is the matching HARD ceiling, set
+#     well above GOMEMLIMIT so the kernel only intervenes on a genuine leak.
+#
+# Budget at these values: ~20 services at ~30-40 MB resident = ~700 MB, Postgres
+# ~900 MB including backends, ~2 GB of headroom inside the 4 GB target. Every
+# value scales through its environment variable -- raise SCOS_GOMEMLIMIT and
+# SCOS_SERVICE_MEM_LIMIT together if you want the stack to use more of the 8 GB.
+#
+# memswap_limit is pinned equal to mem_limit so a container can never swap. The
+# root device is an SSD behind a USB bridge -- fast for a Pi, but that bridge
+# adds latency to every page fault, and a service that quietly swaps is far
+# harder to diagnose than one that fails against a limit you set on purpose.
+x-service-runtime-environment: &service-runtime-environment
+  GOMAXPROCS: ${SCOS_GOMAXPROCS:-2}
+  GOGC: ${SCOS_GOGC:-50}
+  GOMEMLIMIT: ${SCOS_GOMEMLIMIT:-96MiB}
+  # Per-process Postgres connection budget (packages/database.PoolLimits).
+  # Each backend costs Postgres several megabytes of private memory, so this is
+  # a memory knob as much as a concurrency one. This is the floor for the many
+  # governance services that touch the database only occasionally; the three
+  # request-path services override it individually below, because splitting the
+  # budget evenly across a dozen services would starve the hot path to fund
+  # services that are idle. max_connections is sized against the sum.
+  SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS:-3}
+  SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS:-1}
+
+# Docker's default json-file driver keeps every line a container has ever
+# logged, forever, on the root device. Twenty chatty services will quietly fill
+# the SSD; capping and rotating bounds the whole stack at ~200 MB of logs.
+x-service-logging: &service-logging
+  driver: json-file
+  options:
+    max-size: ${SCOS_LOG_MAX_SIZE:-10m}
+    max-file: "${SCOS_LOG_MAX_FILE:-3}"
+
+# Every Go service runs the same image (deploy/Dockerfile), which carries all
+# nineteen binaries, and picks its own with `command:`. One build, one image to
+# store and pull, instead of nineteen that differ only by which binary they
+# contain. Set SCOS_IMAGE to a registry tag to deploy a prebuilt image and skip
+# building on the Pi entirely.
+x-fabric-image: &fabric-image
+  image: ${SCOS_IMAGE:-scos-fabric:local}
+  build:
+    context: ../..
+    dockerfile: deploy/Dockerfile
+
+x-service-limits: &service-limits
+  # PID 1 in each container is the Go service binary itself, which never
+  # reaps children -- and Docker's HEALTHCHECK spawns a new wget/curl
+  # subprocess every interval. Without an init process those pile up as
+  # zombies (thousands per day across the fleet). init: true runs tini as
+  # PID 1 instead, which reaps them for free.
+  init: true
+  mem_limit: ${SCOS_SERVICE_MEM_LIMIT:-160m}
+  memswap_limit: ${SCOS_SERVICE_MEM_LIMIT:-160m}
+  cpus: ${SCOS_SERVICE_CPUS:-2}
+  logging: *service-logging
+
+# Optional: real LLM reasoning for entity extraction, memory summarization
+# (memory-intelligence) and candidate title/content rewriting
+# (consolidation-worker). Every one of those call sites treats an unset
+# DEEPSEEK_API_KEY as "feature disabled" and falls back to a deterministic
+# path -- no service in this fleet requires this key to start or to serve
+# its other endpoints. Leave it unset for a fully offline deployment.
+x-deepseek-environment: &deepseek-environment
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+  DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
+
+services:
+  tls-certs:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - tls-certs:/etc/scos/tls
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ -f /etc/scos/tls/tls.crt ] && [ -f /etc/scos/tls/tls.key ]; then
+          echo "tls-certs: existing certificate found, leaving it in place"
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        SAN="DNS:localhost,IP:127.0.0.1"
+        for svc in memory-gateway autonomous-control-plane retrieval-orchestrator \
+                   context-optimisation code-intelligence execution-proxy \
+                   extension-manager compatibility-gateway hermes-provider \
+                   memory-intelligence okf-synchroniser security-gate \
+                   tool-governance agent-registry recovery-orchestrator \
+                   backup-manager observability transparency-projection \
+                   graphify-provider credential-vault; do
+          SAN="$$SAN,DNS:$$svc"
+        done
+        openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+          -keyout /etc/scos/tls/tls.key -out /etc/scos/tls/tls.crt \
+          -subj "/O=scos-internal-dev" -addext "subjectAltName=$$SAN"
+        # Services run as the unprivileged `scos` user (uid 100 / gid 101 in
+        # the alpine service images). A root-owned 600 key is unreadable by
+        # them, so every TLS listener fails at startup with "permission
+        # denied". Keep the key 600 but hand it to the scos uid/gid, matching
+        # the postgres-tls-certs generator's chown pattern below.
+        chown 100:101 /etc/scos/tls/tls.key /etc/scos/tls/tls.crt
+        chmod 600 /etc/scos/tls/tls.key
+        chmod 644 /etc/scos/tls/tls.crt
+        echo "tls-certs: generated a self-signed development certificate"
+
+  # Every application DATABASE_URL in this file requires sslmode=require or
+  # stronger (packages/database.RequireTLS). PostgreSQL does not serve TLS
+  # by default, so without a server certificate every one of those
+  # connections fails closed with "server does not support SSL, but SSL
+  # was required" -- this generator makes the fail-closed application
+  # requirement actually satisfiable. Ownership must match the postgres
+  # image's postgres user (uid/gid 999) and the key must not be
+  # group/world readable, or the PostgreSQL server refuses to start.
+  postgres-tls-certs:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - postgres-tls-certs:/etc/postgresql-tls
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ -f /etc/postgresql-tls/server.crt ] && [ -f /etc/postgresql-tls/server.key ]; then
+          echo "postgres-tls-certs: existing certificate found, leaving it in place"
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+          -keyout /etc/postgresql-tls/server.key -out /etc/postgresql-tls/server.crt \
+          -subj "/O=scos-internal-dev" \
+          -addext "subjectAltName=DNS:postgres,DNS:localhost,IP:127.0.0.1"
+        chown 999:999 /etc/postgresql-tls/server.key /etc/postgresql-tls/server.crt
+        chmod 600 /etc/postgresql-tls/server.key
+        chmod 644 /etc/postgresql-tls/server.crt
+        echo "postgres-tls-certs: generated a self-signed development server certificate"
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-scos_memory}
+      POSTGRES_USER: ${POSTGRES_USER:-scos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be provided by the deployment secret manager}
+      SCOS_WAL_ARCHIVE_ENABLED: ${SCOS_WAL_ARCHIVE_ENABLED:-false}
+      SCOS_WAL_ARCHIVE_DESTINATION: ${SCOS_WAL_ARCHIVE_DESTINATION:-}
+    # Sized for the 4 GB budget described at the top of this file. Postgres
+    # ships defaults for a 1990s workstation (shared_buffers=128MB) and then
+    # sizes several structures off max_connections, so both matter here:
+    #
+    #   shared_buffers=512MB      the single biggest win; the working set of a
+    #                             memory fabric is index-heavy and benefits far
+    #                             more from cache than from the default 128MB.
+    #   effective_cache_size=1GB  a planner hint, not an allocation -- tells it
+    #                             index scans are cheap because the OS is also
+    #                             caching these files.
+    #   max_connections=75        60 application backends worst case (3
+    #                             request-path services x 8, 12 governance
+    #                             services x 3) plus the Python workers,
+    #                             migrations, and the slots Postgres reserves
+    #                             for superusers.
+    #                             Every slot Postgres reserves costs memory
+    #                             whether or not it is used, so this is
+    #                             deliberately not the default 100.
+    #   work_mem=4MB              per sort/hash node, so the true worst case is
+    #                             this times concurrent nodes across all 60
+    #                             connections -- it multiplies, keep it small.
+    #   random_page_cost=1.1      the Pi boots from flash, not a spinning disk;
+    #                             the default 4.0 pushes the planner into
+    #                             sequential scans that are not actually cheaper.
+    #   max_parallel_workers*     parallel query on 4 shared cores costs more in
+    #                             worker startup and memory than it returns.
+    #
+    # archive_mode stays on so WAL archiving can be enabled later without a
+    # restart, but the 60s archive_timeout it shipped with forced a 16 MB
+    # segment switch every minute there had been any write activity -- ~23 GB of
+    # writes a day at idle. On the SSD this deployment actually uses that is
+    # survivable rather than fatal, but it is still pure write amplification
+    # while SCOS_WAL_ARCHIVE_ENABLED is false, and it competes for the same USB
+    # bus as every real query. 5 minutes keeps the recovery-point guarantee
+    # meaningful at a fraction of the volume; lower SCOS_WAL_ARCHIVE_TIMEOUT if
+    # you turn archiving on and want a tighter bound.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_timeout=${SCOS_WAL_ARCHIVE_TIMEOUT:-300s}
+      - -c
+      - 'archive_command=if [ "$$SCOS_WAL_ARCHIVE_ENABLED" = "true" ]; then sh /usr/local/bin/scos-wal-archive %p %f; else exit 0; fi'
+      - -c
+      - wal_compression=on
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql-tls/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql-tls/server.key
+      - -c
+      - max_connections=${SCOS_PG_MAX_CONNECTIONS:-75}
+      - -c
+      - shared_buffers=${SCOS_PG_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${SCOS_PG_EFFECTIVE_CACHE_SIZE:-1GB}
+      - -c
+      - work_mem=${SCOS_PG_WORK_MEM:-4MB}
+      - -c
+      - maintenance_work_mem=${SCOS_PG_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=100
+      - -c
+      - max_worker_processes=4
+      - -c
+      - max_parallel_workers=2
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - max_parallel_maintenance_workers=1
+      - -c
+      - min_wal_size=128MB
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - checkpoint_completion_target=0.9
+    # shared_buffers (512MB) plus per-backend private memory plus the page cache
+    # for this cgroup. Sized with real headroom over shared_buffers: hitting a
+    # cgroup limit gets Postgres OOM-killed, not slowed down, so this ceiling is
+    # a runaway guard rather than a target to run against.
+    mem_limit: ${SCOS_PG_MEM_LIMIT:-1536m}
+    memswap_limit: ${SCOS_PG_MEM_LIMIT:-1536m}
+    # Docker caps /dev/shm at 64MB, which is where Postgres puts the dynamic
+    # shared memory segments used by parallel workers and by pgvector index
+    # builds. Undersized, an HNSW build fails outright rather than running slow.
+    shm_size: ${SCOS_PG_SHM_SIZE:-256m}
+    logging: *service-logging
+    expose:
+      - "5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../../database/migrations:/scos-database/migrations:ro
+      - ../../database/policies:/scos-database/policies:ro
+      - ../../scripts/scos-wal-archive:/usr/local/bin/scos-wal-archive:ro
+      - postgres-wal-archive:/var/lib/scos/wal-archive
+      - postgres-tls-certs:/etc/postgresql-tls:ro
+    depends_on:
+      postgres-tls-certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrations:
+    image: pgvector/pgvector:pg17
+    restart: "no"
+    user: "0"
+    environment:
+      SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_MIGRATIONS_BASELINE: ${SCOS_MIGRATIONS_BASELINE:-}
+    volumes:
+      - ../../database/migrations:/scos-database/migrations:ro
+      - ../../database/policies:/scos-database/policies:ro
+      - ../../scripts/scos-migrate:/usr/local/bin/scos-migrate:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "/usr/local/bin/scos-migrate"]
+
+  # Shared internal bearer credential. The value must come from the deployment
+  # environment or a secret manager, never from this file.
+
+  memory-gateway:
+    <<: [*service-limits, *fabric-image]
+    command: ["memory-gateway"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      # Above the shared default: the write path -- every memory ingest lands here.
+      SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
+      SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
+      SCOS_HTTP_ADDR: ${SCOS_HTTP_ADDR:-:8080}
+      SCOS_VERSION: ${SCOS_VERSION:-0.1.0-dev}
+      SCOS_SCHEMA_DIR: ${SCOS_SCHEMA_DIR:-}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8080:8080"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8080/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  autonomous-control-plane:
+    <<: [*service-limits, *fabric-image]
+    command: ["autonomous-control-plane"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_CONTROL_HTTP_ADDR: ${SCOS_CONTROL_HTTP_ADDR:-:8081}
+      SCOS_CONTROL_PLANE_STATE_PATH: ${SCOS_CONTROL_PLANE_STATE_PATH:-/var/lib/scos/control-plane/state.json}
+      SCOS_RETRIEVAL_ORCHESTRATOR_URL: ${SCOS_RETRIEVAL_ORCHESTRATOR_URL:-https://retrieval-orchestrator:8082}
+      SCOS_CONTEXT_OPTIMISATION_URL: ${SCOS_CONTEXT_OPTIMISATION_URL:-https://context-optimisation:8083}
+      SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
+      SCOS_EXECUTION_PROXY_URL: ${SCOS_EXECUTION_PROXY_URL:-https://execution-proxy:8085}
+      SCOS_TOOL_GOVERNANCE_URL: ${SCOS_TOOL_GOVERNANCE_URL:-https://tool-governance:8092}
+      SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
+      SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
+      # Optional when DEEPSEEK_API_KEY is configured: ACP dispatches directly
+      # through the DeepSeek OpenAI-compatible API in that mode.
+      SCOS_AGENT_ENDPOINT: ${SCOS_AGENT_ENDPOINT:-}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - autonomous-control-plane-state:/var/lib/scos/control-plane
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8081:8081"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8081/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  consolidation-worker:
+    <<: *service-limits
+    build:
+      context: ../..
+      dockerfile: workers/consolidation/Dockerfile
+    restart: unless-stopped
+    environment:
+      SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_CONSOLIDATION_POLL_SECONDS: ${SCOS_CONSOLIDATION_POLL_SECONDS:-5}
+      SCOS_CONSOLIDATION_BATCH_SIZE: ${SCOS_CONSOLIDATION_BATCH_SIZE:-10}
+      SCOS_LOG_LEVEL: ${SCOS_LOG_LEVEL:-info}
+      # Dream-style Synthesis (§16/§25): no-op without DEEPSEEK_API_KEY.
+      SCOS_SYNTHESIS_MIN_FACTS: ${SCOS_SYNTHESIS_MIN_FACTS:-20}
+      SCOS_SYNTHESIS_CADENCE_HOURS: ${SCOS_SYNTHESIS_CADENCE_HOURS:-24}
+      SCOS_SYNTHESIS_MAX_FACTS: ${SCOS_SYNTHESIS_MAX_FACTS:-200}
+      SCOS_SYNTHESIS_CHECK_INTERVAL_SECONDS: ${SCOS_SYNTHESIS_CHECK_INTERVAL_SECONDS:-3600}
+      <<: *deepseek-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      memory-gateway:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+  embeddings-worker:
+    <<: *service-limits
+    # Override the shared 160m cap: the local ONNX runtime + bge-small model
+    # (~130MB weights) needs far more headroom than the thin Go services.
+    mem_limit: ${SCOS_EMBEDDINGS_MEM_LIMIT:-768m}
+    memswap_limit: ${SCOS_EMBEDDINGS_MEM_LIMIT:-768m}
+    cpus: ${SCOS_EMBEDDINGS_CPUS:-2}
+    build:
+      context: ../..
+      dockerfile: workers/embeddings/Dockerfile
+    restart: unless-stopped
+    environment:
+      SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_EMBEDDINGS_HTTP_ADDR: ${SCOS_EMBEDDINGS_HTTP_ADDR:-:8102}
+      SCOS_EMBEDDINGS_POLL_SECONDS: ${SCOS_EMBEDDINGS_POLL_SECONDS:-5}
+      SCOS_EMBEDDINGS_BATCH_SIZE: ${SCOS_EMBEDDINGS_BATCH_SIZE:-64}
+      SCOS_EMBED_MODEL: ${SCOS_EMBED_MODEL:-BAAI/bge-small-en-v1.5}
+      SCOS_LOG_LEVEL: ${SCOS_LOG_LEVEL:-info}
+    volumes:
+      - embeddings-cache:/var/lib/scos/embeddings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+  index-maintenance-worker:
+    <<: *service-limits
+    build:
+      context: ../..
+      dockerfile: workers/index-maintenance/Dockerfile
+    restart: unless-stopped
+    # One-shot cycle wrapped in a loop so it runs on the maintenance cadence.
+    command: ["sh", "-c", "while true; do python3 main.py; sleep $${SCOS_INDEX_MAINTENANCE_INTERVAL:-3600}; done"]
+    environment:
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_INDEX_MAINTENANCE_INTERVAL: ${SCOS_INDEX_MAINTENANCE_INTERVAL:-3600}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+  policy-evaluation-worker:
+    <<: *service-limits
+    build:
+      context: ../..
+      dockerfile: workers/policy-evaluation/Dockerfile
+    restart: unless-stopped
+    command: ["sh", "-c", "while true; do python3 main.py; sleep $${SCOS_POLICY_EVAL_INTERVAL:-21600}; done"]
+    environment:
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_POLICY_EVAL_INTERVAL: ${SCOS_POLICY_EVAL_INTERVAL:-21600}
+      SCOS_POLICY_EVAL_MIN_SAMPLES: ${SCOS_POLICY_EVAL_MIN_SAMPLES:-20}
+      SCOS_POLICY_EVAL_REGRESSION_THRESHOLD: ${SCOS_POLICY_EVAL_REGRESSION_THRESHOLD:-0.05}
+      SCOS_POLICY_EVAL_SAMPLE_LIMIT: ${SCOS_POLICY_EVAL_SAMPLE_LIMIT:-200}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+  retrieval-orchestrator:
+    <<: [*service-limits, *fabric-image]
+    command: ["retrieval-orchestrator"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      # Above the shared default: the read path, and queryResults holds two connections per request.
+      SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
+      SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
+      SCOS_RETRIEVAL_HTTP_ADDR: ${SCOS_RETRIEVAL_HTTP_ADDR:-:8082}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      # When set, the retrieval orchestrator embeds the query so pgvector
+      # semantic search runs instead of silently falling back to full-text.
+      SCOS_EMBEDDINGS_URL: ${SCOS_EMBEDDINGS_URL:-http://embeddings-worker:8102}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8082:8082"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8082/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  context-optimisation:
+    <<: [*service-limits, *fabric-image]
+    command: ["context-optimisation"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_CONTEXT_HTTP_ADDR: ${SCOS_CONTEXT_HTTP_ADDR:-:8083}
+      SCOS_CONTEXT_SOURCE_STORE: ${SCOS_CONTEXT_SOURCE_STORE:-/var/lib/scos/context/sources}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - context-data:/var/lib/scos/context
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8083:8083"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8083/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  code-intelligence:
+    <<: [*service-limits, *fabric-image]
+    command: ["code-intelligence"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_CODE_INTELLIGENCE_HTTP_ADDR: ${SCOS_CODE_INTELLIGENCE_HTTP_ADDR:-:8084}
+      SCOS_CODE_INTELLIGENCE_STORE_PATH: ${SCOS_CODE_INTELLIGENCE_STORE_PATH:-/var/lib/scos/code-intelligence/state.json}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - code-intelligence-data:/var/lib/scos/code-intelligence
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8084:8084"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8084/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  execution-proxy:
+    <<: [*service-limits, *fabric-image]
+    command: ["execution-proxy"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_EXECUTION_PROXY_HTTP_ADDR: ${SCOS_EXECUTION_PROXY_HTTP_ADDR:-:8085}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_EXECUTION_PROXY_STORE_PATH: ${SCOS_EXECUTION_PROXY_STORE_PATH:-/var/lib/scos/execution-proxy/state.json}
+      SCOS_PROXY_RAW_DIR: ${SCOS_PROXY_RAW_DIR:-/var/lib/scos/execution-proxy/raw}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - execution-proxy-raw:/var/lib/scos/execution-proxy/raw
+      - execution-proxy-state:/var/lib/scos/execution-proxy/state
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8085:8085"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8085/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  extension-manager:
+    <<: [*service-limits, *fabric-image]
+    command: ["extension-manager"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_EXTENSION_MANAGER_HTTP_ADDR: ${SCOS_EXTENSION_MANAGER_HTTP_ADDR:-:8086}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8086:8086"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8086/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  compatibility-gateway:
+    <<: [*service-limits, *fabric-image]
+    command: ["compatibility-gateway"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR: ${SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR:-:8087}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8087:8087"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8087/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  hermes-provider:
+    <<: [*service-limits, *fabric-image]
+    command: ["hermes-provider"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      # Above the shared default: serves agent MCP traffic directly.
+      SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
+      SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
+      SCOS_HERMES_PROVIDER_HTTP_ADDR: ${SCOS_HERMES_PROVIDER_HTTP_ADDR:-:8088}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8088:8088"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8088/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  graphify-provider:
+    <<: [*service-limits, *fabric-image]
+    command: ["graphify-provider"]
+    restart: unless-stopped
+    # Overrides *service-limits' 160m: that budget fits a Go binary's own
+    # footprint, not the `graphify` CLI subprocess this service execs, which
+    # holds AST state for every file of whatever repo it's pointed at in one
+    # process's heap -- a few thousand source files routinely exceeds 160m
+    # and gets OOM-killed regardless of --max-workers (graphify.go), since
+    # that flag bounds parallelism, not per-process peak RSS.
+    mem_limit: ${GRAPHIFY_SERVICE_MEM_LIMIT:-1536m}
+    memswap_limit: ${GRAPHIFY_SERVICE_MEM_LIMIT:-1536m}
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR: ${SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR:-:8099}
+      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      GRAPHIFY_REPO_PATH: ${GRAPHIFY_REPO_PATH:-/repo}
+      # query/path/explain accept an optional repo_path (MCP tool arg) to
+      # graph any repo under this mount, not just GRAPHIFY_REPO_PATH -- see
+      # resolveWorkDir (main.go). GRAPHIFY_ALLOWED_ROOT bounds that input to
+      # this container's actual bind mount, so a caller-supplied repo_path
+      # can't walk outside it. GRAPHIFY_CACHE_DIR is where each repo's
+      # extracted graph.json is cached (source mount is read-only).
+      GRAPHIFY_ALLOWED_ROOT: ${GRAPHIFY_ALLOWED_ROOT:-/workspaces}
+      GRAPHIFY_CACHE_DIR: ${GRAPHIFY_CACHE_DIR:-/var/lib/graphify-cache}
+      # Left optional rather than compose-required: these must be a real
+      # tenant/principal/namespace already provisioned with a
+      # namespace_memberships row (can_write_candidates=true) for ingestion
+      # to succeed, which isn't something this file can invent. Unset, the
+      # service still starts and serves /health and the read-side
+      # query/path/explain tools -- handleExtract (main.go) itself returns
+      # 412 for POST /v1/graphify/extract until these are set.
+      GRAPHIFY_NAMESPACE_ID: ${GRAPHIFY_NAMESPACE_ID:-}
+      GRAPHIFY_TENANT_ID: ${GRAPHIFY_TENANT_ID:-}
+      GRAPHIFY_PRINCIPAL_ID: ${GRAPHIFY_PRINCIPAL_ID:-}
+      GRAPHIFY_BACKEND: ${GRAPHIFY_BACKEND:-}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - ${GRAPHIFY_REPO_HOST_PATH:-..}:/repo:ro
+      # Deliberately has no default. This mount is the entire universe of
+      # source graphify can be asked about, and defaulting it to a whole
+      # development drive put ~90 unrelated projects -- and every .env inside
+      # them -- one query away from a network-reachable service. Point it at
+      # the specific directory holding the repositories you want graphable;
+      # Compose refuses to start rather than guessing.
+      - ${GRAPHIFY_WORKSPACE_HOST_PATH:?GRAPHIFY_WORKSPACE_HOST_PATH must name the directory graphify may read; do not point it at a whole drive}:/workspaces:ro
+      - graphify-cache:/var/lib/graphify-cache
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8099/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  cloud-control-plane:
+    <<: [*service-limits, *fabric-image]
+    command: ["cloud-control-plane"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_CLOUD_HTTP_ADDR: ${SCOS_CLOUD_HTTP_ADDR:-:8079}
+      SCOS_MCP_GATEWAY_URL: ${SCOS_MCP_GATEWAY_URL:-https://mcp-gateway:8098}
+      SCOS_CREDENTIAL_VAULT_URL: ${SCOS_CREDENTIAL_VAULT_URL:-https://credential-vault:8100}
+      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
+      SCOS_OKF_SYNCHRONISER_URL: ${SCOS_OKF_SYNCHRONISER_URL:-https://okf-synchroniser:8090}
+      SCOS_GRAPHIFY_PROVIDER_URL: ${SCOS_GRAPHIFY_PROVIDER_URL:-https://graphify-provider:8099}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      # Keep the creator/customer console off every host interface by default.
+      # Put it behind an authenticated reverse proxy or explicitly set this
+      # to the intended ingress/Tailscale address in production.
+      - "${SCOS_CLOUD_BIND_ADDRESS:-127.0.0.1}:${SCOS_CLOUD_PORT:-8079}:8079"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      migrations:
+        condition: service_completed_successfully
+      mcp-gateway:
+        condition: service_healthy
+      memory-intelligence:
+        condition: service_healthy
+      credential-vault:
+        condition: service_healthy
+      code-intelligence:
+        condition: service_healthy
+      okf-synchroniser:
+        condition: service_healthy
+      graphify-provider:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8079/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  memory-intelligence:
+    <<: [*service-limits, *fabric-image]
+    command: ["memory-intelligence"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment, *deepseek-environment]
+      SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR: ${SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR:-:8089}
+      SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
+      SCOS_RETRIEVAL_ORCHESTRATOR_URL: ${SCOS_RETRIEVAL_ORCHESTRATOR_URL:-https://retrieval-orchestrator:8082}
+      SCOS_CONTEXT_OPTIMISATION_URL: ${SCOS_CONTEXT_OPTIMISATION_URL:-https://context-optimisation:8083}
+      SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
+      SCOS_EXECUTION_PROXY_URL: ${SCOS_EXECUTION_PROXY_URL:-https://execution-proxy:8085}
+      SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
+      SCOS_COMPATIBILITY_GATEWAY_URL: ${SCOS_COMPATIBILITY_GATEWAY_URL:-https://compatibility-gateway:8087}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      # §16/§26 automatic OKF promotion (maybePromoteToOKF): no-op unless
+      # DEEPSEEK_API_KEY is also set -- the LLM is the actual durability
+      # judge, these thresholds are only a cheap pre-filter.
+      SCOS_OKF_SYNCHRONISER_URL: ${SCOS_OKF_SYNCHRONISER_URL:-https://okf-synchroniser:8090}
+      SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD: ${SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD:-90}
+      SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD: ${SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD:-0.85}
+      # Memory-intelligence runs a 1s-poll SSE stream plus dashboard views
+      # against the same pool; the 3-conn shared default exhausts and wedges
+      # readiness (Ping blocks forever waiting for a free conn). Give it a
+      # real pool.
+      SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_MI:-12}
+      SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_MI:-4}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8089:8089"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8089/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  mcp-gateway:
+    <<: [*service-limits, *fabric-image]
+    command: ["mcp-gateway"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_MCP_GATEWAY_HTTP_ADDR: ${SCOS_MCP_GATEWAY_HTTP_ADDR:-:8098}
+      SCOS_HERMES_PROVIDER_URL: ${SCOS_HERMES_PROVIDER_URL:-https://hermes-provider:8088}
+      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      SCOS_GRAPHIFY_PROVIDER_URL: ${SCOS_GRAPHIFY_PROVIDER_URL:-https://graphify-provider:8099}
+      # This service alone is reached by external MCP clients (Claude Code
+      # --transport http, Claude Desktop) that verify TLS against the public
+      # CA pool and cannot pin the shared internal self-signed dev CA the
+      # way tlsserve.TrustedClient can. It therefore serves a real
+      # Tailscale-issued (Let's Encrypt) certificate for its own listener,
+      # overriding service-tls-environment's shared internal cert -- while
+      # SCOS_TLS_CA_FILE stays on the internal CA so its outbound calls to
+      # hermes-provider/memory-intelligence are unaffected.
+      SCOS_TLS_CERT_FILE: /etc/scos/tls-external/tls.crt
+      SCOS_TLS_KEY_FILE: /etc/scos/tls-external/tls.key
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - ../../tls-external:/etc/scos/tls-external:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8098:8098"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      hermes-provider:
+        condition: service_healthy
+      memory-intelligence:
+        condition: service_healthy
+      graphify-provider:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8098/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  okf-synchroniser:
+    <<: [*service-limits, *fabric-image]
+    command: ["okf-synchroniser"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_OKF_SYNCHRONISER_HTTP_ADDR: ${SCOS_OKF_SYNCHRONISER_HTTP_ADDR:-:8090}
+      SCOS_OKF_SYNCHRONISER_STATE_PATH: ${SCOS_OKF_SYNCHRONISER_STATE_PATH:-/var/lib/scos/okf/projections.json}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - okf-data:/var/lib/scos/okf
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8090:8090"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8090/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  security-gate:
+    <<: [*service-limits, *fabric-image]
+    command: ["security-gate"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_SECURITY_GATE_HTTP_ADDR: ${SCOS_SECURITY_GATE_HTTP_ADDR:-:8091}
+      SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
+      SCOS_SECURITY_GATE_STORE_PATH: ${SCOS_SECURITY_GATE_STORE_PATH:-/var/lib/scos/security-gate.json}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_SECURESTORE_URL: ${SCOS_SECURESTORE_URL:-}
+      SCOS_SECURESTORE_AGENT_API_KEY: ${SCOS_SECURESTORE_AGENT_API_KEY:-}
+      SCOS_SECURESTORE_WORKSPACE_ID: ${SCOS_SECURESTORE_WORKSPACE_ID:-}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - security-gate-data:/var/lib/scos
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8091:8091"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8091/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  tool-governance:
+    <<: [*service-limits, *fabric-image]
+    command: ["tool-governance"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_TOOL_GOVERNANCE_HTTP_ADDR: ${SCOS_TOOL_GOVERNANCE_HTTP_ADDR:-:8092}
+      SCOS_TOOL_GOVERNANCE_STORE_PATH: ${SCOS_TOOL_GOVERNANCE_STORE_PATH:-/var/lib/scos/tool-governance.json}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - tool-governance-data:/var/lib/scos
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8092:8092"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8092/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  agent-registry:
+    <<: [*service-limits, *fabric-image]
+    command: ["agent-registry"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_AGENT_REGISTRY_HTTP_ADDR: ${SCOS_AGENT_REGISTRY_HTTP_ADDR:-:8093}
+      SCOS_AGENT_REGISTRY_STORE_PATH: ${SCOS_AGENT_REGISTRY_STORE_PATH:-/var/lib/scos/agent-registry/state.json}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - agent-registry-state:/var/lib/scos/agent-registry/state
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8093:8093"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8093/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  recovery-orchestrator:
+    <<: [*service-limits, *fabric-image]
+    command: ["recovery-orchestrator"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR: ${SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR:-:8094}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8094:8094"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8094/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  backup-manager:
+    <<: [*service-limits, *fabric-image]
+    command: ["backup-manager"]
+    restart: unless-stopped
+    environment:
+      SCOS_OBSERVABILITY_URL: http://observability:8096
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_BACKUP_MANAGER_HTTP_ADDR: ${SCOS_BACKUP_MANAGER_HTTP_ADDR:-:8095}
+      SCOS_BACKUP_PROVIDER: ${SCOS_BACKUP_PROVIDER:-disabled}
+      SCOS_BACKUP_DESTINATION: ${SCOS_BACKUP_DESTINATION:-}
+      SCOS_BACKUP_PROVIDER_VERIFIED: ${SCOS_BACKUP_PROVIDER_VERIFIED:-false}
+      SCOS_BACKUP_OFF_HOST_VERIFIED: ${SCOS_BACKUP_OFF_HOST_VERIFIED:-false}
+      SCOS_SECRET_MANAGER: ${SCOS_SECRET_MANAGER:-}
+      SCOS_BACKUP_ENCRYPTION_KEY_REF: ${SCOS_BACKUP_ENCRYPTION_KEY_REF:-}
+      SCOS_PITR_ENABLED: ${SCOS_PITR_ENABLED:-false}
+      SCOS_BACKUP_DATABASE_URL: ${SCOS_BACKUP_DATABASE_URL:-}
+      SCOS_BACKUP_RESTORE_DATABASE_URL: ${SCOS_BACKUP_RESTORE_DATABASE_URL:-}
+      SCOS_BACKUP_DIR: ${SCOS_BACKUP_DIR:-/var/lib/scos/backups}
+      SCOS_WAL_ARCHIVE_DESTINATION: "${SCOS_WAL_ARCHIVE_DESTINATION:-file:///var/lib/scos/wal-archive}"
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - backup-data:/var/lib/scos/backups
+      - postgres-wal-archive:/var/lib/scos/wal-archive
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8095:8095"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8095/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  observability:
+    <<: [*service-limits, *fabric-image]
+    command: ["observability"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_OBSERVABILITY_HTTP_ADDR: ${SCOS_OBSERVABILITY_HTTP_ADDR:-:8096}
+      SCOS_OBSERVABILITY_STORE_PATH: ${SCOS_OBSERVABILITY_STORE_PATH:-/var/lib/scos/observability/observability.jsonl}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-scos-observability}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - observability-data:/var/lib/scos/observability
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8096:8096"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8096/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  transparency-projection:
+    <<: [*service-limits, *fabric-image]
+    command: ["transparency-projection"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_TRANSPARENCY_HTTP_ADDR: ${SCOS_TRANSPARENCY_HTTP_ADDR:-:8097}
+      SCOS_DASHBOARD_EDIT_PASSPHRASE: ${SCOS_DASHBOARD_EDIT_PASSPHRASE:-}
+      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      SCOS_AGENT_REGISTRY_URL: ${SCOS_AGENT_REGISTRY_URL:-https://agent-registry:8093}
+      SCOS_TOOL_GOVERNANCE_URL: ${SCOS_TOOL_GOVERNANCE_URL:-https://tool-governance:8092}
+      SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
+      SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
+      SCOS_AUTONOMOUS_CONTROL_PLANE_URL: ${SCOS_AUTONOMOUS_CONTROL_PLANE_URL:-https://autonomous-control-plane:8081}
+      SCOS_RECOVERY_ORCHESTRATOR_URL: ${SCOS_RECOVERY_ORCHESTRATOR_URL:-https://recovery-orchestrator:8094}
+      SCOS_SECURITY_GATE_URL: ${SCOS_SECURITY_GATE_URL:-https://security-gate:8091}
+      SCOS_OBSERVABILITY_URL: ${SCOS_OBSERVABILITY_URL:-https://observability:8096}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8097:8097"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      memory-intelligence:
+        condition: service_healthy
+      agent-registry:
+        condition: service_healthy
+      tool-governance:
+        condition: service_healthy
+      extension-manager:
+        condition: service_healthy
+      code-intelligence:
+        condition: service_healthy
+      autonomous-control-plane:
+        condition: service_healthy
+      recovery-orchestrator:
+        condition: service_healthy
+      security-gate:
+        condition: service_healthy
+      observability:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8097/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  credential-vault:
+    <<: [*service-limits, *fabric-image]
+    command: ["credential-vault"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
+      SCOS_CREDENTIAL_VAULT_HTTP_ADDR: ${SCOS_CREDENTIAL_VAULT_HTTP_ADDR:-:8100}
+      SCOS_CREDENTIAL_VAULT_MASTER_KEY: ${SCOS_CREDENTIAL_VAULT_MASTER_KEY:?SCOS_CREDENTIAL_VAULT_MASTER_KEY must be a base64-encoded 32-byte AES-256 key}
+      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+    ports:
+      - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8100:8100"
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8100/health/ready"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+volumes:
+  tls-certs:
+  postgres-tls-certs:
+  postgres-data:
+  execution-proxy-raw:
+  execution-proxy-state:
+  agent-registry-state:
+  autonomous-control-plane-state:
+  security-gate-data:
+  tool-governance-data:
+  observability-data:
+  context-data:
+  code-intelligence-data:
+  okf-data:
+  backup-data:
+  embeddings-cache:
+  graphify-cache:
+  postgres-wal-archive:

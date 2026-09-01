@@ -102,16 +102,7 @@ func main() {
 		}
 		defer db.Close()
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", s.handleReady)
-
-	mux.HandleFunc("/v1/recovery/start", s.handleRecoveryStart)
-	mux.HandleFunc("/v1/recovery/checklist", s.handleChecklistUpdate)
-	mux.HandleFunc("/v1/recovery/complete", s.handleRecoveryComplete)
-	mux.HandleFunc("/v1/recovery/status", s.handleRecoveryStatus)
-	mux.HandleFunc("/v1/recovery/status/", s.handleRecoveryStatusByID)
-	mux.HandleFunc("/v1/recovery/interrupted-turns", s.handleInterruptedTurns)
+	mux := newRecoveryMux(s)
 
 	addr := os.Getenv("SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR")
 	if addr == "" {
@@ -121,6 +112,27 @@ func main() {
 	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// newRecoveryMux wires the routes, kept separate from main so tests can
+// exercise the auth.RequireScope gates below without a listening server.
+func newRecoveryMux(s *recoveryServer) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/ready", s.handleReady)
+
+	// Mutating recovery routes are operator-only: without a scope gate any
+	// authenticated caller could mark a disaster-recovery checklist
+	// "completed" without a single step having run, masking a degraded
+	// service. Read-only status routes below stay open to any authenticated
+	// caller, matching the sibling repository's AUDIT-007 remediation.
+	mux.Handle("/v1/recovery/start", auth.RequireScope("recovery:admin", http.HandlerFunc(s.handleRecoveryStart)))
+	mux.Handle("/v1/recovery/checklist", auth.RequireScope("recovery:admin", http.HandlerFunc(s.handleChecklistUpdate)))
+	mux.Handle("/v1/recovery/complete", auth.RequireScope("recovery:admin", http.HandlerFunc(s.handleRecoveryComplete)))
+	mux.HandleFunc("/v1/recovery/status", s.handleRecoveryStatus)
+	mux.HandleFunc("/v1/recovery/status/", s.handleRecoveryStatusByID)
+	mux.HandleFunc("/v1/recovery/interrupted-turns", s.handleInterruptedTurns)
+	return mux
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {

@@ -7,6 +7,14 @@ rules-only fallback. Run `python3 integrations/agent-plugins/validate.py` to
 check that every registered local agent has a bundle. Each agent uses its own
 `SCOS_AGENT_NAME` while sharing the same secret-free bridge configuration.
 
+The one-shot installer provisions Hermes and all detected local agent bundles
+additively, including native Claude Code and Codex marketplace plugins.
+Unavailable agent CLIs are skipped without altering existing config.
+
+```bash
+python3 scripts/install_agent_plugins.py
+```
+
 Packaged installers for connecting coding agents to the SCOS Memory
 Fabric, instead of the manual per-agent steps in
 `docs/agent-connection-guide.md`. All agents point at the same memory

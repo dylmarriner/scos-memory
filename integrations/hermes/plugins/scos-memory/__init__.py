@@ -43,8 +43,8 @@ FALLBACK_TOOLS = [
 
 def _load_env():
     values = {
-        "SCOS_GATEWAY_URL": "https://scos.172.236.155.15.nip.io/mcp",
-        "SCOS_TLS_CA_PATH": str(Path.home() / ".hermes" / "scos-ca.crt"),
+        "SCOS_GATEWAY_URL": "https://127.0.0.1:8098/mcp",
+        "SCOS_TLS_CA_PATH": "",
     }
     if ENV_PATH.exists():
         for line in ENV_PATH.read_text().splitlines():
@@ -58,22 +58,25 @@ def _load_env():
 
 def _ssl_context(env):
     ca_path = env.get("SCOS_TLS_CA_PATH", "")
-    context = ssl.create_default_context(cafile=ca_path) if ca_path and Path(ca_path).exists() else ssl.create_default_context()
-    if not (ca_path and Path(ca_path).exists()):
+    if ca_path and not Path(ca_path).exists():
+        raise RuntimeError(f"SCOS_TLS_CA_PATH does not exist: {ca_path}")
+    context = ssl.create_default_context(cafile=ca_path or None)
+    if env.get("SCOS_TLS_INSECURE_SKIP_VERIFY") == "1":
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     return context
 
 
 def _gateway_headers(env):
+    token = env.get("SCOS_BEARER_TOKEN") or env.get("SCOS_HERMES_BEARER_TOKEN", "")
+    if not token or not env.get("SCOS_TENANT_ID") or not env.get("SCOS_PRINCIPAL_ID"):
+        raise RuntimeError("SCOS_BEARER_TOKEN, SCOS_TENANT_ID and SCOS_PRINCIPAL_ID are required")
     headers = {
         "Content-Type": "application/json",
         "X-SCOS-Tenant-ID": env.get("SCOS_TENANT_ID", ""),
         "X-SCOS-Principal-ID": env.get("SCOS_PRINCIPAL_ID", ""),
     }
-    token = env.get("SCOS_BEARER_TOKEN") or env.get("SCOS_HERMES_BEARER_TOKEN", "")
-    if token:
-        headers["Authorization"] = "Bearer " + token
+    headers["Authorization"] = "Bearer " + token
     return headers
 
 

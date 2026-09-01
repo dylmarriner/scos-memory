@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 func TestGovernedToolsListsAllGovernedTools(t *testing.T) {
 	tools := governedTools()
-	if len(tools) != 139 {
-		t.Fatalf("expected 139 governed tools, got %d", len(tools))
+	if len(tools) != 146 {
+		t.Fatalf("expected 146 governed tools, got %d", len(tools))
 	}
 	names := governedToolNames()
 	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain"} {
@@ -44,8 +46,8 @@ func TestHandleMCPToolsList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(resp.Result.Tools) != 139 {
-		t.Fatalf("expected 139 tools in tools/list response, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 146 {
+		t.Fatalf("expected 146 tools in tools/list response, got %d", len(resp.Result.Tools))
 	}
 }
 
@@ -143,24 +145,41 @@ func TestHandleMCPNotificationReturnsNoContent(t *testing.T) {
 	}
 }
 
-func TestResolveIdentityFallsBackToHeaders(t *testing.T) {
+// This test previously asserted that resolveIdentity would fall back to
+// caller-supplied X-SCOS-* headers when no claims were present -- it
+// codified the tenant-spoofing path rather than guarding against it. The
+// assertion is inverted here deliberately: at this boundary, headers alone
+// must never produce an identity.
+func TestResolveIdentityRejectsHeaderAssertedIdentity(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
 	r.Header.Set("X-SCOS-Principal-ID", "principal-1")
-	identity, status, _ := resolveIdentity(r)
-	if status != 0 {
-		t.Fatalf("expected identity to resolve, got status %d", status)
-	}
-	if identity.TenantID != "tenant-1" || identity.PrincipalID != "principal-1" {
-		t.Fatalf("unexpected identity: %+v", identity)
+	if _, status, _ := resolveIdentity(r); status != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for header-asserted identity with no claims, got %d", status)
 	}
 }
 
-func TestResolveIdentityRequiresBothHeaders(t *testing.T) {
+func TestResolveIdentityUsesClaims(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	// An attacker-supplied header alongside a legitimate token must not
+	// influence the resolved identity.
+	r.Header.Set("X-SCOS-Tenant-ID", "attacker-tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "attacker-principal")
+	ctx := auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "tenant-1", PrincipalID: "principal-1"})
+	identity, status, _ := resolveIdentity(r.WithContext(ctx))
+	if status != 0 {
+		t.Fatalf("expected claims-bearing request to resolve, got status %d", status)
+	}
+	if identity.TenantID != "tenant-1" || identity.PrincipalID != "principal-1" {
+		t.Fatalf("identity must come from claims, not headers: %+v", identity)
+	}
+}
+
+func TestResolveIdentityRequiresClaims(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
 	if _, status, _ := resolveIdentity(r); status != http.StatusUnauthorized {
-		t.Fatalf("expected 401 when principal id is missing, got %d", status)
+		t.Fatalf("expected 401 without claims, got %d", status)
 	}
 }
 

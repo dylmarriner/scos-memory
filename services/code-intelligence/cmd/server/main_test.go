@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 func TestNewCodeStore(t *testing.T) {
@@ -377,6 +379,59 @@ func TestHandleQueryPreventsCrossTenantLeakage(t *testing.T) {
 	}
 	if len(resp.Results) != 1 || resp.Results[0].Symbol.RepoID != "repo-a" {
 		t.Fatalf("expected only tenant-a's symbol, got %+v", resp.Results)
+	}
+}
+
+// TestRequireTenantPrefersClaimsOverSpoofedHeader guards against a
+// regression of the cross-tenant IDOR the authorization auditor confirmed:
+// requireTenant() previously trusted X-SCOS-Tenant-ID unconditionally, so a
+// caller authenticated with valid claims for one tenant could still read
+// another tenant's data simply by setting the header to the victim's ID.
+// With verified claims present, the header must be ignored entirely.
+func TestRequireTenantPrefersClaimsOverSpoofedHeader(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/v1/repos", nil)
+	r.Header.Set("X-SCOS-Tenant-ID", "victim-tenant")
+	ctx := auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "attacker-tenant", PrincipalID: "attacker"})
+	r = r.WithContext(ctx)
+
+	tenant, ok := requireTenant(r)
+	if !ok {
+		t.Fatalf("expected requireTenant to succeed with valid claims")
+	}
+	if tenant != "attacker-tenant" {
+		t.Fatalf("expected claims tenant %q to win over spoofed header, got %q", "attacker-tenant", tenant)
+	}
+}
+
+// TestHandleQueryIgnoresSpoofedHeaderWhenClaimsPresent exercises the same
+// regression end-to-end through handleQuery: an attacker authenticated as
+// tenant-a sets X-SCOS-Tenant-ID to tenant-b (the victim) and must still
+// only see tenant-a's (empty) results, never tenant-b's data.
+func TestHandleQueryIgnoresSpoofedHeaderWhenClaimsPresent(t *testing.T) {
+	store := newCodeStore()
+	store.repos["repo-b"] = &Repository{ID: "repo-b", TenantID: "tenant-b", CanonicalPath: "/repo"}
+	store.symbols["sym-b"] = &Symbol{ID: "sym-b", RepoID: "repo-b", FullyQualifiedName: "shared.Handler", Kind: "function", Path: "/repo/handler.go"}
+	store.chunks["sym-b"] = &Chunk{SymbolID: "sym-b", Path: "/repo/handler.go"}
+	srv := &server{store: store}
+
+	body := `{"intent":"exact_lookup","query":"shared.Handler","max_results":10}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/code/query", bytes.NewBufferString(body))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-b") // spoofed victim header
+	ctx := auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "tenant-a", PrincipalID: "attacker"})
+	r = r.WithContext(ctx)
+	w := httptest.NewRecorder()
+	srv.handleQuery(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Results []CodeQueryResult `json:"results"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 0 {
+		t.Fatalf("expected no cross-tenant results via spoofed header, got %+v", resp.Results)
 	}
 }
 

@@ -115,19 +115,36 @@ func (s *toolGovernanceServer) readinessCheck() error {
 
 // resolveIdentity determines the tenant/principal a request acts as. Claims
 // carried on an authenticated bearer token take precedence; internal
-// SCOS-Tenant/Principal headers are the fallback used by direct
-// service-to-service calls (execution-proxy, autonomous-control-plane) and
-// by tests that invoke handlers without the auth middleware in front of
-// them. This mirrors services/hermes-provider/cmd/server/main.go exactly.
+// SCOS-Tenant/Principal headers (falling back to body-supplied tenant/
+// principal) are used by direct service-to-service calls (execution-proxy,
+// autonomous-control-plane) and by tests that invoke handlers without the
+// auth middleware in front of them.
+//
+// This used to also require auth.Identity(r.Context()) == "" before trying
+// the header/body fallback, on the theory that a caller who is
+// authenticated-but-claims-less should be rejected outright. That check was
+// dead in production: auth.AuthenticatedHandler sets an identity on the
+// context for *every* successfully authenticated request, claims-bearing or
+// not (see packages/auth/middleware.go), and no internal caller in this
+// fabric ever mints a signed claims token when talking to tool-governance --
+// only cloud-control-plane calls auth.SignClaims, for external ingress.
+// execution-proxy (and other internal callers) authenticate with the plain
+// shared SCOS_INTERNAL_SERVICE_TOKEN and pass tenant_id/principal_id in the
+// request body instead. With the old check in place every such call was
+// unconditionally rejected with 401, permanently breaking
+// /v1/operations/prepare and /v1/operations/reconcile in production even
+// though no test caught it -- every existing test invoked resolveIdentity
+// directly with a bare context that never had an identity set at all, so
+// the dead branch was never exercised the way production traffic exercises
+// it. See TestResolveIdentityReachableForStaticServiceToken, which drives
+// the real auth.AuthenticatedHandler wrapper the way ControlPlaneHandler
+// does in main(), for the regression coverage.
 func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (requestIdentity, int, string) {
 	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
 		if (bodyTenant != "" && bodyTenant != claims.TenantID) || (bodyPrincipal != "" && bodyPrincipal != claims.PrincipalID) {
 			return requestIdentity{}, http.StatusForbidden, "request identity does not match authenticated identity"
 		}
 		return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
-	}
-	if auth.Identity(r.Context()) != "" {
-		return requestIdentity{}, http.StatusUnauthorized, "authenticated token has no tenant and principal claims"
 	}
 	tenantID := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
 	principalID := strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))

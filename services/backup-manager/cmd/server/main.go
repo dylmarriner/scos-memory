@@ -219,19 +219,7 @@ func (s *backupServer) production() bool {
 
 func main() {
 	s := newBackupServer()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health/live", healthOK)
-	mux.HandleFunc("/health/ready", s.handleReady)
-	mux.HandleFunc("/v1/backups", s.handleBackups)
-	mux.HandleFunc("/v1/backups/start", s.handleBackupStart)
-	mux.HandleFunc("/v1/backups/complete", s.handleBackupComplete)
-	mux.HandleFunc("/v1/backups/", s.handleBackupByID)
-	mux.HandleFunc("/v1/restore-tests", s.handleRestoreTests)
-	mux.HandleFunc("/v1/restore-tests/start", s.handleRestoreTestStart)
-	mux.HandleFunc("/v1/restore-tests/complete", s.handleRestoreTestComplete)
-	mux.HandleFunc("/v1/restore-tests/cadence", s.handleRestoreCadence)
-	mux.HandleFunc("/v1/plan", s.handlePlan)
-	mux.HandleFunc("/v1/retention", s.handleRetention)
+	mux := newBackupMux(s)
 	addr := os.Getenv("SCOS_BACKUP_MANAGER_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8095"
@@ -245,6 +233,27 @@ func main() {
 	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// newBackupMux wires the routes, kept separate from main so tests can
+// exercise the auth.RequireScope gates below without a listening server.
+func newBackupMux(s *backupServer) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health/live", healthOK)
+	mux.HandleFunc("/health/ready", s.handleReady)
+	mux.HandleFunc("/v1/backups", s.handleBackups)
+	// Falsifying these is how a fleet ends up believing in a backup that
+	// never ran and a restore that was never tested; both are operator-only.
+	mux.Handle("/v1/backups/start", auth.RequireScope("backups:admin", http.HandlerFunc(s.handleBackupStart)))
+	mux.Handle("/v1/backups/complete", auth.RequireScope("backups:admin", http.HandlerFunc(s.handleBackupComplete)))
+	mux.HandleFunc("/v1/backups/", s.handleBackupByID)
+	mux.HandleFunc("/v1/restore-tests", s.handleRestoreTests)
+	mux.Handle("/v1/restore-tests/start", auth.RequireScope("backups:admin", http.HandlerFunc(s.handleRestoreTestStart)))
+	mux.Handle("/v1/restore-tests/complete", auth.RequireScope("backups:admin", http.HandlerFunc(s.handleRestoreTestComplete)))
+	mux.HandleFunc("/v1/restore-tests/cadence", s.handleRestoreCadence)
+	mux.HandleFunc("/v1/plan", s.handlePlan)
+	mux.HandleFunc("/v1/retention", s.handleRetention)
+	return mux
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {

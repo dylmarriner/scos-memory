@@ -147,17 +147,7 @@ func main() {
 		embedClient: &http.Client{Timeout: 10 * time.Second},
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"live"}`))
-	})
-	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
-		return srv.readinessCheck()
-	}))
-	mux.HandleFunc("/v1/retrieve", srv.handleRetrieve)
-	mux.HandleFunc("/v1/retrieval-runs", srv.handleRetrieve)
-	mux.HandleFunc("/v1/version", handleVersion)
+	mux := newRetrievalMux(srv)
 
 	addr := os.Getenv("SCOS_RETRIEVAL_HTTP_ADDR")
 	if addr == "" {
@@ -167,6 +157,70 @@ func main() {
 	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// newRetrievalMux wires the routes, kept separate from main so tests can
+// exercise resolveIdentity's claims/header precedence through the actual
+// mux rather than by calling handlers directly.
+func newRetrievalMux(s *server) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"live"}`))
+	})
+	mux.HandleFunc("/health/ready", readiness.Handler(func() error {
+		return s.readinessCheck()
+	}))
+	mux.HandleFunc("/v1/retrieve", s.handleRetrieve)
+	mux.HandleFunc("/v1/retrieval-runs", s.handleRetrieve)
+	mux.HandleFunc("/v1/version", handleVersion)
+	return mux
+}
+
+// resolveIdentity determines the tenant/principal a retrieval request acts
+// as. RetrieveRequest.TenantID/PrincipalID are ordinary JSON fields on a
+// body that -- via mcp-gateway's scos_retrieve tool -- ultimately carries
+// caller-supplied (and therefore attacker-controlled) tool-call arguments.
+// Trusting them directly would let any caller read another tenant's memory
+// by simply naming a different tenant_id/principal_id in the request body;
+// this is the same class of spoofing F-01 closed for mcp-gateway's own
+// header forwarding, just one hop further downstream and via the body
+// instead of a header. Claims on an authenticated bearer token take
+// precedence; the X-SCOS-Tenant-ID/X-SCOS-Principal-ID headers (set
+// authoritatively by mcp-gateway's dispatchTool from the caller's own
+// validated claims, never by the caller directly) are the fallback for
+// direct service-to-service calls authenticated with the shared static
+// token. A caller-supplied tenant/principal on the JSON body must agree
+// with whichever identity was actually authenticated -- it is never used on
+// its own to select whose memory to search.
+func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (tenantID, principalID string, status int, msg string) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		if (bodyTenant != "" && bodyTenant != claims.TenantID) || (bodyPrincipal != "" && bodyPrincipal != claims.PrincipalID) {
+			return "", "", http.StatusForbidden, "request identity does not match authenticated identity"
+		}
+		return claims.TenantID, claims.PrincipalID, 0, ""
+	}
+	if auth.Identity(r.Context()) != "" {
+		tenantID = strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
+		principalID = strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
+		if tenantID == "" || principalID == "" {
+			return "", "", http.StatusUnauthorized, "X-SCOS-Tenant-ID and X-SCOS-Principal-ID are required"
+		}
+		return tenantID, principalID, 0, ""
+	}
+	// Reached only when no auth middleware ran in front of this handler
+	// (e.g. a unit test invoking handleRetrieve directly). main() always
+	// wraps routes in auth.ControlPlaneHandler, so this branch is never
+	// exercised in production; it exists so the request-validation tests
+	// below can still exercise the missing-field error paths without a full
+	// auth context.
+	if bodyTenant == "" {
+		return "", "", http.StatusBadRequest, "tenant_id is required"
+	}
+	if bodyPrincipal == "" {
+		return "", "", http.StatusBadRequest, "principal_id is required"
+	}
+	return bodyTenant, bodyPrincipal, 0, ""
 }
 
 // ── handler ──────────────────────────────────────────────────────────────
@@ -187,14 +241,13 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.TenantID == "" {
-		http.Error(w, "tenant_id is required", http.StatusBadRequest)
+	tenantID, principalID, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
 		return
 	}
-	if req.PrincipalID == "" {
-		http.Error(w, "principal_id is required", http.StatusBadRequest)
-		return
-	}
+	req.TenantID = tenantID
+	req.PrincipalID = principalID
 	if req.Query == "" {
 		http.Error(w, "query is required", http.StatusBadRequest)
 		return

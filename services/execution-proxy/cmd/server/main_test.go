@@ -530,3 +530,37 @@ func TestExecutionProxyReadinessRequiresStore(t *testing.T) {
 		t.Fatal("expected readiness failure without a store path")
 	}
 }
+
+// TestHandleExecuteRejectsDestructiveCommandWithoutConfirmation closes a gap
+// identified in hostile-test-gap-auditor.md: validateExecutionRequest's
+// destructive-command confirmation check (main.go:555-557) was never
+// exercised through the actual HTTP handler, so a regression that dropped
+// the check would still pass the full test suite.
+func TestHandleExecuteRejectsDestructiveCommandWithoutConfirmation(t *testing.T) {
+	s := newProxyServerAt(filepath.Join(t.TempDir(), "proxy.json"))
+	r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"tenant","principal_id":"principal","operation_id":"op-1","command":"rm -rf /tmp/x"}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "principal")
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, r)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected unconfirmed destructive command to be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleExecuteRejectsBodyIdentityMismatchingAuthenticatedHeaders closes
+// a companion gap from hostile-test-gap-auditor.md: validateExecutionRequest
+// rejects a body tenant_id/principal_id that disagrees with the
+// X-SCOS-Tenant-ID/X-SCOS-Principal-ID headers set by the auth layer
+// (main.go:544-550), but no test drove that check through handleExecute.
+func TestHandleExecuteRejectsBodyIdentityMismatchingAuthenticatedHeaders(t *testing.T) {
+	s := newProxyServerAt(filepath.Join(t.TempDir(), "proxy.json"))
+	r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"attacker-tenant","principal_id":"attacker-principal","operation_id":"op-1","command":"ls"}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "victim-tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "victim-principal")
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected identity mismatch to be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

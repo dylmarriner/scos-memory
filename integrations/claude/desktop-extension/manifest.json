@@ -4,7 +4,7 @@
   "display_name": "SCOS Memory Fabric",
   "version": "1.0.0",
   "description": "Connects Claude Desktop to the SCOS Memory Fabric's mcp-gateway service over HTTPS.",
-  "long_description": "Bridges Claude Desktop (which only launches local stdio MCP servers) to the SCOS gateway's remote Streamable HTTP MCP endpoint, fronted by cloud-control-plane. Exposes scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct and scos_forget against the same backend Claude Code connects to via docs/agent-connection-guide.md. Requires network reachability to the hosted gateway (a public HTTPS endpoint, no VPN needed) and your own per-user API key.",
+  "long_description": "Bridges Claude Desktop (which only launches local stdio MCP servers) to the SCOS mcp-gateway's remote Streamable HTTP MCP endpoint. Exposes scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct and scos_forget against the same backend Claude Code connects to via docs/agent-connection-guide.md. Requires network reachability to the configured gateway URL (Tailscale by default) and the same tenant/bearer credentials issued for this fleet.",
   "author": {
     "name": "SCOS Core Team"
   },
@@ -28,29 +28,29 @@
   "user_config": {
     "gateway_url": {
       "type": "string",
-      "title": "SCOS gateway URL",
-      "description": "Public MCP endpoint, fronted by cloud-control-plane. Defaults to the hosted fleet deployment.",
-      "default": "https://scos.172.236.155.15.nip.io/mcp",
+      "title": "mcp-gateway URL",
+      "description": "Base MCP endpoint for the SCOS mcp-gateway service. Defaults to the rabuntu fleet deployment.",
+      "default": "https://rabuntu.tail2c15c8.ts.net:8098/mcp",
       "required": true
     },
     "bearer_token": {
       "type": "string",
-      "title": "SCOS API key",
-      "description": "Your own per-user API key (scos_live_...) from the SCOS portal, or the SCOS_BEARER_TOKEN value in ~/.hermes/scos.env on this machine.",
+      "title": "SCOS bearer token",
+      "description": "Value of SCOS_HERMES_BEARER_TOKEN from ~/.hermes/scos.env on this machine, or your own issued service token.",
       "sensitive": true,
       "required": true
     },
     "tenant_id": {
       "type": "string",
-      "title": "Tenant ID (legacy, optional)",
-      "description": "No longer required -- derived from the API key. Leave blank.",
-      "required": false
+      "title": "Tenant ID",
+      "description": "SCOS_TENANT_ID (UUID) from ~/.hermes/scos.env.",
+      "required": true
     },
     "principal_id": {
       "type": "string",
-      "title": "Principal ID (legacy, optional)",
-      "description": "No longer required -- derived from the API key. Leave blank.",
-      "required": false
+      "title": "Principal ID",
+      "description": "SCOS_PRINCIPAL_ID (UUID) from ~/.hermes/scos.env.",
+      "required": true
     }
   },
   "compatibility": {

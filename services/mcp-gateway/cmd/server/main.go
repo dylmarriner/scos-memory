@@ -27,11 +27,11 @@ import (
 // caller's own identity headers, to the service that actually owns that
 // tool's implementation. See governedTools() for the full, current catalogue
 // (memory/fact ops, agent-registry, autonomous-control-plane, backup-manager,
-// compatibility-gateway, context-optimisation, execution-proxy,
-// extension-manager, memory-gateway, okf-synchroniser, recovery-orchestrator,
-// retrieval-orchestrator, security-gate, tool-governance,
-// transparency-projection, and observability) and dispatchTool() for the
-// per-tool forwarding logic.
+// compatibility-gateway, context-optimisation, credential-vault,
+// execution-proxy, extension-manager, memory-gateway, okf-synchroniser,
+// recovery-orchestrator, retrieval-orchestrator, security-gate,
+// tool-governance, transparency-projection, and observability) and
+// dispatchTool() for the per-tool forwarding logic.
 const version = "0.1.0"
 
 type requestIdentity struct {
@@ -59,6 +59,7 @@ type gatewayServer struct {
 	transparencyProjectionURL string
 	observabilityURL          string
 	graphifyProviderURL       string
+	credentialVaultURL        string
 	controlPlaneToken         string
 	client                    *http.Client
 	startTime                 time.Time
@@ -97,6 +98,7 @@ func main() {
 		transparencyProjectionURL: resolveUpstream("SCOS_TRANSPARENCY_PROJECTION_URL", "https://transparency-projection:8097"),
 		observabilityURL:          resolveUpstream("SCOS_OBSERVABILITY_URL", "https://observability:8096"),
 		graphifyProviderURL:       resolveUpstream("SCOS_GRAPHIFY_PROVIDER_URL", "https://graphify-provider:8099"),
+		credentialVaultURL:        resolveUpstream("SCOS_CREDENTIAL_VAULT_URL", "https://credential-vault:8100"),
 		controlPlaneToken:         strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		client:                    client,
 		startTime:                 time.Now(),
@@ -226,15 +228,14 @@ func (s *gatewayServer) handleToolsCall(w http.ResponseWriter, r *http.Request, 
 
 func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, identity requestIdentity, tool string, args map[string]any) (any, error) {
 	// Downstream services resolve identity from X-SCOS-Tenant-ID /
-	// X-SCOS-Principal-ID headers. When the caller authenticated via bearer
-	// claims only, those headers are absent — inject them from the resolved
-	// identity so every forward carries the caller's scope.
-	if r.Header.Get("X-SCOS-Tenant-ID") == "" {
-		r.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
-	}
-	if r.Header.Get("X-SCOS-Principal-ID") == "" {
-		r.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
-	}
+	// X-SCOS-Principal-ID headers. Overwrite unconditionally rather than only
+	// filling a gap: whatever the caller sent is discarded and replaced with
+	// the identity proven by their token claims. Preserving a caller-supplied
+	// value here was the forwarding half of the tenant-spoofing path closed
+	// in resolveIdentity above -- both halves have to go, or an inbound
+	// header still reaches the services behind this one.
+	r.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
+	r.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
 	switch tool {
 	case "scos_status", "scos_recall":
 		return s.callHermesProvider(ctx, r, identity, tool, args)
@@ -570,6 +571,22 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_operation_reconcile":
 		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/reconcile", args)
 
+	// ── credential-vault ─────────────────────────────────────────────────
+	case "scos_credential_list":
+		return s.forwardGET(ctx, r, s.credentialVaultURL+"/v1/credentials")
+	case "scos_credential_create":
+		return s.forwardPOST(ctx, r, s.credentialVaultURL+"/v1/credentials", args)
+	case "scos_credential_get":
+		return s.forwardGET(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"))
+	case "scos_credential_update":
+		return s.forwardWithBody(ctx, r, http.MethodPut, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"), args)
+	case "scos_credential_delete":
+		return s.forwardDELETE(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"))
+	case "scos_credential_acl_grant":
+		return s.forwardPOST(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id")+"/acl", args)
+	case "scos_credential_acl_revoke":
+		return s.forwardDELETE(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id")+"/acl/"+stringArg(args, "principal_id")+"?permission="+url.QueryEscape(stringArg(args, "permission")))
+
 	// ── transparency-projection ──────────────────────────────────────────
 	case "scos_transparency_snapshot":
 		return s.forwardGET(ctx, r, s.transparencyProjectionURL+"/v1/transparency/snapshot")
@@ -791,19 +808,29 @@ func (s *gatewayServer) copyIdentityHeaders(src *http.Request, dst *http.Request
 	}
 }
 
-// resolveIdentity mirrors the convention used by hermes-provider and
-// memory-intelligence: an authenticated claims-bearing bearer token takes
-// precedence, falling back to the internal X-SCOS-* headers.
+// resolveIdentity derives the caller's tenant and principal from validated
+// bearer claims and from nothing else.
+//
+// The internal services (hermes-provider, memory-intelligence,
+// tool-governance) still accept X-SCOS-Tenant-ID / X-SCOS-Principal-ID as a
+// fallback for direct service-to-service calls on the private network. This
+// gateway must not, because it is the one externally reachable surface in
+// the fleet: every agent plugin, desktop extension and CLI reaches the fabric
+// through here. Honouring a caller-supplied tenant header at this boundary
+// let any holder of the shared service token read and write any tenant's
+// memory simply by naming a different UUID -- the tenant boundary was
+// enforced by real code everywhere downstream, but the value it enforced on
+// originated with the attacker.
+//
+// Claims are therefore mandatory here. A caller presenting only the shared
+// static service token is authenticated but anonymous, and is refused rather
+// than being allowed to nominate an identity.
 func resolveIdentity(r *http.Request) (requestIdentity, int, string) {
-	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
-		return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
+	claims, ok := auth.CanonicalClaims(r.Context())
+	if !ok {
+		return requestIdentity{}, http.StatusUnauthorized, "a bearer token carrying tenant_id and principal_id claims is required; X-SCOS-* identity headers are not accepted at this boundary"
 	}
-	tenantID := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
-	principalID := strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
-	if tenantID == "" || principalID == "" {
-		return requestIdentity{}, http.StatusUnauthorized, "X-SCOS-Tenant-ID and X-SCOS-Principal-ID are required (or an authenticated bearer token carrying tenant/principal claims)"
-	}
-	return requestIdentity{TenantID: tenantID, PrincipalID: principalID}, 0, ""
+	return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
 }
 
 // deriveSessionID gives scos_recall a stable UUID-shaped session bucket per
@@ -973,9 +1000,12 @@ func governedTools() []map[string]any {
 			"name":        "scos_graphify_query",
 			"description": "Ask a plain-language question against the graphify knowledge graph and get back the scoped subgraph that answers it",
 			"inputSchema": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"q": map[string]any{"type": "string", "description": "The question to ask the graph"}},
-				"required":   []string{"q"},
+				"type": "object",
+				"properties": map[string]any{
+					"q":         map[string]any{"type": "string", "description": "The question to ask the graph"},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+				},
+				"required": []string{"q"},
 			},
 		},
 		{
@@ -984,8 +1014,9 @@ func governedTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"from": map[string]any{"type": "string", "description": "Starting node name"},
-					"to":   map[string]any{"type": "string", "description": "Target node name"},
+					"from":      map[string]any{"type": "string", "description": "Starting node name"},
+					"to":        map[string]any{"type": "string", "description": "Target node name"},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
 				},
 				"required": []string{"from", "to"},
 			},
@@ -994,9 +1025,12 @@ func governedTools() []map[string]any {
 			"name":        "scos_graphify_explain",
 			"description": "Explain one node in the graphify knowledge graph and list its connections",
 			"inputSchema": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"node": map[string]any{"type": "string", "description": "Node name to explain"}},
-				"required":   []string{"node"},
+				"type": "object",
+				"properties": map[string]any{
+					"node":      map[string]any{"type": "string", "description": "Node name to explain"},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+				},
+				"required": []string{"node"},
 			},
 		},
 		{
@@ -1668,6 +1702,36 @@ func governedTools() []map[string]any {
 			"result":       strField("Result to reconcile to"),
 			"output":       objField("Operation output"),
 		}, "operation_id"),
+	)
+
+	// ── credential-vault ─────────────────────────────────────────────────
+	tools = append(tools,
+		tool("scos_credential_list", "List credentials the caller can read or write (metadata only, values are never included)", map[string]any{}),
+		tool("scos_credential_create", "Store a new encrypted credential (API key, password, token) for the tenant's agents to share", map[string]any{
+			"name":  strField("Credential name, unique per tenant"),
+			"value": strField("Secret value to encrypt and store"),
+			"acl":   objField("Optional extra grants: list of {principal_id, permission} where permission is read or write. The creator always receives both automatically."),
+		}, "name", "value"),
+		tool("scos_credential_get", "Read a credential's decrypted value (requires read permission on this credential)", map[string]any{
+			"id": strField("Credential ID"),
+		}, "id"),
+		tool("scos_credential_update", "Rotate a credential's value (requires write permission on this credential)", map[string]any{
+			"id":    strField("Credential ID"),
+			"value": strField("New secret value to encrypt and store"),
+		}, "id", "value"),
+		tool("scos_credential_delete", "Delete a credential permanently (requires write permission on this credential)", map[string]any{
+			"id": strField("Credential ID"),
+		}, "id"),
+		tool("scos_credential_acl_grant", "Grant another principal read or write access to a credential (requires write permission on this credential)", map[string]any{
+			"id":           strField("Credential ID"),
+			"principal_id": strField("Principal (agent) ID to grant access to"),
+			"permission":   strField("read or write"),
+		}, "id", "principal_id", "permission"),
+		tool("scos_credential_acl_revoke", "Revoke a principal's read or write access to a credential (requires write permission on this credential; refused if it would remove the last write holder)", map[string]any{
+			"id":           strField("Credential ID"),
+			"principal_id": strField("Principal (agent) ID to revoke access from"),
+			"permission":   strField("read or write"),
+		}, "id", "principal_id", "permission"),
 	)
 
 	// ── transparency-projection ──────────────────────────────────────────

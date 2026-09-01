@@ -19,10 +19,10 @@ plain text.
 
 The `scos` MCP server (registered in this project's `.opencode/mcp.json`)
 is a bundled stdio bridge (`.opencode/scripts/scos-mcp-bridge.py`) that
-talks to the hosted SCOS gateway (`cloud-control-plane` fronting
-`mcp-gateway`), reading your own per-user API key from `~/.hermes/scos.env`
-on this machine (see `docs/agent-connection-guide.md` §2). It exposes ten
-tools, scoped to the tenant your API key belongs to.
+talks directly to the SCOS Memory Fabric's `hermes-provider` on rabuntu,
+reading connection details from `~/.hermes/scos.env` on this machine (see
+`docs/agent-connection-guide.md` §2). It exposes ten tools, scoped to
+the tenant and principal in that file.
 
 ## Tools
 

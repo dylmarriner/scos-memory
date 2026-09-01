@@ -421,6 +421,15 @@ func (s *securityServer) handleAuthRevoke(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Revocation must prove possession of the full bearer token (public id
+	// plus its HMAC signature), the same way handleAuthValidate does. Without
+	// this check, anyone who merely learns a token's public id (e.g. from a
+	// same-tenant audit log entry, which records it as AuditRecord.Resource)
+	// could revoke it -- a griefing/DoS vector with no proof of possession.
+	if !s.validToken(req.Token) {
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
 	tok, ok, lookupErr := lookupToken(r.Context(), s.db, tokenPublicPart(req.Token))
 	if lookupErr != nil || !ok {
 		http.Error(w, "token not found", http.StatusUnauthorized)

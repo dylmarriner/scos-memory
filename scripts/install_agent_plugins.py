@@ -73,6 +73,14 @@ def run(command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
 
+def run_if_installed(command: list[str]) -> None:
+    """Run an optional native installer only when that agent is present."""
+    if shutil.which(command[0]) is None:
+        print(f"skipped unavailable agent CLI: {command[0]}")
+        return
+    run(command)
+
+
 def install(skip_gemini: bool = False) -> None:
     BRIDGE.parent.mkdir(parents=True, exist_ok=True)
     backup(BRIDGE)
@@ -88,7 +96,6 @@ def install(skip_gemini: bool = False) -> None:
         run(["gemini", "extensions", "link", str(ROOT / "integrations/agent-plugins/gemini")])
 
     # MCP-capable agents: preserve each host's native config shape.
-    merge_json(HOME / ".copilot" / "mcp-config.json", "mcpServers", "scos", server("copilot"))
     merge_json(HOME / ".cline" / "mcp.json", "mcpServers", "scos", server("cline"))
     merge_json(HOME / ".cline" / "data/settings/cline_mcp_settings.json", "mcpServers", "scos", server("cline"))
     merge_json(HOME / ".cursor" / "mcp.json", "mcpServers", "scos", server("cursor"))
@@ -143,19 +150,9 @@ def install(skip_gemini: bool = False) -> None:
             shutil.copytree(skill_dir, openclaw_skills_target / skill_dir.name, dirs_exist_ok=True)
             print(f"installed skill -> {openclaw_skills_target / skill_dir.name}")
 
-    run(["codex", "plugin", "add", "scos-memory-fabric@scos-fabric-tools"])
-
-    if shutil.which("hermes"):
-        # hermes-agent manages MCP servers via its own CLI/config.yaml, not a
-        # file drop like the other agents -- and `mcp add` does live tool
-        # discovery with an interactive "enable all tools?" prompt, hence the
-        # piped "y\n" for non-interactive installs.
-        print("$ hermes mcp add scos ...")
-        subprocess.run(
-            ["hermes", "mcp", "add", "scos", "--command", "/usr/bin/python3",
-             "--args", "-E", str(BRIDGE), "--env", "SCOS_AGENT_NAME=hermes-agent"],
-            cwd=ROOT, input="y\n", text=True, check=False,
-        )
+    run_if_installed(["codex", "plugin", "add", "scos-memory-fabric@scos-fabric-tools"])
+    run_if_installed(["claude", "plugin", "marketplace", "add", str(ROOT / "integrations/claude")])
+    run_if_installed(["claude", "plugin", "install", "scos-memory-fabric@scos-fabric-tools"])
 
 
 def main() -> None:

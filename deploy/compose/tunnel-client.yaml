@@ -1,0 +1,23 @@
+# tunnel-client runtime profile for the SCOS fabric compose stack.
+# Mounted read-only into the tunnel-client container at /etc/scos/tunnel-client.yaml.
+# No secrets here: every credential is an env: reference resolved from the
+# container environment (which comes from the stack .env).
+config_version: 1
+control_plane:
+  base_url: "https://api.openai.com"
+  tunnel_id: "env:CONTROL_PLANE_TUNNEL_ID"
+  api_key: "env:CONTROL_PLANE_API_KEY"
+health:
+  listen_addr: "127.0.0.1:8080"
+  url_file: "/tmp/scos-memory.url"
+admin_ui:
+  open_browser: false
+log:
+  level: info
+  format: json
+mcp:
+  server_urls:
+    - channel: main
+      url: "https://scos.172.236.155.15.nip.io/mcp"
+  extra_headers:
+    Authorization: "env:SCOS_GATEWAY_AUTHORIZATION"

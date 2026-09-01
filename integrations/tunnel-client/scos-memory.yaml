@@ -1,0 +1,34 @@
+# scos-memory tunnel profile template (OpenAI Secure MCP Tunnel)
+# ==============================================================
+# Deploy as ~/.config/tunnel-client/scos-memory.yaml with the real
+# credentials (chmod 600). The bridge relays to the Linode MCP gateway
+# (https://scos.172.236.155.15.nip.io/mcp) via the bundled stdio bridge,
+# exposing the full governed tool surface to ChatGPT connectors and
+# remote agents over the OpenAI control plane.
+#
+# Required secrets (never commit):
+#   CONTROL_PLANE_TUNNEL_ID — tunnel id from platform.openai.com tunnels
+#   CONTROL_PLANE_API_KEY   — runtime API key (sk-proj-...)
+#
+# Install (systemd, user):
+#   cp deploy/native/systemd/tunnel-client-scos.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tunnel-client-scos.service
+
+admin_ui:
+  open_browser: false
+config_version: 1
+control_plane:
+  api_key: env:CONTROL_PLANE_API_KEY
+  base_url: https://api.openai.com
+  tunnel_id: env:CONTROL_PLANE_TUNNEL_ID
+health:
+  listen_addr: 127.0.0.1:0
+  url_file: ${HOME}/.local/state/tunnel-client/health/scos-memory.url
+log:
+  format: json
+  level: info
+mcp:
+  commands:
+  - channel: main
+    command: env SCOS_AGENT_NAME=tunnel /usr/bin/python3 -E ${HOME}/.hermes/scripts/scos-mcp-bridge.py

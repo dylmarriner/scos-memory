@@ -1,0 +1,15 @@
+tunnel_client_http_file = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:http.bzl",
+    "http_file",
+)
+
+# Keep the exact vendored companion source as a declared Bazel input. The
+# archive checksum pins both the source and its checked-in vendor tree.
+tunnel_client_http_file(
+    name = "tunnel_client_cloudflared_source_archive",
+    downloaded_file_path = "cloudflared-733bfb939963e150dcf5c4faddb1603f744fbc98.tar.gz",
+    sha256 = "4ee24c9250a287246605e4a20d7d8655a0a06c47fccdb6b4cd69e6d9936b8885",
+    urls = [
+        "https://github.com/cloudflare/cloudflared/archive/733bfb939963e150dcf5c4faddb1603f744fbc98.tar.gz",
+    ],
+)

@@ -856,6 +856,49 @@ services:
       start_period: 30s
       retries: 10
 
+  tunnel-client:
+    # OpenAI Secure MCP Tunnel — exposes the SCOS MCP gateway through the
+    # OpenAI control plane so ChatGPT connectors / remote agents reach it
+    # without exposing the gateway publicly beyond the existing nginx TLS
+    # front. Uses the narrow runtime image (no adminui) built from the
+    # vendored upstream clone (integrations/tunnel-client).
+    image: ${SCOS_TUNNEL_CLIENT_IMAGE:-scos-tunnel-client:local}
+    build:
+      context: ../../integrations/tunnel-client
+      dockerfile: Dockerfile.runtime
+      target: runtime-cloudflared
+    command: ["--profile-file", "/etc/scos/tunnel-client.yaml"]
+    restart: unless-stopped
+    init: true
+    mem_limit: ${SCOS_TUNNEL_CLIENT_MEM_LIMIT:-192m}
+    memswap_limit: ${SCOS_TUNNEL_CLIENT_MEM_LIMIT:-192m}
+    cpus: ${SCOS_TUNNEL_CLIENT_CPUS:-1}
+    logging: *service-logging
+    environment:
+      # OpenAI control plane credentials (Runtime API key + tunnel id).
+      CONTROL_PLANE_API_KEY: ${CONTROL_PLANE_API_KEY:?CONTROL_PLANE_API_KEY must be set}
+      CONTROL_PLANE_TUNNEL_ID: ${CONTROL_PLANE_TUNNEL_ID:?CONTROL_PLANE_TUNNEL_ID must be set}
+      # Bearer auth for the SCOS MCP gateway itself: "Bearer <scos_live_...>"
+      SCOS_GATEWAY_AUTHORIZATION: ${SCOS_GATEWAY_AUTHORIZATION:?SCOS_GATEWAY_AUTHORIZATION must be set}
+    volumes:
+      # Secret-free profile; credentials come from env above.
+      - ./tunnel-client.yaml:/etc/scos/tunnel-client.yaml:ro
+    extra_hosts:
+      # Docker's embedded DNS resolves scos.172.236.155.15.nip.io to the
+      # mcp-gateway container's network alias. Pin the real public IP so the
+      # tunnel reaches nginx's valid TLS cert on the host, which proxies to
+      # the gateway (verified: hairpin via the alias refused on :443).
+      - "scos.172.236.155.15.nip.io:172.236.155.15"
+    depends_on:
+      mcp-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
   okf-synchroniser:
     <<: [*service-limits, *fabric-image]
     command: ["okf-synchroniser"]

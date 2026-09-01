@@ -152,7 +152,8 @@ cp .env.example .env
 # Set SCOS_INTERNAL_SERVICE_TOKEN, SCOS_CONTROL_PLANE_TOKEN, and
 # SCOS_SECURITY_ISSUER_SECRET with: openssl rand -base64 32
 # Set POSTGRES_PASSWORD, SCOS_DATABASE_URL (sslmode=require or stronger),
-# and SCOS_AGENT_ENDPOINT.
+# and either SCOS_AGENT_ENDPOINT or DEEPSEEK_API_KEY. When using DeepSeek,
+# set DEEPSEEK_MODEL=deepseek-v4-flash and leave SCOS_AGENT_ENDPOINT empty.
 ${EDITOR:-vi} .env
 
 set -a; . ./.env; set +a
