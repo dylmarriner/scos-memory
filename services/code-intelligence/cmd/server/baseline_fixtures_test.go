@@ -24,6 +24,17 @@ import (
 // tenant isolation -- already have dedicated regression suites:
 // services/graphify-provider/cmd/server/workdir_test.go and the
 // tenant_isolation_test.go files across the fleet.)
+//
+// Both gaps below are now fixed in pgstore.go's durable, snapshot-based
+// store, proven by pgstore_integration_test.go's
+// TestPGRenamePreservesSymbolIdentity and TestPGBranchesCoexistIndependently
+// against a real PostgreSQL database. The assertions here are intentionally
+// NOT flipped: they document the in-memory codeStore's actual behavior on
+// the /v1 API, which is genuinely unchanged -- the durable store is wired
+// in additively as /v2/code/* (pghandlers.go), opt-in via SCOS_DATABASE_URL,
+// specifically because the /v1 wire protocol (bare path strings, no content
+// hash) cannot supply what rename detection needs. These assertions should
+// flip only once /v1 itself is migrated onto the durable store.
 
 func indexRequest(t *testing.T, srv *server, tenant, repoID, commitID string, files []string) *httptest.ResponseRecorder {
 	t.Helper()

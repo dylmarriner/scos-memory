@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -6,6 +7,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,8 +20,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // serviceMetrics emits this service's §32 measures. It is nil-safe and a
@@ -364,6 +368,11 @@ func cloneRelations(in map[string][]string) map[string][]string {
 type server struct {
 	store  *codeStore
 	nextID int
+	// pgStore is the durable, snapshot-based store (see pgstore.go). It is
+	// nil unless SCOS_DATABASE_URL is configured, in which case the v2
+	// handlers in pghandlers.go become usable alongside the existing v1
+	// routes, which remain backed by store above unconditionally.
+	pgStore *pgCodeStore
 }
 
 func main() {
@@ -374,6 +383,23 @@ func main() {
 		log.Fatal(err)
 	}
 	srv := &server{store: store, nextID: nextRepositoryID(store.repos)}
+
+	// The durable store is opt-in: an instance with no SCOS_DATABASE_URL
+	// configured runs exactly as it did before pgstore.go existed, serving
+	// only the in-memory-backed /v1 routes. See pghandlers.go's doc comment
+	// for why flipping this on by default for /v1 callers is a separate,
+	// coordinated change rather than something to do here.
+	if databaseURL := strings.TrimSpace(os.Getenv("SCOS_DATABASE_URL")); databaseURL != "" {
+		if err := database.RequireTLS(databaseURL); err != nil {
+			log.Fatal(err)
+		}
+		db, err := sql.Open("pgx", databaseURL)
+		if err != nil {
+			log.Fatalf("connect to database: %v", err)
+		}
+		database.TuneSQLDB(db)
+		srv.pgStore = newPGCodeStore(db)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -407,6 +433,12 @@ func main() {
 
 	// Adapters
 	mux.HandleFunc("/v1/adapters", srv.handleAdapters)
+
+	// v2: durable, snapshot-based store (pgstore.go/pghandlers.go). Returns
+	// 503 on every route when SCOS_DATABASE_URL is not configured.
+	mux.HandleFunc("/v2/code/repos", srv.handlePGRepos)
+	mux.HandleFunc("/v2/code/index", srv.handlePGIndex)
+	mux.HandleFunc("/v2/code/query", srv.handlePGQuery)
 
 	addr := os.Getenv("SCOS_CODE_INTELLIGENCE_HTTP_ADDR")
 	if addr == "" {
