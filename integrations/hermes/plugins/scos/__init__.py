@@ -10,7 +10,11 @@ hooks (GOVERNANCE.md 4.14/21.4 - platform-owned retrieval and persistence).
 
 Two SCOS surfaces are used, matching the other agent integrations exactly:
   - mcp-gateway (tools/list, tools/call)     — recall + generic tool access
-  - hermes-provider /v1/provider/memory_write — turn persistence
+  - SCOS hermes-provider /v1/provider/sync_turn — complete turn persistence
+
+The SCOS hermes-provider URL below is a memory lifecycle service URL. It is
+not Hermes' inference/model-provider URL: this module deliberately never reads
+OPENAI_*, OPENROUTER_*, or any other model-provider setting.
 
 Reads the same ``~/.hermes/scos.env`` connection file the other SCOS
 integrations (and the scos-mcp-bridge) share, so setting it up once covers
@@ -20,10 +24,13 @@ every agent on the fleet.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import ssl
 import threading
+import tempfile
+import uuid
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -33,7 +40,8 @@ from agent.memory_provider import MemoryProvider
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_GATEWAY_URL = "https://scos.172.236.155.15.nip.io/mcp"
+_DEFAULT_GATEWAY_URL = ""
+_CONFIG_FILENAME = "scos.json"
 
 # Minimal fallback used only if the gateway can't be reached when building
 # tool schemas, so the provider degrades to "recall/persist works, explicit
@@ -61,6 +69,7 @@ class ScosMemoryProvider(MemoryProvider):
         self._session_id = ""
         self._sync_thread: Optional[threading.Thread] = None
         self._sync_lock = threading.Lock()
+        self._persistence_warning_emitted = False
 
     @property
     def name(self) -> str:
@@ -72,11 +81,23 @@ class ScosMemoryProvider(MemoryProvider):
         home = self._hermes_home or Path.home() / ".hermes"
         return Path(home) / "scos.env"
 
+    def _config_path(self) -> Path:
+        home = self._hermes_home or Path.home() / ".hermes"
+        return Path(home) / _CONFIG_FILENAME
+
     def _load_env(self) -> Dict[str, str]:
         values = {
             "SCOS_GATEWAY_URL": _DEFAULT_GATEWAY_URL,
             "SCOS_TLS_CA_PATH": "",
         }
+        config_path = self._config_path()
+        if config_path.exists():
+            try:
+                config = json.loads(config_path.read_text())
+                if isinstance(config, dict):
+                    values.update({str(k): str(v) for k, v in config.items() if v is not None})
+            except (OSError, json.JSONDecodeError) as error:
+                logger.warning("unable to read %s: %s", config_path, error)
         env_path = self._env_path()
         if env_path.exists():
             for line in env_path.read_text().splitlines():
@@ -89,28 +110,89 @@ class ScosMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         env = self._load_env() if not self._env else self._env
-        return bool(env.get("SCOS_GATEWAY_URL") and (env.get("SCOS_BEARER_TOKEN") or env.get("SCOS_HERMES_BEARER_TOKEN")))
+        token = env.get("SCOS_BEARER_TOKEN") or env.get("SCOS_HERMES_BEARER_TOKEN")
+        return bool(
+            env.get("SCOS_GATEWAY_URL")
+            and token
+            and env.get("SCOS_TENANT_ID")
+            and env.get("SCOS_PRINCIPAL_ID")
+            and env.get("SCOS_HERMES_PROVIDER_URL")
+            and env.get("SCOS_NAMESPACE_ID")
+        )
 
     def unavailable_reason(self) -> str:
         return (
-            "SCOS Nexus not configured: set SCOS_GATEWAY_URL and SCOS_BEARER_TOKEN "
+            "SCOS Nexus not configured: set SCOS_GATEWAY_URL, SCOS_BEARER_TOKEN, "
+            "SCOS_TENANT_ID and SCOS_PRINCIPAL_ID "
             f"in {self._env_path()} (see integrations/hermes/README.md)."
         )
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"key": "SCOS_GATEWAY_URL", "description": "mcp-gateway URL for recall + tool access", "required": True, "env_var": "SCOS_GATEWAY_URL"},
+            {"key": "SCOS_GATEWAY_URL", "description": "SCOS gateway URL for recall and memory tools", "required": True},
             {"key": "SCOS_BEARER_TOKEN", "description": "Bearer token for mcp-gateway", "secret": True, "required": True, "env_var": "SCOS_BEARER_TOKEN"},
-            {"key": "SCOS_TENANT_ID", "description": "SCOS tenant ID", "required": False, "env_var": "SCOS_TENANT_ID"},
-            {"key": "SCOS_PRINCIPAL_ID", "description": "SCOS principal ID", "required": False, "env_var": "SCOS_PRINCIPAL_ID"},
-            {"key": "SCOS_HERMES_PROVIDER_URL", "description": "hermes-provider base URL, for turn persistence", "required": False, "env_var": "SCOS_HERMES_PROVIDER_URL"},
-            {"key": "SCOS_HERMES_BEARER_TOKEN", "description": "Bearer token for hermes-provider", "secret": True, "required": False, "env_var": "SCOS_HERMES_BEARER_TOKEN"},
-            {"key": "SCOS_NAMESPACE_ID", "description": "Namespace ID for persisted turns", "required": False, "env_var": "SCOS_NAMESPACE_ID"},
+            {"key": "SCOS_TENANT_ID", "description": "SCOS tenant ID", "required": True},
+            {"key": "SCOS_PRINCIPAL_ID", "description": "SCOS principal ID", "required": True},
+            {"key": "SCOS_HERMES_PROVIDER_URL", "description": "SCOS memory persistence URL", "required": True},
+            {"key": "SCOS_NAMESPACE_ID", "description": "Namespace for persisted turns", "required": True},
         ]
-        # All fields carry env_var, and every value lives in scos.env (shared
-        # with the other SCOS agent integrations) rather than a Hermes-native
-        # config file, so save_config() is intentionally left as the ABC's
-        # no-op default.
+
+    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+        """Persist non-secret setup values in Hermes' provider config."""
+        required = (
+            "SCOS_GATEWAY_URL",
+            "SCOS_TENANT_ID",
+            "SCOS_PRINCIPAL_ID",
+            "SCOS_HERMES_PROVIDER_URL",
+            "SCOS_NAMESPACE_ID",
+        )
+        missing = [key for key in required if not str(values.get(key, "")).strip()]
+        if missing:
+            raise ValueError("SCOS setup is incomplete; missing: " + ", ".join(missing))
+
+        allowed = set(required) | {"SCOS_TLS_CA_PATH"}
+        unknown = sorted(set(values) - allowed - {"SCOS_BEARER_TOKEN", "SCOS_HERMES_BEARER_TOKEN"})
+        if unknown:
+            raise ValueError("unknown SCOS setup fields: " + ", ".join(unknown))
+
+        target = Path(hermes_home) / _CONFIG_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {key: str(values[key]).strip() for key in allowed if values.get(key) is not None and str(values[key]).strip()}
+        fd, temporary = tempfile.mkstemp(prefix=f".{_CONFIG_FILENAME}.", dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, indent=2, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fchmod(stream.fileno(), 0o600)
+            os.replace(temporary, target)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+
+    def post_setup(self, hermes_home: str, config: dict) -> None:
+        """Verify both memory surfaces before setup reports success."""
+        self._hermes_home = Path(hermes_home)
+        self._env = self._load_env()
+        gateway = self._gateway_rpc("tools/list", {})
+        if "error" in gateway:
+            raise RuntimeError(f"SCOS recall check failed: {gateway['error'].get('message', gateway['error'])}")
+        tools = (gateway.get("result") or {}).get("tools")
+        if not isinstance(tools, list) or not any(item.get("name") == "scos_recall" for item in tools if isinstance(item, dict)):
+            raise RuntimeError("SCOS recall check failed: gateway did not advertise scos_recall")
+
+        provider_url = self._env.get("SCOS_HERMES_PROVIDER_URL", "").rstrip("/") + "/v1/provider/status"
+        request = urllib.request.Request(provider_url, headers=self._gateway_headers(), method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=8, context=self._ssl_context()) as response:
+                status = json.loads(response.read().decode() or "{}")
+        except Exception as error:
+            raise RuntimeError(f"SCOS persistence check failed: {error}") from error
+        if not status.get("healthy", status.get("is_available", False)):
+            raise RuntimeError("SCOS persistence check failed: hermes-provider is not healthy")
 
     # -- lifecycle --------------------------------------------------------
 
@@ -121,6 +203,8 @@ class ScosMemoryProvider(MemoryProvider):
         self._env = self._load_env()
 
     def system_prompt_block(self) -> str:
+        if not self.is_available():
+            return ""
         return (
             "# SCOS Nexus Memory\n"
             "Active. You have persistent cross-session memory via the SCOS Memory Fabric. "
@@ -200,30 +284,54 @@ class ScosMemoryProvider(MemoryProvider):
         session_id: str = "",
         messages: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        del messages
         base_url = self._env.get("SCOS_HERMES_PROVIDER_URL")
-        token = self._env.get("SCOS_HERMES_BEARER_TOKEN")
+        token = self._env.get("SCOS_HERMES_BEARER_TOKEN") or self._env.get("SCOS_BEARER_TOKEN")
         namespace_id = self._env.get("SCOS_NAMESPACE_ID")
         if not (base_url and token and namespace_id and user_content and assistant_content):
+            if not self._persistence_warning_emitted:
+                logger.warning(
+                    "SCOS turn persistence is not configured; set "
+                    "SCOS_HERMES_PROVIDER_URL, SCOS_NAMESPACE_ID and a bearer token"
+                )
+                self._persistence_warning_emitted = True
             return
 
         sid = session_id or self._session_id or "unknown"
 
         def _sync():
+            session_uuid = _stable_session_uuid(
+                sid,
+                self._env.get("SCOS_TENANT_ID", ""),
+                self._env.get("SCOS_PRINCIPAL_ID", ""),
+            )
+            turn_id = hashlib.sha256(
+                f"{sid}\0{user_content}\0{assistant_content}".encode("utf-8")
+            ).hexdigest()
+            turn_messages = messages or [
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": assistant_content},
+            ]
             body = json.dumps({
                 "namespace_id": namespace_id,
-                "key": f"hermes-agent-turn:{sid}:{hash(user_content) & 0xffffffff}",
-                "value": f"User: {user_content[:2000]}\n\nAssistant: {assistant_content[:2000]}",
-                "scope": "agent",
-                "source": "hermes-agent-memory-provider",
+                "session_id": session_uuid,
+                "turn_id": turn_id,
+                "messages": turn_messages,
+                "tool_calls": [],
             }).encode()
             request = urllib.request.Request(
-                base_url.rstrip("/") + "/v1/provider/memory_write",
+                base_url.rstrip("/") + "/v1/provider/sync_turn",
                 data=body, method="POST",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "X-SCOS-Tenant-ID": self._env.get("SCOS_TENANT_ID", ""),
+                    "X-SCOS-Principal-ID": self._env.get("SCOS_PRINCIPAL_ID", ""),
+                },
             )
             try:
-                urllib.request.urlopen(request, timeout=8, context=self._ssl_context())
+                with urllib.request.urlopen(request, timeout=8, context=self._ssl_context()) as response:
+                    if response.status // 100 != 2:
+                        raise RuntimeError(f"unexpected sync status {response.status}")
             except Exception as error:
                 logger.debug("SCOS sync_turn failed: %s", error)
 
@@ -267,6 +375,15 @@ class ScosMemoryProvider(MemoryProvider):
                 except (KeyError, json.JSONDecodeError):
                     return json.dumps({"text": block.get("text")})
         return json.dumps(result)
+
+
+def _stable_session_uuid(session_id: str, tenant_id: str, principal_id: str) -> str:
+    """Map Hermes' arbitrary session identifier to the provider UUID contract."""
+    try:
+        return str(uuid.UUID(session_id))
+    except (ValueError, AttributeError, TypeError):
+        identity = f"{tenant_id}\0{principal_id}\0{session_id}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, "scos-hermes-session:" + identity))
 
 
 def register(ctx) -> None:

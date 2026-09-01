@@ -22,9 +22,10 @@ Claude Code and Codex integrations get from their `scos-auto-recall` /
 What it does each turn:
 - **`prefetch()`** — calls `scos_recall` on mcp-gateway before the model sees
   the prompt, and injects the result into context.
-- **`sync_turn()`** — after the turn, writes the user+assistant exchange to
-  `hermes-provider`'s `/v1/provider/memory_write` (background thread,
-  non-blocking), mirroring what Claude Code's Stop hook does.
+- **`sync_turn()`** — after the turn, submits the complete message exchange to
+  `hermes-provider`'s `/v1/provider/sync_turn` (background thread,
+  non-blocking), allowing the backend to retain and process the turn as a
+  first-class conversation event.
 - **`get_tool_schemas()` / `handle_tool_call()`** — still exposes every tool
   mcp-gateway reports (`scos_recall`, `scos_status`, etc.) for the model to
   call explicitly when it needs something the automatic recall missed.
@@ -39,21 +40,33 @@ Then activate it as the active memory provider (Hermes allows only one
 external provider at a time — see `agent/memory_provider.py`):
 
 ```bash
-hermes memory setup   # pick "scos", or set memory.provider: scos in config.yaml directly
+hermes memory setup   # pick "scos"; setup validates recall and persistence
 ```
 
 | Key | Required for | Purpose |
 | --- | --- | --- |
-| `SCOS_GATEWAY_URL` | recall + tools | mcp-gateway endpoint |
+| `SCOS_GATEWAY_URL` | recall + tools | mcp-gateway endpoint, saved in `~/.hermes/scos.json` |
 | `SCOS_BEARER_TOKEN` | recall + tools | mcp-gateway auth |
-| `SCOS_TENANT_ID` / `SCOS_PRINCIPAL_ID` | recall + tools | tenant scoping headers |
-| `SCOS_HERMES_PROVIDER_URL` | turn persistence | hermes-provider base URL |
-| `SCOS_HERMES_BEARER_TOKEN` | turn persistence | hermes-provider auth |
-| `SCOS_NAMESPACE_ID` | turn persistence | namespace for written turns |
+| `SCOS_TENANT_ID` / `SCOS_PRINCIPAL_ID` | recall + persistence | tenant/principal scoping headers, saved in `scos.json` |
+| `SCOS_HERMES_PROVIDER_URL` | turn persistence | SCOS `hermes-provider` memory-lifecycle API, saved in `scos.json` |
+| `SCOS_NAMESPACE_ID` | turn persistence | namespace for written turns, saved in `scos.json` |
 
-Persistence is opt-in in effect: if the `SCOS_HERMES_PROVIDER_URL` /
-`SCOS_HERMES_BEARER_TOKEN` / `SCOS_NAMESPACE_ID` trio is absent, `sync_turn()`
-silently no-ops and you still get recall-only behavior.
+`hermes memory setup` now requires the complete configuration, stores non-secret
+settings in `~/.hermes/scos.json`, stores the bearer token through Hermes' secret
+environment handling, and checks both gateway recall and hermes-provider health
+before reporting success. `SCOS_HERMES_BEARER_TOKEN` remains supported as a
+legacy override, but is no longer required when the shared bearer token is valid
+for both services. Turn idempotency keys are stable across provider restarts.
+
+### Provider independence
+
+SCOS memory identity and persistence are independent of Hermes' model provider.
+The Hermes model/inference settings (`OPENAI_*`, OpenRouter, DeepSeek, Ollama,
+etc.) must never be copied into this integration and are not read by it. A
+model-provider change therefore leaves the SCOS tenant, principal, namespace,
+recall index, and persisted turns unchanged. `SCOS_GATEWAY_URL` and
+`SCOS_HERMES_PROVIDER_URL` name SCOS HTTP services only; despite the word
+"provider", neither setting selects or identifies an LLM provider.
 
 ## `plugins/scos-memory` — toolset plugin (superseded)
 
