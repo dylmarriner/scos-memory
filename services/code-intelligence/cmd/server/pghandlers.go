@@ -146,6 +146,11 @@ type pgIndexFileRequest struct {
 	Path        string `json:"path"`
 	Language    string `json:"language,omitempty"`
 	ContentHash string `json:"content_hash"`
+	// Content is optional; see PGFileInput's doc comment (pgstore.go) for
+	// what supplying it actually buys a caller today (real Go declaration
+	// extraction) versus every other language, which still only gets the
+	// Tier 0 file-level symbol regardless of whether Content is sent.
+	Content string `json:"content,omitempty"`
 }
 
 func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +224,7 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 
 	files := make([]PGFileInput, 0, len(req.Files))
 	for _, f := range req.Files {
-		files = append(files, PGFileInput{Path: f.Path, Language: f.Language, ContentHash: f.ContentHash})
+		files = append(files, PGFileInput{Path: f.Path, Language: f.Language, ContentHash: f.ContentHash, Content: f.Content})
 	}
 
 	snapshotID, err := s.pgStore.CreateSnapshot(r.Context(), req.RepositoryID, tenant, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)

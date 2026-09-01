@@ -54,6 +54,16 @@ type PGFileInput struct {
 	Path        string
 	Language    string
 	ContentHash string
+	// Content is optional. When present and Language is a language this
+	// store can actually parse (currently only "go"), each of the file's
+	// top-level declarations (functions, methods, types, consts, vars) is
+	// indexed as its own Tier 1 symbol via goextract.go, alongside -- not
+	// instead of -- the Tier 0 file-level symbol every file gets. Content
+	// hashes for those declarations are computed here, not by the caller:
+	// unlike the file-level ContentHash (which callers are expected to
+	// already have, e.g. from Git), a per-declaration hash requires
+	// actually parsing the file, which only this store can do.
+	Content string
 }
 
 // PGSymbolVersion is one row of what a query resolves to: the stable
@@ -184,6 +194,48 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $4, 'file', $5)`,
 		symbolID, snapshotID, fileID, f.Path, f.ContentHash); err != nil {
 		return fmt.Errorf("create symbol version: %w", err)
+	}
+
+	if f.Language == "go" && f.Content != "" {
+		if err := s.indexGoDeclarationsLocked(ctx, tx, snapshotID, repositoryID, fileID, f); err != nil {
+			return fmt.Errorf("index go declarations: %w", err)
+		}
+	}
+	return nil
+}
+
+// indexGoDeclarationsLocked indexes f's real top-level Go declarations
+// (goextract.go) as Tier 1 symbols, each keyed on its own content hash --
+// not the whole file's -- so an edit to one function does not perturb any
+// other declaration's identity (see the fine-grained-identity tests in
+// goextract_test.go). A parse error is swallowed rather than failing the
+// whole index: an unparseable file (a syntax error mid-edit, a generated
+// file with unusual syntax) should not block the Tier 0 file-level symbol
+// every other language already gets by the same rule.
+func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, fileID string, f PGFileInput) error {
+	pkgName, decls, err := extractGoDeclarations(f.Path, f.Content)
+	if err != nil {
+		return nil
+	}
+	for _, d := range decls {
+		stableKey := "go:" + d.Kind + ":" + d.ContentHash
+		var symbolID string
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO code_symbols (repository_id, stable_key, kind, language, first_snapshot_id)
+			VALUES ($1, $2, $3, 'go', $4)
+			ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
+			RETURNING id`,
+			repositoryID, stableKey, d.Kind, snapshotID).Scan(&symbolID); err != nil {
+			return fmt.Errorf("upsert go declaration identity for %s: %w", d.Name, err)
+		}
+		rangeText := fmt.Sprintf("%d-%d", d.StartLine, d.EndLine)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO code_symbol_versions
+				(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, doc_comment)
+			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, NULLIF($10, ''))`,
+			symbolID, snapshotID, fileID, d.FullyQualifiedName(pkgName), f.Path, d.Kind, rangeText, d.Signature, d.ContentHash, d.DocComment); err != nil {
+			return fmt.Errorf("create go declaration version for %s: %w", d.Name, err)
+		}
 	}
 	return nil
 }

@@ -378,3 +378,56 @@ func TestHandlePGRoutesRejectCallsFromUserWhoDisabledStore(t *testing.T) {
 		t.Fatalf("expected a user who never opted out to be unaffected, got %d: %s", okResp.Code, okResp.Body.String())
 	}
 }
+
+// A caller who submits real Go source as a file's "content" gets real
+// declarations back through the actual HTTP index route, not just through
+// pgCodeStore directly (see TestPGIndexSnapshotExtractsRealGoDeclarations).
+func TestHandlePGIndexWithContentExtractsRealGoDeclarations(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{
+		"canonical_path": "/repo/" + t.Name(),
+	})
+	var reposOut struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &reposOut); err != nil {
+		t.Fatal(err)
+	}
+
+	const source = "package sample\n\nfunc CreateUser(name string) error {\n\treturn nil\n}\n"
+	indexResp := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"commit_id":     "commit-1",
+		"files": []map[string]any{
+			{"path": "pkg/sample.go", "language": "go", "content_hash": hashContent(source), "content": source},
+		},
+	})
+	if indexResp.Code != http.StatusOK {
+		t.Fatalf("index: %d: %s", indexResp.Code, indexResp.Body.String())
+	}
+
+	queryResp := pgRequest(t, srv, http.MethodPost, "/v2/code/query", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"query":         "sample.CreateUser",
+	})
+	if queryResp.Code != http.StatusOK {
+		t.Fatalf("query: %d: %s", queryResp.Code, queryResp.Body.String())
+	}
+	var queryOut struct {
+		Results []PGSymbolVersion `json:"results"`
+	}
+	if err := json.Unmarshal(queryResp.Body.Bytes(), &queryOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(queryOut.Results) != 1 || queryOut.Results[0].FullyQualifiedName != "sample.CreateUser" {
+		t.Fatalf("expected exactly one result for sample.CreateUser, got %+v", queryOut.Results)
+	}
+	if queryOut.Results[0].MatchType != "exact" {
+		t.Fatalf("expected an exact match, got %q", queryOut.Results[0].MatchType)
+	}
+}

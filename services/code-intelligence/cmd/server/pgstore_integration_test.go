@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"os"
+	"strings"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -573,5 +574,153 @@ func TestPGUserSettingsAreIsolatedPerTenantAndPrincipal(t *testing.T) {
 	}
 	if !enabledSamePrincipalOtherTenant {
 		t.Fatal("expected the same principal_id string in a different tenant to be unaffected")
+	}
+}
+
+const pgTestGoSource = `package sample
+
+// CreateUser creates a user.
+func CreateUser(name string) error {
+	return nil
+}
+
+type UserService struct{}
+
+func (s *UserService) Close() error {
+	return nil
+}
+`
+
+// TestPGIndexSnapshotExtractsRealGoDeclarations proves the whole path end
+// to end: a Go file indexed with its actual source produces real Tier 1
+// symbols (goextract.go) queryable by their fully-qualified name, in
+// addition to -- not instead of -- the Tier 0 file-level symbol every
+// language gets.
+func TestPGIndexSnapshotExtractsRealGoDeclarations(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(pgTestGoSource), Content: pgTestGoSource},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	// An exact-path query now matches every symbol anchored at that path --
+	// the Tier 0 file-level symbol plus every Tier 1 declaration in it, all
+	// legitimately "at" pkg/sample.go.
+	byPath, err := store.QueryByPathOrFQN(ctx, repoID, "main", "pkg/sample.go")
+	if err != nil {
+		t.Fatalf("query by path: %v", err)
+	}
+	fileLevelCount := 0
+	for _, r := range byPath {
+		if r.FullyQualifiedName == "pkg/sample.go" {
+			fileLevelCount++
+		}
+	}
+	if fileLevelCount != 1 {
+		t.Fatalf("expected exactly one Tier 0 file-level symbol among path matches, got %+v", byPath)
+	}
+	if len(byPath) != 4 {
+		t.Fatalf("expected the file symbol plus 3 declarations (CreateUser, UserService, Close), got %d: %+v", len(byPath), byPath)
+	}
+
+	fn, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.CreateUser")
+	if err != nil {
+		t.Fatalf("query function: %v", err)
+	}
+	if len(fn) != 1 {
+		t.Fatalf("expected exactly one result for sample.CreateUser, got %+v", fn)
+	}
+
+	method, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.(*UserService).Close")
+	if err != nil {
+		t.Fatalf("query method: %v", err)
+	}
+	if len(method) != 1 {
+		t.Fatalf("expected exactly one result for the Close method, got %+v", method)
+	}
+
+	var docComment sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT doc_comment FROM code_symbol_versions WHERE snapshot_id = $1 AND symbol_id = $2`,
+		fn[0].SnapshotID, fn[0].SymbolID).Scan(&docComment); err != nil {
+		t.Fatalf("load doc comment: %v", err)
+	}
+	if !docComment.Valid || docComment.String != "CreateUser creates a user." {
+		t.Fatalf("expected CreateUser's doc comment to be stored, got %+v", docComment)
+	}
+}
+
+// A one-line edit to a single function's body must change only that
+// function's identity in the durable store -- not the type, not the other
+// method, not the file-level symbol -- carrying goextract_test.go's
+// fine-grained-identity guarantee through actual indexing.
+func TestPGIndexSnapshotIsolatesGoFunctionEditToThatSymbol(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap1, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 1: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(pgTestGoSource), Content: pgTestGoSource},
+	}); err != nil {
+		t.Fatalf("index snapshot 1: %v", err)
+	}
+	before, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.(*UserService).Close")
+	if err != nil || len(before) != 1 {
+		t.Fatalf("expected Close to resolve before the edit: %v (err %v)", before, err)
+	}
+	closeSymbolBefore := before[0].SymbolID
+	beforeType, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.UserService")
+	if err != nil || len(beforeType) != 1 {
+		t.Fatalf("expected UserService to resolve before the edit: %v (err %v)", beforeType, err)
+	}
+	typeSymbolBefore := beforeType[0].SymbolID
+
+	editedSource := strings.Replace(pgTestGoSource,
+		"func (s *UserService) Close() error {\n\treturn nil\n}",
+		"func (s *UserService) Close() error {\n\treturn nil // now with a comment\n}", 1)
+	snap2, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-2", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 2: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(editedSource), Content: editedSource},
+	}); err != nil {
+		t.Fatalf("index snapshot 2: %v", err)
+	}
+
+	afterClose, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.(*UserService).Close")
+	if err != nil || len(afterClose) != 1 {
+		t.Fatalf("expected Close to still resolve after the edit: %v (err %v)", afterClose, err)
+	}
+	if afterClose[0].SymbolID == closeSymbolBefore {
+		t.Fatal("expected editing Close's body to change its symbol identity")
+	}
+
+	afterType, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.UserService")
+	if err != nil || len(afterType) != 1 {
+		t.Fatalf("expected UserService to still resolve after the edit: %v (err %v)", afterType, err)
+	}
+	if afterType[0].SymbolID != typeSymbolBefore {
+		t.Fatal("expected UserService's identity to be unaffected by an edit inside Close")
 	}
 }
