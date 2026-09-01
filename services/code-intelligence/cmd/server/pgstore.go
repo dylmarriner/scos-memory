@@ -259,8 +259,8 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		return nil, fmt.Errorf("upsert symbol identity: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO code_symbol_versions (symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, content_hash)
-		VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $4, 'file', $5)`,
+		INSERT INTO code_symbol_versions (symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, content_hash, confidence_class, extractor)
+		VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $4, 'file', $5, 'heuristic', 'path-convention')`,
 		symbolID, snapshotID, fileID, f.Path, f.ContentHash); err != nil {
 		return nil, fmt.Errorf("create symbol version: %w", err)
 	}
@@ -304,8 +304,8 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 		var symbolVersionID string
 		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO code_symbol_versions
-				(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, doc_comment)
-			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, NULLIF($10, ''))
+				(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, doc_comment, confidence_class, extractor)
+			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, NULLIF($10, ''), 'static_analysis', 'go/parser')
 			RETURNING id`,
 			symbolID, snapshotID, fileID, d.FullyQualifiedName(pkgName), f.Path, d.Kind, rangeText, d.Signature, d.ContentHash, d.DocComment).Scan(&symbolVersionID); err != nil {
 			return nil, fmt.Errorf("create go declaration version for %s: %w", d.Name, err)
