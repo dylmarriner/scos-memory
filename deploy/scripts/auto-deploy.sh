@@ -45,12 +45,25 @@ git merge --ff-only origin/main
 
 "${COMPOSE[@]}" build --build-arg "SOURCE_SHA=$AFTER" --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# `database/migrations` is bind-mounted into the migrations container from
+# this checkout, not baked into its image (see docker-compose.yml) -- so a
+# new .sql file landing on disk is not a service-definition change compose's
+# own `up` will notice, and a one-shot container that already exited 0 stays
+# exited. `up -d` alone would silently never re-run this container, so a new
+# migration added to the repo would never apply here even though it applies
+# on a fresh install. `run --rm` always executes it fresh; the runner itself
+# (scripts/scos-migrate) tracks applied versions in scos_schema_migrations,
+# so running it on every deploy is a no-op except for genuinely new files,
+# and it runs before the fabric services below so new schema is present
+# before app code that might depend on it starts.
+"${COMPOSE[@]}" run --rm migrations
+
 # shellcheck disable=SC2086
 "${COMPOSE[@]}" up -d --no-deps --force-recreate $FABRIC_SERVICES
 
 # Second pass with normal (non-force) semantics so anything else declared in
-# the compose file -- migrations, workers, tunnel-client, postgres config
-# changes -- also lands, without bouncing postgres on every deploy.
+# the compose file -- workers, tunnel-client, postgres config changes --
+# also lands, without bouncing postgres on every deploy.
 "${COMPOSE[@]}" up -d
 
 # Verify parity instead of trusting that force-recreate landed everywhere:
