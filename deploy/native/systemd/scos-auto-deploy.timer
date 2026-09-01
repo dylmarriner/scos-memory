@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll origin/main for scos-memory-fabric every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

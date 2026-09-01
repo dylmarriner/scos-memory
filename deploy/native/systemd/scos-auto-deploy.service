@@ -1,0 +1,11 @@
+[Unit]
+Description=Pull and deploy new scos-memory-fabric commits from origin/main
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/scos-memory-fabric
+ExecStart=/opt/scos-memory-fabric/deploy/scripts/auto-deploy.sh
+StandardOutput=append:/var/log/scos-auto-deploy.log
+StandardError=append:/var/log/scos-auto-deploy.log
