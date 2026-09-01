@@ -70,6 +70,11 @@ type PGSymbolVersion struct {
 	Branch              string
 	RenamedFromPath     string
 	RenamedFromSnapshot string
+	// MatchType is "exact" for a path/FQN match or "lexical" for a full-text
+	// match; Relevance is ts_rank's score and is only meaningful for lexical
+	// matches (exact matches don't carry a ranking signal to report).
+	MatchType string
+	Relevance float64
 }
 
 // EnsureRepository returns repositoryID for (tenantID, canonicalPath),
@@ -222,6 +227,48 @@ func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch
 		}
 		r.RenamedFromPath = renamedFromPath.String
 		r.RenamedFromSnapshot = renamedFromSnapshot.String
+		r.MatchType = "exact"
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// QueryLexical full-text searches the active snapshot for (repositoryID,
+// branch) using PostgreSQL FTS over each symbol's fully-qualified name and
+// path (blueprint §11's lexical retriever, the audit's "BM25/lexical:
+// Missing/Unknown" gap). This is the fallback for a query that doesn't
+// match any path/FQN exactly -- an identifier substring, a typo, or a
+// multi-word query -- where dense/embedding search would otherwise be the
+// only option and, per the blueprint, "can be embarrassingly imaginative"
+// for exact identifier lookups. Results are ordered by ts_rank descending
+// and capped at limit.
+func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, term string, limit int) ([]PGSymbolVersion, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
+		       ts_rank(sv.search_vector, query) AS rank
+		FROM code_symbol_versions sv
+		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id,
+		     plainto_tsquery('simple', regexp_replace($3, '[/._-]', ' ', 'g')) query
+		WHERE snap.repository_id = $1 AND snap.branch = $2 AND snap.status = 'active'
+		  AND sv.search_vector @@ query
+		ORDER BY rank DESC
+		LIMIT $4`,
+		repositoryID, branch, term, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query lexical: %w", err)
+	}
+	defer rows.Close()
+
+	var results []PGSymbolVersion
+	for rows.Next() {
+		var r PGSymbolVersion
+		if err := rows.Scan(&r.SymbolID, &r.FullyQualifiedName, &r.Path, &r.ContentHash, &r.SnapshotID, &r.CommitID, &r.Branch, &r.Relevance); err != nil {
+			return nil, fmt.Errorf("scan lexical row: %w", err)
+		}
+		r.MatchType = "lexical"
 		results = append(results, r)
 	}
 	return results, rows.Err()

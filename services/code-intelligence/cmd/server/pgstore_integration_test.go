@@ -284,3 +284,56 @@ func TestPGCreateSnapshotIsIdempotentForSameIdentity(t *testing.T) {
 		t.Fatalf("expected exactly one snapshot row, got %d", count)
 	}
 }
+
+// TestPGLexicalSearchFindsSubstringMatches proves migration
+// 000026_code_lexical_search.sql's FTS column and index actually work end
+// to end: a query that is not an exact path/FQN (so QueryByPathOrFQN would
+// return nothing) but shares a meaningful token with an indexed symbol's
+// path/FQN is still found via full-text search.
+func TestPGLexicalSearchFindsSubstringMatches(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snapshotID, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
+		{Path: "internal/auth/middleware.go", Language: "go", ContentHash: hashContent("auth")},
+		{Path: "internal/billing/invoice.go", Language: "go", ContentHash: hashContent("billing")},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	exact, err := store.QueryByPathOrFQN(ctx, repoID, "main", "middleware")
+	if err != nil {
+		t.Fatalf("exact query: %v", err)
+	}
+	if len(exact) != 0 {
+		t.Fatalf("expected no exact match for a bare substring, got %v", exact)
+	}
+
+	lexical, err := store.QueryLexical(ctx, repoID, "main", "middleware", 10)
+	if err != nil {
+		t.Fatalf("lexical query: %v", err)
+	}
+	if len(lexical) != 1 || lexical[0].Path != "internal/auth/middleware.go" {
+		t.Fatalf("expected exactly the middleware file, got %+v", lexical)
+	}
+	if lexical[0].MatchType != "lexical" {
+		t.Fatalf("expected MatchType lexical, got %q", lexical[0].MatchType)
+	}
+
+	noise, err := store.QueryLexical(ctx, repoID, "main", "nonexistent_token_xyz", 10)
+	if err != nil {
+		t.Fatalf("lexical query for no match: %v", err)
+	}
+	if len(noise) != 0 {
+		t.Fatalf("expected no matches for an unrelated term, got %v", noise)
+	}
+}

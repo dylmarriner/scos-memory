@@ -151,3 +151,49 @@ func TestHandlePGIndexRejectsCrossTenantRepository(t *testing.T) {
 		t.Fatalf("expected no results querying another tenant's repository, got %+v", queryOut.Results)
 	}
 }
+
+// The v2 query route falls back to lexical search when no exact path/FQN
+// match exists, so a caller of the HTTP API -- not just pgCodeStore
+// directly -- benefits from migration 000026's FTS index.
+func TestHandlePGQueryFallsBackToLexicalSearch(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{
+		"canonical_path": "/repo/" + t.Name(),
+	})
+	var reposOut struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &reposOut); err != nil {
+		t.Fatal(err)
+	}
+
+	pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"commit_id":     "commit-1",
+		"files": []map[string]any{
+			{"path": "internal/auth/middleware.go", "content_hash": hashContent("auth-mw")},
+		},
+	})
+
+	queryResp := pgRequest(t, srv, http.MethodPost, "/v2/code/query", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"query":         "middleware",
+	})
+	if queryResp.Code != http.StatusOK {
+		t.Fatalf("query: %d: %s", queryResp.Code, queryResp.Body.String())
+	}
+	var queryOut struct {
+		Results []PGSymbolVersion `json:"results"`
+	}
+	if err := json.Unmarshal(queryResp.Body.Bytes(), &queryOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(queryOut.Results) != 1 || queryOut.Results[0].MatchType != "lexical" {
+		t.Fatalf("expected exactly one lexical match, got %+v", queryOut.Results)
+	}
+}

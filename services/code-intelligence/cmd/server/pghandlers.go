@@ -200,6 +200,16 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Lexical fallback only, never a blend: an exact path/FQN match is
+	// unambiguous, so a caller who typed the identifier they meant should
+	// never see it buried under ranked full-text guesses.
+	if len(results) == 0 {
+		results, err = s.pgStore.QueryLexical(r.Context(), req.RepositoryID, req.Branch, req.Query, 20)
+		if err != nil {
+			http.Error(w, "lexical query: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	if results == nil {
 		results = []PGSymbolVersion{}
 	}
