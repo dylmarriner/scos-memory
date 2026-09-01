@@ -46,6 +46,8 @@ func pgRequestAs(t *testing.T, srv *server, method, path, tenant, principal stri
 		srv.handlePGSnapshotDiff(w, r)
 	case "/v2/code/settings":
 		srv.handlePGSettings(w, r)
+	case "/v2/code/impact":
+		srv.handlePGImpact(w, r)
 	default:
 		t.Fatalf("unhandled path %s", path)
 	}
@@ -54,7 +56,7 @@ func pgRequestAs(t *testing.T, srv *server, method, path, tenant, principal stri
 
 func TestHandlePGRoutesReturnUnavailableWithoutStoreConfigured(t *testing.T) {
 	srv := &server{}
-	for _, path := range []string{"/v2/code/repos", "/v2/code/index", "/v2/code/query", "/v2/code/snapshots/diff", "/v2/code/settings"} {
+	for _, path := range []string{"/v2/code/repos", "/v2/code/index", "/v2/code/query", "/v2/code/snapshots/diff", "/v2/code/settings", "/v2/code/impact"} {
 		w := pgRequest(t, srv, http.MethodPost, path, "tenant-a", map[string]any{})
 		if w.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s: expected 503 without a configured store, got %d: %s", path, w.Code, w.Body.String())
@@ -429,5 +431,107 @@ func TestHandlePGIndexWithContentExtractsRealGoDeclarations(t *testing.T) {
 	}
 	if queryOut.Results[0].MatchType != "exact" {
 		t.Fatalf("expected an exact match, got %q", queryOut.Results[0].MatchType)
+	}
+}
+
+const impactHandlerSource = `package sample
+
+func leaf() int {
+	return 1
+}
+
+func middle() int {
+	return leaf()
+}
+`
+
+func TestHandlePGImpactFindsDirectDependents(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{
+		"canonical_path": "/repo/" + t.Name(),
+	})
+	var reposOut struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &reposOut); err != nil {
+		t.Fatal(err)
+	}
+	pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"commit_id":     "commit-1",
+		"files": []map[string]any{
+			{"path": "pkg/sample.go", "language": "go", "content_hash": hashContent(impactHandlerSource), "content": impactHandlerSource},
+		},
+	})
+
+	impactResp := pgRequest(t, srv, http.MethodPost, "/v2/code/impact", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"query":         "sample.leaf",
+	})
+	if impactResp.Code != http.StatusOK {
+		t.Fatalf("impact: %d: %s", impactResp.Code, impactResp.Body.String())
+	}
+	var impact PGImpact
+	if err := json.Unmarshal(impactResp.Body.Bytes(), &impact); err != nil {
+		t.Fatal(err)
+	}
+	if !hasFQN(impact.DirectDependents, "sample.middle") {
+		t.Fatalf("expected middle in DirectDependents, got %+v", impact.DirectDependents)
+	}
+}
+
+func TestHandlePGImpactReturns404ForUnknownSymbol(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{
+		"canonical_path": "/repo/" + t.Name(),
+	})
+	var reposOut struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &reposOut); err != nil {
+		t.Fatal(err)
+	}
+
+	impactResp := pgRequest(t, srv, http.MethodPost, "/v2/code/impact", tenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"query":         "sample.doesNotExist",
+	})
+	if impactResp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unknown symbol, got %d: %s", impactResp.Code, impactResp.Body.String())
+	}
+}
+
+func TestHandlePGImpactRejectsCrossTenantRepository(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	ownerTenant := testTenant(t, db)
+	attackerTenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", ownerTenant, map[string]any{
+		"canonical_path": "/repo/" + t.Name(),
+	})
+	var reposOut struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &reposOut); err != nil {
+		t.Fatal(err)
+	}
+
+	impactResp := pgRequest(t, srv, http.MethodPost, "/v2/code/impact", attackerTenant, map[string]any{
+		"repository_id": reposOut.RepositoryID,
+		"branch":        "main",
+		"query":         "sample.leaf",
+	})
+	if impactResp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for another tenant's repository, got %d: %s", impactResp.Code, impactResp.Body.String())
 	}
 }

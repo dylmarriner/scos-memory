@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // pgCodeStore is the durable, snapshot-based code-intelligence persistence
@@ -572,4 +573,112 @@ func (s *pgCodeStore) SetUserEnabled(ctx context.Context, tenantID, principalID 
 		return fmt.Errorf("set user settings: %w", err)
 	}
 	return nil
+}
+
+// PGImpact is the result of ChangeImpact: what actually depends on a
+// symbol, derived from real code_edges (CALLS, currently the only
+// relation goextract.go populates) rather than the in-memory codeStore's
+// OutboundRelations field, which the heuristic filename-convention
+// extractor never populates at all -- the original audit's "Change
+// impact: Partial... source graph precision limits correctness" applied
+// literally: there was no real graph to traverse. DirectDependents are
+// one CALLS hop away; TransitiveDependents are everything else reachable
+// within MaxDepth hops, excluding the matched symbols and their direct
+// dependents.
+type PGImpact struct {
+	MatchedSymbols       []PGSymbolVersion
+	DirectDependents     []PGSymbolVersion
+	TransitiveDependents []PGSymbolVersion
+	MaxDepth             int
+}
+
+// ChangeImpact resolves query the same way QueryByPathOrFQN does (exact
+// path/FQN, in the active snapshot for repositoryID+branch), then walks
+// code_edges backwards from every match: who calls this, and who calls
+// those callers, up to maxDepth hops. maxDepth <= 0 defaults to 3 -- deep
+// enough to surface a real blast radius, bounded so one pathologically
+// central symbol (a logging helper called from everywhere) can't turn one
+// request into a full-graph traversal.
+func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
+	matched, err := s.QueryByPathOrFQN(ctx, repositoryID, branch, query)
+	if err != nil {
+		return nil, fmt.Errorf("resolve query: %w", err)
+	}
+	if len(matched) == 0 {
+		return nil, ErrSymbolNotFound
+	}
+
+	impact := &PGImpact{MatchedSymbols: matched, MaxDepth: maxDepth}
+	visited := make(map[string]bool, len(matched))
+	frontier := make([]string, 0, len(matched))
+	for _, m := range matched {
+		visited[m.SymbolVersionID] = true
+		frontier = append(frontier, m.SymbolVersionID)
+	}
+
+	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
+		next, err := s.callersOf(ctx, frontier)
+		if err != nil {
+			return nil, fmt.Errorf("callers at depth %d: %w", depth, err)
+		}
+		var newFrontier []string
+		for _, n := range next {
+			if visited[n.SymbolVersionID] {
+				continue
+			}
+			visited[n.SymbolVersionID] = true
+			newFrontier = append(newFrontier, n.SymbolVersionID)
+			if depth == 0 {
+				impact.DirectDependents = append(impact.DirectDependents, n)
+			} else {
+				impact.TransitiveDependents = append(impact.TransitiveDependents, n)
+			}
+		}
+		frontier = newFrontier
+	}
+	return impact, nil
+}
+
+// callersOf returns every symbol version with a CALLS edge targeting any
+// of targetSymbolVersionIDs. Built with individual placeholders rather
+// than passing a Go slice as a single array parameter: whether the
+// database/sql driver in use accepts a slice for `= ANY($1)` is a
+// driver-specific behavior this doesn't want to depend on, and the
+// per-layer fan-in a change-impact BFS deals with is never large enough
+// for this to matter.
+func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []string) ([]PGSymbolVersion, error) {
+	if len(targetSymbolVersionIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(targetSymbolVersionIDs))
+	args := make([]any, len(targetSymbolVersionIDs))
+	for i, id := range targetSymbolVersionIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	query := fmt.Sprintf(`
+		SELECT DISTINCT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch
+		FROM code_edges e
+		JOIN code_symbol_versions sv ON sv.id = e.source_symbol_version_id
+		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
+		WHERE e.relation = 'CALLS' AND e.target_symbol_version_id IN (%s)`,
+		strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query callers: %w", err)
+	}
+	defer rows.Close()
+
+	var results []PGSymbolVersion
+	for rows.Next() {
+		var r PGSymbolVersion
+		if err := rows.Scan(&r.SymbolVersionID, &r.SymbolID, &r.FullyQualifiedName, &r.Path, &r.ContentHash, &r.SnapshotID, &r.CommitID, &r.Branch); err != nil {
+			return nil, fmt.Errorf("scan caller row: %w", err)
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
 }

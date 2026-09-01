@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -833,5 +834,146 @@ func TestPGIndexSnapshotSkipsAmbiguousCallNames(t *testing.T) {
 	}
 	if edgeCount != 0 {
 		t.Fatalf("expected no CALLS edges for an ambiguous name, got %d", edgeCount)
+	}
+}
+
+func hasFQN(symbols []PGSymbolVersion, fqn string) bool {
+	for _, s := range symbols {
+		if s.FullyQualifiedName == fqn {
+			return true
+		}
+	}
+	return false
+}
+
+// leaf <- middle <- top: a three-level real call chain, so ChangeImpact
+// can be tested for both direct (one hop) and transitive (two hops)
+// dependents in the same fixture.
+const impactChainSource = `package sample
+
+func leaf() int {
+	return 1
+}
+
+func middle() int {
+	return leaf()
+}
+
+func top() int {
+	return middle()
+}
+`
+
+func TestPGChangeImpactFindsDirectAndTransitiveDependents(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(impactChainSource), Content: impactChainSource},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	impact, err := store.ChangeImpact(ctx, repoID, "main", "sample.leaf", 3)
+	if err != nil {
+		t.Fatalf("change impact: %v", err)
+	}
+	if !hasFQN(impact.DirectDependents, "sample.middle") {
+		t.Fatalf("expected middle (calls leaf directly) in DirectDependents, got %+v", impact.DirectDependents)
+	}
+	if hasFQN(impact.DirectDependents, "sample.top") {
+		t.Fatalf("expected top NOT in DirectDependents (it calls middle, not leaf directly), got %+v", impact.DirectDependents)
+	}
+	if !hasFQN(impact.TransitiveDependents, "sample.top") {
+		t.Fatalf("expected top (calls middle, which calls leaf) in TransitiveDependents, got %+v", impact.TransitiveDependents)
+	}
+	if hasFQN(impact.TransitiveDependents, "sample.middle") {
+		t.Fatalf("expected middle NOT to also appear in TransitiveDependents (it's already Direct), got %+v", impact.TransitiveDependents)
+	}
+}
+
+// maxDepth=1 must surface middle (one hop from leaf) but never reach top
+// (two hops) -- the depth bound actually bounds something.
+func TestPGChangeImpactRespectsMaxDepth(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(impactChainSource), Content: impactChainSource},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	impact, err := store.ChangeImpact(ctx, repoID, "main", "sample.leaf", 1)
+	if err != nil {
+		t.Fatalf("change impact: %v", err)
+	}
+	if !hasFQN(impact.DirectDependents, "sample.middle") {
+		t.Fatalf("expected middle in DirectDependents even at maxDepth=1, got %+v", impact.DirectDependents)
+	}
+	if hasFQN(impact.TransitiveDependents, "sample.top") || len(impact.TransitiveDependents) != 0 {
+		t.Fatalf("expected no transitive dependents at maxDepth=1, got %+v", impact.TransitiveDependents)
+	}
+}
+
+// A leaf function with no callers at all must return an empty impact, not
+// an error -- "nothing depends on this" is itself a meaningful answer.
+func TestPGChangeImpactReturnsEmptyForUncalledSymbol(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(impactChainSource), Content: impactChainSource},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	impact, err := store.ChangeImpact(ctx, repoID, "main", "sample.top", 3)
+	if err != nil {
+		t.Fatalf("change impact: %v", err)
+	}
+	if len(impact.DirectDependents) != 0 || len(impact.TransitiveDependents) != 0 {
+		t.Fatalf("expected no dependents for top (nothing calls it), got %+v", impact)
+	}
+}
+
+func TestPGChangeImpactReturnsErrSymbolNotFoundForUnknownQuery(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	if _, err := store.ChangeImpact(ctx, repoID, "main", "sample.doesNotExist", 3); !errors.Is(err, ErrSymbolNotFound) {
+		t.Fatalf("expected ErrSymbolNotFound, got %v", err)
 	}
 }

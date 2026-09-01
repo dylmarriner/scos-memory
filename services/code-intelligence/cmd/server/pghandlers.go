@@ -392,3 +392,71 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"results": results})
 }
+
+func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requirePGStore(w) {
+		return
+	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+	principal, ok := requirePrincipal(r)
+	if !ok {
+		http.Error(w, "authenticated principal header is required", http.StatusUnauthorized)
+		return
+	}
+	if !s.requireEnabled(w, r, tenant, principal) {
+		return
+	}
+	var req struct {
+		RepositoryID string `json:"repository_id"`
+		Branch       string `json:"branch"`
+		Query        string `json:"query"`
+		MaxDepth     int    `json:"max_depth,omitempty"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.RepositoryID == "" || req.Branch == "" || req.Query == "" {
+		http.Error(w, "repository_id, branch and query are required", http.StatusBadRequest)
+		return
+	}
+
+	// Same tenant-ownership rule as handlePGQuery: a repository belonging
+	// to another tenant behaves as if it doesn't exist (§19.10), not as an
+	// error that would confirm its existence.
+	var owningTenant string
+	if err := s.pgStore.db.QueryRowContext(r.Context(),
+		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "repository not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if owningTenant != tenant {
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	impact, err := s.pgStore.ChangeImpact(r.Context(), req.RepositoryID, req.Branch, req.Query, req.MaxDepth)
+	if err != nil {
+		if errors.Is(err, ErrSymbolNotFound) {
+			http.Error(w, "no symbol matches query in the active snapshot", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "change impact: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, impact)
+}
