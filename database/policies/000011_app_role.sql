@@ -18,15 +18,16 @@ BEGIN;
 -- app_password=... (see scripts/scos-migrate) -- required, not defaulted,
 -- so this file fails loudly rather than creating a role with a guessable
 -- password if the operator forgot to set SCOS_APP_PASSWORD.
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'scos_app') THEN
-    CREATE ROLE scos_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOBYPASSRLS;
-  ELSE
-    ALTER ROLE scos_app PASSWORD :'app_password';
-  END IF;
-END
-$$;
+-- Built and \gexec'd at the top level, not inside a DO $$ ... $$ block: psql
+-- does not expand :'variable' references inside dollar-quoted text, so the
+-- previous DO-block form sent the literal string ":'app_password'" to the
+-- server and failed with "syntax error at or near ':'".
+SELECT format('ALTER ROLE scos_app PASSWORD %L;', :'app_password')
+WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = 'scos_app')
+UNION ALL
+SELECT format('CREATE ROLE scos_app LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS;', :'app_password')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'scos_app')
+\gexec
 
 GRANT USAGE ON SCHEMA public TO scos_app;
 
