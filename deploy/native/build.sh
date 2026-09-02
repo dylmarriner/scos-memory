@@ -23,7 +23,10 @@ retrieval-orchestrator security-gate tool-governance transparency-projection"
 echo "==> building ${SERVICES// /, }"
 cd "$REPO_ROOT"
 mkdir -p "$INSTALL_BIN_DIR.new"
-export CGO_ENABLED=0 GOFLAGS=-buildvcs=false
+# CGO_ENABLED=1: code-intelligence's Tree-sitter parsers are cgo bindings and
+# need a C toolchain (gcc/musl-dev or build-essential) on the build host --
+# see deploy/Dockerfile for the matching container-build change.
+export CGO_ENABLED=1 GOFLAGS=-buildvcs=false
 
 # Stamped into packages/release's SourceSHA/BuildTime, mirroring
 # deploy/Dockerfile's build-arg handling, so a native install reports the

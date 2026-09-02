@@ -23,7 +23,14 @@
 # toolchain rather than whatever patch Docker Hub resolves the tag to on a
 # given day.
 FROM golang:1.26.6-alpine AS build
-ENV GOFLAGS=-buildvcs=false CGO_ENABLED=0
+# CGO_ENABLED=1: code-intelligence's Tree-sitter parsers (tree-sitter-go,
+# -javascript, -python, -rust, -typescript) are cgo bindings around the C
+# tree-sitter runtime -- built with CGO disabled their Go files are excluded
+# by build constraints entirely, which fails the shared build for every
+# service, not just code-intelligence. gcc/musl-dev below give the alpine
+# build stage the C toolchain cgo needs.
+ENV GOFLAGS=-buildvcs=false CGO_ENABLED=1
+RUN apk add --no-cache gcc musl-dev
 WORKDIR /src
 
 # Resolve modules before the source is copied so editing a handler does not
