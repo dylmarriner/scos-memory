@@ -114,12 +114,23 @@ func TunePoolConfig(config *pgxpool.Config) *pgxpool.Config {
 }
 
 // NewPool is a drop-in replacement for pgxpool.New that applies the budget.
+// It also fails closed (P0-0) if the connecting role has BYPASSRLS -- see
+// rls_guard.go's requireNoBypassRLS for why this check belongs here rather
+// than as an opt-in call each service remembers to make.
 func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	return pgxpool.NewWithConfig(ctx, TunePoolConfig(config))
+	pool, err := pgxpool.NewWithConfig(ctx, TunePoolConfig(config))
+	if err != nil {
+		return nil, err
+	}
+	if err := requireNoBypassRLS(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return pool, nil
 }
 
 // TuneSQLDB applies the budget to a database/sql handle. Without this the

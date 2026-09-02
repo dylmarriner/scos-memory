@@ -1,0 +1,34 @@
+# Self-host, single-user overlay: no accounts, no bearer token, no
+# tenant/principal to hand-provision. Apply on top of the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# mcp-gateway resolves every caller to the reserved local-mode identity
+# (see services/mcp-gateway/cmd/server/main.go, localModeTenantID) seeded by
+# database/migrations/000030_local_mode_default_identity.sql. Every other
+# service in the base file is untouched -- their internal-service-token and
+# control-plane-token requirements stay exactly as they are, since those are
+# machine-generated plumbing this overlay's `scripts/local_quickstart.sh`
+# fills in automatically, not something a self-host operator has to source.
+#
+# This file intentionally does not touch docker-compose.yml's required (:?)
+# auth env vars -- tests/test_compose_security.py asserts against that file
+# verbatim, and this overlay is additive, not a replacement.
+#
+# Note on the mcp-gateway port binding: Compose *merges* (appends to) list
+# fields like `ports` across -f files rather than replacing them, so this
+# overlay does not attempt to override it here -- doing so would leave both
+# bindings active. The base file's binding already reads
+# `${SCOS_TAILSCALE_IP:-100.93.75.87}:8098:8098`, so scripts/local_quickstart.sh
+# sets SCOS_TAILSCALE_IP=127.0.0.1 in the generated .env instead, which is a
+# plain variable substitution and has no such merge pitfall.
+services:
+  mcp-gateway:
+    environment:
+      SCOS_AUTH_MODE: local
+      # The base file's SCOS_TLS_CERT_FILE/KEY_FILE point at a real
+      # Tailscale/Let's Encrypt certificate for one specific hosted
+      # deployment; a self-host operator has neither, so fall back to the
+      # shared internal self-signed dev CA every other service already uses.
+      SCOS_TLS_CERT_FILE: /etc/scos/tls/tls.crt
+      SCOS_TLS_KEY_FILE: /etc/scos/tls/tls.key

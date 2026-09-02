@@ -28,9 +28,9 @@ import (
 )
 
 type server struct {
-	db                                                                                                                  *sql.DB
-	issuerSecret, gatewayURL, vaultURL, memIntelligenceURL, codeIntelligenceURL, okfURL, graphifyURL, controlPlaneToken string
-	client                                                                                                              *http.Client
+	db                                                                                                                                    *sql.DB
+	issuerSecret, gatewayURL, publicGatewayURL, vaultURL, memIntelligenceURL, codeIntelligenceURL, okfURL, graphifyURL, controlPlaneToken string
+	client                                                                                                                                *http.Client
 }
 type credentials struct {
 	Email       string `json:"email"`
@@ -65,6 +65,7 @@ func main() {
 		db:                  db,
 		issuerSecret:        strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET")),
 		gatewayURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_MCP_GATEWAY_URL")), "/"),
+		publicGatewayURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_PUBLIC_GATEWAY_URL")), "/"),
 		vaultURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_CREDENTIAL_VAULT_URL")), "/"),
 		memIntelligenceURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_MEMORY_INTELLIGENCE_URL")), "/"),
 		codeIntelligenceURL: strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_CODE_INTELLIGENCE_URL")), "/"),
@@ -75,6 +76,14 @@ func main() {
 	}
 	if s.gatewayURL == "" {
 		s.gatewayURL = "https://mcp-gateway:8098"
+	}
+	if s.publicGatewayURL == "" {
+		// Best-effort fallback for a deployment that never set this --
+		// correct for an all-internal test setup, wrong (docker-internal
+		// DNS name, unreachable from a user's own machine) for any real
+		// hosted deployment. Set SCOS_PUBLIC_GATEWAY_URL explicitly there.
+		s.publicGatewayURL = s.gatewayURL + "/mcp"
+		log.Printf("cloud-control-plane: SCOS_PUBLIC_GATEWAY_URL not set, falling back to %s -- this is almost certainly wrong for a real deployment reachable from outside the docker network", s.publicGatewayURL)
 	}
 	if s.vaultURL == "" {
 		s.vaultURL = "https://credential-vault:8100"
@@ -110,6 +119,8 @@ func main() {
 	mux.HandleFunc("/api/me", s.me)
 	mux.HandleFunc("/api/keys", s.keys)
 	mux.HandleFunc("/api/keys/revoke", s.revokeKey)
+	mux.HandleFunc("/api/cli/provisioning-token", s.cliProvisioningToken)
+	mux.HandleFunc("/api/cli/exchange", s.cliExchange)
 	mux.HandleFunc("/api/usage", s.usage)
 	mux.HandleFunc("/api/billing", s.billing)
 	mux.HandleFunc("/api/plans", s.plans)
@@ -132,7 +143,6 @@ func main() {
 	mux.HandleFunc("/api/okf/documents", s.okfDocuments)
 	mux.HandleFunc("/api/graphify/query", s.graphifyQuery)
 	mux.HandleFunc("/api/graphify/explain", s.graphifyExplain)
-	mux.HandleFunc("/admin", adminPortal)
 	mux.HandleFunc("/api/teams", s.teams)
 	mux.HandleFunc("/api/teams/create", s.createTeam)
 	mux.HandleFunc("/api/teams/invite", s.inviteTeam)
@@ -407,21 +417,15 @@ func (s *server) keys(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", 400)
 			return
 		}
-		key, e := randomToken("scos_live_")
-		if e != nil {
-			http.Error(w, "key unavailable", 500)
-			return
-		}
 		keyTenant, keyPrincipal := id.TenantID, id.PrincipalID
 		if strings.TrimSpace(in.TeamID) != "" {
-			e = s.db.QueryRowContext(r.Context(), `SELECT t.tenant_id,m.principal_id FROM cloud_teams t JOIN cloud_team_members m ON m.team_id=t.id WHERE t.id=$1 AND m.user_id=$2`, strings.TrimSpace(in.TeamID), id.UserID).Scan(&keyTenant, &keyPrincipal)
+			e := s.db.QueryRowContext(r.Context(), `SELECT t.tenant_id,m.principal_id FROM cloud_teams t JOIN cloud_team_members m ON m.team_id=t.id WHERE t.id=$1 AND m.user_id=$2`, strings.TrimSpace(in.TeamID), id.UserID).Scan(&keyTenant, &keyPrincipal)
 			if e != nil {
 				http.Error(w, "team membership required", 403)
 				return
 			}
 		}
-		var outID string
-		e = s.db.QueryRowContext(r.Context(), `INSERT INTO cloud_api_keys(user_id,tenant_id,principal_id,name,prefix,key_hash) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, id.UserID, keyTenant, keyPrincipal, strings.TrimSpace(in.Name), key[:18], hash(key)).Scan(&outID)
+		outID, key, e := issueAPIKey(r.Context(), s.db, id.UserID, keyTenant, keyPrincipal, strings.TrimSpace(in.Name))
 		if e != nil {
 			http.Error(w, "key creation failed", 500)
 			return
@@ -455,6 +459,112 @@ func (s *server) revokeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonWrite(w, 200, map[string]bool{"ok": true})
+}
+
+// queryRowContexter is satisfied by both *sql.DB and *sql.Tx, so
+// issueAPIKey can run standalone (keys()) or as part of a larger
+// transaction (cliExchange(), which must consume the provisioning token and
+// mint the key atomically).
+type queryRowContexter interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// issueAPIKey mints a long-lived scos_live_... bearer token for the given
+// tenant/principal and records it against userID for later listing/revoke.
+// Shared by keys() (POST /api/keys) and cliExchange() (POST
+// /api/cli/exchange) so both surfaces issue keys the same way.
+func issueAPIKey(ctx context.Context, q queryRowContexter, userID, tenantID, principalID, name string) (id, key string, err error) {
+	key, err = randomToken("scos_live_")
+	if err != nil {
+		return "", "", err
+	}
+	err = q.QueryRowContext(ctx, `INSERT INTO cloud_api_keys(user_id,tenant_id,principal_id,name,prefix,key_hash) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, userID, tenantID, principalID, name, key[:18], hash(key)).Scan(&id)
+	if err != nil {
+		return "", "", err
+	}
+	return id, key, nil
+}
+
+// cliProvisioningToken mints a short-lived, single-use token for the
+// dashboard's "Connect this machine" one-liner. Session-cookie
+// authenticated, like the rest of the account surface -- the token it
+// returns is what a local install script exchanges (cliExchange, below) for
+// a real API key, so it's safe to display/copy without becoming a standing
+// credential.
+func (s *server) cliProvisioningToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	id, err := s.current(r)
+	if err != nil {
+		http.Error(w, "authentication required", 401)
+		return
+	}
+	tok, err := randomToken("scos_prov_")
+	if err != nil {
+		http.Error(w, "token unavailable", 500)
+		return
+	}
+	_, err = s.db.ExecContext(r.Context(), `INSERT INTO cloud_provisioning_tokens(user_id,tenant_id,principal_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '10 minutes')`, id.UserID, id.TenantID, id.PrincipalID, hash(tok))
+	if err != nil {
+		http.Error(w, "token unavailable", 500)
+		return
+	}
+	jsonWrite(w, 201, map[string]any{"token": tok, "expires_in_seconds": 600})
+}
+
+// cliExchange consumes a single-use provisioning token (no session cookie --
+// the token itself is the authentication) and mints a real API key for it,
+// atomically with marking the token used so a token can never be redeemed
+// twice even under concurrent requests (SELECT ... FOR UPDATE holds the row
+// lock for the transaction's duration).
+func (s *server) cliExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var in struct {
+		Token string `json:"token"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Token) == "" {
+		http.Error(w, "token is required", 400)
+		return
+	}
+	tokenHash := hash(strings.TrimSpace(in.Token))
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
+	defer tx.Rollback()
+
+	var userID, tenantID, principalID string
+	err = tx.QueryRowContext(r.Context(), `SELECT user_id,tenant_id,principal_id FROM cloud_provisioning_tokens WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE`, tokenHash).Scan(&userID, &tenantID, &principalID)
+	if err != nil {
+		http.Error(w, "token is invalid, expired, or already used", 401)
+		return
+	}
+	if _, err = tx.ExecContext(r.Context(), `UPDATE cloud_provisioning_tokens SET used_at=now() WHERE token_hash=$1`, tokenHash); err != nil {
+		http.Error(w, "token unavailable", 500)
+		return
+	}
+	_, key, err := issueAPIKey(r.Context(), tx, userID, tenantID, principalID, "cli-install")
+	if err != nil {
+		http.Error(w, "key creation failed", 500)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "key creation failed", 500)
+		return
+	}
+	jsonWrite(w, 200, map[string]string{
+		"gateway_url":  s.publicGatewayURL,
+		"bearer_token": key,
+		"tenant_id":    tenantID,
+		"principal_id": principalID,
+	})
 }
 
 func (s *server) usage(w http.ResponseWriter, r *http.Request) {

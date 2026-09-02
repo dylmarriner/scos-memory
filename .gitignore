@@ -39,6 +39,7 @@ package-lock.json
 
 # Runtime artifacts
 audit-log.jsonl
+benchmarks/deployed-results.json
 .atlas-gate/
 tls-external/
 

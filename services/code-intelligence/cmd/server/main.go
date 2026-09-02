@@ -84,6 +84,12 @@ type Symbol struct {
 	InboundRelationSummary []string `json:"inbound_relation_summary,omitempty"`
 	Tests                  []string `json:"tests,omitempty"`
 	Visibility             string   `json:"visibility,omitempty"`
+	// CalledNames lists the bare function/method names this symbol's body
+	// calls syntactically (function/method kinds only). Populated by
+	// extractTreeSitterSymbols the same way goextract.go's calledNames
+	// works for Go: a name here is unresolved until pgstore.go's edge
+	// builder matches it against another declaration in the same scope.
+	CalledNames []string `json:"-"`
 }
 
 type IndexGeneration struct {

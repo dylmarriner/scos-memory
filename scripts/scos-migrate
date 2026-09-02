@@ -1,11 +1,18 @@
 #!/bin/sh
 set -eu
 
+# P0-0: database/policies/000011_app_role.sql provisions the restricted
+# scos_app role every service connects as at runtime, and needs a password
+# supplied at apply time -- required, not defaulted, so a forgotten
+# SCOS_APP_PASSWORD fails loudly here rather than silently creating (or
+# leaving unchanged) a role with a guessable/empty password.
+app_password=${SCOS_APP_PASSWORD:?SCOS_APP_PASSWORD must be provided (used by database/policies/000011_app_role.sql to provision the scos_app runtime role)}
+
 database_url=${SCOS_DATABASE_URL:-}
 if [ -n "$database_url" ]; then
-  psql_cmd() { psql "$database_url" -v ON_ERROR_STOP=1 "$@"; }
+  psql_cmd() { psql "$database_url" -v ON_ERROR_STOP=1 -v app_password="$app_password" "$@"; }
 else
-  psql_cmd() { psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 "$@"; }
+  psql_cmd() { psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -v app_password="$app_password" "$@"; }
 fi
 psql_cmd <<'SQL'
 CREATE TABLE IF NOT EXISTS scos_schema_migrations (

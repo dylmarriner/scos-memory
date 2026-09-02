@@ -153,6 +153,123 @@ func TestPGIndexSnapshotFromSCIPHandlesEmptyIndex(t *testing.T) {
 	}
 }
 
+// TestPGIndexSnapshotFromSCIPCreatesRelationshipEdges proves
+// insertSCIPRelationshipEdgesLocked: Dog# both IMPLEMENTS Animal# (from
+// is_implementation alone) and Dog#sound() both IMPLEMENTS and REFERENCES
+// Animal#sound() (from a relationship with both flags set) -- two distinct
+// code_edges rows for the one Relationship entry, none for a symbol pair
+// that only ever appears as an IsImplementation-less reference.
+func TestPGIndexSnapshotFromSCIPCreatesRelationshipEdges(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "scip-typescript", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if _, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, sampleSCIPIndexWithRelationships()); err != nil {
+		t.Fatalf("index from SCIP: %v", err)
+	}
+
+	dog, err := store.QueryByPathOrFQN(ctx, repoID, "main", "Dog")
+	if err != nil || len(dog) != 1 {
+		t.Fatalf("expected Dog to resolve: %v (err %v)", dog, err)
+	}
+	animal, err := store.QueryByPathOrFQN(ctx, repoID, "main", "Animal")
+	if err != nil || len(animal) != 1 {
+		t.Fatalf("expected Animal to resolve: %v (err %v)", animal, err)
+	}
+
+	var implementsCount, referencesCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM code_edges
+		WHERE snapshot_id = $1 AND source_symbol_version_id = $2 AND target_symbol_version_id = $3
+		  AND relation = 'IMPLEMENTS' AND confidence_class = 'deterministic'`,
+		snap, dog[0].SymbolVersionID, animal[0].SymbolVersionID).Scan(&implementsCount); err != nil {
+		t.Fatalf("count implements edges: %v", err)
+	}
+	if implementsCount != 1 {
+		t.Fatalf("expected exactly one IMPLEMENTS edge Dog->Animal, got %d", implementsCount)
+	}
+	// Dog# has no is_reference relationship to Animal#, only Dog#sound() does.
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM code_edges
+		WHERE snapshot_id = $1 AND source_symbol_version_id = $2 AND target_symbol_version_id = $3
+		  AND relation = 'REFERENCES'`,
+		snap, dog[0].SymbolVersionID, animal[0].SymbolVersionID).Scan(&referencesCount); err != nil {
+		t.Fatalf("count references edges: %v", err)
+	}
+	if referencesCount != 0 {
+		t.Fatalf("expected no REFERENCES edge for Dog->Animal (only is_implementation was set), got %d", referencesCount)
+	}
+
+	dogSound, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sound")
+	if err != nil || len(dogSound) < 1 {
+		t.Fatalf("expected sound to resolve: %v (err %v)", dogSound, err)
+	}
+	var bothCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(DISTINCT relation) FROM code_edges
+		WHERE snapshot_id = $1 AND relation IN ('IMPLEMENTS', 'REFERENCES')
+		  AND source_symbol_version_id IN (
+		    SELECT id FROM code_symbol_versions WHERE snapshot_id = $1 AND fully_qualified_name = 'sound' AND path = 'pkg/dog.ts')`,
+		snap).Scan(&bothCount); err != nil {
+		t.Fatalf("count sound relation kinds: %v", err)
+	}
+	if bothCount != 2 {
+		t.Fatalf("expected Dog#sound() to produce both an IMPLEMENTS and a REFERENCES edge, got %d distinct relations", bothCount)
+	}
+}
+
+// TestPGIndexSnapshotFromSCIPCreatesOccurrenceReferenceEdges proves
+// insertSCIPOccurrenceReferenceEdgesLocked: a bare reference occurrence
+// (helper() called inside run()'s body, no Relationships involved at all)
+// is attributed to its enclosing definition via EnclosingSourceRange
+// containment and produces a real REFERENCES edge, run -> helper.
+func TestPGIndexSnapshotFromSCIPCreatesOccurrenceReferenceEdges(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "scip-python", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if _, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, sampleSCIPIndexWithOccurrenceReferences()); err != nil {
+		t.Fatalf("index from SCIP: %v", err)
+	}
+
+	run, err := store.QueryByPathOrFQN(ctx, repoID, "main", "run")
+	if err != nil || len(run) != 1 {
+		t.Fatalf("expected run to resolve: %v (err %v)", run, err)
+	}
+	helper, err := store.QueryByPathOrFQN(ctx, repoID, "main", "helper")
+	if err != nil || len(helper) != 1 {
+		t.Fatalf("expected helper to resolve: %v (err %v)", helper, err)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM code_edges
+		WHERE snapshot_id = $1 AND source_symbol_version_id = $2 AND target_symbol_version_id = $3
+		  AND relation = 'REFERENCES' AND confidence_class = 'deterministic' AND extractor = 'scip:python'`,
+		snap, run[0].SymbolVersionID, helper[0].SymbolVersionID).Scan(&count); err != nil {
+		t.Fatalf("count references edges: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one occurrence-derived REFERENCES edge run->helper, got %d", count)
+	}
+}
+
 // End-to-end through the actual HTTP route: a caller base64-encodes a real
 // SCIP index (as they would after running scip-python/scip-typescript/etc.
 // and reading the resulting .scip file) and posts it to

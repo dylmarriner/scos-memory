@@ -275,3 +275,40 @@ JSON-RPC traffic.
 - `hermes-provider` terminates TLS itself (`:8088`); don't add a second
   reverse proxy in front of it without also updating `scos-ca.crt` on every
   client machine.
+
+## 7. Self-hosting with no account, no bearer token (`SCOS_AUTH_MODE=local`)
+
+Everything above (§2-3) is the hosted/managed path: a real tenant + bearer
+token issued for this specific deployment. A self-hosted, single-user
+instance doesn't need any of that — `mcp-gateway` can run with auth off
+entirely, resolving every caller to one reserved, always-present tenant
+seeded by `database/migrations/000030_local_mode_default_identity.sql`.
+
+```bash
+scripts/local_quickstart.sh
+```
+
+This generates fresh internal secrets (Postgres password, service tokens —
+none of which a user or agent ever sees), brings up the fleet on
+`docker-compose.yml` + `docker-compose.local.yml`, and skips
+`cloud-control-plane` and `tunnel-client` (the hosted account/billing
+service and the remote-exposure tunnel — neither applies to a local
+no-account deployment). It prints the local gateway address when done:
+`https://127.0.0.1:8098/mcp`.
+
+Connect an agent with no token at all:
+
+```bash
+claude mcp add --transport http scos-local https://127.0.0.1:8098/mcp
+```
+
+or, for an agent that uses the shared stdio bridge (§3), set only
+`SCOS_GATEWAY_URL=https://127.0.0.1:8098/mcp` in `~/.hermes/scos.env` and
+leave `SCOS_BEARER_TOKEN`/`SCOS_TENANT_ID`/`SCOS_PRINCIPAL_ID` unset — the
+bridge sends no auth headers when all three are absent, which is exactly
+what a `SCOS_AUTH_MODE=local` gateway expects.
+
+Do **not** point a `SCOS_AUTH_MODE=local` gateway's port at anything beyond
+`127.0.0.1` (or your own trusted LAN/tailnet) — there is no bearer token
+gating it, so anyone who can reach the port can read and write this
+instance's memory.

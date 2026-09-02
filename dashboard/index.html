@@ -70,6 +70,34 @@
     button.link { background: none; border: none; color: var(--cyan); padding: 0 .25rem; }
     button.small, .btn.small { padding: .2rem .5rem; font-size: .66rem; }
 
+    /* ── connect tab ──────────────────────────────────────────────────── */
+    code.copy-cmd { display: block; background: #05070d; border: 1px solid rgba(255,255,255,.1); border-radius: .4rem; padding: .5rem .65rem; font-size: .74rem; color: var(--green); cursor: pointer; user-select: all; word-break: break-all; }
+    code.copy-cmd:hover { border-color: rgba(34,224,176,.4); }
+    code.copy-cmd.copied { border-color: var(--green); color: #fff; }
+    .agent-row { display: flex; align-items: center; gap: .7rem; padding: .55rem 0; border-bottom: 1px solid var(--border-soft); }
+    .agent-row:last-child { border-bottom: none; }
+    .agent-row .agent-dot { width: .55rem; height: .55rem; border-radius: 50%; flex: none; background: var(--text-faint); }
+    .agent-row .agent-name { font-weight: 600; min-width: 130px; }
+    .agent-row .agent-kind { color: var(--text-dim); font-size: .72rem; min-width: 110px; }
+    .agent-row .agent-status { font-size: .68rem; letter-spacing: .04em; text-transform: uppercase; padding: .1rem .5rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+    .agent-row .agent-note { color: var(--text-faint); font-size: .72rem; flex: 1; }
+    .agent-row .agent-readme { color: var(--cyan); font-size: .7rem; white-space: nowrap; }
+
+    /* ── static architecture diagram ─────────────────────────────────── */
+    .arch-diagram { display: flex; flex-direction: column; align-items: center; gap: .3rem; }
+    .arch-tier { display: flex; justify-content: center; gap: .6rem; flex-wrap: wrap; width: 100%; }
+    .arch-tier.wrap { max-width: 900px; margin: 0 auto; }
+    .arch-arrow { color: var(--text-faint); font-size: 1.1rem; line-height: 1; margin: .1rem 0; }
+    .arch-tier-label { font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); margin: .3rem 0 .1rem; }
+    .arch-box { border-radius: .5rem; padding: .5rem .8rem; font-size: .76rem; text-align: center; border: 1px solid var(--border); background: rgba(13,17,28,.6); line-height: 1.35; }
+    .arch-box span { display: block; font-size: .66rem; color: var(--text-dim); margin-top: .15rem; }
+    .arch-box.wide { min-width: 320px; }
+    .arch-box.faint { color: var(--text-dim); border-color: var(--border-soft); }
+    .arch-box.cyan { border-color: rgba(0,240,255,.28); color: var(--cyan); }
+    .arch-box.violet { border-color: rgba(124,58,237,.32); color: var(--violet); }
+    .arch-box.green { border-color: rgba(34,224,176,.3); color: var(--green); }
+    .arch-box.amber { border-color: rgba(246,173,85,.3); color: var(--amber); }
+
     /* ── tabs ─────────────────────────────────────────────────────────── */
     .tabs { display: flex; gap: .35rem; margin-top: 1rem; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
     .tab-btn {
@@ -153,6 +181,8 @@
     .graph-node circle { stroke-width: 1.4; transition: opacity .12s ease, filter .12s ease; filter: drop-shadow(0 0 5px var(--glow, rgba(0,240,255,.6))); animation: glowPulse 3s ease-in-out infinite; }
     .graph-node.fact circle { fill: #0a2230; stroke: var(--cyan); --glow: rgba(0,240,255,.6); }
     .graph-node.entity circle { fill: #1c1230; stroke: var(--violet); --glow: rgba(167,139,250,.6); }
+    .graph-node.agent circle { fill: #06251c; stroke: var(--green); --glow: rgba(34,224,176,.6); }
+    .graph-node.tool circle { fill: #2a1c05; stroke: var(--amber); --glow: rgba(246,173,85,.55); }
     .graph-node.dim { opacity: .15; }
     .graph-node:hover circle { filter: brightness(1.3) drop-shadow(0 0 8px var(--glow)); }
     .graph-label { fill: var(--text-dim); font-size: 8.5px; text-anchor: middle; pointer-events: none; user-select: none; }
@@ -323,27 +353,129 @@
     </section>
 
     <section class="tab-panel" data-tab="agents" id="tab-agents" hidden>
-      <div class="agents-grid" style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:1rem;align-items:start">
-        <div class="glass-card cyan">
-          <div class="card-title cyan" style="margin-bottom:.65rem">Connected agents</div>
+      <div class="glass-card cyan">
+        <div class="card-head">
+          <div class="card-title cyan">Agent topology</div>
+          <div class="card-meta">agent &rarr; permitted tool, from the agent registry's own governance record</div>
+        </div>
+        <div class="graph-wrap" id="agt-graph-mount"></div>
+      </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:1rem;align-items:start">
+        <div class="glass-card plain">
+          <div class="card-title plain" style="margin-bottom:.65rem">Connected agents (raw)</div>
           <div class="panel-body" id="agt-agents-mount"></div>
         </div>
         <div class="hud-panel">
-          <div class="hud-panel-head"><span class="hud-tag">TOL</span><span class="hud-title">Tool operations</span></div>
+          <div class="hud-panel-head"><span class="hud-tag">TOL</span><span class="hud-title">Tool operations (raw)</span></div>
           <div class="panel-body" id="agt-tools-mount"></div>
         </div>
       </div>
       <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:1rem;align-items:start">
         <div class="glass-card violet">
           <div class="card-title violet" style="margin-bottom:.65rem">Routing decisions</div>
+          <p style="color:var(--text-dim);font-size:.76rem;margin:0 0 .5rem">
+            The control plane's decision store is per-interaction, not a live list -- this shows
+            whatever the projection could resolve without one, which is usually "unavailable" by design.
+          </p>
           <div class="panel-body" id="agt-routing-mount"></div>
         </div>
         <div class="col-stack" id="agt-right"></div>
       </div>
     </section>
 
+    <section class="tab-panel" data-tab="connect" id="tab-connect" hidden>
+      <div class="glass-card cyan">
+        <div class="card-head">
+          <div class="card-title cyan">Connect a local agent</div>
+          <div class="card-meta" id="connect-summary">&nbsp;</div>
+        </div>
+        <p style="color:var(--text-dim);font-size:.82rem;margin:.2rem 0 .9rem">
+          These 14 runtimes are the local coding agents SCOS ships a bundle for
+          (<code>integrations/agent-plugins/registry.json</code>). Install writes are additive and
+          back up any file they touch — nothing here runs against your machine from the browser;
+          run the command locally, then optionally paste its <code>--json</code> output below.
+        </p>
+        <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:1rem">
+          <div class="hud-panel" style="flex:1;min-width:260px">
+            <div class="hud-panel-head"><span class="hud-tag">RUN</span><span class="hud-title">Install / refresh all bundles</span></div>
+            <div class="panel-body"><code class="copy-cmd" id="connect-cmd-install" tabindex="0" role="button">python3 scripts/install_agent_plugins.py</code></div>
+          </div>
+          <div class="hud-panel" style="flex:1;min-width:260px">
+            <div class="hud-panel-head"><span class="hud-tag">RUN</span><span class="hud-title">Check status (this machine)</span></div>
+            <div class="panel-body"><code class="copy-cmd" id="connect-cmd-doctor" tabindex="0" role="button">python3 scripts/agent_integration_doctor.py --json</code></div>
+          </div>
+        </div>
+        <div class="panel-body" id="connect-agents-mount"></div>
+      </div>
+      <div class="glass-card amber" style="margin-top:1rem" id="connect-hosted-card" hidden>
+        <div class="card-title amber" style="margin-bottom:.5rem">Connect this machine to your account</div>
+        <p style="color:var(--text-dim);font-size:.82rem;margin:.2rem 0 .7rem">
+          Generates a one-time install link tied to your account. Running it on
+          this or any machine writes <code>~/.hermes/scos.env</code> and links
+          every local agent bundle above to your account automatically — no
+          gateway URL, bearer token, tenant ID, or principal ID to copy by hand.
+        </p>
+        <div class="dialog-error" id="connect-hosted-error"></div>
+        <button id="connect-hosted-generate" class="primary small">Generate install command</button>
+        <div id="connect-hosted-out" class="glass-card amber" style="display:none;margin-top:.7rem;padding:.65rem .75rem">
+          <div style="font-size:.66rem;letter-spacing:.06em;text-transform:uppercase;color:var(--amber);margin-bottom:.4rem">&#9888; one-time link, expires in 10 minutes and stops working once run — treat it like a temporary password</div>
+          <code class="copy-cmd" id="connect-hosted-cmd" tabindex="0" role="button"></code>
+        </div>
+      </div>
+      <div class="glass-card violet" style="margin-top:1rem">
+        <div class="card-title violet" style="margin-bottom:.5rem">Load a doctor report</div>
+        <p style="color:var(--text-dim);font-size:.82rem;margin:.2rem 0 .7rem">
+          Paste the JSON printed by <code>python3 scripts/agent_integration_doctor.py --json</code> to
+          overlay real per-agent status (VERIFIED / PRESENT / MISSING) on the list above. This never
+          leaves your browser — it's parsed and rendered locally, not uploaded anywhere.
+        </p>
+        <textarea id="connect-doctor-input" placeholder="paste doctor --json output here…" style="width:100%;min-height:90px;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.6rem;font:12px/1.4 'IBM Plex Mono', monospace;box-sizing:border-box"></textarea>
+        <div style="display:flex;gap:.5rem;margin-top:.5rem;align-items:center">
+          <button id="connect-doctor-load" class="primary small">Load report</button>
+          <button id="connect-doctor-clear" class="small">Clear</button>
+          <span class="dialog-error" id="connect-doctor-error" style="margin-left:.3rem"></span>
+        </div>
+      </div>
+    </section>
+
     <section class="tab-panel" data-tab="system" id="tab-system" hidden>
-      <div class="glass-card violet">
+      <div class="glass-card cyan">
+        <div class="card-title cyan" style="margin-bottom:.8rem">Architecture</div>
+        <div class="arch-diagram">
+          <div class="arch-tier">
+            <div class="arch-box faint">Claude Code / Desktop</div>
+            <div class="arch-box faint">Codex &middot; OpenCode &middot; Cursor &middot; 11 more</div>
+            <div class="arch-box faint">HTTP / SDK / MCP / A2A</div>
+          </div>
+          <div class="arch-arrow">&darr;</div>
+          <div class="arch-tier"><div class="arch-box violet wide">Autonomous Control Plane<br><span>journal &rarr; scope &rarr; route &rarr; dispatch &rarr; commit</span></div></div>
+          <div class="arch-arrow">&darr;</div>
+          <div class="arch-tier-label">Governed service mesh &mdash; 20+ independently testable Go services</div>
+          <div class="arch-tier wrap">
+            <div class="arch-box cyan">Memory Gateway</div>
+            <div class="arch-box cyan">Retrieval Orchestrator</div>
+            <div class="arch-box cyan">Security Gate</div>
+            <div class="arch-box cyan">Tool Governance</div>
+            <div class="arch-box cyan">Extension Manager</div>
+            <div class="arch-box cyan">Code Intelligence</div>
+            <div class="arch-box cyan">Agent Registry</div>
+            <div class="arch-box cyan">Backup Manager</div>
+            <div class="arch-box cyan">Recovery Orchestrator</div>
+          </div>
+          <div class="arch-arrow">&darr;</div>
+          <div class="arch-tier">
+            <div class="arch-box green">PostgreSQL + pgvector<br><span>RLS-enforced, authoritative</span></div>
+            <div class="arch-box green">OKF Git store<br><span>curated knowledge</span></div>
+          </div>
+          <div class="arch-tier-label">also fed from the mesh</div>
+          <div class="arch-tier">
+            <div class="arch-box amber">Consolidation Worker<br><span>conflict detection &middot; promotion</span></div>
+            <div class="arch-box amber">This dashboard<br><span>you are here</span></div>
+          </div>
+        </div>
+        <p style="color:var(--text-dim);font-size:.72rem;margin-top:.7rem">Conceptual, not live &mdash; kept in sync with README.md's architecture diagram by hand.</p>
+      </div>
+      <div class="glass-card violet" style="margin-top:1rem">
         <div class="card-head">
           <div class="card-title violet">Service mesh</div>
           <div class="card-meta" id="sys-service-count">&nbsp;</div>
@@ -440,7 +572,10 @@
               <button id="key-create" class="primary small">create</button>
             </div>
             <div class="dialog-error" id="acct-key-error"></div>
-            <pre class="raw" id="acct-key-out" style="display:none"></pre>
+            <div id="acct-key-out" class="glass-card amber" style="display:none;margin-bottom:.7rem;padding:.65rem .75rem">
+              <div style="font-size:.66rem;letter-spacing:.06em;text-transform:uppercase;color:var(--amber);margin-bottom:.4rem">&#9888; copy this key now &mdash; it will not be shown again</div>
+              <code class="copy-cmd" id="acct-key-secret" tabindex="0" role="button"></code>
+            </div>
             <div class="panel-body" id="acct-keys-list"></div>
           </div>
           <div class="glass-card violet">
@@ -464,6 +599,17 @@
           <input type="text" id="admin-user-search" placeholder="search email / name&hellip;" style="background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.35rem .6rem;font:inherit;font-size:.78rem">
         </div>
         <div class="panel-body" id="admin-users-table" style="max-height:none"></div>
+      </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start">
+        <div class="glass-card violet">
+          <div class="card-title violet" style="margin-bottom:.6rem">Tenant usage (last 30 days)</div>
+          <p style="color:var(--text-dim);font-size:.76rem;margin:0 0 .5rem">Click "usage" on a user row above to load it here.</p>
+          <div class="panel-body" id="admin-tenant-usage" style="max-height:none"></div>
+        </div>
+        <div class="glass-card green">
+          <div class="card-title green" style="margin-bottom:.6rem">Plans &amp; perks</div>
+          <div id="admin-plan-editors"></div>
+        </div>
       </div>
       <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:1rem;align-items:start">
         <div class="glass-card amber">
@@ -948,6 +1094,181 @@
       return wrap;
     }
 
+    // ── agent topology graph ─────────────────────────────────────────────
+    // Built client-side from two real projections -- agent-registry's
+    // declared tool_permissions (which tools each agent may call, the
+    // governance-level "how does it connect") and tool-governance's recent
+    // operations (which tools have actually been exercised lately). There is
+    // deliberately no fabricated agent->operation edge: /v1/operations does
+    // not carry an agent_id, and /v1/control/decisions is per-interaction,
+    // not a list, so this never pretends to show live call traffic it can't
+    // actually attribute.
+    const AGENT_STATUS_COLOR = { active: 'var(--green)', degraded: 'var(--amber)', inactive: 'var(--text-faint)' };
+    const TOOL_COLOR = 'var(--amber)';
+
+    function renderAgentGraph(agentsRaw, opsRaw, heightPx) {
+      const wrap = document.createElement('div');
+      const agents = Array.isArray(agentsRaw) ? agentsRaw.filter((a) => a && a.id) : [];
+      const ops = Array.isArray(opsRaw) ? opsRaw : [];
+
+      if (agents.length === 0) {
+        const p = document.createElement('p');
+        p.className = 'missing';
+        p.textContent = 'no agents registered yet';
+        wrap.appendChild(p);
+        return wrap;
+      }
+
+      const opCountByTool = new Map();
+      for (const op of ops) {
+        if (op && op.tool_id) opCountByTool.set(op.tool_id, (opCountByTool.get(op.tool_id) || 0) + 1);
+      }
+
+      const nodes = [];
+      const edges = [];
+      const toolSeen = new Set();
+      for (const a of agents) {
+        nodes.push({ id: 'a:' + a.id, kind: 'agent', label: a.name || a.id, status: a.status, agent: a });
+        for (const perm of a.tool_permissions || []) {
+          if (!toolSeen.has(perm)) {
+            toolSeen.add(perm);
+            nodes.push({ id: 't:' + perm, kind: 'tool', label: perm, opCount: opCountByTool.get(perm) || 0 });
+          }
+          edges.push({ source: 'a:' + a.id, target: 't:' + perm });
+        }
+      }
+      // Tools that have seen recent operations but aren't permitted to any
+      // known agent are still surfaced (unattached), rather than dropped --
+      // an orphaned tool call is itself a signal worth seeing.
+      for (const toolID of opCountByTool.keys()) {
+        if (!toolSeen.has(toolID)) nodes.push({ id: 't:' + toolID, kind: 'tool', label: toolID, opCount: opCountByTool.get(toolID) });
+      }
+
+      if (nodes.filter((n) => n.kind === 'tool').length === 0) {
+        const p = document.createElement('p');
+        p.className = 'missing';
+        wrap.appendChild(p);
+        const agentList = document.createElement('div');
+        agentList.style.marginTop = '.5rem';
+        p.textContent = `${agents.length} agent${agents.length === 1 ? '' : 's'} registered, none declare tool_permissions yet`;
+        wrap.appendChild(agentList);
+        return wrap;
+      }
+
+      const width = 720, height = 460;
+      const index = new Map(nodes.map((n, i) => [n.id, i]));
+      const degree = new Map();
+      for (const e of edges) {
+        degree.set(e.source, (degree.get(e.source) || 0) + 1);
+        degree.set(e.target, (degree.get(e.target) || 0) + 1);
+      }
+      const pos = forceLayout(nodes, edges, width, height, Math.min(220, 4000 / Math.max(nodes.length, 1) + 60));
+
+      const graphBox = document.createElement('div');
+      graphBox.className = 'graph-wrap';
+      const sweep = document.createElement('div');
+      sweep.className = 'graph-sweep';
+      graphBox.appendChild(sweep);
+
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      svg.setAttribute('class', 'graph-svg');
+      svg.style.height = (heightPx || 420) + 'px';
+      const g = document.createElementNS(SVG_NS, 'g');
+      svg.appendChild(g);
+      const edgeGroup = document.createElementNS(SVG_NS, 'g');
+      const nodeGroup = document.createElementNS(SVG_NS, 'g');
+      g.append(edgeGroup, nodeGroup);
+
+      for (const e of edges) {
+        const si = index.get(e.source), ti = index.get(e.target);
+        if (si === undefined || ti === undefined) continue;
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('class', 'graph-edge');
+        path.setAttribute('d', edgePath(pos[si].x, pos[si].y, pos[ti].x, pos[ti].y));
+        path.setAttribute('fill', 'none');
+        edgeGroup.appendChild(path);
+      }
+
+      const tooltip = document.createElement('div');
+      tooltip.className = 'graph-tooltip';
+      function showTooltip(ev, n) {
+        tooltip.style.display = 'block';
+        tooltip.innerHTML = n.kind === 'agent'
+          ? `<strong>${escapeHtml(n.label)}</strong><br><span>agent &middot; ${escapeHtml(n.status || 'unknown')}</span>`
+          : `<strong>${escapeHtml(n.label)}</strong><br><span>tool &middot; ${n.opCount || 0} recent op${n.opCount === 1 ? '' : 's'}</span>`;
+        const rect = graphBox.getBoundingClientRect();
+        tooltip.style.left = Math.min(rect.width - 190, Math.max(0, ev.clientX - rect.left + 14)) + 'px';
+        tooltip.style.top = Math.max(0, ev.clientY - rect.top - 8) + 'px';
+      }
+
+      nodes.forEach((n, i) => {
+        const p = pos[i];
+        const isAgent = n.kind === 'agent';
+        const r = isAgent ? 13 : Math.min(16, 6 + Math.sqrt(n.opCount || 0) * 2.5);
+        const nodeEl = document.createElementNS(SVG_NS, 'g');
+        nodeEl.setAttribute('class', 'graph-node ' + (isAgent ? 'agent' : 'tool'));
+        nodeEl.setAttribute('transform', `translate(${p.x},${p.y})`);
+        const circle = document.createElementNS(SVG_NS, 'circle');
+        circle.setAttribute('r', r);
+        if (isAgent) {
+          const color = AGENT_STATUS_COLOR[n.status] || 'var(--red)';
+          circle.style.stroke = color;
+          circle.style.setProperty('--glow', color);
+        }
+        nodeEl.appendChild(circle);
+        const label = document.createElementNS(SVG_NS, 'text');
+        label.setAttribute('class', 'graph-label');
+        label.setAttribute('y', r + 11);
+        label.textContent = String(n.label || '').slice(0, 22);
+        nodeEl.appendChild(label);
+        nodeEl.addEventListener('mouseenter', (ev) => showTooltip(ev, n));
+        nodeEl.addEventListener('mousemove', (ev) => showTooltip(ev, n));
+        nodeEl.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+        nodeGroup.appendChild(nodeEl);
+      });
+
+      let scale = 1, panX = 0, panY = 0, dragging = false, lastX = 0, lastY = 0;
+      function applyTransform() { g.setAttribute('transform', `translate(${panX},${panY}) scale(${scale})`); }
+      svg.addEventListener('wheel', (ev) => {
+        ev.preventDefault();
+        scale = Math.min(4, Math.max(0.35, scale * (ev.deltaY < 0 ? 1.12 : 0.89)));
+        applyTransform();
+      }, { passive: false });
+      svg.addEventListener('pointerdown', (ev) => { dragging = true; lastX = ev.clientX; lastY = ev.clientY; svg.setPointerCapture(ev.pointerId); svg.classList.add('panning'); });
+      svg.addEventListener('pointermove', (ev) => { if (!dragging) return; panX += ev.clientX - lastX; panY += ev.clientY - lastY; lastX = ev.clientX; lastY = ev.clientY; applyTransform(); });
+      svg.addEventListener('pointerup', () => { dragging = false; svg.classList.remove('panning'); });
+      svg.addEventListener('pointerleave', () => { dragging = false; svg.classList.remove('panning'); });
+
+      graphBox.append(svg, tooltip);
+      wrap.appendChild(graphBox);
+
+      const agentCount = nodes.filter((n) => n.kind === 'agent').length;
+      const toolCount = nodes.filter((n) => n.kind === 'tool').length;
+      const legend = document.createElement('div');
+      legend.className = 'graph-legend';
+      legend.innerHTML =
+        '<span><i class="graph-dot" style="background:var(--green);box-shadow:0 0 6px var(--green)"></i>agent (active)</span>' +
+        '<span><i class="graph-dot" style="background:var(--amber);box-shadow:0 0 6px var(--amber)"></i>tool / degraded agent</span>' +
+        `<span>${agentCount} agent${agentCount === 1 ? '' : 's'} &middot; ${toolCount} tool${toolCount === 1 ? '' : 's'} &middot; ${edges.length} permission${edges.length === 1 ? '' : 's'}</span>` +
+        '<span class="graph-hint">scroll to zoom &middot; drag to pan &middot; hover a node for detail</span>';
+      wrap.appendChild(legend);
+      return wrap;
+    }
+
+    function renderAgentTopology() {
+      const mount = document.getElementById('agt-graph-mount');
+      if (!mount) return;
+      const agentsState = panelState.get('agents');
+      const opsState = panelState.get('tool_operations');
+      if (!agentsState || agentsState.lastValue === null) {
+        mount.innerHTML = '<p class="missing">waiting for the agent registry projection&hellip;</p>';
+        return;
+      }
+      mount.innerHTML = '';
+      mount.appendChild(renderAgentGraph(agentsState.lastValue, opsState ? opsState.lastValue : null, 420));
+    }
+
     function render(value, depth) {
       depth = depth || 0;
       if (looksLikeGraph(value)) return renderGraph(value);
@@ -1140,6 +1461,7 @@
       { id: 'memory',   label: 'Memory' },
       { id: 'facts',    label: 'Facts' },
       { id: 'agents',   label: 'Agents' },
+      { id: 'connect',  label: 'Connect' },
       { id: 'system',   label: 'System' },
       { id: 'flow',     label: 'Flow' },
       { id: 'account',  label: 'Account' },
@@ -1379,6 +1701,104 @@
     mountPanel('costs', null, document.getElementById('flow-costs-mount'), defaultPaint);
     mountPanel('timeline', null, document.getElementById('flow-timeline-mount'), defaultPaint);
 
+    // ── Connect tab: static catalog of the 14 local-agent bundles this repo
+    // ships (kept in sync with integrations/agent-plugins/registry.json)
+    // overlaid with a doctor --json report the user pastes in by hand --
+    // the browser has no way to inspect the user's own filesystem. ────────
+    const AGENT_CATALOG = [
+      { id: 'claude-code',     name: 'Claude Code',      kind: 'native-plugin', readme: 'integrations/claude/README.md' },
+      { id: 'codex',           name: 'Codex CLI',        kind: 'native-plugin', readme: 'integrations/codex/README.md' },
+      { id: 'hermes-agent',    name: 'Hermes Agent',     kind: 'native-plugin', readme: 'integrations/hermes/README.md' },
+      { id: 'kilo',            name: 'Kilo',             kind: 'native-plugin', readme: 'integrations/kilo/README.md' },
+      { id: 'opencode',        name: 'OpenCode',         kind: 'native-plugin', readme: 'integrations/opencode/README.md' },
+      { id: 'openclaw',        name: 'OpenClaw',         kind: 'native-plugin', readme: 'integrations/openclaw/README.md' },
+      { id: 'qwen-code',       name: 'Qwen Code',        kind: 'native-plugin', readme: 'integrations/qwen/README.md' },
+      { id: 'gemini-cli',      name: 'Gemini CLI',       kind: 'extension',     readme: 'integrations/agent-plugins/gemini/README.md' },
+      { id: 'cline',           name: 'Cline',            kind: 'mcp-and-rules', readme: 'integrations/agent-plugins/cline/README.md' },
+      { id: 'cursor',          name: 'Cursor',           kind: 'mcp-and-rules', readme: 'integrations/agent-plugins/cursor/README.md' },
+      { id: 'windsurf-devin',  name: 'Windsurf / Devin', kind: 'mcp-and-rules', readme: 'integrations/agent-plugins/windsurf/README.md' },
+      { id: 'antigravity',     name: 'Antigravity',      kind: 'mcp-and-rules', readme: 'integrations/agent-plugins/antigravity/README.md' },
+      { id: 'continue',        name: 'Continue',         kind: 'mcp-and-rules', readme: 'integrations/agent-plugins/continue/README.md' },
+      { id: 'aider',           name: 'Aider',            kind: 'rules-bundle',  readme: 'integrations/agent-plugins/aider/README.md' },
+    ];
+    const CONNECT_STATUS_COLOR = { VERIFIED: 'var(--green)', PRESENT: 'var(--amber)', MISSING: 'var(--text-faint)' };
+    let connectDoctorReport = null;
+
+    function renderConnectAgents() {
+      const mount = document.getElementById('connect-agents-mount');
+      const byId = new Map((connectDoctorReport ? connectDoctorReport.agents : []).map((r) => [r.agent_id, r]));
+      mount.innerHTML = '';
+      for (const agent of AGENT_CATALOG) {
+        const status = byId.get(agent.id);
+        const row = document.createElement('div');
+        row.className = 'agent-row';
+        const dotColor = status ? (CONNECT_STATUS_COLOR[status.status] || 'var(--text-faint)') : 'var(--text-faint)';
+        row.innerHTML = `
+          <span class="agent-dot" style="background:${dotColor}"></span>
+          <span class="agent-name">${escapeHtml(agent.name)}</span>
+          <span class="agent-kind">${escapeHtml(agent.kind)}</span>
+          <span class="agent-status" style="${status ? `color:${dotColor};border-color:${dotColor}` : ''}">${escapeHtml(status ? status.status : 'unknown')}</span>
+          <span class="agent-note">${escapeHtml(status ? status.note : 'run the doctor script to check this machine')}</span>
+          <span class="agent-readme">${escapeHtml(agent.readme)}</span>`;
+        mount.appendChild(row);
+      }
+      const summary = document.getElementById('connect-summary');
+      if (connectDoctorReport) {
+        const s = connectDoctorReport.summary;
+        summary.textContent = `${s.verified} verified · ${s.present} present · ${s.missing} missing (as of ${connectDoctorReport.generated_at})`;
+      } else {
+        summary.textContent = `${AGENT_CATALOG.length} known bundles — paste a doctor report below for live status`;
+      }
+    }
+
+    function wireCopyCmd(id) {
+      const el = document.getElementById(id);
+      const copy = () => {
+        navigator.clipboard?.writeText(el.textContent).catch(() => {});
+        el.classList.add('copied');
+        setTimeout(() => el.classList.remove('copied'), 900);
+      };
+      el.addEventListener('click', copy);
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copy(); } });
+    }
+    wireCopyCmd('connect-cmd-install');
+    wireCopyCmd('connect-cmd-doctor');
+    wireCopyCmd('connect-hosted-cmd');
+
+    document.getElementById('connect-hosted-generate').addEventListener('click', async () => {
+      const errEl = document.getElementById('connect-hosted-error');
+      const out = document.getElementById('connect-hosted-out');
+      errEl.textContent = ''; out.style.display = 'none';
+      try {
+        const { token } = await apiFetch('/api/cli/provisioning-token', { method: 'POST' });
+        const cmd = `curl -fsSL ${location.origin}/install.sh | bash -s -- --token=${token} --base-url=${location.origin}`;
+        document.getElementById('connect-hosted-cmd').textContent = cmd;
+        out.style.display = 'block';
+      } catch (error) { errEl.textContent = error.message; }
+    });
+
+    document.getElementById('connect-doctor-load').addEventListener('click', () => {
+      const errEl = document.getElementById('connect-doctor-error');
+      errEl.textContent = '';
+      const raw = document.getElementById('connect-doctor-input').value.trim();
+      if (!raw) { errEl.textContent = 'paste the --json output first'; return; }
+      try {
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed.agents)) throw new Error('missing "agents" array — is this doctor --json output?');
+        connectDoctorReport = parsed;
+        renderConnectAgents();
+      } catch (e) {
+        errEl.textContent = `could not parse report: ${e.message}`;
+      }
+    });
+    document.getElementById('connect-doctor-clear').addEventListener('click', () => {
+      connectDoctorReport = null;
+      document.getElementById('connect-doctor-input').value = '';
+      document.getElementById('connect-doctor-error').textContent = '';
+      renderConnectAgents();
+    });
+    renderConnectAgents();
+
     function paintPanel(key) { paintAllMounts(key); }
 
     async function refreshSnapshot() {
@@ -1407,6 +1827,7 @@
           }
         }
       }
+      renderAgentTopology();
       statusPill.classList.remove('error');
       statusText.textContent = `refreshed ${new Date().toISOString()}`;
       if (anyUnavailable) statusText.textContent += ' (partial)';
@@ -1514,16 +1935,23 @@
       const signedOut = document.getElementById('acct-signed-out');
       const signedIn = document.getElementById('acct-signed-in');
       const adminBtn = document.querySelector('.tab-btn[data-tab="admin"]');
+      const hostedConnect = document.getElementById('connect-hosted-card');
       if (session) {
         signedOut.hidden = true;
         signedIn.hidden = false;
         document.getElementById('acct-welcome').textContent = `${session.display_name} · ${session.email} · ${session.platform_role}`;
         if (adminBtn) adminBtn.hidden = session.platform_role !== 'creator';
+        if (hostedConnect) hostedConnect.hidden = false;
         loadAccountData();
       } else {
         signedOut.hidden = false;
         signedIn.hidden = true;
         if (adminBtn) adminBtn.hidden = true;
+        // Generating an install link requires a session (POST
+        // /api/cli/provisioning-token is cookie-authenticated) -- hide the
+        // card entirely for a signed-out visitor rather than showing a
+        // button that will just 401.
+        if (hostedConnect) hostedConnect.hidden = true;
       }
     }
 
@@ -1641,6 +2069,14 @@
       }
     });
 
+    // A Go zero-value time (never set) serializes as this sentinel -- shown
+    // as "never" rather than a nonsense 1st-century date.
+    function formatKeyDate(iso) {
+      if (!iso || iso.startsWith('0001-01-01')) return 'never';
+      const d = new Date(iso);
+      return isNaN(d) ? 'never' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+
     async function loadKeys() {
       const list = document.getElementById('acct-keys-list');
       try {
@@ -1649,33 +2085,51 @@
         if (!keys.length) { list.innerHTML = '<p class="missing">no API keys yet</p>'; return; }
         for (const k of keys) {
           const row = document.createElement('div');
-          row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:.78rem';
-          row.innerHTML = `<span>${escapeHtml(k.name)} <span style="color:var(--text-faint)">${escapeHtml(k.prefix)}&hellip;</span></span>`;
+          row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:.6rem;padding:.5rem 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:.78rem';
+          row.innerHTML = `<span>
+            <strong>${escapeHtml(k.name)}</strong>
+            <span style="color:var(--text-faint)">${escapeHtml(k.prefix)}&hellip;</span><br>
+            <span style="color:var(--text-faint);font-size:.7rem">created ${formatKeyDate(k.created_at)} &middot; last used ${formatKeyDate(k.last_used_at)}</span>
+          </span>`;
           const revokeBtn = document.createElement('button');
-          revokeBtn.className = 'small danger'; revokeBtn.textContent = 'revoke';
+          revokeBtn.className = 'small'; revokeBtn.textContent = 'revoke';
+          let confirming = false, resetTimer = null;
           revokeBtn.addEventListener('click', async () => {
+            if (!confirming) {
+              confirming = true;
+              revokeBtn.textContent = 'confirm?';
+              revokeBtn.classList.add('danger');
+              resetTimer = setTimeout(() => { confirming = false; revokeBtn.textContent = 'revoke'; revokeBtn.classList.remove('danger'); }, 4000);
+              return;
+            }
+            clearTimeout(resetTimer);
+            revokeBtn.disabled = true;
             try { await apiFetch('/api/keys/revoke', { method: 'POST', body: JSON.stringify({ id: k.id }) }); await loadKeys(); }
-            catch (error) { document.getElementById('acct-key-error').textContent = error.message; }
+            catch (error) { document.getElementById('acct-key-error').textContent = error.message; revokeBtn.disabled = false; confirming = false; revokeBtn.textContent = 'revoke'; revokeBtn.classList.remove('danger'); }
           });
           row.appendChild(revokeBtn);
           list.appendChild(row);
         }
       } catch (error) { list.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
     }
-    document.getElementById('key-create').addEventListener('click', async () => {
+    async function createKey() {
       const errEl = document.getElementById('acct-key-error');
       const out = document.getElementById('acct-key-out');
       errEl.textContent = ''; out.style.display = 'none';
-      const name = document.getElementById('key-name').value.trim();
+      const nameInput = document.getElementById('key-name');
+      const name = nameInput.value.trim();
       if (!name) { errEl.textContent = 'name is required'; return; }
       try {
         const created = await apiFetch('/api/keys', { method: 'POST', body: JSON.stringify({ name }) });
         out.style.display = 'block';
-        out.textContent = `${created.key}\n\n${created.warning}`;
-        document.getElementById('key-name').value = '';
+        document.getElementById('acct-key-secret').textContent = created.key;
+        nameInput.value = '';
         await loadKeys();
       } catch (error) { errEl.textContent = error.message; }
-    });
+    }
+    document.getElementById('key-create').addEventListener('click', createKey);
+    document.getElementById('key-name').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') createKey(); });
+    wireCopyCmd('acct-key-secret');
 
     async function loadTeams() {
       const list = document.getElementById('acct-teams-list');
@@ -1720,6 +2174,7 @@
         document.getElementById('admin-overview-stats').innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`;
       }
       await loadAdminUsers();
+      await loadAdminPlans();
       try {
         const audit = await apiFetch('/api/admin/audit');
         document.getElementById('admin-audit-log').innerHTML = '';
@@ -1727,6 +2182,54 @@
       } catch (error) {
         document.getElementById('admin-audit-log').innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`;
       }
+    }
+
+    async function loadAdminPlans() {
+      const el = document.getElementById('admin-plan-editors');
+      try {
+        const plans = await apiFetch('/api/plans');
+        el.innerHTML = '';
+        for (const p of plans) {
+          const box = document.createElement('div');
+          box.className = 'hud-panel';
+          box.style.marginBottom = '.6rem';
+          box.innerHTML = `
+            <div class="hud-panel-head"><span class="hud-tag">${escapeHtml(p.id)}</span></div>
+            <label style="display:block;font-size:.68rem;color:var(--text-dim);margin:.3rem 0 .15rem">Name</label>
+            <input type="text" data-field="name" value="${escapeHtml(p.name)}" style="width:100%;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.3rem .5rem;font:inherit;box-sizing:border-box">
+            <label style="display:block;font-size:.68rem;color:var(--text-dim);margin:.4rem 0 .15rem">Price</label>
+            <input type="text" data-field="price" value="${escapeHtml(p.price)}" style="width:100%;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.3rem .5rem;font:inherit;box-sizing:border-box">
+            <label style="display:block;font-size:.68rem;color:var(--text-dim);margin:.4rem 0 .15rem">Perks (one per line)</label>
+            <textarea data-field="perks" style="width:100%;min-height:70px;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.3rem .5rem;font:inherit;box-sizing:border-box">${escapeHtml((p.perks || []).join('\n'))}</textarea>
+            <button class="small primary" style="margin-top:.4rem" data-save>save</button>
+            <span class="dialog-error" data-msg></span>`;
+          box.querySelector('[data-save]').addEventListener('click', async () => {
+            const msgEl = box.querySelector('[data-msg]');
+            msgEl.textContent = '';
+            try {
+              await apiFetch('/api/admin/plans', { method: 'PUT', body: JSON.stringify({
+                id: p.id,
+                name: box.querySelector('[data-field="name"]').value,
+                price: box.querySelector('[data-field="price"]').value,
+                perks: box.querySelector('[data-field="perks"]').value.split('\n').map((s) => s.trim()).filter(Boolean),
+              }) });
+              msgEl.textContent = 'saved';
+              msgEl.style.color = 'var(--green)';
+              await loadAdminData();
+            } catch (error) { msgEl.textContent = error.message; msgEl.style.color = 'var(--red)'; }
+          });
+          el.appendChild(box);
+        }
+      } catch (error) { el.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
+    }
+
+    async function loadAdminTenantUsage(tenantID) {
+      const el = document.getElementById('admin-tenant-usage');
+      try {
+        const rows = await apiFetch('/api/admin/tenant-usage?tenant_id=' + encodeURIComponent(tenantID));
+        el.innerHTML = '';
+        el.appendChild(render(rows));
+      } catch (error) { el.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`; }
     }
     async function loadAdminUsers() {
       const q = document.getElementById('admin-user-search').value.trim();
@@ -1748,7 +2251,11 @@
             try { await apiFetch('/api/admin/set-role', { method: 'POST', body: JSON.stringify({ user_id: u.id, role: u.platform_role === 'creator' ? 'user' : 'creator' }) }); await loadAdminUsers(); }
             catch (error) { alert(error.message); }
           });
+          const usageBtn = document.createElement('button');
+          usageBtn.className = 'small'; usageBtn.textContent = 'usage';
+          usageBtn.addEventListener('click', () => loadAdminTenantUsage(u.tenant_id));
           actions.appendChild(roleBtn);
+          actions.appendChild(usageBtn);
           tr.innerHTML = `<td>${escapeHtml(u.email)}</td><td>${escapeHtml(u.display_name)}</td><td>${escapeHtml(u.platform_role)}</td><td>${escapeHtml(u.plan)}</td><td>${escapeHtml(u.status)}</td>`;
           tr.appendChild(actions);
           tbody.appendChild(tr);

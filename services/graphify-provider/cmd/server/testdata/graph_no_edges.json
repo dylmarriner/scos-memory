@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    {
+      "id": "lone_file",
+      "label": "lone.go",
+      "file_type": "code",
+      "source_file": "lone.go",
+      "source_location": "L1",
+      "_origin": "ast"
+    }
+  ],
+  "edges": [],
+  "hyperedges": []
+}

@@ -18,6 +18,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HOME = Path.home()
 BRIDGE = HOME / ".hermes" / "scripts" / "scos-mcp-bridge.py"
+SCOS_ENV = HOME / ".hermes" / "scos.env"
+CLAUDE_SETTINGS = HOME / ".claude" / "settings.json"
+CLAUDE_PLUGIN_KEY = "scos-memory-fabric@scos-fabric-tools"
 STAMP = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -71,6 +74,57 @@ def copy_commands(source_dir: Path, target_dir: Path) -> None:
 def run(command: list[str]) -> None:
     print("$", " ".join(command))
     subprocess.run(command, cwd=ROOT, check=True)
+
+
+def load_scos_env() -> dict:
+    env = {}
+    if SCOS_ENV.exists():
+        for line in SCOS_ENV.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env[key] = value
+    return env
+
+
+def configure_claude_plugin_options() -> None:
+    """Pre-fill the Claude Code plugin's userConfig from ~/.hermes/scos.env so
+    `claude plugin install` doesn't have to interactively prompt for four raw
+    values the user has no reason to know off-hand. Only fills options that
+    aren't already set, so a value someone deliberately overrode by hand is
+    left alone."""
+    env = load_scos_env()
+    fields = {
+        "gateway_url": env.get("SCOS_GATEWAY_URL") or env.get("SCOS_MCP_GATEWAY_URL"),
+        "bearer_token": env.get("SCOS_BEARER_TOKEN") or env.get("SCOS_HERMES_BEARER_TOKEN"),
+        "tenant_id": env.get("SCOS_TENANT_ID"),
+        "principal_id": env.get("SCOS_PRINCIPAL_ID"),
+    }
+    if not any(fields.values()):
+        print(f"skipped plugin config prefill: {SCOS_ENV} not found or empty")
+        return
+
+    data = {}
+    if CLAUDE_SETTINGS.exists():
+        data = json.loads(CLAUDE_SETTINGS.read_text())
+    plugin_configs = data.setdefault("pluginConfigs", {})
+    options = plugin_configs.setdefault(CLAUDE_PLUGIN_KEY, {}).setdefault("options", {})
+
+    filled = []
+    for key, value in fields.items():
+        if value and not options.get(key):
+            options[key] = value
+            filled.append(key)
+
+    if not filled:
+        print(f"plugin config already set for {CLAUDE_PLUGIN_KEY}, nothing to prefill")
+        return
+
+    backup(CLAUDE_SETTINGS)
+    CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    CLAUDE_SETTINGS.write_text(json.dumps(data, indent=2) + "\n")
+    print(f"prefilled plugin config ({', '.join(filled)}) -> {CLAUDE_SETTINGS}")
 
 
 def run_if_installed(command: list[str]) -> None:
@@ -152,6 +206,7 @@ def install(skip_gemini: bool = False) -> None:
 
     run_if_installed(["codex", "plugin", "add", "scos-memory-fabric@scos-fabric-tools"])
     run_if_installed(["claude", "plugin", "marketplace", "add", str(ROOT / "integrations/claude")])
+    configure_claude_plugin_options()
     run_if_installed(["claude", "plugin", "install", "scos-memory-fabric@scos-fabric-tools"])
 
 

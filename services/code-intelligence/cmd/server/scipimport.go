@@ -51,22 +51,214 @@ func ParseSCIPIndex(data []byte) (*scip.Index, error) {
 // unchanged content) that a compiler-assigned identifier doesn't need to
 // solve the same way.
 //
-// Reference/call-graph edges (scip.Occurrence's non-definition roles) are
-// deliberately not ingested here: attributing a reference to its enclosing
-// symbol requires computing each definition's source range and testing
-// containment, which is real additional work left for a focused follow-up
-// rather than folded into the first SCIP ingestion pass.
+// Occurrence-based reference edges (scip.Occurrence's non-definition
+// roles) are ingested too, as a further pass: insertSCIPOccurrenceReferenceEdgesLocked
+// attributes each reference occurrence to its innermost enclosing
+// definition by testing position containment against every definition
+// occurrence's EnclosingSourceRange in the same document. This is
+// necessarily best-effort in a way the Relationships pass below isn't --
+// not every SCIP indexer populates enclosing ranges, and where none is
+// present for a document, that document's references are honestly left
+// unattributed (no edge, not a guess) rather than resolved against the
+// wrong scope.
 func (s *pgCodeStore) IndexSCIP(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, index *scip.Index) (int, error) {
 	count := 0
+	versionBySymbol := make(map[string]string)
+	var pending []scipRelationshipSource
 	for _, doc := range index.Documents {
 		for _, sym := range doc.Symbols {
-			if err := s.indexSCIPSymbolLocked(ctx, tx, snapshotID, repositoryID, doc, sym); err != nil {
+			versionID, err := s.indexSCIPSymbolLocked(ctx, tx, snapshotID, repositoryID, doc, sym)
+			if err != nil {
 				return count, fmt.Errorf("index SCIP symbol %s: %w", sym.Symbol, err)
 			}
+			versionBySymbol[sym.Symbol] = versionID
 			count++
+			if len(sym.Relationships) > 0 {
+				pending = append(pending, scipRelationshipSource{sourceSymbol: sym.Symbol, extractor: "scip:" + doc.Language, relationships: sym.Relationships})
+			}
+		}
+	}
+	// seenEdges is shared across both edge-building passes below so a
+	// relationship-derived REFERENCES edge and an occurrence-derived one
+	// for the same (source, target) pair -- a legitimate overlap, since a
+	// Relationship can name the same target an occurrence inside that
+	// scope also references -- collapse into a single row rather than two
+	// identical ones.
+	seenEdges := make(map[string]bool)
+	if err := insertSCIPRelationshipEdgesLocked(ctx, tx, snapshotID, versionBySymbol, pending, seenEdges); err != nil {
+		return count, fmt.Errorf("index SCIP relationship edges: %w", err)
+	}
+	for _, doc := range index.Documents {
+		if err := insertSCIPOccurrenceReferenceEdgesLocked(ctx, tx, snapshotID, versionBySymbol, doc, seenEdges); err != nil {
+			return count, fmt.Errorf("index SCIP occurrence references in %s: %w", doc.RelativePath, err)
 		}
 	}
 	return count, nil
+}
+
+// scipRelationshipSource defers one symbol's declared Relationships until
+// every document in the index has been ingested, mirroring
+// insertCallEdgesLocked's two-pass shape in pgstore.go: a relationship can
+// name a symbol defined in a document processed later in iteration order
+// (or not defined in this repository's index at all), so resolution can't
+// happen until the full versionBySymbol map is built.
+type scipRelationshipSource struct {
+	sourceSymbol  string
+	extractor     string
+	relationships []*scip.Relationship
+}
+
+// insertSCIPRelationshipEdgesLocked turns each pending symbol's
+// Relationships into code_edges rows: IsImplementation becomes an
+// IMPLEMENTS edge, IsReference becomes a REFERENCES edge (both can fire for
+// the same relationship, per Relationship's own doc comment, producing two
+// rows). Unlike insertCallEdgesLocked's name-based matching, there is no
+// ambiguity to resolve here -- the indexer already named an exact target
+// symbol string -- so the only reason to skip a relationship is the target
+// not resolving to any symbol version in this snapshot (e.g. an interface
+// declared in a dependency this index doesn't cover).
+func insertSCIPRelationshipEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, versionBySymbol map[string]string, pending []scipRelationshipSource, seenEdges map[string]bool) error {
+	for _, p := range pending {
+		sourceVersionID, ok := versionBySymbol[p.sourceSymbol]
+		if !ok {
+			continue
+		}
+		for _, rel := range p.relationships {
+			targetVersionID, ok := versionBySymbol[rel.Symbol]
+			if !ok {
+				continue
+			}
+			if rel.IsImplementation {
+				if err := insertCodeEdge(ctx, tx, snapshotID, sourceVersionID, targetVersionID, "IMPLEMENTS", p.extractor, seenEdges); err != nil {
+					return err
+				}
+			}
+			if rel.IsReference {
+				if err := insertCodeEdge(ctx, tx, snapshotID, sourceVersionID, targetVersionID, "REFERENCES", p.extractor, seenEdges); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// scipEnclosingDef is one definition occurrence in a document that
+// declared a usable EnclosingSourceRange -- the candidate scopes
+// insertSCIPOccurrenceReferenceEdgesLocked attributes a reference
+// occurrence to.
+type scipEnclosingDef struct {
+	symbol string
+	r      scip.Range
+}
+
+// insertSCIPOccurrenceReferenceEdgesLocked attributes every non-definition
+// occurrence in doc to the innermost definition occurrence whose
+// EnclosingSourceRange contains it, and records a REFERENCES edge from
+// that enclosing definition to the referenced symbol. "Innermost" is
+// approximated by the smallest enclosing range among all candidates that
+// contain the reference's start position -- exact for the common case of
+// non-overlapping nested scopes (a method inside a class inside a module),
+// which is what every mainstream SCIP indexer emits.
+//
+// A document with no definition occurrence carrying an enclosing range at
+// all is skipped outright: some indexers never populate it, and guessing
+// an enclosing scope from indentation or any other heuristic would produce
+// exactly the kind of fabricated edge this codebase's confidence-class
+// philosophy (see insertCallEdgesLocked in pgstore.go) refuses to emit.
+func insertSCIPOccurrenceReferenceEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, versionBySymbol map[string]string, doc *scip.Document, seenEdges map[string]bool) error {
+	if len(doc.Occurrences) == 0 {
+		return nil
+	}
+	var defs []scipEnclosingDef
+	for _, occ := range doc.Occurrences {
+		if occ.Symbol == "" || occ.SymbolRoles&int32(scip.SymbolRole_Definition) == 0 {
+			continue
+		}
+		r, ok := occ.EnclosingSourceRange()
+		if !ok {
+			continue
+		}
+		defs = append(defs, scipEnclosingDef{symbol: occ.Symbol, r: r})
+	}
+	if len(defs) == 0 {
+		return nil
+	}
+
+	extractor := "scip:" + doc.Language
+	for _, occ := range doc.Occurrences {
+		if occ.Symbol == "" || occ.SymbolRoles&int32(scip.SymbolRole_Definition) != 0 {
+			continue
+		}
+		refRange, ok := occ.SourceRange()
+		if !ok {
+			continue
+		}
+		enclosing, ok := innermostEnclosingDef(defs, refRange.Start)
+		if !ok {
+			continue
+		}
+		sourceVersionID, ok := versionBySymbol[enclosing.symbol]
+		if !ok {
+			continue
+		}
+		targetVersionID, ok := versionBySymbol[occ.Symbol]
+		if !ok {
+			continue
+		}
+		if err := insertCodeEdge(ctx, tx, snapshotID, sourceVersionID, targetVersionID, "REFERENCES", extractor, seenEdges); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// innermostEnclosingDef returns the def in defs whose range contains pos
+// and has the smallest line/character span, i.e. the most specific
+// enclosing scope. Ties (equal span) resolve to whichever candidate was
+// seen first; real SCIP output never produces two definitions with
+// identical enclosing ranges in the same document.
+func innermostEnclosingDef(defs []scipEnclosingDef, pos scip.Position) (scipEnclosingDef, bool) {
+	var best scipEnclosingDef
+	var bestSpan int64
+	found := false
+	for _, d := range defs {
+		if !d.r.Contains(pos) {
+			continue
+		}
+		span := scipRangeSpan(d.r)
+		if !found || span < bestSpan {
+			best, bestSpan, found = d, span, true
+		}
+	}
+	return best, found
+}
+
+// scipRangeSpan is a comparable proxy for a range's size: line differences
+// dominate (a range spanning even one extra line is never "smaller" than
+// one confined to a single line no matter the character width), so the
+// line delta is weighted well above any plausible single-line character
+// count.
+func scipRangeSpan(r scip.Range) int64 {
+	return int64(r.End.Line-r.Start.Line)*1_000_000 + int64(r.End.Character-r.Start.Character)
+}
+
+func insertCodeEdge(ctx context.Context, tx *sql.Tx, snapshotID, sourceVersionID, targetVersionID, relation, extractor string, seenEdges map[string]bool) error {
+	if sourceVersionID == targetVersionID {
+		return nil
+	}
+	key := sourceVersionID + "|" + targetVersionID + "|" + relation
+	if seenEdges[key] {
+		return nil
+	}
+	seenEdges[key] = true
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO code_edges (snapshot_id, source_symbol_version_id, target_symbol_version_id, relation, confidence_class, extractor)
+		VALUES ($1, $2, $3, $4, 'deterministic', $5)`,
+		snapshotID, sourceVersionID, targetVersionID, relation, extractor); err != nil {
+		return fmt.Errorf("insert %s edge: %w", relation, err)
+	}
+	return nil
 }
 
 // IndexSnapshotFromSCIP is IndexSCIP wrapped the same way IndexSnapshot
@@ -96,7 +288,7 @@ func (s *pgCodeStore) IndexSnapshotFromSCIP(ctx context.Context, snapshotID, rep
 	return count, tx.Commit()
 }
 
-func (s *pgCodeStore) indexSCIPSymbolLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, doc *scip.Document, sym *scip.SymbolInformation) error {
+func (s *pgCodeStore) indexSCIPSymbolLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, doc *scip.Document, sym *scip.SymbolInformation) (string, error) {
 	stableKey := "scip:" + sym.Symbol
 	kind := strings.ToLower(sym.Kind.String())
 	if kind == "" || kind == "unspecifiedkind" {
@@ -110,7 +302,7 @@ func (s *pgCodeStore) indexSCIPSymbolLocked(ctx context.Context, tx *sql.Tx, sna
 		ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
 		RETURNING id`,
 		repositoryID, stableKey, kind, doc.Language, snapshotID).Scan(&symbolID); err != nil {
-		return fmt.Errorf("upsert scip symbol identity: %w", err)
+		return "", fmt.Errorf("upsert scip symbol identity: %w", err)
 	}
 
 	fqn := sym.DisplayName
@@ -120,15 +312,21 @@ func (s *pgCodeStore) indexSCIPSymbolLocked(ctx context.Context, tx *sql.Tx, sna
 	docComment := strings.TrimSpace(strings.Join(sym.Documentation, "\n\n"))
 	contentHash := scipSymbolContentHash(sym.Symbol)
 
-	if _, err := tx.ExecContext(ctx, `
+	// ON CONFLICT DO UPDATE (a harmless self-assignment) rather than DO
+	// NOTHING so RETURNING always reports a row, even when this exact
+	// (snapshot_id, symbol_id) was already inserted -- insertSCIPRelationshipEdgesLocked
+	// needs every ingested symbol's version id, not just newly-inserted ones.
+	var symbolVersionID string
+	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO code_symbol_versions
 			(symbol_id, snapshot_id, fully_qualified_name, path, kind, signature, content_hash, doc_comment, confidence_class, extractor)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), 'deterministic', $9)
-		ON CONFLICT (snapshot_id, symbol_id) DO NOTHING`,
-		symbolID, snapshotID, fqn, doc.RelativePath, kind, signatureText(sym), contentHash, docComment, "scip:"+doc.Language); err != nil {
-		return fmt.Errorf("create scip symbol version: %w", err)
+		ON CONFLICT (snapshot_id, symbol_id) DO UPDATE SET symbol_id = EXCLUDED.symbol_id
+		RETURNING id`,
+		symbolID, snapshotID, fqn, doc.RelativePath, kind, signatureText(sym), contentHash, docComment, "scip:"+doc.Language).Scan(&symbolVersionID); err != nil {
+		return "", fmt.Errorf("create scip symbol version: %w", err)
 	}
-	return nil
+	return symbolVersionID, nil
 }
 
 // signatureText renders SCIP's SignatureDocumentation when the indexer

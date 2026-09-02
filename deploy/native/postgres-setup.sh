@@ -63,13 +63,20 @@ else
 fi
 
 echo "==> role and database"
+# P0-0: CREATEROLE (not full SUPERUSER) lets this role create the
+# restricted scos_app runtime role itself, via
+# database/policies/000011_app_role.sql -- scos-migrate runs that file
+# connected as this role. Compose's postgres image makes its bootstrap
+# POSTGRES_USER a full superuser, which already implies CREATEROLE; this
+# keeps the native path's privilege bump to the minimum actually needed
+# rather than matching Compose's superuser by default.
 sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$POSTGRES_USER') THEN
-    CREATE ROLE $POSTGRES_USER LOGIN PASSWORD '$POSTGRES_PASSWORD';
+    CREATE ROLE $POSTGRES_USER LOGIN CREATEROLE PASSWORD '$POSTGRES_PASSWORD';
   ELSE
-    ALTER ROLE $POSTGRES_USER PASSWORD '$POSTGRES_PASSWORD';
+    ALTER ROLE $POSTGRES_USER CREATEROLE PASSWORD '$POSTGRES_PASSWORD';
   END IF;
 END
 \$\$;
@@ -121,3 +128,15 @@ echo
 echo "==> done. Set in /etc/scos/scos-fabric.env:"
 echo "    SCOS_DATABASE_URL=postgresql://$POSTGRES_USER:<password>@127.0.0.1:5432/$POSTGRES_DB?sslmode=require"
 echo "    DATABASE_URL=postgresql://$POSTGRES_USER:<password>@127.0.0.1:5432/$POSTGRES_DB?sslmode=require"
+echo
+echo "==> P0-0: also set, for the restricted scos_app runtime role every"
+echo "    service connects as (provisioned by scos-migrate the first time"
+echo "    it runs database/policies/000011_app_role.sql -- pick a fresh"
+echo "    high-entropy SCOS_APP_PASSWORD, it does not need to match"
+echo "    POSTGRES_PASSWORD and should not):"
+echo "    SCOS_APP_PASSWORD=<a different password>"
+echo "    SCOS_APP_DATABASE_URL=postgresql://scos_app:<that password>@127.0.0.1:5432/$POSTGRES_DB?sslmode=require"
+echo "    DATABASE_URL on every service unit (scos-fabric@.service instances,"
+echo "    not the migrations unit) must point at SCOS_APP_DATABASE_URL, not"
+echo "    SCOS_DATABASE_URL -- only the migrations unit keeps the owner"
+echo "    connection."

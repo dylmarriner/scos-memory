@@ -1,7 +1,14 @@
-.PHONY: fmt test integration-test failure-injection validate audit audit-runtime code-index compose-up compose-down db-shell
+.PHONY: fmt test integration-test failure-injection validate audit audit-runtime code-index deployed-benchmark compose-up compose-down db-shell
 
 code-index:
 	python3 scripts/generate_code_index.py
+
+deployed-benchmark:
+	@test -n "$${SCOS_BENCHMARK_ENDPOINT}" || (printf '%s\n' 'SCOS_BENCHMARK_ENDPOINT must be set' >&2; exit 1)
+	@test -n "$${SCOS_BENCHMARK_TOKEN}" || (printf '%s\n' 'SCOS_BENCHMARK_TOKEN must be set through the secret mechanism' >&2; exit 1)
+	@test -n "$${SCOS_BENCHMARK_TENANT_ID}" || (printf '%s\n' 'SCOS_BENCHMARK_TENANT_ID must be set' >&2; exit 1)
+	@test -n "$${SCOS_BENCHMARK_PRINCIPAL_ID}" || (printf '%s\n' 'SCOS_BENCHMARK_PRINCIPAL_ID must be set' >&2; exit 1)
+	python3 benchmarks/run_deployed.py --output "$${SCOS_BENCHMARK_OUTPUT:-benchmarks/deployed-results.json}"
 
 fmt:
 	gofmt -w $$(find services -name '*.go' -type f)
@@ -39,6 +46,7 @@ validate:
 	@test -n "$${SCOS_DATABASE_URL}" || (printf '%s\n' 'SCOS_DATABASE_URL must be set for compose validation' >&2; exit 1)
 	@test -n "$${SCOS_AGENT_ENDPOINT}" || test -n "$${DEEPSEEK_API_KEY}" || (printf '%s\n' 'SCOS_AGENT_ENDPOINT or DEEPSEEK_API_KEY must be set for compose validation' >&2; exit 1)
 	@test -n "$${POSTGRES_PASSWORD}" || (printf '%s\n' 'POSTGRES_PASSWORD must be set for compose validation' >&2; exit 1)
+	@test -n "$${SCOS_PUBLIC_GATEWAY_URL}" || (printf '%s\n' 'SCOS_PUBLIC_GATEWAY_URL must be set for compose validation' >&2; exit 1)
 	@test -n "$${SCOS_CONTROL_PLANE_TOKEN}" || (printf '%s\n' 'SCOS_CONTROL_PLANE_TOKEN must be set for compose validation' >&2; exit 1)
 	docker compose -f deploy/compose/docker-compose.yml config >/dev/null
 	python3 scripts/audit_governance.py
@@ -57,3 +65,12 @@ compose-down:
 
 db-shell:
 	docker compose --env-file .env -f deploy/compose/docker-compose.yml exec postgres psql -U "$${POSTGRES_USER:-scos}" -d "$${POSTGRES_DB:-scos_memory}"
+
+doctor:
+	python3 scripts/agent_integration_doctor.py
+
+doctor-json:
+	python3 scripts/agent_integration_doctor.py --json
+
+install-agents:
+	python3 scripts/install_agent_plugins.py

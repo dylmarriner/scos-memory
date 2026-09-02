@@ -30,12 +30,13 @@ import (
 var serviceMetrics = telemetry.FromEnvironment("transparency-projection")
 
 type projectionServer struct {
-	upstream          string // primary dependency (memory-intelligence), used for readiness
-	upstreams         map[string]string
-	controlPlaneToken string       // forwarded to control-plane-protected upstreams (code-intelligence etc.)
-	client            *http.Client // fast client for health probes and event streaming
-	snapshotClient    *http.Client // slow client for snapshot assembly (heavyweight views)
-	serviceToken      string       // claims JWT minted at startup; used when the caller sends no bearer token
+	upstream             string // primary dependency (memory-intelligence), used for readiness
+	upstreams            map[string]string
+	cloudControlPlaneURL string       // same-origin browser API proxy for account/admin views
+	controlPlaneToken    string       // forwarded to control-plane-protected upstreams (code-intelligence etc.)
+	client               *http.Client // fast client for health probes and event streaming
+	snapshotClient       *http.Client // slow client for snapshot assembly (heavyweight views)
+	serviceToken         string       // claims JWT minted at startup; used when the caller sends no bearer token
 
 	editPassphrase string // SCOS_DASHBOARD_EDIT_PASSPHRASE; empty disables editing entirely
 	editSecret     string // HMAC key for dashboard edit-session tokens (reuses the security issuer secret)
@@ -68,6 +69,7 @@ var upstreamDefaults = []upstreamDefault{
 	{"credential_vault", "SCOS_CREDENTIAL_VAULT_URL", "https://credential-vault:8100"},
 	{"okf_synchroniser", "SCOS_OKF_SYNCHRONISER_URL", "https://okf-synchroniser:8090"},
 	{"graphify_provider", "SCOS_GRAPHIFY_PROVIDER_URL", "https://graphify-provider:8099"},
+	{"cloud_control_plane", "SCOS_CLOUD_CONTROL_PLANE_URL", "https://cloud-control-plane:8079"},
 }
 
 func resolveUpstreams() map[string]string {
@@ -93,13 +95,14 @@ func main() {
 		log.Fatalf("mint service claims token: %v", err)
 	}
 	s := &projectionServer{
-		upstream:          upstreams["memory_intelligence"],
-		upstreams:         upstreams,
-		controlPlaneToken: strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
-		serviceToken:      serviceToken,
-		client:            client,
-		editPassphrase:    strings.TrimSpace(os.Getenv("SCOS_DASHBOARD_EDIT_PASSPHRASE")),
-		editSecret:        strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET")),
+		upstream:             upstreams["memory_intelligence"],
+		upstreams:            upstreams,
+		cloudControlPlaneURL: upstreams["cloud_control_plane"],
+		controlPlaneToken:    strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
+		serviceToken:         serviceToken,
+		client:               client,
+		editPassphrase:       strings.TrimSpace(os.Getenv("SCOS_DASHBOARD_EDIT_PASSPHRASE")),
+		editSecret:           strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET")),
 	}
 	if s.editPassphrase == "" {
 		log.Printf("SCOS_DASHBOARD_EDIT_PASSPHRASE not set: dashboard editing (fact correct/forget) is disabled, viewing only")
@@ -136,6 +139,14 @@ func main() {
 		// caller token is required to view any panel.
 		if strings.HasPrefix(r.URL.Path, "/v1/transparency/") {
 			mux.ServeHTTP(w, r)
+			return
+		}
+		// Account and admin panels use HttpOnly session cookies. Keep those
+		// requests same-origin from the browser and proxy only the cloud API
+		// namespace; the cloud service remains responsible for authentication
+		// and authorization on every endpoint.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			s.cloudAPI(w, r)
 			return
 		}
 		authenticated.ServeHTTP(w, r)
@@ -453,6 +464,41 @@ func (s *projectionServer) graphify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
+}
+
+func (s *projectionServer) cloudAPI(w http.ResponseWriter, r *http.Request) {
+	if s.cloudControlPlaneURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "cloud control plane is not configured"})
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, s.cloudControlPlaneURL+r.URL.Path, r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid cloud control-plane request"})
+		return
+	}
+	req.URL.RawQuery = r.URL.RawQuery
+	for _, name := range []string{"Content-Type", "Cookie", "Authorization", "X-Request-ID", "X-Correlation-ID"} {
+		if value := r.Header.Get(name); value != "" {
+			req.Header.Set(name, value)
+		}
+	}
+	client := s.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "cloud control plane unavailable"})
+		return
+	}
+	defer resp.Body.Close()
+	for name, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // mintEditToken and hasValidEditToken mirror mintServiceToken's HMAC-JWT

@@ -46,3 +46,47 @@ func TestLoadGraphMatchesRealGraphifyOutput(t *testing.T) {
 		t.Fatalf("relationTypeFor(INFERRED) = %q, want inferred_from", relationTypeFor(inferred.Confidence))
 	}
 }
+
+// testdata/graph_0.9.52.json is real output from `graphify extract
+// --code-only` (graphifyy 0.9.52, the version deployed to production as of
+// 2026-09) against this repository itself. Found live: networkx's
+// node_link_data changed its default edges-key parameter from "links" to
+// "edges" somewhere between 0.9.48 and 0.9.52, and graphify inherited that
+// change with no version marker in the output to detect it by -- every
+// edge from a real production extraction was silently dropped (decode
+// succeeded, node count looked right, Edges was just empty) until
+// graphDocument.UnmarshalJSON learned to fall back to "edges" when "links"
+// is absent. This is the regression guard for that: if a future graphify
+// version renames the key again, this fails loudly instead of silently
+// serving an edgeless graph.
+func TestLoadGraphAcceptsNewerGraphifyEdgesKey(t *testing.T) {
+	doc, err := loadGraph("testdata/graph_0.9.52.json")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if len(doc.Nodes) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(doc.Nodes))
+	}
+	if len(doc.Edges) != 1 {
+		t.Fatalf("expected 1 edge (from the \"edges\" key, not \"links\"), got %d", len(doc.Edges))
+	}
+	if doc.Edges[0].Source != "claude_workflows_hostile_repo_audit_scos_fabric" {
+		t.Fatalf("unexpected edge: %+v", doc.Edges[0])
+	}
+}
+
+// A document with genuinely no edges under either key must decode as an
+// edgeless graph, not error -- that's a valid (if unusual) answer for a
+// tiny or single-file repository.
+func TestLoadGraphHandlesNoEdgesUnderEitherKey(t *testing.T) {
+	doc, err := loadGraph("testdata/graph_no_edges.json")
+	if err != nil {
+		t.Fatalf("loadGraph: %v", err)
+	}
+	if len(doc.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(doc.Nodes))
+	}
+	if len(doc.Edges) != 0 {
+		t.Fatalf("expected 0 edges, got %d", len(doc.Edges))
+	}
+}

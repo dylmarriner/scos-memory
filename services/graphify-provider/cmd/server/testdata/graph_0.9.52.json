@@ -1,0 +1,33 @@
+{
+  "nodes": [
+    {
+      "id": "claude_workflows_hostile_repo_audit_scos_fabric",
+      "label": "hostile-repo-audit-scos-fabric.js",
+      "file_type": "code",
+      "source_file": ".claude/workflows/hostile-repo-audit-scos-fabric.js",
+      "source_location": "L1",
+      "_origin": "ast"
+    },
+    {
+      "id": "claude_workflows_hostile_repo_audit_scos_fabric_meta",
+      "label": "meta",
+      "file_type": "code",
+      "source_file": ".claude/workflows/hostile-repo-audit-scos-fabric.js",
+      "source_location": "L1",
+      "_origin": "ast"
+    }
+  ],
+  "edges": [
+    {
+      "source": "claude_workflows_hostile_repo_audit_scos_fabric",
+      "target": "claude_workflows_hostile_repo_audit_scos_fabric_meta",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".claude/workflows/hostile-repo-audit-scos-fabric.js",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast"
+    }
+  ],
+  "hyperedges": []
+}

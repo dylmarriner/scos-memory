@@ -1,9 +1,9 @@
 {
   "id": "scos-memory",
   "name": "SCOS Memory Fabric",
-  "description": "OpenClaw-native SCOS memory guidance and governed MCP tools.",
-  "version": "1.0.0",
+  "description": "OpenClaw-native SCOS memory guidance and governed read-only tools.",
+  "version": "1.1.0",
   "activation": { "onStartup": true },
-  "contracts": { "tools": ["scos_memory_guidance"] },
+  "contracts": { "tools": ["scos_memory_guidance", "scos_recall", "scos_status", "scos_explain"] },
   "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
 }

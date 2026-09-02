@@ -14,7 +14,10 @@ class ComposeSecurityTests(unittest.TestCase):
         # and the loopback-bound creator console.  Reject only unbound or
         # plaintext-style mappings that would expose services on all hosts.
         for line in COMPOSE.splitlines():
-            if line.strip().startswith('- "') and ":" in line:
+            # Check published host:container ports only.  `extra_hosts` also
+            # uses a colon, but it is an internal DNS mapping rather than a
+            # host port publication and has a different shape.
+            if line.strip().startswith('- "') and re.search(r":\d+:\d+", line):
                 self.assertRegex(
                     line,
                     r"\$\{SCOS_(?:TAILSCALE_IP|CLOUD_BIND_ADDRESS)",

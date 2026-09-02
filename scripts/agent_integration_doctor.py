@@ -21,8 +21,11 @@ its hooks.json merely exists.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,7 +80,7 @@ def check_presence(agent_id: str) -> tuple[bool, list[str]]:
     return bool(evidence), evidence
 
 
-def main() -> None:
+def build_report() -> dict:
     registry = json.loads(REGISTRY_PATH.read_text())
     rows = []
     for entry in registry["agents"]:
@@ -90,19 +93,54 @@ def main() -> None:
             tier, note, status = "unconfirmed", "registered + present, no lifecycle test run", "PRESENT"
         else:
             tier, note, status = "n/a", "no binary/config dir found on this machine", "MISSING"
-        rows.append((agent_id, entry.get("kind", "?"), status, tier, note, evidence))
+        rows.append({
+            "agent_id": agent_id,
+            "kind": entry.get("kind", "?"),
+            "path": entry.get("path", "?"),
+            "status": status,
+            "tier": tier,
+            "note": note,
+            "evidence": evidence,
+        })
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "host": Path.home().name,
+        "install_command": "python3 scripts/install_agent_plugins.py",
+        "agents": rows,
+        "summary": {
+            "verified": sum(1 for r in rows if r["status"] == "VERIFIED"),
+            "present": sum(1 for r in rows if r["status"] == "PRESENT"),
+            "missing": sum(1 for r in rows if r["status"] == "MISSING"),
+            "total": len(rows),
+        },
+    }
 
-    width = max(len(r[0]) for r in rows)
+
+def print_table(report: dict) -> None:
+    rows = report["agents"]
+    width = max(len(r["agent_id"]) for r in rows)
     print(f"{'agent_id':<{width}}  {'kind':<16}  {'status':<9}  {'tier':<8}  note")
     print("-" * (width + 70))
-    for agent_id, kind, status, tier, note, evidence in rows:
-        print(f"{agent_id:<{width}}  {kind:<16}  {status:<9}  {tier:<8}  {note}")
+    for r in rows:
+        print(f"{r['agent_id']:<{width}}  {r['kind']:<16}  {r['status']:<9}  {r['tier']:<8}  {r['note']}")
+    s = report["summary"]
+    print(f"\n{s['verified']} verified, {s['present']} present-unconfirmed, {s['missing']} missing, "
+          f"of {s['total']} registered agents.")
+    if s["missing"] or s["present"]:
+        print(f"\nTo install/refresh bundles for agents present on this machine, run:\n"
+              f"  {report['install_command']}")
 
-    verified = sum(1 for r in rows if r[2] == "VERIFIED")
-    present = sum(1 for r in rows if r[2] == "PRESENT")
-    missing = sum(1 for r in rows if r[2] == "MISSING")
-    print(f"\n{verified} verified, {present} present-unconfirmed, {missing} missing, "
-          f"of {len(rows)} registered agents.")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true", help="emit the report as JSON (for dashboard/CI consumption)")
+    args = parser.parse_args()
+    report = build_report()
+    if args.json:
+        json.dump(report, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print_table(report)
 
 
 if __name__ == "__main__":

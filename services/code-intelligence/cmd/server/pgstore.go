@@ -89,6 +89,12 @@ type PGSymbolVersion struct {
 	// matches (exact matches don't carry a ranking signal to report).
 	MatchType string
 	Relevance float64
+	// Centrality is this symbol's personalized-PageRank score within a
+	// ChangeImpact call's visited subgraph, seeded on the matched symbols
+	// (P0-A). It is only populated on ChangeImpact's DirectDependents and
+	// TransitiveDependents, where it also determines their ordering
+	// (highest first); zero/unset elsewhere.
+	Centrality float64
 }
 
 // EnsureRepository returns repositoryID for (tenantID, canonicalPath),
@@ -153,7 +159,7 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var allDecls []indexedGoDecl
+	var allDecls []indexedDecl
 	for _, f := range files {
 		decls, err := s.indexFileLocked(ctx, tx, snapshotID, repositoryID, f)
 		if err != nil {
@@ -161,7 +167,7 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		}
 		allDecls = append(allDecls, decls...)
 	}
-	if err := insertGoCallEdgesLocked(ctx, tx, snapshotID, allDecls); err != nil {
+	if err := insertCallEdgesLocked(ctx, tx, snapshotID, allDecls); err != nil {
 		return fmt.Errorf("index call edges: %w", err)
 	}
 
@@ -176,38 +182,52 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	return tx.Commit()
 }
 
-// indexedGoDecl is what indexFileLocked reports back about each Go
-// declaration it indexed, so IndexSnapshot can resolve call edges once
-// every file in the snapshot -- and therefore every declaration a call
-// might target -- has actually been indexed. A call inside file A to a
-// function defined in file B of the same package could not be resolved
+// indexedDecl is what indexFileLocked reports back about each declaration
+// it indexed -- from Go's real parser (indexGoDeclarationsLocked) or from a
+// Tree-sitter grammar (indexTreeSitterDeclarationsLocked) -- so IndexSnapshot
+// can resolve call edges once every file in the snapshot -- and therefore
+// every declaration a call might target -- has actually been indexed. A
+// call inside file A to a function defined in file B could not be resolved
 // while file A was still being processed on its own.
-type indexedGoDecl struct {
+//
+// Scope is the resolution boundary a bare CalledNames entry is matched
+// within: Go's real package name for a Go declaration (so a call can
+// resolve across files in the same package), or the Tree-sitter module name
+// (the indexed file's basename, see extractTreeSitterSymbols) for a
+// syntax-derived one -- Tree-sitter never determines a real package/module
+// boundary, so scoping to "this file" is the conservative choice: it avoids
+// manufacturing a cross-file edge on a same-named function in an unrelated
+// file, at the cost of missing genuine cross-file calls the same fallback
+// tier could never have confirmed anyway.
+type indexedDecl struct {
 	SymbolID    string
 	SymbolVerID string
-	Package     string
+	Scope       string
 	Name        string
 	Kind        string
 	CalledNames []string
+	Extractor   string
 }
 
-// insertGoCallEdgesLocked turns each declaration's syntactic CalledNames
-// into a code_edges row, but only when exactly one function/method in the
-// same package (within this snapshot) has that name -- two candidates
-// means the bare name is genuinely ambiguous at this extraction tier (no
+// insertCallEdgesLocked turns each declaration's syntactic CalledNames into
+// a code_edges row, but only when exactly one function/method in the same
+// Scope (within this snapshot) has that name -- two candidates means the
+// bare name is genuinely ambiguous at this extraction tier (no
 // type-checking), and the honest answer is no edge, not a guess between
 // them. This is why the audit and blueprint both call for an explicit
 // confidence class per edge: 'static_analysis' here is real syntax-derived
 // signal, weaker than a type-checked reference but categorically better
 // than the heuristic filename-convention extractor's total absence of any
-// call graph.
-func insertGoCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, decls []indexedGoDecl) error {
-	targets := make(map[string][]indexedGoDecl, len(decls))
+// call graph. extractor is per-declaration provenance (e.g. "go/parser",
+// "tree-sitter:python") rather than a single hardcoded value, since decls
+// mixes both.
+func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, decls []indexedDecl) error {
+	targets := make(map[string][]indexedDecl, len(decls))
 	for _, d := range decls {
 		if d.Kind != "function" && d.Kind != "method" {
 			continue
 		}
-		key := d.Package + "." + d.Name
+		key := d.Scope + "." + d.Name
 		targets[key] = append(targets[key], d)
 	}
 
@@ -216,15 +236,15 @@ func insertGoCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string,
 			continue
 		}
 		for _, calledName := range caller.CalledNames {
-			candidates := targets[caller.Package+"."+calledName]
+			candidates := targets[caller.Scope+"."+calledName]
 			if len(candidates) != 1 {
 				continue // unresolved (0) or ambiguous (2+): no edge, not a guess
 			}
 			target := candidates[0]
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO code_edges (snapshot_id, source_symbol_version_id, target_symbol_version_id, relation, confidence_class, extractor)
-				VALUES ($1, $2, $3, 'CALLS', 'static_analysis', 'go/parser')`,
-				snapshotID, caller.SymbolVerID, target.SymbolVerID); err != nil {
+				VALUES ($1, $2, $3, 'CALLS', 'static_analysis', $4)`,
+				snapshotID, caller.SymbolVerID, target.SymbolVerID, caller.Extractor); err != nil {
 				return fmt.Errorf("insert call edge %s -> %s: %w", caller.Name, target.Name, err)
 			}
 		}
@@ -232,7 +252,7 @@ func insertGoCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string,
 	return nil
 }
 
-func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, f PGFileInput) ([]indexedGoDecl, error) {
+func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, f PGFileInput) ([]indexedDecl, error) {
 	var fileID string
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO code_files (repository_id, first_snapshot_id) VALUES ($1, $2) RETURNING id`,
@@ -270,21 +290,31 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		return decls, nil
 	}
 	if f.Content != "" {
-		if err := s.indexTreeSitterDeclarationsLocked(ctx, tx, snapshotID, repositoryID, fileID, f); err != nil {
+		decls, err := s.indexTreeSitterDeclarationsLocked(ctx, tx, snapshotID, repositoryID, fileID, f)
+		if err != nil {
 			return nil, fmt.Errorf("index %s declarations: %w", f.Language, err)
 		}
+		return decls, nil
 	}
 	return nil, nil
 }
 
-func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, fileID string, f PGFileInput) error {
+// indexTreeSitterDeclarationsLocked indexes f's Tree-sitter-derived
+// declarations (treesitter.go) as syntax-tier symbols, and reports them
+// back as indexedDecl so IndexSnapshot's edge-building pass can resolve
+// their CalledNames into CALLS edges the same way it does for Go -- see
+// indexedDecl's doc comment on why Scope is the file's module name rather
+// than a real package/import boundary here.
+func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, fileID string, f PGFileInput) ([]indexedDecl, error) {
 	symbols, err := extractTreeSitterSymbols(f.Path, f.Language, f.Content, repositoryID)
 	if err != nil {
 		// Tree-sitter is a fallback adapter. A syntax error must not discard the
 		// already-indexed Tier 0 file symbol or block another file in the same
 		// snapshot from being indexed.
-		return nil
+		return nil, nil
 	}
+	extractor := "tree-sitter:" + f.Language
+	out := make([]indexedDecl, 0, len(symbols))
 	for _, symbol := range symbols {
 		stableKey := "treesitter:" + f.Language + ":" + symbol.FullyQualifiedName + ":" + symbol.ContentHash
 		var symbolID string
@@ -293,17 +323,29 @@ func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx 
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
 			RETURNING id`, repositoryID, stableKey, symbol.Kind, f.Language, snapshotID).Scan(&symbolID); err != nil {
-			return fmt.Errorf("upsert %s: %w", symbol.FullyQualifiedName, err)
+			return nil, fmt.Errorf("upsert %s: %w", symbol.FullyQualifiedName, err)
 		}
-		if _, err := tx.ExecContext(ctx, `
+		var symbolVersionID string
+		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO code_symbol_versions
 			(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, confidence_class, extractor)
-			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, 'syntax', $10)`,
-			symbolID, snapshotID, fileID, symbol.FullyQualifiedName, symbol.Path, symbol.Kind, symbol.Range, symbol.Signature, symbol.ContentHash, "tree-sitter:"+f.Language); err != nil {
-			return fmt.Errorf("insert %s version: %w", symbol.FullyQualifiedName, err)
+			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, 'syntax', $10)
+			RETURNING id`,
+			symbolID, snapshotID, fileID, symbol.FullyQualifiedName, symbol.Path, symbol.Kind, symbol.Range, symbol.Signature, symbol.ContentHash, extractor).Scan(&symbolVersionID); err != nil {
+			return nil, fmt.Errorf("insert %s version: %w", symbol.FullyQualifiedName, err)
 		}
+		module, _, _ := strings.Cut(symbol.FullyQualifiedName, ".")
+		out = append(out, indexedDecl{
+			SymbolID:    symbolID,
+			SymbolVerID: symbolVersionID,
+			Scope:       module,
+			Name:        symbol.FullyQualifiedName[strings.LastIndex(symbol.FullyQualifiedName, ".")+1:],
+			Kind:        symbol.Kind,
+			CalledNames: symbol.CalledNames,
+			Extractor:   extractor,
+		})
 	}
-	return nil
+	return out, nil
 }
 
 // indexGoDeclarationsLocked indexes f's real top-level Go declarations
@@ -314,12 +356,12 @@ func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx 
 // whole index: an unparseable file (a syntax error mid-edit, a generated
 // file with unusual syntax) should not block the Tier 0 file-level symbol
 // every other language already gets by the same rule.
-func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, fileID string, f PGFileInput) ([]indexedGoDecl, error) {
+func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, fileID string, f PGFileInput) ([]indexedDecl, error) {
 	pkgName, decls, err := extractGoDeclarations(f.Path, f.Content)
 	if err != nil {
 		return nil, nil
 	}
-	out := make([]indexedGoDecl, 0, len(decls))
+	out := make([]indexedDecl, 0, len(decls))
 	for _, d := range decls {
 		stableKey := "go:" + d.Kind + ":" + d.ContentHash
 		var symbolID string
@@ -341,13 +383,14 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 			symbolID, snapshotID, fileID, d.FullyQualifiedName(pkgName), f.Path, d.Kind, rangeText, d.Signature, d.ContentHash, d.DocComment).Scan(&symbolVersionID); err != nil {
 			return nil, fmt.Errorf("create go declaration version for %s: %w", d.Name, err)
 		}
-		out = append(out, indexedGoDecl{
+		out = append(out, indexedDecl{
 			SymbolID:    symbolID,
 			SymbolVerID: symbolVersionID,
-			Package:     pkgName,
+			Scope:       pkgName,
 			Name:        d.Name,
 			Kind:        d.Kind,
 			CalledNames: d.CalledNames,
+			Extractor:   "go/parser",
 		})
 	}
 	return out, nil
@@ -623,6 +666,17 @@ type PGImpact struct {
 	MaxDepth             int
 }
 
+// pageRankDamping and pageRankIterations are ChangeImpact's fixed
+// PageRank parameters (P0-A). 0.85 is the standard PageRank damping
+// factor; 30 power iterations is comfortably past convergence for the
+// bounded-size subgraphs ChangeImpact ever ranks (visited is capped by
+// MaxDepth hops from a handful of matched symbols, not the whole
+// repository graph).
+const (
+	pageRankDamping    = 0.85
+	pageRankIterations = 30
+)
+
 // ChangeImpact resolves query the same way QueryByPathOrFQN does (exact
 // path/FQN, in the active snapshot for repositoryID+branch), then walks
 // code_edges backwards from every match: who calls this, and who calls
@@ -644,9 +698,11 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 
 	impact := &PGImpact{MatchedSymbols: matched, MaxDepth: maxDepth}
 	visited := make(map[string]bool, len(matched))
+	seeds := make([]string, 0, len(matched))
 	frontier := make([]string, 0, len(matched))
 	for _, m := range matched {
 		visited[m.SymbolVersionID] = true
+		seeds = append(seeds, m.SymbolVersionID)
 		frontier = append(frontier, m.SymbolVersionID)
 	}
 
@@ -670,7 +726,71 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 		}
 		frontier = newFrontier
 	}
+
+	if len(impact.DirectDependents) > 0 || len(impact.TransitiveDependents) > 0 {
+		nodes := make([]string, 0, len(visited))
+		for id := range visited {
+			nodes = append(nodes, id)
+		}
+		edges, err := s.edgesAmong(ctx, nodes)
+		if err != nil {
+			return nil, fmt.Errorf("load ranking edges: %w", err)
+		}
+		ranks := personalizedPageRank(nodes, edges, seeds, pageRankDamping, pageRankIterations)
+		idOf := func(v PGSymbolVersion) string { return v.SymbolVersionID }
+		fqnOf := func(v PGSymbolVersion) string { return v.FullyQualifiedName }
+		for i := range impact.DirectDependents {
+			impact.DirectDependents[i].Centrality = ranks[impact.DirectDependents[i].SymbolVersionID]
+		}
+		for i := range impact.TransitiveDependents {
+			impact.TransitiveDependents[i].Centrality = ranks[impact.TransitiveDependents[i].SymbolVersionID]
+		}
+		rankByCentrality(impact.DirectDependents, ranks, idOf, fqnOf)
+		rankByCentrality(impact.TransitiveDependents, ranks, idOf, fqnOf)
+	}
+
 	return impact, nil
+}
+
+// edgesAmong returns the CALLS adjacency (source -> targets) restricted to
+// edges whose source and target are both in symbolVersionIDs -- the
+// subgraph ChangeImpact's BFS already visited, not the whole repository
+// graph. Ranking only this bounded set is what keeps personalizedPageRank
+// cheap: it scales with one change's blast radius, not with repository
+// size.
+func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string) (map[string][]string, error) {
+	edges := make(map[string][]string, len(symbolVersionIDs))
+	if len(symbolVersionIDs) == 0 {
+		return edges, nil
+	}
+	placeholders := make([]string, len(symbolVersionIDs))
+	args := make([]any, len(symbolVersionIDs))
+	for i, id := range symbolVersionIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	inList := strings.Join(placeholders, ",")
+	query := fmt.Sprintf(`
+		SELECT source_symbol_version_id, target_symbol_version_id
+		FROM code_edges
+		WHERE relation = 'CALLS'
+		  AND source_symbol_version_id IN (%s)
+		  AND target_symbol_version_id IN (%s)`,
+		inList, inList)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query edges among visited: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var source, target string
+		if err := rows.Scan(&source, &target); err != nil {
+			return nil, fmt.Errorf("scan edge row: %w", err)
+		}
+		edges[source] = append(edges[source], target)
+	}
+	return edges, rows.Err()
 }
 
 // callersOf returns every symbol version with a CALLS edge targeting any

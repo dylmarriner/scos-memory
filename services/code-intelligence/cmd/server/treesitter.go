@@ -63,6 +63,74 @@ type treeSitterDeclaration struct {
 	name string
 }
 
+// callExpressionKind and calleeSelectorField describe, per language, how a
+// call is shaped in that grammar's tree: the node kind that represents a
+// call expression, and -- when the callee is a member/attribute access
+// rather than a bare identifier -- the field name that holds the accessed
+// property. This mirrors goextract.go's calledNames at the same
+// permissiveness: "x.Bar()" contributes "Bar" regardless of what x is, and
+// pgstore.go's edge builder is what turns an unresolved bare name into
+// either a real edge or nothing.
+type callShape struct {
+	callKind      string
+	selectorKind  string
+	selectorField string
+}
+
+func callShapeFor(language string) (callShape, bool) {
+	switch language {
+	case "python":
+		return callShape{callKind: "call", selectorKind: "attribute", selectorField: "attribute"}, true
+	case "typescript", "javascript":
+		return callShape{callKind: "call_expression", selectorKind: "member_expression", selectorField: "property"}, true
+	case "rust":
+		return callShape{callKind: "call_expression", selectorKind: "field_expression", selectorField: "field"}, true
+	default:
+		return callShape{}, false
+	}
+}
+
+// treeSitterCalledNames walks node's full subtree (the declaration's own body,
+// including any nested closures/functions -- deliberately permissive, same
+// as goextract.go's ast.Inspect over a Go function body) and collects the
+// bare name of every call expression's target.
+func treeSitterCalledNames(node *ts.Node, language string, source []byte) []string {
+	shape, ok := callShapeFor(language)
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var names []string
+	var walk func(n *ts.Node)
+	walk = func(n *ts.Node) {
+		if n.Kind() == shape.callKind {
+			if callee := n.ChildByFieldName("function"); callee != nil {
+				if name := calleeName(callee, shape, source); name != "" && !seen[name] {
+					seen[name] = true
+					names = append(names, name)
+				}
+			}
+		}
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			walk(n.NamedChild(i))
+		}
+	}
+	walk(node)
+	return names
+}
+
+func calleeName(callee *ts.Node, shape callShape, source []byte) string {
+	if callee.Kind() == "identifier" {
+		return callee.Utf8Text(source)
+	}
+	if callee.Kind() == shape.selectorKind {
+		if field := callee.ChildByFieldName(shape.selectorField); field != nil {
+			return field.Utf8Text(source)
+		}
+	}
+	return ""
+}
+
 func classifyTreeSitterDeclaration(kind, language string) (treeSitterDeclaration, bool) {
 	declarationKinds := map[string]map[string]string{
 		"python": {
@@ -104,12 +172,16 @@ func collectTreeSitterSymbols(node *ts.Node, parents []string, language, path, r
 					id := symbolScope(repoID, path+"\x00"+strings.Join(qualified, ".")+"\x00"+contentHash)
 					startLine := node.StartPosition().Row + 1
 					endLine := node.EndPosition().Row + 1
+					var called []string
+					if kind == "function" || kind == "method" {
+						called = treeSitterCalledNames(node, language, source)
+					}
 					*out = append(*out, Symbol{
 						ID: id[:16], RepoID: repoID,
 						FullyQualifiedName: strings.Join(qualified, "."), Kind: kind,
 						Path: path, Range: fmt.Sprintf("%d-%d", startLine, endLine),
 						Language: language, ContentHash: contentHash,
-						Signature: string(body),
+						Signature: string(body), CalledNames: called,
 					})
 					parents = append(parents, name)
 				}

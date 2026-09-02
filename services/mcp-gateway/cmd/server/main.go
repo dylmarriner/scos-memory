@@ -115,9 +115,17 @@ func main() {
 	if addr == "" {
 		addr = ":8098"
 	}
+
+	var handler http.Handler = mux
+	if isLocalAuthMode() {
+		log.Printf("mcp-gateway (%s): SCOS_AUTH_MODE=local -- no bearer token required, every caller resolves to the reserved local-mode tenant %s", version, localModeTenantID)
+	} else {
+		handler = auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
+	}
+
 	log.Printf("mcp-gateway (%s) listening on %s, hermes=%s memory-intelligence=%s",
 		version, addr, s.hermesURL, s.memoryIntelligenceURL)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, handler); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -810,8 +818,27 @@ func (s *gatewayServer) copyIdentityHeaders(src *http.Request, dst *http.Request
 	}
 }
 
+// localModeTenantID and localModePrincipalID are the reserved, well-known
+// identity every caller resolves to under SCOS_AUTH_MODE=local (self-hosted,
+// single-user, no accounts). A migration seeds a matching tenant/principal/
+// workspace/namespace row for this UUID so downstream RLS policies -- which
+// deny all access when scos.tenant_id is unset, not "allow all" -- keep
+// working unchanged; local mode is a startup-time identity shortcut here,
+// never a change to auth enforcement or row-level security elsewhere.
+const (
+	localModeTenantID    = "00000000-0000-0000-0000-000000000001"
+	localModePrincipalID = "00000000-0000-0000-0000-000000000001"
+)
+
+func isLocalAuthMode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_AUTH_MODE")), "local")
+}
+
 // resolveIdentity derives the caller's tenant and principal from validated
-// bearer claims and from nothing else.
+// bearer claims and from nothing else -- unless SCOS_AUTH_MODE=local, in
+// which case every caller resolves to the reserved local-mode identity
+// above and no bearer token is required at all (see main(), which skips
+// auth.AuthenticatedHandler entirely in that mode).
 //
 // The internal services (hermes-provider, memory-intelligence,
 // tool-governance) still accept X-SCOS-Tenant-ID / X-SCOS-Principal-ID as a
@@ -824,10 +851,14 @@ func (s *gatewayServer) copyIdentityHeaders(src *http.Request, dst *http.Request
 // enforced by real code everywhere downstream, but the value it enforced on
 // originated with the attacker.
 //
-// Claims are therefore mandatory here. A caller presenting only the shared
-// static service token is authenticated but anonymous, and is refused rather
-// than being allowed to nominate an identity.
+// Claims are therefore mandatory here (outside local mode). A caller
+// presenting only the shared static service token is authenticated but
+// anonymous, and is refused rather than being allowed to nominate an
+// identity.
 func resolveIdentity(r *http.Request) (requestIdentity, int, string) {
+	if isLocalAuthMode() {
+		return requestIdentity{TenantID: localModeTenantID, PrincipalID: localModePrincipalID}, 0, ""
+	}
 	claims, ok := auth.CanonicalClaims(r.Context())
 	if !ok {
 		return requestIdentity{}, http.StatusUnauthorized, "a bearer token carrying tenant_id and principal_id claims is required; X-SCOS-* identity headers are not accepted at this boundary"

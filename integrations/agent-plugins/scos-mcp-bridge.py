@@ -86,16 +86,23 @@ def ssl_ctx():
 
 
 def gateway_headers():
-    if not TOKEN or not TENANT_ID or not PRINCIPAL_ID:
-        raise RuntimeError("SCOS_BEARER_TOKEN, SCOS_TENANT_ID and SCOS_PRINCIPAL_ID are required")
     h = {
         "Content-Type": "application/json",
-        "X-SCOS-Tenant-ID": TENANT_ID,
-        "X-SCOS-Principal-ID": PRINCIPAL_ID,
         "X-SCOS-Agent-Name": AGENT_NAME,
     }
-    if TOKEN:
-        h["Authorization"] = "Bearer " + TOKEN
+    if not TOKEN and not TENANT_ID and not PRINCIPAL_ID:
+        # Self-hosted gateway running with SCOS_AUTH_MODE=local: it resolves
+        # every caller to its own reserved identity, so there's nothing to
+        # send here. Leaving all three unset in scos.env opts into this.
+        return h
+    if not TOKEN or not TENANT_ID or not PRINCIPAL_ID:
+        raise RuntimeError(
+            "SCOS_BEARER_TOKEN, SCOS_TENANT_ID and SCOS_PRINCIPAL_ID are required "
+            "(or leave all three unset to talk to a local, no-auth SCOS_AUTH_MODE=local gateway)"
+        )
+    h["X-SCOS-Tenant-ID"] = TENANT_ID
+    h["X-SCOS-Principal-ID"] = PRINCIPAL_ID
+    h["Authorization"] = "Bearer " + TOKEN
     return h
 
 

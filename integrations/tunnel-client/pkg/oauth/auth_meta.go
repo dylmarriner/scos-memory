@@ -14,8 +14,8 @@ import (
 	tclog "github.com/openai/tunnel-client/pkg/log"
 )
 
-// TODO: Replace this local implementation with oauthex.GetAuthServerMeta once
-// the upstream mcp_go_client_oauth build-tag gate is removed.
+// Compatibility note: this local projection remains necessary while the
+// upstream mcp_go_client_oauth build-tag gate is present.
 
 // AuthServerMetadata is a narrow projection used by tunnel-client OAuth URL collection.
 type AuthServerMetadata struct {

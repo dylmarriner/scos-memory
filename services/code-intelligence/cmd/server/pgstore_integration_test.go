@@ -870,6 +870,59 @@ func TestPGIndexSnapshotUsesTreeSitterForPython(t *testing.T) {
 	}
 }
 
+const treeSitterCallEdgeSource = `def helper():
+    return 1
+
+def run():
+    return helper()
+`
+
+// TestPGIndexSnapshotCreatesTreeSitterCallEdges is the Tree-sitter-fallback
+// counterpart to TestPGIndexSnapshotCreatesUnambiguousCallEdges: a Python
+// file indexed via Tree-sitter (no Go parser involved) still produces a
+// real CALLS edge for an unambiguous syntactic call, with 'tree-sitter:
+// python' recorded as the edge's extractor.
+func TestPGIndexSnapshotCreatesTreeSitterCallEdges(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "tree-sitter-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/sample.py", Language: "python", ContentHash: hashContent(treeSitterCallEdgeSource), Content: treeSitterCallEdgeSource},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	run, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.run")
+	if err != nil || len(run) != 1 {
+		t.Fatalf("expected run to resolve: %v (err %v)", run, err)
+	}
+	helper, err := store.QueryByPathOrFQN(ctx, repoID, "main", "sample.helper")
+	if err != nil || len(helper) != 1 {
+		t.Fatalf("expected helper to resolve: %v (err %v)", helper, err)
+	}
+	if got := countEdges(t, db, snap, run[0].SymbolVersionID, helper[0].SymbolVersionID); got != 1 {
+		t.Fatalf("expected exactly one CALLS edge from run to helper, got %d", got)
+	}
+
+	var extractor string
+	if err := db.QueryRowContext(ctx, `
+		SELECT extractor FROM code_edges WHERE snapshot_id = $1 AND relation = 'CALLS'`, snap).Scan(&extractor); err != nil {
+		t.Fatalf("load edge extractor: %v", err)
+	}
+	if extractor != "tree-sitter:python" {
+		t.Fatalf("expected extractor tree-sitter:python, got %q", extractor)
+	}
+}
+
 func hasFQN(symbols []PGSymbolVersion, fqn string) bool {
 	for _, s := range symbols {
 		if s.FullyQualifiedName == fqn {
@@ -994,6 +1047,73 @@ func TestPGChangeImpactReturnsEmptyForUncalledSymbol(t *testing.T) {
 	}
 	if len(impact.DirectDependents) != 0 || len(impact.TransitiveDependents) != 0 {
 		t.Fatalf("expected no dependents for top (nothing calls it), got %+v", impact)
+	}
+}
+
+// fanInSource gives hub two independent callers (heavyCaller and
+// lightCaller) plus a caller-of-a-caller (indirect -> heavyCaller), so
+// ChangeImpact("hub") has a DirectDependents set where centrality should
+// distinguish heavyCaller (also transitively depended on by indirect) from
+// lightCaller (a dead end) even though both are one hop away.
+const fanInSource = `package sample
+
+func hub() int {
+	return 1
+}
+
+func heavyCaller() int {
+	return hub()
+}
+
+func lightCaller() int {
+	return hub()
+}
+
+func indirect() int {
+	return heavyCaller()
+}
+`
+
+// P0-A: ChangeImpact ranks DirectDependents/TransitiveDependents by
+// personalized-PageRank centrality within the visited subgraph, not by
+// arbitrary BFS order. heavyCaller is itself called by indirect, so it
+// should rank above lightCaller (a dead end with no further callers) even
+// though both are direct dependents of hub.
+func TestPGChangeImpactRanksDependentsByCentrality(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(fanInSource), Content: fanInSource},
+	}); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+
+	impact, err := store.ChangeImpact(ctx, repoID, "main", "sample.hub", 3)
+	if err != nil {
+		t.Fatalf("change impact: %v", err)
+	}
+	if len(impact.DirectDependents) != 2 {
+		t.Fatalf("expected 2 direct dependents (heavyCaller, lightCaller), got %+v", impact.DirectDependents)
+	}
+	if impact.DirectDependents[0].FullyQualifiedName != "sample.heavyCaller" {
+		t.Fatalf("expected heavyCaller ranked first by centrality, got order %+v", impact.DirectDependents)
+	}
+	if impact.DirectDependents[0].Centrality <= impact.DirectDependents[1].Centrality {
+		t.Fatalf("expected heavyCaller's centrality (%v) to exceed lightCaller's (%v)",
+			impact.DirectDependents[0].Centrality, impact.DirectDependents[1].Centrality)
+	}
+	if !hasFQN(impact.TransitiveDependents, "sample.indirect") {
+		t.Fatalf("expected indirect (calls heavyCaller) in TransitiveDependents, got %+v", impact.TransitiveDependents)
 	}
 }
 

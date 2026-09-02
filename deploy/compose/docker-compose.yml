@@ -309,6 +309,7 @@ services:
     user: "0"
     environment:
       SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_APP_PASSWORD: ${SCOS_APP_PASSWORD:?SCOS_APP_PASSWORD must be provided -- used to provision the restricted scos_app runtime role (database/policies/000011_app_role.sql)}
       SCOS_MIGRATIONS_BASELINE: ${SCOS_MIGRATIONS_BASELINE:-}
     volumes:
       - ../../database/migrations:/scos-database/migrations:ro
@@ -335,7 +336,7 @@ services:
       SCOS_HTTP_ADDR: ${SCOS_HTTP_ADDR:-:8080}
       SCOS_VERSION: ${SCOS_VERSION:-0.1.0-dev}
       SCOS_SCHEMA_DIR: ${SCOS_SCHEMA_DIR:-}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -371,7 +372,7 @@ services:
       SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
       SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
       SCOS_AGENT_ENDPOINT: ${SCOS_AGENT_ENDPOINT:?SCOS_AGENT_ENDPOINT must be set}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - autonomous-control-plane-state:/var/lib/scos/control-plane
@@ -398,7 +399,7 @@ services:
       dockerfile: workers/consolidation/Dockerfile
     restart: unless-stopped
     environment:
-      SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_CONSOLIDATION_POLL_SECONDS: ${SCOS_CONSOLIDATION_POLL_SECONDS:-5}
       SCOS_CONSOLIDATION_BATCH_SIZE: ${SCOS_CONSOLIDATION_BATCH_SIZE:-10}
       SCOS_LOG_LEVEL: ${SCOS_LOG_LEVEL:-info}
@@ -428,7 +429,7 @@ services:
       dockerfile: workers/embeddings/Dockerfile
     restart: unless-stopped
     environment:
-      SCOS_DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      SCOS_DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_EMBEDDINGS_HTTP_ADDR: ${SCOS_EMBEDDINGS_HTTP_ADDR:-:8102}
       SCOS_EMBEDDINGS_POLL_SECONDS: ${SCOS_EMBEDDINGS_POLL_SECONDS:-5}
       SCOS_EMBEDDINGS_BATCH_SIZE: ${SCOS_EMBEDDINGS_BATCH_SIZE:-64}
@@ -451,7 +452,7 @@ services:
     # One-shot cycle wrapped in a loop so it runs on the maintenance cadence.
     command: ["sh", "-c", "while true; do python3 main.py; sleep $${SCOS_INDEX_MAINTENANCE_INTERVAL:-3600}; done"]
     environment:
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_INDEX_MAINTENANCE_INTERVAL: ${SCOS_INDEX_MAINTENANCE_INTERVAL:-3600}
     depends_on:
       postgres:
@@ -467,7 +468,7 @@ services:
     restart: unless-stopped
     command: ["sh", "-c", "while true; do python3 main.py; sleep $${SCOS_POLICY_EVAL_INTERVAL:-21600}; done"]
     environment:
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_POLICY_EVAL_INTERVAL: ${SCOS_POLICY_EVAL_INTERVAL:-21600}
       SCOS_POLICY_EVAL_MIN_SAMPLES: ${SCOS_POLICY_EVAL_MIN_SAMPLES:-20}
       SCOS_POLICY_EVAL_REGRESSION_THRESHOLD: ${SCOS_POLICY_EVAL_REGRESSION_THRESHOLD:-0.05}
@@ -489,7 +490,7 @@ services:
       SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
       SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
       SCOS_RETRIEVAL_HTTP_ADDR: ${SCOS_RETRIEVAL_HTTP_ADDR:-:8082}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       # When set, the retrieval orchestrator embeds the query so pgvector
       # semantic search runs instead of silently falling back to full-text.
       SCOS_EMBEDDINGS_URL: ${SCOS_EMBEDDINGS_URL:-http://embeddings-worker:8102}
@@ -549,7 +550,7 @@ services:
       # /v1/* routes above are unaffected either way; an individual user can
       # still disable /v2 for themselves from the dashboard settings tab
       # (POST /v2/code/settings) without this being unset.
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - code-intelligence-data:/var/lib/scos/code-intelligence
@@ -577,7 +578,7 @@ services:
       SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_EXECUTION_PROXY_HTTP_ADDR: ${SCOS_EXECUTION_PROXY_HTTP_ADDR:-:8085}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_EXECUTION_PROXY_STORE_PATH: ${SCOS_EXECUTION_PROXY_STORE_PATH:-/var/lib/scos/execution-proxy/state.json}
       SCOS_PROXY_RAW_DIR: ${SCOS_PROXY_RAW_DIR:-/var/lib/scos/execution-proxy/raw}
     volumes:
@@ -608,7 +609,7 @@ services:
       SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_EXTENSION_MANAGER_HTTP_ADDR: ${SCOS_EXTENSION_MANAGER_HTTP_ADDR:-:8086}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -635,7 +636,7 @@ services:
       SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR: ${SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR:-:8087}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -664,7 +665,7 @@ services:
       SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
       SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
       SCOS_HERMES_PROVIDER_HTTP_ADDR: ${SCOS_HERMES_PROVIDER_HTTP_ADDR:-:8088}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -738,12 +739,19 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CLOUD_HTTP_ADDR: ${SCOS_CLOUD_HTTP_ADDR:-:8079}
       SCOS_MCP_GATEWAY_URL: ${SCOS_MCP_GATEWAY_URL:-https://mcp-gateway:8098}
+      # Distinct from SCOS_MCP_GATEWAY_URL above (that one is the
+      # docker-internal address this service proxies /mcp requests to).
+      # This is the address returned to a user's own machine by
+      # POST /api/cli/exchange -- it must be reachable from outside the
+      # docker network. There is intentionally no deployment-specific
+      # fallback: returning a token-bearing URL for another host is unsafe.
+      SCOS_PUBLIC_GATEWAY_URL: ${SCOS_PUBLIC_GATEWAY_URL:?SCOS_PUBLIC_GATEWAY_URL must be provided}
       SCOS_CREDENTIAL_VAULT_URL: ${SCOS_CREDENTIAL_VAULT_URL:-https://credential-vault:8100}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
       SCOS_CODE_INTELLIGENCE_URL: ${SCOS_CODE_INTELLIGENCE_URL:-https://code-intelligence:8084}
       SCOS_OKF_SYNCHRONISER_URL: ${SCOS_OKF_SYNCHRONISER_URL:-https://okf-synchroniser:8090}
       SCOS_GRAPHIFY_PROVIDER_URL: ${SCOS_GRAPHIFY_PROVIDER_URL:-https://graphify-provider:8099}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -790,7 +798,7 @@ services:
       SCOS_EXECUTION_PROXY_URL: ${SCOS_EXECUTION_PROXY_URL:-https://execution-proxy:8085}
       SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
       SCOS_COMPATIBILITY_GATEWAY_URL: ${SCOS_COMPATIBILITY_GATEWAY_URL:-https://compatibility-gateway:8087}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       # §16/§26 automatic OKF promotion (maybePromoteToOKF): no-op unless
       # DEEPSEEK_API_KEY is also set -- the LLM is the actual durability
       # judge, these thresholds are only a cheap pre-filter.
@@ -917,7 +925,7 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_OKF_SYNCHRONISER_HTTP_ADDR: ${SCOS_OKF_SYNCHRONISER_HTTP_ADDR:-:8090}
       SCOS_OKF_SYNCHRONISER_STATE_PATH: ${SCOS_OKF_SYNCHRONISER_STATE_PATH:-/var/lib/scos/okf/projections.json}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - okf-data:/var/lib/scos/okf
@@ -947,7 +955,7 @@ services:
       SCOS_SECURITY_GATE_HTTP_ADDR: ${SCOS_SECURITY_GATE_HTTP_ADDR:-:8091}
       SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
       SCOS_SECURITY_GATE_STORE_PATH: ${SCOS_SECURITY_GATE_STORE_PATH:-/var/lib/scos/security-gate.json}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_SECURESTORE_URL: ${SCOS_SECURESTORE_URL:-}
       SCOS_SECURESTORE_AGENT_API_KEY: ${SCOS_SECURESTORE_AGENT_API_KEY:-}
       SCOS_SECURESTORE_WORKSPACE_ID: ${SCOS_SECURESTORE_WORKSPACE_ID:-}
@@ -978,7 +986,7 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_TOOL_GOVERNANCE_HTTP_ADDR: ${SCOS_TOOL_GOVERNANCE_HTTP_ADDR:-:8092}
       SCOS_TOOL_GOVERNANCE_STORE_PATH: ${SCOS_TOOL_GOVERNANCE_STORE_PATH:-/var/lib/scos/tool-governance.json}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - tool-governance-data:/var/lib/scos
@@ -1006,7 +1014,7 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_AGENT_REGISTRY_HTTP_ADDR: ${SCOS_AGENT_REGISTRY_HTTP_ADDR:-:8093}
       SCOS_AGENT_REGISTRY_STORE_PATH: ${SCOS_AGENT_REGISTRY_STORE_PATH:-/var/lib/scos/agent-registry/state.json}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - agent-registry-state:/var/lib/scos/agent-registry/state
@@ -1034,7 +1042,7 @@ services:
       SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR: ${SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR:-:8094}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -1099,7 +1107,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-scos-observability}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - observability-data:/var/lib/scos/observability
@@ -1141,6 +1149,7 @@ services:
       SCOS_CREDENTIAL_VAULT_URL: ${SCOS_CREDENTIAL_VAULT_URL:-https://credential-vault:8100}
       SCOS_OKF_SYNCHRONISER_URL: ${SCOS_OKF_SYNCHRONISER_URL:-https://okf-synchroniser:8090}
       SCOS_GRAPHIFY_PROVIDER_URL: ${SCOS_GRAPHIFY_PROVIDER_URL:-https://graphify-provider:8099}
+      SCOS_CLOUD_CONTROL_PLANE_URL: ${SCOS_CLOUD_CONTROL_PLANE_URL:-https://cloud-control-plane:8079}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:
@@ -1183,7 +1192,7 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CREDENTIAL_VAULT_HTTP_ADDR: ${SCOS_CREDENTIAL_VAULT_HTTP_ADDR:-:8100}
       SCOS_CREDENTIAL_VAULT_MASTER_KEY: ${SCOS_CREDENTIAL_VAULT_MASTER_KEY:?SCOS_CREDENTIAL_VAULT_MASTER_KEY must be a base64-encoded 32-byte AES-256 key}
-      DATABASE_URL: ${SCOS_DATABASE_URL:?SCOS_DATABASE_URL must be provided with sslmode=require or stronger}
+      DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
     ports:

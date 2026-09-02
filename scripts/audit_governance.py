@@ -224,6 +224,10 @@ def audit() -> list[str]:
             or "dist" in path.parts
             or "build" in path.parts
             or "tests" in path.parts
+            # Go tests commonly live alongside production packages rather
+            # than in a tests/ directory; they are not production artifacts
+            # and may legitimately contain marker strings in assertions.
+            or path.name.endswith("_test.go")
             or "__pycache__" in path.parts
             or relative(path) == "scripts/audit_governance.py"
         ):

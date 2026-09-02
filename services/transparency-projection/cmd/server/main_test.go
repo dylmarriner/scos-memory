@@ -2,11 +2,51 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestCloudAPIProxiesSessionAndResponse(t *testing.T) {
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/me" || r.URL.RawQuery != "view=full" {
+			t.Errorf("request URL = %s, want /api/me?view=full", r.URL.RequestURI())
+		}
+		if got := r.Header.Get("Cookie"); got != "scos_session=session-token" {
+			t.Errorf("Cookie = %q, want session cookie", got)
+		}
+		w.Header().Set("Set-Cookie", "scos_session=refreshed; Path=/; HttpOnly")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"user-1"}`)
+	}))
+	defer cloud.Close()
+
+	s := &projectionServer{cloudControlPlaneURL: cloud.URL, client: cloud.Client()}
+	req := httptest.NewRequest(http.MethodGet, "/api/me?view=full", nil)
+	req.Header.Set("Cookie", "scos_session=session-token")
+	res := httptest.NewRecorder()
+	s.cloudAPI(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Set-Cookie"); got == "" {
+		t.Fatal("expected proxied Set-Cookie header")
+	}
+	if got := res.Body.String(); got != `{"id":"user-1"}` {
+		t.Fatalf("body = %q, want cloud response", got)
+	}
+}
+
+func TestCloudAPIFailsClosedWhenUnconfigured(t *testing.T) {
+	s := &projectionServer{}
+	res := httptest.NewRecorder()
+	s.cloudAPI(res, httptest.NewRequest(http.MethodGet, "/api/me", nil))
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", res.Code)
+	}
+}
 
 func TestSnapshotUsesAuthoritativeUpstreamViews(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

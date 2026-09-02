@@ -183,6 +183,22 @@ func TestResolveIdentityRequiresClaims(t *testing.T) {
 	}
 }
 
+func TestResolveIdentityLocalAuthModeIgnoresClaimsAndHeaders(t *testing.T) {
+	t.Setenv("SCOS_AUTH_MODE", "local")
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	// Neither a bearer token nor a caller-asserted header should matter in
+	// local mode -- every caller resolves to the same reserved identity.
+	r.Header.Set("X-SCOS-Tenant-ID", "attacker-tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "attacker-principal")
+	identity, status, _ := resolveIdentity(r)
+	if status != 0 {
+		t.Fatalf("expected local mode to resolve without claims, got status %d", status)
+	}
+	if identity.TenantID != localModeTenantID || identity.PrincipalID != localModePrincipalID {
+		t.Fatalf("expected reserved local-mode identity, got %+v", identity)
+	}
+}
+
 func TestDeriveSessionIDIsDeterministicAndValidUUIDShape(t *testing.T) {
 	a := deriveSessionID("tenant-1", "principal-1")
 	b := deriveSessionID("tenant-1", "principal-1")

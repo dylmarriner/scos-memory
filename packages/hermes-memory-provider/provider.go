@@ -48,8 +48,11 @@ type Provider struct {
 	config      map[string]string
 }
 
-// ProviderConfig is deliberately limited to the Hermes setup contract. Auth
-// values are references to Hermes-managed secrets, never secret material.
+// ProviderConfig is deliberately limited to the Hermes/SCOS setup contract.
+// BaseURL is the SCOS memory service endpoint, never an LLM/inference endpoint;
+// model-provider selection belongs to the Hermes runtime and can change
+// without changing memory identity or persistence. Auth values are references
+// to Hermes-managed secrets, never secret material.
 type ProviderConfig struct{ BaseURL, ProfileScope, TenantID, PrincipalID, Workspace, TransportSecurity, OptionalAuthReference string }
 
 type persistedProvider struct {

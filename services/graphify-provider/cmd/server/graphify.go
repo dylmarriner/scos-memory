@@ -253,11 +253,23 @@ func (s *graphifyServer) ensureCachedGraph(ctx context.Context, workDir string) 
 }
 
 // graphNode/graphEdge/graphDocument mirror graphify's actual networkx
-// node-link output (verified against a real `graphify extract --code-only`
-// run, graphifyy 0.9.48): the graph is serialized as {nodes, links}, not
-// {nodes, edges}, confidence tags live only on links (nodes themselves are
+// node-link output (originally verified against a real `graphify extract
+// --code-only` run, graphifyy 0.9.48, which serialized edges under
+// "links"). Confidence tags live only on edges (nodes themselves are
 // always AST-observed, so they carry no confidence field), and
 // source_location is a string like "L17", not a line number.
+//
+// The edge key is NOT stable across graphify versions: networkx's
+// node_link_data changed its default edges-key parameter from "links" to
+// "edges" between the two, and graphify inherited that change without a
+// major version bump of its own. Verified live: the 0.9.48 binary this
+// package's test fixture came from emits {"links": [...]}, while 0.9.52
+// (deployed in production as of 2026-09) emits {"edges": [...]} for the
+// same repository -- silently, with no top-level version field in the
+// output to detect which format is in play. Decoding only "links" meant
+// every edge from a 0.9.52+ extraction was dropped with no error: the
+// call succeeded, node count looked plausible, and the graph was simply
+// edgeless. graphDocument's UnmarshalJSON below tries both keys.
 type graphNode struct {
 	ID             string `json:"id"`
 	Label          string `json:"label"`
@@ -278,7 +290,31 @@ type graphEdge struct {
 
 type graphDocument struct {
 	Nodes []graphNode `json:"nodes"`
-	Edges []graphEdge `json:"links"`
+	Edges []graphEdge `json:"-"`
+}
+
+// UnmarshalJSON tries "links" (graphify <= 0.9.48, and this package's
+// pinned test fixture) first, falling back to "edges" (graphify >= 0.9.52)
+// when "links" is absent or empty. A document that genuinely has neither
+// key, or an empty edge list either way, still decodes successfully with
+// Edges == nil -- an edgeless graph is a valid (if unusual) answer for a
+// tiny repository, not a decode failure.
+func (d *graphDocument) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Nodes []graphNode `json:"nodes"`
+		Links []graphEdge `json:"links"`
+		Edges []graphEdge `json:"edges"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	d.Nodes = raw.Nodes
+	if len(raw.Links) > 0 {
+		d.Edges = raw.Links
+	} else {
+		d.Edges = raw.Edges
+	}
+	return nil
 }
 
 func loadGraph(path string) (*graphDocument, error) {

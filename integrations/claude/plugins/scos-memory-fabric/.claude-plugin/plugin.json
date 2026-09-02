@@ -15,27 +15,27 @@
     "gateway_url": {
       "type": "string",
       "title": "mcp-gateway URL",
-      "description": "Base MCP endpoint for the SCOS mcp-gateway service (services/mcp-gateway). Defaults to the rabuntu fleet deployment.",
+      "description": "The web address of your SCOS Memory Fabric server (the mcp-gateway service). If you ran scripts/install_agent_plugins.py first, this was already filled in from ~/.hermes/scos.env (SCOS_GATEWAY_URL) and you shouldn't need to touch it. Otherwise, ask whoever set up your SCOS deployment for this URL.",
       "default": "https://rabuntu.tail2c15c8.ts.net:8098/mcp",
       "required": true
     },
     "bearer_token": {
       "type": "string",
       "title": "SCOS bearer token",
-      "description": "Value of SCOS_HERMES_BEARER_TOKEN from ~/.hermes/scos.env on this machine, or your own issued service token.",
+      "description": "Your login credential (like a password) for the SCOS server, proving Claude Code is allowed to connect. If you ran scripts/install_agent_plugins.py first, this was already filled in from ~/.hermes/scos.env (SCOS_BEARER_TOKEN) and you shouldn't need to touch it. Otherwise, get one from whoever administers your SCOS deployment.",
       "sensitive": true,
       "required": true
     },
     "tenant_id": {
       "type": "string",
       "title": "Tenant ID",
-      "description": "SCOS_TENANT_ID (UUID) from ~/.hermes/scos.env.",
+      "description": "Identifies which organization's/workspace's data you're allowed to see on a shared SCOS server (like a company/workspace ID) — memories are isolated per tenant so one tenant can never read another's. If you ran scripts/install_agent_plugins.py first, this was already filled in from ~/.hermes/scos.env (SCOS_TENANT_ID). Otherwise, get it from whoever administers your SCOS deployment; it's not something you choose yourself.",
       "required": true
     },
     "principal_id": {
       "type": "string",
       "title": "Principal ID",
-      "description": "SCOS_PRINCIPAL_ID (UUID) from ~/.hermes/scos.env.",
+      "description": "Identifies you (or this agent identity) within the tenant above — like a username, used so memories can be attributed to a specific caller. If you ran scripts/install_agent_plugins.py first, this was already filled in from ~/.hermes/scos.env (SCOS_PRINCIPAL_ID). Otherwise, get it from whoever administers your SCOS deployment.",
       "required": true
     }
   }

@@ -190,6 +190,57 @@ func TestCodeSettingsRejectsUnsupportedMethod(t *testing.T) {
 	}
 }
 
+// TestCLIProvisioningTokenRequiresSession mirrors TestVaultRequiresSession:
+// the dashboard "Connect this machine" one-liner mints this token, so
+// minting one requires an already-logged-in session -- the success path
+// (a real INSERT into cloud_provisioning_tokens) needs a live database and
+// is exercised by an integration run instead.
+func TestCLIProvisioningTokenRequiresSession(t *testing.T) {
+	s := &server{}
+	r := httptest.NewRequest(http.MethodPost, "/api/cli/provisioning-token", nil)
+	rec := httptest.NewRecorder()
+	s.cliProvisioningToken(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without a session cookie, got %d", rec.Code)
+	}
+}
+
+func TestCLIProvisioningTokenRejectsUnsupportedMethod(t *testing.T) {
+	s := &server{}
+	r := httptest.NewRequest(http.MethodGet, "/api/cli/provisioning-token", nil)
+	rec := httptest.NewRecorder()
+	s.cliProvisioningToken(rec, r)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET, got %d", rec.Code)
+	}
+}
+
+// TestCLIExchangeRequiresToken checks the validation that runs before any
+// database access -- unlike the session-cookie handlers above, exchange has
+// no session to reject on, so the cheap failure path is a missing/blank
+// token in the body instead. The success path (token lookup, single-use
+// consumption, key issuance) needs a live database and is exercised by an
+// integration run instead.
+func TestCLIExchangeRequiresToken(t *testing.T) {
+	s := &server{}
+	r := httptest.NewRequest(http.MethodPost, "/api/cli/exchange", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	s.cliExchange(rec, r)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a missing token, got %d", rec.Code)
+	}
+}
+
+func TestCLIExchangeRejectsUnsupportedMethod(t *testing.T) {
+	s := &server{}
+	r := httptest.NewRequest(http.MethodGet, "/api/cli/exchange", nil)
+	rec := httptest.NewRecorder()
+	s.cliExchange(rec, r)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET, got %d", rec.Code)
+	}
+}
+
 func TestRandomTokenHasPrefixAndLength(t *testing.T) {
 	tok, err := randomToken("scos_live_")
 	if err != nil {

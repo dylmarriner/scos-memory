@@ -178,6 +178,21 @@ make validate   # JSON Schema + Compose config validation
 make audit      # governance compliance gate
 ```
 
+To run the deployed code-index baseline against an isolated Linode benchmark
+tenant, provide `SCOS_BENCHMARK_ENDPOINT`, `SCOS_BENCHMARK_TOKEN`,
+`SCOS_BENCHMARK_TENANT_ID`, and `SCOS_BENCHMARK_PRINCIPAL_ID` through the
+environment/secret manager, then run:
+
+```bash
+make deployed-benchmark
+```
+
+The runner fails closed on unavailable or malformed remote responses and writes
+the non-secret result artifact to `benchmarks/deployed-results.json`. It uses
+unique branch/commit identities for repeatability; the current code-index API
+does not expose fixture deletion, so those isolated fixtures require normal
+tenant retention cleanup.
+
 Full failure-injection acceptance run (58 cases, requires the live Compose stack):
 
 ```bash

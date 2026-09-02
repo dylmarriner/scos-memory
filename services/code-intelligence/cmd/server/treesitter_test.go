@@ -58,3 +58,73 @@ func TestTreeSitterRejectsUnsupportedLanguage(t *testing.T) {
 		t.Fatal("expected unsupported language error")
 	}
 }
+
+func findSymbol(symbols []Symbol, fqn string) (Symbol, bool) {
+	for _, s := range symbols {
+		if s.FullyQualifiedName == fqn {
+			return s, true
+		}
+	}
+	return Symbol{}, false
+}
+
+func TestTreeSitterCollectsCalledNamesPython(t *testing.T) {
+	symbols, err := extractTreeSitterSymbols("service.py", "python", `class Store:
+    def load(self):
+        return self.fetch()
+
+    def fetch(self):
+        return validate(self.load())
+`, "repo-1")
+	if err != nil {
+		t.Fatalf("extract Tree-sitter symbols: %v", err)
+	}
+	load, ok := findSymbol(symbols, "service.Store.load")
+	if !ok {
+		t.Fatalf("expected service.Store.load among %+v", symbols)
+	}
+	if len(load.CalledNames) != 1 || load.CalledNames[0] != "fetch" {
+		t.Fatalf("expected load to call fetch via self.fetch(), got %+v", load.CalledNames)
+	}
+	fetch, ok := findSymbol(symbols, "service.Store.fetch")
+	if !ok {
+		t.Fatalf("expected service.Store.fetch among %+v", symbols)
+	}
+	if len(fetch.CalledNames) != 2 {
+		t.Fatalf("expected fetch to call validate and load, got %+v", fetch.CalledNames)
+	}
+}
+
+func TestTreeSitterCollectsCalledNamesTypeScript(t *testing.T) {
+	symbols, err := extractTreeSitterSymbols("service.ts", "typescript", `function loadUser(id: string) {
+  return normalize(fetchUser(id))
+}
+`, "repo-1")
+	if err != nil {
+		t.Fatalf("extract Tree-sitter symbols: %v", err)
+	}
+	fn, ok := findSymbol(symbols, "service.loadUser")
+	if !ok {
+		t.Fatalf("expected service.loadUser among %+v", symbols)
+	}
+	if len(fn.CalledNames) != 2 {
+		t.Fatalf("expected loadUser to call normalize and fetchUser, got %+v", fn.CalledNames)
+	}
+}
+
+func TestTreeSitterDoesNotCollectCalledNamesForNonCallableKinds(t *testing.T) {
+	symbols, err := extractTreeSitterSymbols("service.ts", "typescript", `export interface User {
+  id: string
+}
+`, "repo-1")
+	if err != nil {
+		t.Fatalf("extract Tree-sitter symbols: %v", err)
+	}
+	iface, ok := findSymbol(symbols, "service.User")
+	if !ok {
+		t.Fatalf("expected service.User among %+v", symbols)
+	}
+	if iface.CalledNames != nil {
+		t.Fatalf("expected no CalledNames for an interface, got %+v", iface.CalledNames)
+	}
+}

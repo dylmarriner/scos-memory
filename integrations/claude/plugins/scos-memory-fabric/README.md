@@ -21,7 +21,17 @@ will accept it.
 
 ## Install
 
-From this repo (or any checkout that has `integrations/claude/`):
+Preferred: run the shared installer first — it reads `~/.hermes/scos.env` and
+pre-fills the plugin's config in `~/.claude/settings.json`, so you won't be
+prompted for anything:
+
+```bash
+python3 scripts/install_agent_plugins.py
+```
+
+That script also runs `claude plugin marketplace add`/`install` for you if
+the `claude` CLI is on your PATH. If you'd rather do it by hand (or the
+script's `claude` step got skipped):
 
 ```bash
 claude
@@ -29,19 +39,24 @@ claude
 /plugin install scos-memory-fabric@scos-fabric-tools
 ```
 
-Claude Code prompts for four values on enable — the same ones documented in
-`docs/agent-connection-guide.md` §2, read from your own `~/.hermes/scos.env`:
+If nothing pre-filled the config, Claude Code prompts for four values on
+enable — the same ones documented in `docs/agent-connection-guide.md` §2 (and
+explained in plain language right there in each prompt), read from your own
+`~/.hermes/scos.env`:
 
-| Prompt | Source |
-|---|---|
-| mcp-gateway URL | defaults to the rabuntu deployment; override only if pointed at a different environment |
-| SCOS bearer token | `SCOS_HERMES_BEARER_TOKEN` in `~/.hermes/scos.env` |
-| Tenant ID | `SCOS_TENANT_ID` in `~/.hermes/scos.env` |
-| Principal ID | `SCOS_PRINCIPAL_ID` in `~/.hermes/scos.env` |
+| Prompt | Source | What it actually is |
+|---|---|---|
+| mcp-gateway URL | `SCOS_GATEWAY_URL` in `~/.hermes/scos.env` | The address of your SCOS server |
+| SCOS bearer token | `SCOS_BEARER_TOKEN` (falls back to `SCOS_HERMES_BEARER_TOKEN`) | A password proving you're allowed to connect |
+| Tenant ID | `SCOS_TENANT_ID` in `~/.hermes/scos.env` | Which organization/workspace's memories you can see — isolates tenants from each other |
+| Principal ID | `SCOS_PRINCIPAL_ID` in `~/.hermes/scos.env` | Who you are within that tenant, so memories can be attributed to a caller |
 
-The bearer token is marked `sensitive` — Claude Code stores it in your OS
-keychain (or `~/.claude/.credentials.json` where no keychain is available),
-never in plaintext `settings.json`, and never in this repo.
+None of these are values you invent yourself — they come from whoever set up
+your SCOS deployment (usually just your own `~/.hermes/scos.env` on a
+single-user fleet). The bearer token is marked `sensitive` — Claude Code
+stores it in your OS keychain (or `~/.claude/.credentials.json` where no
+keychain is available), never in plaintext `settings.json`, and never in this
+repo.
 
 Verify with `/mcp` inside a session, or:
 

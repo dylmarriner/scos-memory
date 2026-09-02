@@ -36,6 +36,97 @@ func sampleSCIPIndex() *scip.Index {
 	}
 }
 
+// sampleSCIPIndexWithRelationships mirrors the Animal/Dog example from
+// Relationship's own doc comment in scip.proto: Dog#sound() both
+// implements and references Animal#sound(), and Dog# implements Animal#
+// without referencing it -- the two independent relationship flags a
+// correct ingestion must not conflate.
+func sampleSCIPIndexWithRelationships() *scip.Index {
+	return &scip.Index{
+		Metadata: &scip.Metadata{ProjectRoot: "file:///repo"},
+		Documents: []*scip.Document{
+			{
+				Language:     "typescript",
+				RelativePath: "pkg/animal.ts",
+				Symbols: []*scip.SymbolInformation{
+					{Symbol: "scip-typescript npm . . Animal#", DisplayName: "Animal", Kind: scip.SymbolInformation_Interface},
+					{Symbol: "scip-typescript npm . . Animal#sound().", DisplayName: "sound", Kind: scip.SymbolInformation_Method},
+				},
+			},
+			{
+				Language:     "typescript",
+				RelativePath: "pkg/dog.ts",
+				Symbols: []*scip.SymbolInformation{
+					{
+						Symbol: "scip-typescript npm . . Dog#", DisplayName: "Dog", Kind: scip.SymbolInformation_Class,
+						Relationships: []*scip.Relationship{
+							{Symbol: "scip-typescript npm . . Animal#", IsImplementation: true},
+						},
+					},
+					{
+						Symbol: "scip-typescript npm . . Dog#sound().", DisplayName: "sound", Kind: scip.SymbolInformation_Method,
+						Relationships: []*scip.Relationship{
+							{Symbol: "scip-typescript npm . . Animal#sound().", IsImplementation: true, IsReference: true},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// sampleSCIPIndexWithOccurrenceReferences models one file:
+//
+//	def helper():        line 0
+//	    return 1          line 1
+//
+//	def run():            line 3
+//	    return helper()    line 4
+//
+// run()'s definition occurrence declares an enclosing range spanning lines
+// 3-4 (its whole body); the occurrence at line 4 referencing helper's
+// symbol (SCIP's SymbolRoles has no Definition bit set there) sits inside
+// that range, so insertSCIPOccurrenceReferenceEdgesLocked should attribute
+// it to run() and emit a REFERENCES edge to helper(). helper() itself
+// declares no enclosing range, so nothing can (or should) be attributed
+// *into* helper()'s body -- irrelevant here since helper's body has no
+// references of its own.
+func sampleSCIPIndexWithOccurrenceReferences() *scip.Index {
+	return &scip.Index{
+		Metadata: &scip.Metadata{ProjectRoot: "file:///repo"},
+		Documents: []*scip.Document{
+			{
+				Language:     "python",
+				RelativePath: "pkg/sample.py",
+				Symbols: []*scip.SymbolInformation{
+					{Symbol: "scip-python python . . pkg/sample/helper().", DisplayName: "helper", Kind: scip.SymbolInformation_Function},
+					{Symbol: "scip-python python . . pkg/sample/run().", DisplayName: "run", Kind: scip.SymbolInformation_Function},
+				},
+				Occurrences: []*scip.Occurrence{
+					{
+						Symbol:         "scip-python python . . pkg/sample/helper().",
+						SymbolRoles:    int32(scip.SymbolRole_Definition),
+						Range:          []int32{0, 4, 10},
+						EnclosingRange: []int32{0, 0, 1, 12},
+					},
+					{
+						Symbol:         "scip-python python . . pkg/sample/run().",
+						SymbolRoles:    int32(scip.SymbolRole_Definition),
+						Range:          []int32{3, 4, 7},
+						EnclosingRange: []int32{3, 0, 4, 20},
+					},
+					{
+						// The call to helper() inside run()'s body: a plain
+						// reference, no Definition role set.
+						Symbol: "scip-python python . . pkg/sample/helper().",
+						Range:  []int32{4, 11, 17},
+					},
+				},
+			},
+		},
+	}
+}
+
 func TestParseSCIPIndexRoundTrips(t *testing.T) {
 	original := sampleSCIPIndex()
 	data, err := proto.Marshal(original)

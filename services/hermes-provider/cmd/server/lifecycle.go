@@ -222,7 +222,7 @@ func (s *hermesServer) handleConfigSchema(w http.ResponseWriter, r *http.Request
 	writeJSON(w, map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"base_url":           map[string]any{"type": "string", "description": "SCOS Nexus base URL"},
+			"base_url":           map[string]any{"type": "string", "description": "SCOS Nexus memory-service base URL (not an LLM/provider inference URL)"},
 			"profile_scope":      map[string]any{"type": "string", "description": "Hermes profile scope"},
 			"tenant_id":          map[string]any{"type": "string"},
 			"principal_id":       map[string]any{"type": "string"},
