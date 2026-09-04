@@ -6,7 +6,7 @@ toolchain go1.26.6
 
 require (
 	github.com/jackc/pgx/v5 v5.7.2
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/scip-code/scip/bindings/go/scip v0.9.0
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	github.com/tree-sitter/tree-sitter-javascript v0.25.0
