@@ -292,7 +292,23 @@ func (s *hermesServer) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	recall, err := recentTurns(ctx, s.db, identity.TenantID, req.SessionID, recallLimit)
+	// A fresh transaction: the one above already committed, so its
+	// transaction-local scos.tenant_id/scos.principal_id (set true, i.e.
+	// scoped to that transaction) no longer apply on this connection or any
+	// other one recentTurns' query might land on. Without re-setting it
+	// here, RLS's fail-closed policies see an empty current_setting() and
+	// silently return zero rows regardless of what's actually stored.
+	readTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer readTx.Rollback()
+	if err := setPrincipalContext(ctx, readTx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	recall, err := recentTurns(ctx, readTx, identity.TenantID, req.SessionID, recallLimit)
 	if err != nil {
 		http.Error(w, "load recall: "+err.Error(), http.StatusInternalServerError)
 		return

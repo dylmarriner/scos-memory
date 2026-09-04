@@ -154,7 +154,18 @@ func (s *hermesServer) handleTurnStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	recall, err := recentTurns(r.Context(), s.db, identity.TenantID, req.SessionID, recallLimit)
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	recall, err := recentTurns(ctx, tx, identity.TenantID, req.SessionID, recallLimit)
 	if err != nil {
 		http.Error(w, "load recall: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -331,7 +342,18 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 				maxItems = int(n)
 			}
 		}
-		memories, err := searchMemories(r.Context(), s.db, identity.TenantID, query, maxItems)
+		ctx := r.Context()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+		if err := setPrincipalContext(ctx, tx, identity); err != nil {
+			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		memories, err := searchMemories(ctx, tx, identity.TenantID, query, maxItems)
 		if err != nil {
 			http.Error(w, "search memories: "+err.Error(), http.StatusInternalServerError)
 			return

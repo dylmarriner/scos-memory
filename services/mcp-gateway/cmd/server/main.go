@@ -707,6 +707,15 @@ func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url st
 	}
 	req.Header.Set("Content-Type", "application/json")
 	s.copyIdentityHeaders(r, req)
+	if req.Header.Get("Idempotency-Key") == "" {
+		// MCP tool calls carry no per-call header channel the caller can set,
+		// so a caller can never supply Idempotency-Key even though several
+		// governed endpoints (memory-gateway, tool-governance) require it.
+		// Derive one deterministically from identity+url+body: identical
+		// retries of the same logical call collapse to the same key, while
+		// distinct calls (different args) still get distinct keys.
+		req.Header.Set("Idempotency-Key", deriveIdempotencyKey(req.Header.Get("Authorization"), url, encoded))
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, errUnreachable("code-intelligence unavailable: " + err.Error())
@@ -803,6 +812,16 @@ func queryFromArgs(args map[string]any, keys ...string) string {
 type errUnreachable string
 
 func (e errUnreachable) Error() string { return string(e) }
+
+func deriveIdempotencyKey(authHeader, url string, body []byte) string {
+	h := sha256.New()
+	h.Write([]byte(authHeader))
+	h.Write([]byte("\x00"))
+	h.Write([]byte(url))
+	h.Write([]byte("\x00"))
+	h.Write(body)
+	return "mcp-gateway:" + hex.EncodeToString(h.Sum(nil))
+}
 
 func (s *gatewayServer) copyIdentityHeaders(src *http.Request, dst *http.Request) {
 	for _, name := range []string{"Authorization", "X-SCOS-Tenant-ID", "X-SCOS-Principal-ID", "Idempotency-Key"} {

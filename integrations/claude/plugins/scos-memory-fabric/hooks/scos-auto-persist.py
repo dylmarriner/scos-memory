@@ -9,14 +9,26 @@ lifecycle described in GOVERNANCE.md 11 - that requires session/turn IDs
 this hook doesn't have. It closes the "nothing is ever saved automatically"
 gap for Claude Code; it is not a substitute for a real control-plane ingress
 adapter.
+
+Failures are logged to ~/.hermes/auto-persist.log rather than swallowed: a
+prior version of this script silently discarded every error, which is how a
+500 from a missing RLS policy on memory_versions (fixed in
+database/policies/000013_memory_versions_write.sql) went unnoticed for as
+long as it did. A write is retried once on a transient failure; a non-2xx
+HTTP response is not retried (retrying an unchanged request against a
+policy/auth error just fails the same way twice).
 """
+import hashlib
 import json
 import os
 import ssl
 import sys
+import time
+import urllib.error
 import urllib.request
 
 ENV_PATH = os.path.expanduser("~/.hermes/scos.env")
+LOG_PATH = os.path.expanduser("~/.hermes/auto-persist.log")
 
 
 def load_env():
@@ -32,6 +44,14 @@ def load_env():
     except OSError:
         pass
     return env
+
+
+def log(msg):
+    try:
+        with open(LOG_PATH, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
 
 
 def last_exchange(transcript_path):
@@ -65,6 +85,30 @@ def last_exchange(transcript_path):
     return user_text, assistant_text
 
 
+def stable_key(session_id, user_text):
+    # Python's hash() is salted per-process (PYTHONHASHSEED) unless
+    # explicitly disabled, so the previous `hash(user_text) & 0xffffffff`
+    # produced a different key for the identical exchange across separate
+    # invocations of this script -- defeating the upsert/versioning
+    # upsertMemory keys on (tenant, namespace, hermes_key) to detect. A
+    # stable digest lets a genuine repeat of the same exchange collapse into
+    # a new version of the same memory_items row instead of a duplicate.
+    digest = hashlib.sha256(user_text.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"claude-code-turn:{session_id}:{digest}"
+
+
+def post_memory_write(base_url, token, body):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/v1/provider/memory_write",
+        data=body, method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    return urllib.request.urlopen(req, timeout=8, context=ctx)
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -83,29 +127,33 @@ def main():
     token = env.get("SCOS_HERMES_BEARER_TOKEN")
     namespace_id = env.get("SCOS_NAMESPACE_ID")
     if not base_url or not token or not namespace_id:
+        log("skipped: missing SCOS_HERMES_PROVIDER_URL/SCOS_HERMES_BEARER_TOKEN/SCOS_NAMESPACE_ID in scos.env")
         return
 
     session_id = payload.get("session_id", "unknown")
     body = json.dumps({
         "namespace_id": namespace_id,
-        "key": f"claude-code-turn:{session_id}:{hash(user_text) & 0xffffffff}",
-        "value": f"User: {user_text[:2000]}\n\nAssistant: {assistant_text[:2000]}",
+        "key": stable_key(session_id, user_text),
+        "value": f"User: {user_text[:8000]}\n\nAssistant: {assistant_text[:8000]}",
         "scope": "agent",
         "source": "claude-code-stop-hook",
     }).encode()
 
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(
-        base_url.rstrip("/") + "/v1/provider/memory_write",
-        data=body, method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-    )
-    try:
-        urllib.request.urlopen(req, timeout=8, context=ctx)
-    except Exception:
-        return
+    for attempt in (1, 2):
+        try:
+            post_memory_write(base_url, token, body)
+            return
+        except urllib.error.HTTPError as e:
+            # A non-2xx response means the server processed and rejected the
+            # request (auth, validation, RLS) -- retrying the same body
+            # won't change that outcome, so log once and stop.
+            log(f"memory_write failed: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:500]}")
+            return
+        except Exception as e:
+            if attempt == 2:
+                log(f"memory_write failed after retry: {type(e).__name__}: {e}")
+                return
+            time.sleep(0.5)
 
 
 if __name__ == "__main__":

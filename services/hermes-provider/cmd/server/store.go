@@ -192,7 +192,7 @@ func insertTurnWithMessages(ctx context.Context, tx *sql.Tx, id requestIdentity,
 // recentTurns returns the most recent turns (with their messages folded back
 // into the StoredTurn shape the Hermes API has always returned) for a
 // session, newest first, bounded by limit.
-func recentTurns(ctx context.Context, db *sql.DB, tenantID, sessionID string, limit int) ([]StoredTurn, error) {
+func recentTurns(ctx context.Context, db *sql.Tx, tenantID, sessionID string, limit int) ([]StoredTurn, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT t.id, t.accepted_at
 		FROM turns t
@@ -277,7 +277,7 @@ type SearchedMemory struct {
 // lexical, semantic, relational, metadata and temporal; only the lexical
 // leg is implemented here -- semantic search needs a query-embedding
 // pipeline this fleet does not yet have).
-func searchMemories(ctx context.Context, db *sql.DB, tenantID, query string, limit int) ([]SearchedMemory, error) {
+func searchMemories(ctx context.Context, db *sql.Tx, tenantID, query string, limit int) ([]SearchedMemory, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 10
 	}
