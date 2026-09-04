@@ -436,8 +436,20 @@ func upsertMemory(ctx context.Context, tx *sql.Tx, id requestIdentity, namespace
 		`, versionID, memoryID, req.Value, contentHash, id.PrincipalID); execErr != nil {
 			return "", 0, fmt.Errorf("insert memory version: %w", execErr)
 		}
-		if _, execErr := tx.ExecContext(ctx, `UPDATE memory_items SET current_version_id=$1 WHERE id=$2`, versionID, memoryID); execErr != nil {
+		res, execErr := tx.ExecContext(ctx, `UPDATE memory_items SET current_version_id=$1 WHERE id=$2`, versionID, memoryID)
+		if execErr != nil {
 			return "", 0, fmt.Errorf("set current version: %w", execErr)
+		}
+		// RLS with no UPDATE policy makes this match zero rows rather than
+		// error (000001_rls.sql defined memory_items_candidate_write for
+		// INSERT only) -- the write above would silently commit with
+		// current_version_id left NULL forever, permanently invisible to
+		// searchMemories' JOIN on it. Checking affected rows turns that into
+		// a loud failure instead of a memory nothing can ever recall.
+		if n, raErr := res.RowsAffected(); raErr != nil {
+			return "", 0, fmt.Errorf("set current version: rows affected: %w", raErr)
+		} else if n != 1 {
+			return "", 0, fmt.Errorf("set current version: expected to update 1 row, updated %d (RLS policy gap?)", n)
 		}
 		return memoryID, 1, nil
 	case err != nil:
@@ -455,8 +467,14 @@ func upsertMemory(ctx context.Context, tx *sql.Tx, id requestIdentity, namespace
 	`, newVersionID, existingID, nextVersion, req.Value, contentHash, currentVersionID, id.PrincipalID); execErr != nil {
 		return "", 0, fmt.Errorf("insert superseding memory version: %w", execErr)
 	}
-	if _, execErr := tx.ExecContext(ctx, `UPDATE memory_items SET current_version_id=$1, metadata=$2 WHERE id=$3`, newVersionID, metadata, existingID); execErr != nil {
+	res, execErr := tx.ExecContext(ctx, `UPDATE memory_items SET current_version_id=$1, metadata=$2 WHERE id=$3`, newVersionID, metadata, existingID)
+	if execErr != nil {
 		return "", 0, fmt.Errorf("advance current version: %w", execErr)
+	}
+	if n, raErr := res.RowsAffected(); raErr != nil {
+		return "", 0, fmt.Errorf("advance current version: rows affected: %w", raErr)
+	} else if n != 1 {
+		return "", 0, fmt.Errorf("advance current version: expected to update 1 row, updated %d (RLS policy gap?)", n)
 	}
 	return existingID, nextVersion, nil
 }
