@@ -22,6 +22,8 @@ import (
 	"github.com/dylmarriner/scos-memory/packages/release"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -88,6 +90,42 @@ type server struct {
 	db            *pgxpool.Pool
 	embeddingsURL string // optional: when set, query text is embedded for real vector search
 	embedClient   *http.Client
+}
+
+// pgxQuerier is satisfied by both *pgxpool.Pool and pgx.Tx, letting the
+// read helpers below run against either a bare pool connection or an
+// existing transaction with no change to their bodies.
+type pgxQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// withPrincipalContext opens a short-lived transaction, sets the RLS
+// tenant/principal context and runs fn against it, then commits.
+//
+// namespaces and principals (joined by resolveAuthorisedNamespaces) and
+// memory_items (joined by every search function below) are all under
+// FORCE ROW LEVEL SECURITY. Every one of this file's queries ran via the
+// bare s.db.Query/QueryRow/Exec against the pool with no transaction, so
+// current_setting('scos.tenant_id'/'scos.principal_id') resolved to NULL
+// and RLS silently matched zero rows on every retrieval -- not an error,
+// scos_recall just always returned empty, regardless of real data. Same
+// bug class, same fix, as memory-intelligence's querier/
+// withPrincipalContext (see that file's comment for the full story).
+func (s *server) withPrincipalContext(ctx context.Context, tenantID, principalID string, fn func(pgxQuerier) error) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT set_config('scos.tenant_id',$1,true), set_config('scos.principal_id',$2,true)`, tenantID, principalID); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *server) readinessCheck() error {
@@ -387,34 +425,36 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 // ── pipeline stages ──────────────────────────────────────────────────────
 
 func (s *server) resolveAuthorisedNamespaces(ctx context.Context, req RetrieveRequest) ([]string, error) {
-	// Always resolve through membership, including caller-supplied namespaces.
-	rows, err := s.db.Query(ctx, `
-		SELECT n.canonical_name
-		FROM namespaces n
-		JOIN namespace_memberships m ON m.namespace_id = n.id
-		JOIN principals p ON p.id = m.principal_id
-		WHERE n.tenant_id = $1
-		  AND p.tenant_id = n.tenant_id
-		  AND p.disabled_at IS NULL
-		  AND m.principal_id = $2
-		  AND m.can_read = true
-		  AND (COALESCE(cardinality($3::text[]), 0) = 0 OR n.canonical_name = ANY($3::text[]))
-		ORDER BY n.canonical_name
-	`, req.TenantID, req.PrincipalID, req.Namespaces)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var namespaces []string
-	for rows.Next() {
-		var ns string
-		if err := rows.Scan(&ns); err != nil {
-			return nil, err
+	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		// Always resolve through membership, including caller-supplied namespaces.
+		rows, err := q.Query(ctx, `
+			SELECT n.canonical_name
+			FROM namespaces n
+			JOIN namespace_memberships m ON m.namespace_id = n.id
+			JOIN principals p ON p.id = m.principal_id
+			WHERE n.tenant_id = $1
+			  AND p.tenant_id = n.tenant_id
+			  AND p.disabled_at IS NULL
+			  AND m.principal_id = $2
+			  AND m.can_read = true
+			  AND (COALESCE(cardinality($3::text[]), 0) = 0 OR n.canonical_name = ANY($3::text[]))
+			ORDER BY n.canonical_name
+		`, req.TenantID, req.PrincipalID, req.Namespaces)
+		if err != nil {
+			return err
 		}
-		namespaces = append(namespaces, ns)
-	}
-	if err := rows.Err(); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var ns string
+			if err := rows.Scan(&ns); err != nil {
+				return err
+			}
+			namespaces = append(namespaces, ns)
+		}
+		return rows.Err()
+	})
+	if err != nil {
 		return nil, err
 	}
 	if len(req.Namespaces) > 0 && !containsAllNamespaces(req.Namespaces, namespaces) {
@@ -637,29 +677,31 @@ func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, na
 		ORDER BY mi.created_at DESC
 		LIMIT $5
 	`
-	rows, err := s.db.Query(ctx, query, req.TenantID, req.PrincipalID, namespaces, req.SessionID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var results []RetrievalResult
-	for rows.Next() {
-		var r RetrievalResult
-		var content, sensitivity string
-		var evidenceJSON, conflictsJSON []byte
-		if err := rows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content,
-			&r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity,
-			&r.NamespaceID, &evidenceJSON, &conflictsJSON); err != nil {
-			return nil, err
+	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		rows, err := q.Query(ctx, query, req.TenantID, req.PrincipalID, namespaces, req.SessionID, limit)
+		if err != nil {
+			return err
 		}
-		r.Sensitivity = sensitivity
-		r.Content = truncate(content, 2000)
-		decodeResultJSON(&r, evidenceJSON, conflictsJSON)
-		r.Provenance = "session_state"
-		results = append(results, r)
-	}
-	return results, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var r RetrievalResult
+			var content, sensitivity string
+			var evidenceJSON, conflictsJSON []byte
+			if err := rows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content,
+				&r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity,
+				&r.NamespaceID, &evidenceJSON, &conflictsJSON); err != nil {
+				return err
+			}
+			r.Sensitivity = sensitivity
+			r.Content = truncate(content, 2000)
+			decodeResultJSON(&r, evidenceJSON, conflictsJSON)
+			r.Provenance = "session_state"
+			results = append(results, r)
+		}
+		return rows.Err()
+	})
+	return results, err
 }
 
 // relationExpansion follows authorised memory relations from lexical and
@@ -677,136 +719,146 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	rows, err := s.db.Query(ctx, `
-		SELECT DISTINCT mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
-		       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb)
-		FROM memory_relations rel
-		JOIN memory_items mi ON mi.id=rel.target_memory_id
-		LEFT JOIN memory_versions mv ON mv.id=mi.current_version_id
-		JOIN namespaces n ON n.id=mi.namespace_id
-		JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read=true
-		WHERE mi.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
-		  AND mi.sensitivity <= $4 AND (mi.valid_from IS NULL OR mi.valid_from <= now())
-		  AND (mi.valid_until IS NULL OR mi.valid_until > now()) AND (mi.expires_at IS NULL OR mi.expires_at > now())
-		  AND n.canonical_name=ANY($5::text[]) LIMIT $6`, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var results []RetrievalResult
-	for rows.Next() {
-		var r RetrievalResult
-		var content, sensitivity string
-		var evidence, conflicts []byte
-		if err := rows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content, &r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity, &r.NamespaceID, &evidence, &conflicts); err != nil {
-			return nil, err
+	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		rows, err := q.Query(ctx, `
+			SELECT DISTINCT mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
+			       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
+			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb),
+			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb)
+			FROM memory_relations rel
+			JOIN memory_items mi ON mi.id=rel.target_memory_id
+			LEFT JOIN memory_versions mv ON mv.id=mi.current_version_id
+			JOIN namespaces n ON n.id=mi.namespace_id
+			JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read=true
+			WHERE mi.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
+			  AND mi.sensitivity <= $4 AND (mi.valid_from IS NULL OR mi.valid_from <= now())
+			  AND (mi.valid_until IS NULL OR mi.valid_until > now()) AND (mi.expires_at IS NULL OR mi.expires_at > now())
+			  AND n.canonical_name=ANY($5::text[]) LIMIT $6`, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit)
+		if err != nil {
+			return err
 		}
-		r.Sensitivity = sensitivity
-		r.Content = truncate(content, 2000)
-		r.Provenance = "relation"
-		decodeResultJSON(&r, evidence, conflicts)
-		results = append(results, r)
-	}
-	return results, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var r RetrievalResult
+			var content, sensitivity string
+			var evidence, conflicts []byte
+			if err := rows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content, &r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity, &r.NamespaceID, &evidence, &conflicts); err != nil {
+				return err
+			}
+			r.Sensitivity = sensitivity
+			r.Content = truncate(content, 2000)
+			r.Provenance = "relation"
+			decodeResultJSON(&r, evidence, conflicts)
+			results = append(results, r)
+		}
+		return rows.Err()
+	})
+	return results, err
 }
 
 // ── query helper ─────────────────────────────────────────────────────────
 
 func (s *server) queryResults(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int, query string, queryParam string, provenance string) ([]RetrievalResult, error) {
-	// Convert namespaces to UUIDs
-	nsRows, err := s.db.Query(ctx, `SELECT id FROM namespaces WHERE tenant_id = $1 AND canonical_name = ANY($2)`, req.TenantID, namespaces)
-	if err != nil {
-		return nil, err
-	}
-	defer nsRows.Close()
-
-	var nsUUIDs []string
-	for nsRows.Next() {
-		var id string
-		if err := nsRows.Scan(&id); err != nil {
-			return nil, err
-		}
-		nsUUIDs = append(nsUUIDs, id)
-	}
-	if nsRows.Err() != nil {
-		return nil, nsRows.Err()
-	}
-
-	if len(nsUUIDs) == 0 {
-		return nil, nil
-	}
-
-	pgRows, err := s.db.Query(ctx, query, req.TenantID, nsUUIDs, sensitivityMax, queryParam, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer pgRows.Close()
-
 	var results []RetrievalResult
-	for pgRows.Next() {
-		var r RetrievalResult
-		var content, sensitivity string
-		var evidenceJSON, conflictsJSON []byte
-		if err := pgRows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content,
-			&r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity,
-			&r.NamespaceID, &evidenceJSON, &conflictsJSON); err != nil {
-			return nil, err
+	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		// Convert namespaces to UUIDs
+		nsRows, err := q.Query(ctx, `SELECT id FROM namespaces WHERE tenant_id = $1 AND canonical_name = ANY($2)`, req.TenantID, namespaces)
+		if err != nil {
+			return err
 		}
-		r.Sensitivity = sensitivity
-		r.Content = truncate(content, 2000)
-		decodeResultJSON(&r, evidenceJSON, conflictsJSON)
-		r.Provenance = provenance
-		results = append(results, r)
-	}
-	return results, pgRows.Err()
+		var nsUUIDs []string
+		for nsRows.Next() {
+			var id string
+			if err := nsRows.Scan(&id); err != nil {
+				nsRows.Close()
+				return err
+			}
+			nsUUIDs = append(nsUUIDs, id)
+		}
+		nsErr := nsRows.Err()
+		nsRows.Close() // must close before the next query on this connection -- see withPrincipalContext's doc comment
+		if nsErr != nil {
+			return nsErr
+		}
+		if len(nsUUIDs) == 0 {
+			return nil
+		}
+
+		pgRows, err := q.Query(ctx, query, req.TenantID, nsUUIDs, sensitivityMax, queryParam, limit)
+		if err != nil {
+			return err
+		}
+		defer pgRows.Close()
+		for pgRows.Next() {
+			var r RetrievalResult
+			var content, sensitivity string
+			var evidenceJSON, conflictsJSON []byte
+			if err := pgRows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content,
+				&r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity,
+				&r.NamespaceID, &evidenceJSON, &conflictsJSON); err != nil {
+				return err
+			}
+			r.Sensitivity = sensitivity
+			r.Content = truncate(content, 2000)
+			decodeResultJSON(&r, evidenceJSON, conflictsJSON)
+			r.Provenance = provenance
+			results = append(results, r)
+		}
+		return pgRows.Err()
+	})
+	return results, err
 }
 
 func (s *server) queryVectorResults(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int, query, embedding string) ([]RetrievalResult, error) {
-	nsRows, err := s.db.Query(ctx, `SELECT id FROM namespaces WHERE tenant_id = $1 AND canonical_name = ANY($2)`, req.TenantID, namespaces)
-	if err != nil {
-		return nil, err
-	}
-	defer nsRows.Close()
-	var nsUUIDs []string
-	for nsRows.Next() {
-		var id string
-		if err := nsRows.Scan(&id); err != nil {
-			return nil, err
-		}
-		nsUUIDs = append(nsUUIDs, id)
-	}
-	if err := nsRows.Err(); err != nil {
-		return nil, err
-	}
-	if len(nsUUIDs) == 0 {
-		return nil, nil
-	}
-	rows, err := s.db.Query(ctx, query, req.TenantID, nsUUIDs, sensitivityMax, embedding, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var results []RetrievalResult
-	for rows.Next() {
-		var r RetrievalResult
-		var content, sensitivity string
-		var semanticScore float64
-		var evidenceJSON, conflictsJSON []byte
-		if err := rows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content,
-			&r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity,
-			&r.NamespaceID, &semanticScore, &evidenceJSON, &conflictsJSON); err != nil {
-			return nil, err
+	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		nsRows, err := q.Query(ctx, `SELECT id FROM namespaces WHERE tenant_id = $1 AND canonical_name = ANY($2)`, req.TenantID, namespaces)
+		if err != nil {
+			return err
 		}
-		r.Sensitivity = sensitivity
-		r.Content = truncate(content, 2000)
-		r.SemanticScore = semanticScore
-		r.Provenance = "semantic"
-		decodeResultJSON(&r, evidenceJSON, conflictsJSON)
-		results = append(results, r)
-	}
-	return results, rows.Err()
+		var nsUUIDs []string
+		for nsRows.Next() {
+			var id string
+			if err := nsRows.Scan(&id); err != nil {
+				nsRows.Close()
+				return err
+			}
+			nsUUIDs = append(nsUUIDs, id)
+		}
+		nsErr := nsRows.Err()
+		nsRows.Close() // must close before the next query on this connection
+		if nsErr != nil {
+			return nsErr
+		}
+		if len(nsUUIDs) == 0 {
+			return nil
+		}
+		rows, err := q.Query(ctx, query, req.TenantID, nsUUIDs, sensitivityMax, embedding, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r RetrievalResult
+			var content, sensitivity string
+			var semanticScore float64
+			var evidenceJSON, conflictsJSON []byte
+			if err := rows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content,
+				&r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity,
+				&r.NamespaceID, &semanticScore, &evidenceJSON, &conflictsJSON); err != nil {
+				return err
+			}
+			r.Sensitivity = sensitivity
+			r.Content = truncate(content, 2000)
+			r.SemanticScore = semanticScore
+			r.Provenance = "semantic"
+			decodeResultJSON(&r, evidenceJSON, conflictsJSON)
+			results = append(results, r)
+		}
+		return rows.Err()
+	})
+	return results, err
 }
 
 func decodeResultJSON(result *RetrievalResult, evidenceJSON, conflictsJSON []byte) {
@@ -993,37 +1045,37 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 	selectedJSON := toJSONB(selectedIDs)
 
 	var runID string
-	err := s.db.QueryRow(ctx, `
-		INSERT INTO retrieval_runs
-			(tenant_id, principal_id, agent_id, session_id, turn_id,
-			 query_hash, namespaces, filters, ranking_config, selected_memory_ids,
-			 latency_ms, candidate_counts, token_estimate, model_versions)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		RETURNING id
-	`, req.TenantID, req.PrincipalID, req.AgentID, req.SessionID, req.TurnID,
-		queryHash, toJSONB(namespaces), toJSONB(req.Filters),
-		`{"fusion":"rrf","k":60,"reranker":"authority_confidence_v1"}`, selectedJSON, latencyMs,
-		toJSONB(candidateCounts), estimateSectionsTokens(sections),
-		toJSONB(map[string]string{"embedding": "request-supplied-or-none", "reranker": "authority_confidence_v1"})).Scan(&runID)
-	if err != nil {
-		return "", err
-	}
-
-	// Record individual results
-	for rank, item := range selected {
-		provenance := toJSONB(map[string]any{"source": item.Provenance})
-		_, err = s.db.Exec(ctx, `
-			INSERT INTO retrieval_results
-				(retrieval_run_id, memory_id, rank, lexical_score, semantic_score, fused_score, provenance, conflicts)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-			ON CONFLICT DO NOTHING
-		`, runID, item.MemoryID, rank+1, item.LexicalScore, item.SemanticScore, item.FusedScore, provenance, toJSONB(item.Conflicts))
-		if err != nil {
-			return runID, err
+	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		if err := q.QueryRow(ctx, `
+			INSERT INTO retrieval_runs
+				(tenant_id, principal_id, agent_id, session_id, turn_id,
+				 query_hash, namespaces, filters, ranking_config, selected_memory_ids,
+				 latency_ms, candidate_counts, token_estimate, model_versions)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			RETURNING id
+		`, req.TenantID, req.PrincipalID, req.AgentID, req.SessionID, req.TurnID,
+			queryHash, toJSONB(namespaces), toJSONB(req.Filters),
+			`{"fusion":"rrf","k":60,"reranker":"authority_confidence_v1"}`, selectedJSON, latencyMs,
+			toJSONB(candidateCounts), estimateSectionsTokens(sections),
+			toJSONB(map[string]string{"embedding": "request-supplied-or-none", "reranker": "authority_confidence_v1"})).Scan(&runID); err != nil {
+			return err
 		}
-	}
 
-	return runID, nil
+		// Record individual results
+		for rank, item := range selected {
+			provenance := toJSONB(map[string]any{"source": item.Provenance})
+			if _, err := q.Exec(ctx, `
+				INSERT INTO retrieval_results
+					(retrieval_run_id, memory_id, rank, lexical_score, semantic_score, fused_score, provenance, conflicts)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+				ON CONFLICT DO NOTHING
+			`, runID, item.MemoryID, rank+1, item.LexicalScore, item.SemanticScore, item.FusedScore, provenance, toJSONB(item.Conflicts)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return runID, err
 }
 
 func estimateSectionsTokens(sections []ContextSection) int {
