@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -68,9 +69,16 @@ type Fact struct {
 	SupersededBy string        `json:"superseded_by,omitempty"`
 	Status       string        `json:"status,omitempty"` // active, merged -- see loadFactsIncludingMerged
 	Evidence     []string      `json:"evidence,omitempty"`
-	Inferred     bool          `json:"inferred"`
-	Derivation   string        `json:"derivation,omitempty"`
-	Revision     int           `json:"revision"`
+	// CodeSymbolVersionIDs are code_symbol_versions.id values the caller
+	// already knows this fact cites (e.g. an agent recording a decision
+	// right after scos_code_impact/scos_code_query returned a result). P1-C
+	// write point 2: when set and this fact gets promoted to OKF, these are
+	// linked automatically with source='okf_promotion' -- see
+	// maybePromoteToOKF. Empty is the common case; this is never required.
+	CodeSymbolVersionIDs []string `json:"code_symbol_version_ids,omitempty"`
+	Inferred             bool     `json:"inferred"`
+	Derivation           string   `json:"derivation,omitempty"`
+	Revision             int      `json:"revision"`
 
 	// Identity/placement fields. These carry no meaning in the historical
 	// in-memory shape but are required to satisfy the relational schema's
@@ -372,6 +380,7 @@ func main() {
 	mux.HandleFunc("/v1/dashboard/user-model", srv.handleDashboardUserModel)
 	mux.HandleFunc("/v1/memory/graph", srv.handleDashboardMemoryGraph)
 	mux.HandleFunc("/v1/learnings", srv.handleDashboardLearnings)
+	mux.HandleFunc("/v1/evidence-links", srv.handleEvidenceLinks)
 	mux.HandleFunc("/v1/diary", srv.handleDiary)
 	mux.HandleFunc("/v1/stream", srv.handleStream) // SSE
 	mux.HandleFunc("/v1/transparency/stream", srv.handleStream)
@@ -400,7 +409,9 @@ func (s *engineServer) handleEntityRepresentation(w http.ResponseWriter, r *http
 	id := strings.TrimPrefix(r.URL.Path, "/v1/entities/")
 	id = strings.TrimSuffix(id, "/representation")
 	ctx := r.Context()
-	entity, err := getEntity(ctx, s.db, identity.TenantID, id)
+	entity, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Entity, error) {
+		return getEntity(ctx, q, identity.TenantID, id)
+	})
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -410,7 +421,9 @@ func (s *engineServer) handleEntityRepresentation(w http.ResponseWriter, r *http
 	}
 	facts := make([]*Fact, 0, len(entity.Facts))
 	for _, factID := range entity.Facts {
-		if fact, err := getFact(ctx, s.db, identity.TenantID, factID); err == nil {
+		if fact, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+			return getFact(ctx, q, identity.TenantID, factID)
+		}); err == nil {
 			facts = append(facts, fact)
 		}
 	}
@@ -434,7 +447,9 @@ func (s *engineServer) handleUserKnowledge(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	ctx := r.Context()
-	entity, err := getEntity(ctx, s.db, identity.TenantID, userID)
+	entity, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Entity, error) {
+		return getEntity(ctx, q, identity.TenantID, userID)
+	})
 	if err == sql.ErrNoRows || (err == nil && entity.Type != "user") {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
@@ -444,7 +459,9 @@ func (s *engineServer) handleUserKnowledge(w http.ResponseWriter, r *http.Reques
 	}
 	facts := make([]*Fact, 0, len(entity.Facts))
 	for _, factID := range entity.Facts {
-		if fact, err := getFact(ctx, s.db, identity.TenantID, factID); err == nil {
+		if fact, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+			return getFact(ctx, q, identity.TenantID, factID)
+		}); err == nil {
 			facts = append(facts, fact)
 		}
 	}
@@ -474,7 +491,9 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("include_merged") == "true" {
 			loader = loadFactsIncludingMerged
 		}
-		facts, err := loader(r.Context(), s.db, identity.TenantID, "")
+		facts, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*Fact, error) {
+			return loader(r.Context(), q, identity.TenantID, "")
+		})
 		if err != nil {
 			http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -521,7 +540,9 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 		// this tenant before inserting, exactly as the original in-memory
 		// implementation did for contradictions, just sourced from the
 		// durable store instead of a map.
-		existing, err := loadFacts(ctx, s.db, identity.TenantID, "")
+		existing, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*Fact, error) {
+			return loadFacts(ctx, q, identity.TenantID, "")
+		})
 		if err != nil {
 			http.Error(w, "load existing facts: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -662,7 +683,9 @@ func (s *engineServer) handleFactByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, status)
 			return
 		}
-		fact, err := getFact(r.Context(), s.db, identity.TenantID, id)
+		fact, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) (*Fact, error) {
+			return getFact(r.Context(), q, identity.TenantID, id)
+		})
 		if err == sql.ErrNoRows {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -702,7 +725,9 @@ func (s *engineServer) handleFactHistory(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "fact id is required", http.StatusBadRequest)
 		return
 	}
-	history, err := loadFactHistory(r.Context(), s.db, identity.TenantID, id)
+	history, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]FactVersion, error) {
+		return loadFactHistory(r.Context(), q, identity.TenantID, id)
+	})
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -786,6 +811,38 @@ var okfSlugSanitizer = regexp.MustCompile(`[^a-z0-9-]+`)
 // knowledge_curator (or role-appropriate reviewer) to approve it. Nothing
 // here bypasses that; it only decides whether a proposal is worth opening
 // and how to shape it.
+// linkPromotedFactToCode is P1-C write point 2: a fact that already cites
+// code_symbol_version_ids and clears the OKF durability bar gets those
+// citations persisted as memory_code_links rows with source='okf_promotion'
+// -- best-effort, logged not fatal, since this never blocks the promotion
+// this fact is already mid-way through.
+func (s *engineServer) linkPromotedFactToCode(fact *Fact, tenantID string) {
+	if s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("link promoted fact %s to code: begin transaction: %v", fact.ID, err)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, requestIdentity{TenantID: tenantID, PrincipalID: fact.PrincipalID}); err != nil {
+		log.Printf("link promoted fact %s to code: set principal context: %v", fact.ID, err)
+		return
+	}
+	for _, symbolVersionID := range fact.CodeSymbolVersionIDs {
+		if _, err := insertEvidenceLink(ctx, tx, tenantID, fact.ID, symbolVersionID, "evidences", "okf_promotion", 1.0); err != nil {
+			log.Printf("link promoted fact %s to code symbol version %s: %v", fact.ID, symbolVersionID, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("link promoted fact %s to code: commit: %v", fact.ID, err)
+	}
+}
+
 func (s *engineServer) maybePromoteToOKF(fact *Fact, tenantID string) {
 	if fact == nil || fact.Authority < s.okfAuthorityThresh || fact.Confidence < s.okfConfidenceThresh {
 		return
@@ -801,6 +858,10 @@ func (s *engineServer) maybePromoteToOKF(fact *Fact, tenantID string) {
 	}
 	if candidate == nil {
 		return // model judged this fact not durable/structural enough for OKF
+	}
+
+	if len(fact.CodeSymbolVersionIDs) > 0 {
+		s.linkPromotedFactToCode(fact, tenantID)
 	}
 
 	path := candidate.Category + "/" + candidate.Slug + ".md"
@@ -947,6 +1008,71 @@ If durable is false, category/slug/title/type/authority/tags/summary may be empt
 // handleFactForget implements scos_forget (§25/§42): DELETE /v1/facts/{id}
 // soft-deletes the fact (status='revoked'). ?cascade=true also revokes the
 // fact's superseded predecessor chain (see forgetFact).
+// handleEvidenceLinks implements scos_link_evidence (P1-C, §25): an agent
+// explicitly records that a fact evidences, was motivated by, or was
+// invalidated by a specific code symbol version. Zero inference -- the
+// caller already knows the relationship; this just persists it. The other
+// P1-C write point (maybePromoteToOKF auto-linking on promotion) is
+// separate and unconditional on this endpoint existing.
+func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		FactID              string  `json:"fact_id"`
+		CodeSymbolVersionID string  `json:"code_symbol_version_id"`
+		LinkType            string  `json:"link_type"`
+		Confidence          float64 `json:"confidence"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.FactID == "" || req.CodeSymbolVersionID == "" {
+		http.Error(w, "fact_id and code_symbol_version_id are required", http.StatusBadRequest)
+		return
+	}
+	switch req.LinkType {
+	case "evidences", "motivated_by", "invalidated_by":
+	case "":
+		req.LinkType = "evidences"
+	default:
+		http.Error(w, "link_type must be one of evidences, motivated_by, invalidated_by", http.StatusBadRequest)
+		return
+	}
+	confidence := req.Confidence
+	if confidence == 0 {
+		confidence = 1.0
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	id, err := insertEvidenceLink(ctx, tx, identity.TenantID, req.FactID, req.CodeSymbolVersionID, req.LinkType, "explicit", confidence)
+	if err != nil {
+		http.Error(w, "insert evidence link: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"id": id, "fact_id": req.FactID, "code_symbol_version_id": req.CodeSymbolVersionID, "link_type": req.LinkType})
+}
+
 func (s *engineServer) handleFactForget(w http.ResponseWriter, r *http.Request, id string) {
 	identity, status, msg := resolveIdentityFromRequest(r)
 	if status != 0 {
@@ -1003,7 +1129,9 @@ func (s *engineServer) handleFactFeedback(w http.ResponseWriter, r *http.Request
 		http.Error(w, msg, status)
 		return
 	}
-	if _, err := getFact(r.Context(), s.db, identity.TenantID, id); err == sql.ErrNoRows {
+	if _, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) (*Fact, error) {
+		return getFact(r.Context(), q, identity.TenantID, id)
+	}); err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	} else if err != nil {
@@ -1148,7 +1276,9 @@ func (s *engineServer) handleEntities(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, status)
 			return
 		}
-		entities, err := loadEntities(r.Context(), s.db, identity.TenantID)
+		entities, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*Entity, error) {
+			return loadEntities(r.Context(), q, identity.TenantID)
+		})
 		if err != nil {
 			http.Error(w, "load entities: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1213,7 +1343,9 @@ func (s *engineServer) handleEntityByID(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/entities/")
-	entity, err := getEntity(r.Context(), s.db, identity.TenantID, id)
+	entity, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) (*Entity, error) {
+		return getEntity(r.Context(), q, identity.TenantID, id)
+	})
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -1234,7 +1366,9 @@ func (s *engineServer) handleDiary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, status)
 		return
 	}
-	entries, err := loadDiary(r.Context(), s.db, identity.TenantID)
+	entries, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]any, error) {
+		return loadDiary(r.Context(), q, identity.TenantID)
+	})
 	if err != nil {
 		http.Error(w, "load diary: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1255,7 +1389,9 @@ func (s *engineServer) handleBeliefs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, status)
 			return
 		}
-		beliefs, err := loadBeliefs(r.Context(), s.db, identity.TenantID)
+		beliefs, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*Belief, error) {
+			return loadBeliefs(r.Context(), q, identity.TenantID)
+		})
 		if err != nil {
 			http.Error(w, "load beliefs: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1294,7 +1430,9 @@ func (s *engineServer) handleBeliefs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, evidenceID := range belief.Evidence {
-			if _, err := getFact(ctx, s.db, identity.TenantID, evidenceID); err != nil {
+			if _, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+				return getFact(ctx, q, identity.TenantID, evidenceID)
+			}); err != nil {
 				http.Error(w, fmt.Sprintf("evidence_ids references unknown fact %q", evidenceID), http.StatusUnprocessableEntity)
 				return
 			}
@@ -1335,7 +1473,9 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, status)
 			return
 		}
-		relations, err := loadRelations(r.Context(), s.db, identity.TenantID)
+		relations, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*TemporalRelation, error) {
+			return loadRelations(r.Context(), q, identity.TenantID)
+		})
 		if err != nil {
 			http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1375,11 +1515,15 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 		// as belonging to the caller, so ownership has to be enforced here,
 		// at write time, exactly as handleBeliefs already does for
 		// evidence_ids.
-		if _, err := getFact(ctx, s.db, identity.TenantID, req.SourceMemoryID); err != nil {
+		if _, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+			return getFact(ctx, q, identity.TenantID, req.SourceMemoryID)
+		}); err != nil {
 			http.Error(w, fmt.Sprintf("source_memory_id references unknown fact %q", req.SourceMemoryID), http.StatusUnprocessableEntity)
 			return
 		}
-		if _, err := getFact(ctx, s.db, identity.TenantID, req.TargetMemoryID); err != nil {
+		if _, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+			return getFact(ctx, q, identity.TenantID, req.TargetMemoryID)
+		}); err != nil {
 			http.Error(w, fmt.Sprintf("target_memory_id references unknown fact %q", req.TargetMemoryID), http.StatusUnprocessableEntity)
 			return
 		}
@@ -1423,7 +1567,9 @@ func (s *engineServer) handleHierarchy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, status)
 			return
 		}
-		nodes, err := loadHierarchy(r.Context(), s.db, identity.TenantID)
+		nodes, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*HierarchyNode, error) {
+			return loadHierarchy(r.Context(), q, identity.TenantID)
+		})
 		if err != nil {
 			http.Error(w, "load hierarchy: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1509,7 +1655,9 @@ func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var evidenceFacts []*Fact
 	for _, id := range req.Evidence {
-		if f, err := getFact(ctx, s.db, identity.TenantID, id); err == nil {
+		if f, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+			return getFact(ctx, q, identity.TenantID, id)
+		}); err == nil {
 			evidenceFacts = append(evidenceFacts, f)
 		}
 	}
@@ -1545,7 +1693,9 @@ func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	existingBeliefs, err := loadBeliefs(ctx, s.db, identity.TenantID)
+	existingBeliefs, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*Belief, error) {
+		return loadBeliefs(ctx, q, identity.TenantID)
+	})
 	if err != nil {
 		http.Error(w, "load beliefs: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1684,17 +1834,23 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 		return
 	}
 	ctx := r.Context()
-	facts, err := loadFacts(ctx, s.db, identity.TenantID, "")
+	facts, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*Fact, error) {
+		return loadFacts(ctx, q, identity.TenantID, "")
+	})
 	if err != nil {
 		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	entities, err := loadEntities(ctx, s.db, identity.TenantID)
+	entities, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*Entity, error) {
+		return loadEntities(ctx, q, identity.TenantID)
+	})
 	if err != nil {
 		http.Error(w, "load entities: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	relations, err := loadRelations(ctx, s.db, identity.TenantID)
+	relations, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*TemporalRelation, error) {
+		return loadRelations(ctx, q, identity.TenantID)
+	})
 	if err != nil {
 		http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1749,7 +1905,9 @@ func (s *engineServer) handleDashboardFacts(w http.ResponseWriter, r *http.Reque
 	if r.URL.Query().Get("include_merged") == "true" {
 		loader = loadFactsIncludingMerged
 	}
-	facts, err := loader(r.Context(), s.db, identity.TenantID, network)
+	facts, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*Fact, error) {
+		return loader(r.Context(), q, identity.TenantID, network)
+	})
 	if err != nil {
 		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1779,7 +1937,9 @@ func (s *engineServer) handleDashboardSummary(w http.ResponseWriter, r *http.Req
 		return
 	}
 	network := r.URL.Query().Get("network")
-	facts, err := loadFacts(r.Context(), s.db, identity.TenantID, network)
+	facts, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*Fact, error) {
+		return loadFacts(r.Context(), q, identity.TenantID, network)
+	})
 	if err != nil {
 		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1876,7 +2036,9 @@ func (s *engineServer) handleDashboardLearnings(w http.ResponseWriter, r *http.R
 		http.Error(w, msg, status)
 		return
 	}
-	beliefs, err := loadBeliefs(r.Context(), s.db, identity.TenantID)
+	beliefs, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*Belief, error) {
+		return loadBeliefs(r.Context(), q, identity.TenantID)
+	})
 	if err != nil {
 		http.Error(w, "load beliefs: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1896,7 +2058,9 @@ func (s *engineServer) handleDashboardContradictions(w http.ResponseWriter, r *h
 		return
 	}
 	ctx := r.Context()
-	relations, err := loadRelations(ctx, s.db, identity.TenantID)
+	relations, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*TemporalRelation, error) {
+		return loadRelations(ctx, q, identity.TenantID)
+	})
 	if err != nil {
 		http.Error(w, "load relations: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1905,7 +2069,9 @@ func (s *engineServer) handleDashboardContradictions(w http.ResponseWriter, r *h
 	// relation endpoint, each loading the full fact set) turned ~1k relations
 	// into ~2k full-table scans; with a big relation set the contradictions
 	// panel took minutes. One query, one map, O(1) lookups.
-	facts, err := loadFacts(ctx, s.db, identity.TenantID, "")
+	facts, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*Fact, error) {
+		return loadFacts(ctx, q, identity.TenantID, "")
+	})
 	if err != nil {
 		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1946,7 +2112,9 @@ func (s *engineServer) handleDashboardTimeline(w http.ResponseWriter, r *http.Re
 		http.Error(w, msg, status)
 		return
 	}
-	facts, err := loadFacts(r.Context(), s.db, identity.TenantID, "")
+	facts, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*Fact, error) {
+		return loadFacts(r.Context(), q, identity.TenantID, "")
+	})
 	if err != nil {
 		http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1980,7 +2148,9 @@ func (s *engineServer) handleDashboardUserModel(w http.ResponseWriter, r *http.R
 		return
 	}
 	ctx := r.Context()
-	entities, err := loadEntities(ctx, s.db, identity.TenantID)
+	entities, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*Entity, error) {
+		return loadEntities(ctx, q, identity.TenantID)
+	})
 	if err != nil {
 		http.Error(w, "load entities: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1994,7 +2164,9 @@ func (s *engineServer) handleDashboardUserModel(w http.ResponseWriter, r *http.R
 	var userFacts []*Fact
 	for _, e := range entityList {
 		for _, factID := range e.Facts {
-			if f, err := getFact(ctx, s.db, identity.TenantID, factID); err == nil {
+			if f, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+				return getFact(ctx, q, identity.TenantID, factID)
+			}); err == nil {
 				userFacts = append(userFacts, f)
 			}
 		}
@@ -2157,6 +2329,16 @@ func isContradictory(a, b *Fact) bool {
 	if a.Network != b.Network || a.Scope != b.Scope {
 		return false
 	}
+
+	// Same-key-different-value check (P0-C): catches same-polarity
+	// conflicts the negation-word path below cannot ("ships on tuesdays"
+	// vs "ships on thursdays" -- neither negates the other).
+	aKey, aVal := keyValueNorm(a.Content)
+	bKey, bVal := keyValueNorm(b.Content)
+	if aKey != "" && aKey == bKey && aVal != bVal {
+		return true
+	}
+
 	aWords := strings.Fields(strings.ToLower(a.Content))
 	bWords := strings.Fields(strings.ToLower(b.Content))
 
@@ -2195,6 +2377,30 @@ func isContradictory(a, b *Fact) bool {
 }
 
 // ── Dream-style Merge (§16/§25) ─────────────────────────────────────────
+
+// keyValueNorm splits content's significant (len > 3) words into a leading
+// key_norm and trailing value_norm, the coarse heuristic P0-C's plan
+// recommends: not reliable NLP subject/predicate extraction, just enough to
+// catch same-polarity conflicts sharing a leading phrase ("ships on
+// tuesdays" vs "ships on thursdays") that isContradictory's negation check
+// structurally cannot. keyWords bounds how many leading words form the key;
+// the rest is the value. Returns ("", "") when content has no significant
+// words to split.
+const keyNormWords = 3
+
+func keyValueNorm(content string) (keyNorm, valueNorm string) {
+	words := significantWords(content)
+	if len(words) == 0 {
+		return "", ""
+	}
+	n := keyNormWords
+	if n > len(words) {
+		n = len(words)
+	}
+	keyNorm = strings.Join(words[:n], " ")
+	valueNorm = strings.Join(words[n:], " ")
+	return keyNorm, valueNorm
+}
 
 func significantWords(content string) []string {
 	words := strings.Fields(strings.ToLower(content))

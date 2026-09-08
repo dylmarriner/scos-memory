@@ -36,7 +36,6 @@ type projectionServer struct {
 	controlPlaneToken    string       // forwarded to control-plane-protected upstreams (code-intelligence etc.)
 	client               *http.Client // fast client for health probes and event streaming
 	snapshotClient       *http.Client // slow client for snapshot assembly (heavyweight views)
-	serviceToken         string       // claims JWT minted at startup; used when the caller sends no bearer token
 
 	editPassphrase string // SCOS_DASHBOARD_EDIT_PASSPHRASE; empty disables editing entirely
 	editSecret     string // HMAC key for dashboard edit-session tokens (reuses the security issuer secret)
@@ -90,8 +89,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure internal TLS client: %v", err)
 	}
-	serviceToken, err := mintServiceToken()
-	if err != nil {
+	if _, err := mintServiceToken(); err != nil {
 		log.Fatalf("mint service claims token: %v", err)
 	}
 	s := &projectionServer{
@@ -99,7 +97,6 @@ func main() {
 		upstreams:            upstreams,
 		cloudControlPlaneURL: upstreams["cloud_control_plane"],
 		controlPlaneToken:    strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
-		serviceToken:         serviceToken,
 		client:               client,
 		editPassphrase:       strings.TrimSpace(os.Getenv("SCOS_DASHBOARD_EDIT_PASSPHRASE")),
 		editSecret:           strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET")),
@@ -590,10 +587,15 @@ func (s *projectionServer) copyIdentityHeaders(src *http.Request, dst *http.Requ
 		}
 	}
 	// The dashboard is deliberately viewable without a caller token: the
-	// projection mints its own claims identity at startup and injects it
-	// when the browser sends nothing. A caller-supplied token still wins.
-	if !authSet && s.serviceToken != "" {
-		dst.Header.Set("Authorization", "Bearer "+s.serviceToken)
+	// projection mints its own claims identity and injects it when the
+	// browser sends nothing. A caller-supplied token still wins. Minted
+	// fresh per request (cheap HMAC, no I/O) rather than cached once at
+	// startup, since a cached token's exp claim outlives long-lived
+	// containers and would otherwise 401 every upstream call once stale.
+	if !authSet {
+		if token, err := mintServiceToken(); err == nil {
+			dst.Header.Set("Authorization", "Bearer "+token)
+		}
 	}
 	// Control-plane-protected upstreams (code-intelligence, tool-governance,
 	// autonomous-control-plane, recovery-orchestrator, security-gate) require

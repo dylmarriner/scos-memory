@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -291,6 +292,18 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/query", args)
 	case "scos_code_impact":
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/impact", args)
+	case "scos_link_evidence":
+		factID := stringArg(args, "fact_id")
+		symbolVersionID := stringArg(args, "code_symbol_version_id")
+		if factID == "" || symbolVersionID == "" {
+			return nil, fmt.Errorf("fact_id and code_symbol_version_id are required")
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/evidence-links", map[string]any{
+			"fact_id":                factID,
+			"code_symbol_version_id": symbolVersionID,
+			"link_type":              stringArg(args, "link_type"),
+			"confidence":             args["confidence"],
+		})
 	case "scos_correct":
 		memoryID := stringArg(args, "memory_id")
 		if memoryID == "" {
@@ -1161,6 +1174,20 @@ func governedTools() []map[string]any {
 					"modified_symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Symbols that were modified"},
 				},
 				"required": []string{"repository_id", "modified_symbols"},
+			},
+		},
+		{
+			"name":        "scos_link_evidence",
+			"description": "Record that a memory fact evidences, was motivated by, or was invalidated by a specific code symbol version (P1-C explicit memory<->code links)",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"fact_id":                map[string]any{"type": "string", "description": "Memory fact ID"},
+					"code_symbol_version_id": map[string]any{"type": "string", "description": "code_symbol_versions.id from scos_code_query/scos_code_impact"},
+					"link_type":              map[string]any{"type": "string", "enum": []string{"evidences", "motivated_by", "invalidated_by"}, "description": "Relationship type; defaults to evidences"},
+					"confidence":             map[string]any{"type": "number", "description": "0-1, defaults to 1.0"},
+				},
+				"required": []string{"fact_id", "code_symbol_version_id"},
 			},
 		},
 		{

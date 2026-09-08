@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 )
 
 var proposalStatuses = map[string]bool{
@@ -149,6 +151,14 @@ func (s *okfServer) proposalPath(path string) (string, error) {
 func (s *okfServer) createProposal(req okfProposalRequest) (*OKFProposal, error) {
 	if strings.TrimSpace(req.Proposer) == "" || req.Content == "" {
 		return nil, errors.New("proposer and content are required")
+	}
+	// Write-time secret/PII gate (P0-B), fail-closed here unlike
+	// memory-intelligence's redact-and-flag: OKF content is meant to become
+	// broadly readable/shared curated knowledge, so a leaked secret here is
+	// worse, not better, than in raw conversational memory -- reject the
+	// proposal rather than silently store a redacted "authoritative" doc.
+	if findings := secretscan.Scan(req.Content); len(findings) > 0 {
+		return nil, fmt.Errorf("proposal content contains %d likely secret/PII match(es) (e.g. %s); remove before submitting", len(findings), findings[0].Kind)
 	}
 	path, err := s.proposalPath(req.Path)
 	if err != nil {

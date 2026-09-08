@@ -46,6 +46,31 @@ func TestContradictionDetection(t *testing.T) {
 	}
 }
 
+func TestContradictionDetection_SameKeyDifferentValue(t *testing.T) {
+	// Same-polarity conflict (P0-C): neither side negates the other, so
+	// the negation-word path can't catch it -- key_norm equality plus
+	// value_norm inequality must.
+	shipsTuesday := &Fact{Content: "deploys ships every tuesday", Network: NetworkWorld, Scope: "global"}
+	shipsThursday := &Fact{Content: "deploys ships every thursday", Network: NetworkWorld, Scope: "global"}
+	if !isContradictory(shipsTuesday, shipsThursday) {
+		t.Fatal("expected same-key-different-value contradiction detected")
+	}
+	unrelated := &Fact{Content: "database uses postgres version", Network: NetworkWorld, Scope: "global"}
+	if isContradictory(shipsTuesday, unrelated) {
+		t.Fatal("should not detect contradiction between unrelated keys")
+	}
+}
+
+func TestKeyValueNorm(t *testing.T) {
+	key, val := keyValueNorm("deploys ships every tuesday")
+	if key != "deploys ships every" || val != "tuesday" {
+		t.Fatalf("unexpected split: key=%q val=%q", key, val)
+	}
+	if k, v := keyValueNorm(""); k != "" || v != "" {
+		t.Fatalf("expected empty split for empty content, got key=%q val=%q", k, v)
+	}
+}
+
 func TestDashboardSystemReportsUnreachablePeersTruthfully(t *testing.T) {
 	s := newEngineServer()
 	res := httptest.NewRecorder()

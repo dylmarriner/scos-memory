@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 )
 
 // requestIdentity is the authenticated tenant/principal pair a request acts
@@ -36,6 +38,49 @@ func newID() (string, error) {
 func setPrincipalContext(ctx context.Context, tx *sql.Tx, id requestIdentity) error {
 	_, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true), set_config('scos.principal_id',$2,true)`, id.TenantID, id.PrincipalID)
 	return err
+}
+
+// querier is satisfied by both *sql.DB and *sql.Tx, letting the read
+// helpers below run against either a bare connection or an existing
+// transaction with no change to their bodies.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// withPrincipalContext opens a short-lived transaction, sets the RLS
+// tenant/principal context (the same set_config every write already makes
+// via setPrincipalContext) and runs fn against it, then commits.
+//
+// Every table under FORCE ROW LEVEL SECURITY (memory_items, entities, ...)
+// resolves current_setting('scos.tenant_id'/'scos.principal_id') to NULL
+// outside this context -- which is not an error, RLS just silently
+// matches zero rows. A bare db.QueryContext/db.QueryRowContext against one
+// of these tables is *always* this bug, regardless of how correct the
+// query's own WHERE clause is: the read functions below must only ever be
+// called wrapped in this (for a plain read) or inside a write transaction
+// that already called setPrincipalContext directly (correctFact,
+// forgetFact, forgetAllFacts, recordFactFeedback -- these keep their own
+// db.BeginTx since withPrincipalContext's tx can't nest into theirs).
+func withPrincipalContext[T any](ctx context.Context, db *sql.DB, id requestIdentity, fn func(querier) (T, error)) (T, error) {
+	var zero T
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return zero, err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return zero, err
+	}
+	result, err := fn(tx)
+	if err != nil {
+		return zero, err
+	}
+	if err := tx.Commit(); err != nil {
+		return zero, err
+	}
+	return result, nil
 }
 
 func sha256Hex(s string) string {
@@ -104,6 +149,17 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 	authority := clampInt(fact.Authority, 0, 100)
 	confidence := clampFloat(fact.Confidence, 0, 1)
 
+	// Write-time secret/PII gate (P0-B): redact-and-flag, not fail-closed --
+	// a false positive here should degrade the write, never block it. On a
+	// match the stored content is the redacted form and sensitivity is
+	// elevated to 'secret'; the original content is never persisted.
+	sensitivity := "internal"
+	content := fact.Content
+	if findings := secretscan.Scan(content); len(findings) > 0 {
+		content = secretscan.Redact(content, findings)
+		sensitivity = "secret"
+	}
+
 	structured, err := json.Marshal(map[string]any{
 		"network":     fact.Network,
 		"source":      fact.Source,
@@ -126,16 +182,18 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 		validUntil = fact.ValidUntil
 	}
 
+	keyNorm, valueNorm := keyValueNorm(content)
+
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO memory_items (id, tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary, authority_level, confidence_score, sensitivity, valid_from, valid_until)
-		VALUES ($1,$2,$3,$4,$5,'active',$6,$7,$8,$9,'internal',$10,$11)
-	`, memoryID, id.TenantID, namespaceID, id.PrincipalID, memoryType, truncate(fact.Content, 120), truncate(fact.Content, 500), authority, confidence, validFrom, validUntil); err != nil {
+		INSERT INTO memory_items (id, tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary, authority_level, confidence_score, sensitivity, valid_from, valid_until, key_norm, value_norm)
+		VALUES ($1,$2,$3,$4,$5,'active',$6,$7,$8,$9,$10,$11,$12,$13,$14)
+	`, memoryID, id.TenantID, namespaceID, id.PrincipalID, memoryType, truncate(content, 120), truncate(content, 500), authority, confidence, sensitivity, validFrom, validUntil, keyNorm, valueNorm); err != nil {
 		return "", fmt.Errorf("insert memory item: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_versions (id, memory_id, version_number, content, structured_content, content_hash, change_reason, created_by)
 		VALUES ($1,$2,1,$3,$4,$5,'initial_write',$6)
-	`, versionID, memoryID, fact.Content, structured, sha256Hex(fact.Content), id.PrincipalID); err != nil {
+	`, versionID, memoryID, content, structured, sha256Hex(content), id.PrincipalID); err != nil {
 		return "", fmt.Errorf("insert memory version: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_items SET current_version_id=$1 WHERE id=$2`, versionID, memoryID); err != nil {
@@ -152,6 +210,27 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 	return memoryID, nil
 }
 
+// insertEvidenceLink persists a memory_code_links row (P1-C, §25): factID
+// evidences/was-motivated-by/was-invalidated-by codeSymbolVersionID.
+// source is "explicit" for a caller-invoked scos_link_evidence, or
+// "okf_promotion" when maybePromoteToOKF writes one automatically.
+// ON CONFLICT DO UPDATE rather than DO NOTHING: a caller re-asserting the
+// same (fact, symbol version, link_type) with a different confidence is
+// updating the link, not silently no-op'ing.
+func insertEvidenceLink(ctx context.Context, tx *sql.Tx, tenantID, factID, codeSymbolVersionID, linkType, source string, confidence float64) (string, error) {
+	var id string
+	err := tx.QueryRowContext(ctx, `
+		INSERT INTO memory_code_links (tenant_id, fact_id, code_symbol_version_id, link_type, confidence, source)
+		VALUES ($1,$2,$3,$4,$5,$6)
+		ON CONFLICT (fact_id, code_symbol_version_id, link_type) DO UPDATE SET confidence = EXCLUDED.confidence
+		RETURNING id`,
+		tenantID, factID, codeSymbolVersionID, linkType, confidence, source).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // loadFacts reconstructs every active, unexpired fact belonging to tenantID
 // (optionally filtered to one network) back into the historical Fact JSON
 // shape. Corrected (superseded), merged (duplicate-folded) and forgotten
@@ -164,7 +243,7 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 // uses the same filter — an expired, merged or forgotten fact is treated as
 // gone, not merely hidden from listings. Use loadFactsIncludingMerged for
 // Dream-style include_merged=true reads.
-func loadFacts(ctx context.Context, db *sql.DB, tenantID, network string) ([]*Fact, error) {
+func loadFacts(ctx context.Context, db querier, tenantID, network string) ([]*Fact, error) {
 	return loadFactsByStatus(ctx, db, tenantID, network, []string{"active"})
 }
 
@@ -172,7 +251,7 @@ func loadFacts(ctx context.Context, db *sql.DB, tenantID, network string) ([]*Fa
 // marked 'merged' (Dream's include_merged=true read mode) — still excludes
 // 'superseded'/'revoked', which have their own dedicated access paths
 // (scos_fact_history, scos_explain).
-func loadFactsIncludingMerged(ctx context.Context, db *sql.DB, tenantID, network string) ([]*Fact, error) {
+func loadFactsIncludingMerged(ctx context.Context, db querier, tenantID, network string) ([]*Fact, error) {
 	return loadFactsByStatus(ctx, db, tenantID, network, []string{"active", "merged"})
 }
 
@@ -180,7 +259,7 @@ func loadFactsIncludingMerged(ctx context.Context, db *sql.DB, tenantID, network
 // statuses is always a fixed internal literal set (never user input), so
 // building the IN(...) clause by string join is safe and sidesteps relying
 // on driver-specific array-parameter binding.
-func loadFactsByStatus(ctx context.Context, db *sql.DB, tenantID, network string, statuses []string) ([]*Fact, error) {
+func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string, statuses []string) ([]*Fact, error) {
 	placeholders := make([]string, len(statuses))
 	args := make([]any, 0, len(statuses)+1)
 	args = append(args, tenantID)
@@ -266,7 +345,7 @@ func loadFactsByStatus(ctx context.Context, db *sql.DB, tenantID, network string
 	return facts, nil
 }
 
-func getFact(ctx context.Context, db *sql.DB, tenantID, factID string) (*Fact, error) {
+func getFact(ctx context.Context, db querier, tenantID, factID string) (*Fact, error) {
 	facts, err := loadFacts(ctx, db, tenantID, "")
 	if err != nil {
 		return nil, err
@@ -306,7 +385,9 @@ func markFactMerged(ctx context.Context, tx *sql.Tx, tenantID, duplicateFactID, 
 // appearing in recall/dashboards the moment this commits, while remaining in
 // the database for audit.
 func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID, newContent, reason string) (*Fact, error) {
-	old, err := getFact(ctx, db, id.TenantID, oldFactID)
+	old, err := withPrincipalContext(ctx, db, id, func(q querier) (*Fact, error) {
+		return getFact(ctx, q, id.TenantID, oldFactID)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +460,7 @@ type FactVersion struct {
 // first. Unlike loadFacts/getFact it does not filter on status: history
 // must remain visible for a fact that has since been corrected or
 // forgotten, since that is exactly what an audit trail is for (§42).
-func loadFactHistory(ctx context.Context, db *sql.DB, tenantID, factID string) ([]FactVersion, error) {
+func loadFactHistory(ctx context.Context, db querier, tenantID, factID string) ([]FactVersion, error) {
 	var exists bool
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, factID, tenantID).Scan(&exists); err != nil {
 		return nil, err
@@ -674,7 +755,7 @@ func insertRelation(ctx context.Context, tx *sql.Tx, sourceFactID, targetFactID,
 	return err
 }
 
-func loadRelations(ctx context.Context, db *sql.DB, tenantID string) ([]*TemporalRelation, error) {
+func loadRelations(ctx context.Context, db querier, tenantID string) ([]*TemporalRelation, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT r.source_memory_id, r.target_memory_id, r.relation_type, r.created_at
 		FROM memory_relations r
@@ -753,7 +834,7 @@ func entityFromRow(id, entityType, displayName, scope string, metadataRaw []byte
 	return e, nil
 }
 
-func loadEntities(ctx context.Context, db *sql.DB, tenantID string) ([]*Entity, error) {
+func loadEntities(ctx context.Context, db querier, tenantID string) ([]*Entity, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, entity_type, display_name, scope, metadata FROM entities WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
@@ -775,7 +856,7 @@ func loadEntities(ctx context.Context, db *sql.DB, tenantID string) ([]*Entity, 
 	return entities, rows.Err()
 }
 
-func getEntity(ctx context.Context, db *sql.DB, tenantID, entityID string) (*Entity, error) {
+func getEntity(ctx context.Context, db querier, tenantID, entityID string) (*Entity, error) {
 	var entityType, displayName, scope string
 	var metadataRaw []byte
 	err := db.QueryRowContext(ctx, `SELECT entity_type, display_name, scope, metadata FROM entities WHERE tenant_id=$1 AND id=$2`, tenantID, entityID).
@@ -838,7 +919,7 @@ func insertBelief(ctx context.Context, tx *sql.Tx, id requestIdentity, belief *B
 	return beliefID, nil
 }
 
-func loadBeliefs(ctx context.Context, db *sql.DB, tenantID string) ([]*Belief, error) {
+func loadBeliefs(ctx context.Context, db querier, tenantID string) ([]*Belief, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, premise, conclusion, confidence, COALESCE(revised_by::text,''), created_at
 		FROM beliefs WHERE tenant_id=$1 ORDER BY created_at DESC
@@ -904,7 +985,7 @@ func insertHierarchyNode(ctx context.Context, tx *sql.Tx, tenantID string, node 
 	return id, nil
 }
 
-func loadHierarchy(ctx context.Context, db *sql.DB, tenantID string) ([]*HierarchyNode, error) {
+func loadHierarchy(ctx context.Context, db querier, tenantID string) ([]*HierarchyNode, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, level, name, COALESCE(parent_id::text,''), scope, COALESCE(summary,''), fact_count, updated_at
 		FROM hierarchy_nodes WHERE tenant_id=$1 ORDER BY created_at DESC
@@ -984,7 +1065,7 @@ func recordFactFeedback(ctx context.Context, db *sql.DB, id requestIdentity, fac
 	return tx.Commit()
 }
 
-func loadDiary(ctx context.Context, db *sql.DB, tenantID string) ([]any, error) {
+func loadDiary(ctx context.Context, db querier, tenantID string) ([]any, error) {
 	rows, err := db.QueryContext(ctx, `SELECT content FROM diary_entries WHERE tenant_id=$1 ORDER BY occurred_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
