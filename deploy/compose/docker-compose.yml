@@ -371,7 +371,15 @@ services:
       SCOS_TOOL_GOVERNANCE_URL: ${SCOS_TOOL_GOVERNANCE_URL:-https://tool-governance:8092}
       SCOS_EXTENSION_MANAGER_URL: ${SCOS_EXTENSION_MANAGER_URL:-https://extension-manager:8086}
       SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
-      SCOS_AGENT_ENDPOINT: ${SCOS_AGENT_ENDPOINT:?SCOS_AGENT_ENDPOINT must be set}
+      # Agent dispatch backend: SCOS_AGENT_ENDPOINT wins if set (a real HTTP
+      # agent service); otherwise dispatchAgent falls through to DeepSeek
+      # when DEEPSEEK_API_KEY is configured -- see main.go's dispatchAgent.
+      # Optional, not required: the fabric ships with neither wired by
+      # default, and DEEPSEEK_API_KEY alone is a valid, complete config.
+      SCOS_AGENT_ENDPOINT: ${SCOS_AGENT_ENDPOINT:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
