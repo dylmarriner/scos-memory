@@ -319,6 +319,33 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ── 1.5. Standing-answer cache (P1-B) ────────────────────────────
+	// A normalized-exact-match repeat of a prior question skips the whole
+	// 5-source fan-out below. question_key is a lowercased/trimmed exact
+	// match on query text, not a classifier -- see the migration's comment
+	// for why (a fixed named-question set needs a classification step this
+	// doesn't have yet).
+	if answer, err := s.lookupStandingAnswer(ctx, req.TenantID, req.PrincipalID, namespaces, req.Query); err != nil {
+		log.Printf("standing answer lookup error: %v", err)
+	} else if answer != nil {
+		writeJSON(w, RetrieveResponse{
+			Sections: []ContextSection{{
+				Heading: "Standing Answer",
+				Items: []RetrievalResult{{
+					Summary:     answer.Answer,
+					Content:     answer.Answer,
+					Confidence:  answer.Confidence,
+					Provenance:  "standing_answer",
+					NamespaceID: answer.NamespaceID,
+					Rank:        1,
+				}},
+			}},
+			TotalTokens: estimateTokens(answer.Answer),
+			LatencyMs:   int(time.Since(start).Milliseconds()),
+		})
+		return
+	}
+
 	// ── 2. Parse query ──────────────────────────────────────────────
 	queryHash := hashQuery(req.Query)
 	tsQuery := toTSQuery(req.Query)
@@ -1093,6 +1120,47 @@ func estimateSectionsTokens(sections []ContextSection) int {
 func hashQuery(q string) string {
 	h := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(q))))
 	return hex.EncodeToString(h[:])
+}
+
+// standingAnswer is one memory_standing_answers row.
+type standingAnswer struct {
+	Answer      string
+	Confidence  float64
+	NamespaceID string
+}
+
+// lookupStandingAnswer checks the standing-answer cache (P1-B) for query,
+// normalized the same way hashQuery does (lowercased/trimmed exact match),
+// across every namespace the caller is authorised for. Returns nil, nil on
+// a miss -- that is the expected, common outcome, not an error. On
+// multiple matching namespaces (rare -- a caller with more than one
+// authorised namespace that both happen to have cached the same normalized
+// question), the highest-confidence row wins.
+func (s *server) lookupStandingAnswer(ctx context.Context, tenantID, principalID string, namespaces []string, query string) (*standingAnswer, error) {
+	questionKey := hashQuery(query)
+	var answer *standingAnswer
+	err := s.withPrincipalContext(ctx, tenantID, principalID, func(q pgxQuerier) error {
+		rows, err := q.Query(ctx, `
+			SELECT sa.answer, sa.confidence, sa.namespace_id
+			FROM memory_standing_answers sa
+			JOIN namespaces n ON n.id = sa.namespace_id
+			WHERE sa.tenant_id = $1 AND sa.question_key = $2 AND n.canonical_name = ANY($3::text[])
+			ORDER BY sa.confidence DESC
+			LIMIT 1`, tenantID, questionKey, namespaces)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		if rows.Next() {
+			var a standingAnswer
+			if err := rows.Scan(&a.Answer, &a.Confidence, &a.NamespaceID); err != nil {
+				return err
+			}
+			answer = &a
+		}
+		return rows.Err()
+	})
+	return answer, err
 }
 
 func toTSQuery(input string) string {
