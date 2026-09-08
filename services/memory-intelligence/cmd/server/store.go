@@ -280,7 +280,6 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	facts := make([]*Fact, 0)
 	for rows.Next() {
@@ -288,6 +287,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		var structuredRaw []byte
 		var itemCreatedAt, versionCreatedAt time.Time
 		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		var structured struct {
@@ -301,6 +301,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 			Derivation string        `json:"derivation"`
 		}
 		if err := json.Unmarshal(structuredRaw, &structured); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("decode fact structured_content: %w", err)
 		}
 		f.Network = structured.Network
@@ -315,7 +316,23 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		if network != "" && string(f.Network) != network {
 			continue
 		}
+		facts = append(facts, &f)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	// rows must be fully closed before any nested query below: db may be a
+	// single pinned *sql.Tx connection (withPrincipalContext), which cannot
+	// run a second query while an earlier result set on the same connection
+	// is still open -- that desyncs the connection ("driver: bad
+	// connection"), not something *sql.DB's pool (which hands out a
+	// different connection per call) ever surfaced.
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
 
+	for _, f := range facts {
 		evRows, err := db.QueryContext(ctx, `SELECT reference_id FROM memory_evidence WHERE memory_id=$1 AND evidence_kind='fact_citation'`, f.ID)
 		if err != nil {
 			return nil, err
@@ -337,10 +354,6 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 			return nil, closeErr
 		}
 		f.Evidence = evidence
-		facts = append(facts, &f)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return facts, nil
 }
@@ -927,18 +940,32 @@ func loadBeliefs(ctx context.Context, db querier, tenantID string) ([]*Belief, e
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	beliefs := make([]*Belief, 0)
 	for rows.Next() {
 		var b Belief
 		var premise sql.NullString
 		var createdAt time.Time
 		if err := rows.Scan(&b.ID, &premise, &b.Conclusion, &b.Confidence, &b.RevisedBy, &createdAt); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		b.Premise = premise.String
 		b.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		beliefs = append(beliefs, &b)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	// Must close before any nested query below -- see loadFactsByStatus's
+	// comment on the same pattern: db may be a single pinned *sql.Tx
+	// connection, which can't run a second query while this result set is
+	// still open.
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
 
+	for _, b := range beliefs {
 		evRows, err := db.QueryContext(ctx, `
 			SELECT me.reference_id FROM belief_evidence be
 			JOIN memory_evidence me ON me.id = be.evidence_id
@@ -964,9 +991,8 @@ func loadBeliefs(ctx context.Context, db querier, tenantID string) ([]*Belief, e
 			return nil, closeErr
 		}
 		b.Evidence = evidence
-		beliefs = append(beliefs, &b)
 	}
-	return beliefs, rows.Err()
+	return beliefs, nil
 }
 
 // insertHierarchyNode persists a memory-palace hierarchy node.
