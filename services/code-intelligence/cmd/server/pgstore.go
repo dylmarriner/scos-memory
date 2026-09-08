@@ -3,10 +3,39 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 )
+
+// encodeCalledNames/decodeCalledNames marshal indexedDecl.CalledNames to/from
+// the called_names column's JSON-encoded text (not a native Postgres array
+// -- see 000034_code_symbol_called_names_scope.sql). A nil/empty slice
+// encodes to "" (stored as NULL) rather than "[]" or "null", so an
+// unpopulated column round-trips to a nil slice, not a one-element slice
+// containing "null".
+func encodeCalledNames(names []string) any {
+	if len(names) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(names)
+	if err != nil {
+		return nil
+	}
+	return string(b)
+}
+
+func decodeCalledNames(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(raw), &names); err != nil {
+		return nil
+	}
+	return names
+}
 
 // pgCodeStore is the durable, snapshot-based code-intelligence persistence
 // layer described in SCOS_MEMORY_TECHNICAL_BLUEPRINT_AND_ENGINEERING_ROADMAP.md
@@ -159,9 +188,18 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// P1-D: resolved once per snapshot, not per file -- a file whose
+	// content_hash matches its parent snapshot's row for the same path
+	// skips re-parsing entirely (indexFileLocked copies its declarations
+	// forward instead). Empty for a repository's first-ever snapshot.
+	var parentSnapshotID string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(parent_snapshot_id::text, '') FROM code_repository_snapshots WHERE id = $1`, snapshotID).Scan(&parentSnapshotID); err != nil {
+		return fmt.Errorf("resolve parent snapshot: %w", err)
+	}
+
 	var allDecls []indexedDecl
 	for _, f := range files {
-		decls, err := s.indexFileLocked(ctx, tx, snapshotID, repositoryID, f)
+		decls, err := s.indexFileLocked(ctx, tx, snapshotID, repositoryID, parentSnapshotID, f)
 		if err != nil {
 			return fmt.Errorf("index %s: %w", f.Path, err)
 		}
@@ -252,7 +290,7 @@ func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, d
 	return nil
 }
 
-func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, f PGFileInput) ([]indexedDecl, error) {
+func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, parentSnapshotID string, f PGFileInput) ([]indexedDecl, error) {
 	var fileID string
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO code_files (repository_id, first_snapshot_id) VALUES ($1, $2) RETURNING id`,
@@ -282,6 +320,25 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		return nil, fmt.Errorf("create symbol version: %w", err)
 	}
 
+	if parentSnapshotID != "" {
+		var parentFileVersionID string
+		err := tx.QueryRowContext(ctx, `
+			SELECT id FROM code_file_versions
+			WHERE snapshot_id = $1 AND path = $2 AND content_hash = $3`,
+			parentSnapshotID, f.Path, f.ContentHash).Scan(&parentFileVersionID)
+		if err == nil {
+			decls, copyErr := s.copyDeclarationsLocked(ctx, tx, snapshotID, fileID, parentFileVersionID)
+			if copyErr != nil {
+				return nil, fmt.Errorf("copy unchanged declarations for %s: %w", f.Path, copyErr)
+			}
+			return decls, nil
+		}
+		if err != sql.ErrNoRows {
+			return nil, fmt.Errorf("check parent file version for %s: %w", f.Path, err)
+		}
+		// no matching unchanged parent row -- fall through to full extraction
+	}
+
 	if f.Language == "go" && f.Content != "" {
 		decls, err := s.indexGoDeclarationsLocked(ctx, tx, snapshotID, repositoryID, fileID, f)
 		if err != nil {
@@ -297,6 +354,80 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		return decls, nil
 	}
 	return nil, nil
+}
+
+// copyDeclarationsLocked implements P1-D's skip path: f's content is
+// byte-identical to what parentFileVersionID already indexed, so instead of
+// re-parsing, every code_symbol_versions row that belonged to that parent
+// file version is copied forward as a new row for (snapshotID, fileID) --
+// same symbol_id (preserves identity across the skip, same as a real
+// re-index would), same fully_qualified_name/kind/range/signature/
+// content_hash/confidence_class/extractor/scope/called_names. Reconstructing
+// indexedDecl from the copies (not from a fresh parse) is what makes this
+// still contribute correctly to insertCallEdgesLocked: a changed file
+// elsewhere in this same IndexSnapshot run that calls into this unchanged
+// file's function still resolves that edge, because this file's
+// declarations are present in this run's indexedDecl list exactly as if it
+// had been re-parsed.
+func (s *pgCodeStore) copyDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, fileID, parentFileVersionID string) ([]indexedDecl, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT symbol_id, fully_qualified_name, path, kind, range, signature, content_hash,
+		       doc_comment, confidence_class, extractor, COALESCE(scope, ''), called_names
+		FROM code_symbol_versions
+		WHERE file_version_id = $1 AND kind != 'file'`, parentFileVersionID)
+	if err != nil {
+		return nil, fmt.Errorf("load parent declarations: %w", err)
+	}
+	defer rows.Close()
+
+	type parentDecl struct {
+		symbolID, fqn, path, kind, rng, signature, contentHash, docComment, confidenceClass, extractor, scope string
+		calledNamesRaw                                                                                        sql.NullString
+		calledNames                                                                                           []string
+	}
+	var parents []parentDecl
+	for rows.Next() {
+		var d parentDecl
+		var rng, signature, docComment sql.NullString
+		if err := rows.Scan(&d.symbolID, &d.fqn, &d.path, &d.kind, &rng, &signature, &d.contentHash,
+			&docComment, &d.confidenceClass, &d.extractor, &d.scope, &d.calledNamesRaw); err != nil {
+			return nil, fmt.Errorf("scan parent declaration: %w", err)
+		}
+		d.rng, d.signature, d.docComment = rng.String, signature.String, docComment.String
+		d.calledNames = decodeCalledNames(d.calledNamesRaw.String)
+		parents = append(parents, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]indexedDecl, 0, len(parents))
+	for _, d := range parents {
+		var symbolVersionID string
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO code_symbol_versions
+				(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, doc_comment, confidence_class, extractor, scope, called_names)
+			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, NULLIF($7,''), NULLIF($8,''), $9, NULLIF($10,''), $11, $12, $13, $14)
+			RETURNING id`,
+			d.symbolID, snapshotID, fileID, d.fqn, d.path, d.kind, d.rng, d.signature, d.contentHash,
+			d.docComment, d.confidenceClass, d.extractor, d.scope, encodeCalledNames(d.calledNames)).Scan(&symbolVersionID); err != nil {
+			return nil, fmt.Errorf("copy declaration version for %s: %w", d.fqn, err)
+		}
+		name := d.fqn
+		if idx := strings.LastIndex(d.fqn, "."); idx >= 0 {
+			name = d.fqn[idx+1:]
+		}
+		out = append(out, indexedDecl{
+			SymbolID:    d.symbolID,
+			SymbolVerID: symbolVersionID,
+			Scope:       d.scope,
+			Name:        name,
+			Kind:        d.kind,
+			CalledNames: d.calledNames,
+			Extractor:   d.extractor,
+		})
+	}
+	return out, nil
 }
 
 // indexTreeSitterDeclarationsLocked indexes f's Tree-sitter-derived
@@ -325,16 +456,16 @@ func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx 
 			RETURNING id`, repositoryID, stableKey, symbol.Kind, f.Language, snapshotID).Scan(&symbolID); err != nil {
 			return nil, fmt.Errorf("upsert %s: %w", symbol.FullyQualifiedName, err)
 		}
+		module, _, _ := strings.Cut(symbol.FullyQualifiedName, ".")
 		var symbolVersionID string
 		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO code_symbol_versions
-			(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, confidence_class, extractor)
-			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, 'syntax', $10)
+			(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, confidence_class, extractor, scope, called_names)
+			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, 'syntax', $10, $11, $12)
 			RETURNING id`,
-			symbolID, snapshotID, fileID, symbol.FullyQualifiedName, symbol.Path, symbol.Kind, symbol.Range, symbol.Signature, symbol.ContentHash, extractor).Scan(&symbolVersionID); err != nil {
+			symbolID, snapshotID, fileID, symbol.FullyQualifiedName, symbol.Path, symbol.Kind, symbol.Range, symbol.Signature, symbol.ContentHash, extractor, module, encodeCalledNames(symbol.CalledNames)).Scan(&symbolVersionID); err != nil {
 			return nil, fmt.Errorf("insert %s version: %w", symbol.FullyQualifiedName, err)
 		}
-		module, _, _ := strings.Cut(symbol.FullyQualifiedName, ".")
 		out = append(out, indexedDecl{
 			SymbolID:    symbolID,
 			SymbolVerID: symbolVersionID,
@@ -377,10 +508,10 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 		var symbolVersionID string
 		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO code_symbol_versions
-				(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, doc_comment, confidence_class, extractor)
-			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, NULLIF($10, ''), 'static_analysis', 'go/parser')
+				(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, doc_comment, confidence_class, extractor, scope, called_names)
+			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, $7, $8, $9, NULLIF($10, ''), 'static_analysis', 'go/parser', $11, $12)
 			RETURNING id`,
-			symbolID, snapshotID, fileID, d.FullyQualifiedName(pkgName), f.Path, d.Kind, rangeText, d.Signature, d.ContentHash, d.DocComment).Scan(&symbolVersionID); err != nil {
+			symbolID, snapshotID, fileID, d.FullyQualifiedName(pkgName), f.Path, d.Kind, rangeText, d.Signature, d.ContentHash, d.DocComment, pkgName, encodeCalledNames(d.CalledNames)).Scan(&symbolVersionID); err != nil {
 			return nil, fmt.Errorf("create go declaration version for %s: %w", d.Name, err)
 		}
 		out = append(out, indexedDecl{

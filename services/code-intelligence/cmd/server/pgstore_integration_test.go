@@ -1117,6 +1117,105 @@ func TestPGChangeImpactRanksDependentsByCentrality(t *testing.T) {
 	}
 }
 
+// TestPGIndexSnapshotSkipsUnchangedFileAndPreservesCrossFileEdges is P1-D's
+// core correctness guarantee: a changed file (helper.go's target function
+// gets renamed to force a real content change) that calls into an
+// UNCHANGED file (caller.go, byte-identical between snapshots) must still
+// resolve that CALLS edge in the new snapshot -- caller.go's declarations
+// were copied forward from the parent snapshot, not re-parsed, and this
+// proves the copy still contributes correctly to this run's call-edge
+// resolution rather than silently dropping the edge.
+func TestPGIndexSnapshotSkipsUnchangedFileAndPreservesCrossFileEdges(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+
+	const callerSource = `package sample
+
+func caller() {
+	target()
+}
+`
+	const helperSourceV1 = `package sample
+
+func target() {}
+`
+	const helperSourceV2 = `package sample
+
+func target() { _ = 1 }
+`
+
+	snap1, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 1: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+		{Path: "pkg/caller.go", Language: "go", ContentHash: hashContent(callerSource), Content: callerSource},
+		{Path: "pkg/helper.go", Language: "go", ContentHash: hashContent(helperSourceV1), Content: helperSourceV1},
+	}); err != nil {
+		t.Fatalf("index snapshot 1: %v", err)
+	}
+
+	// Sanity check on the baseline snapshot: the edge exists before any skip
+	// logic is involved.
+	impact1, err := store.ChangeImpact(ctx, repoID, "main", "sample.target", 3)
+	if err != nil {
+		t.Fatalf("change impact (snapshot 1): %v", err)
+	}
+	if !hasFQN(impact1.DirectDependents, "sample.caller") {
+		t.Fatalf("expected sample.caller as a direct dependent in snapshot 1, got %+v", impact1.DirectDependents)
+	}
+
+	// Snapshot 2: caller.go is byte-identical (must be skipped/copied, not
+	// re-parsed); helper.go's target() body changed (forces re-parse).
+	snap2, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-2", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 2: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+		{Path: "pkg/caller.go", Language: "go", ContentHash: hashContent(callerSource), Content: callerSource},
+		{Path: "pkg/helper.go", Language: "go", ContentHash: hashContent(helperSourceV2), Content: helperSourceV2},
+	}); err != nil {
+		t.Fatalf("index snapshot 2: %v", err)
+	}
+
+	impact2, err := store.ChangeImpact(ctx, repoID, "main", "sample.target", 3)
+	if err != nil {
+		t.Fatalf("change impact (snapshot 2): %v", err)
+	}
+	if !hasFQN(impact2.DirectDependents, "sample.caller") {
+		t.Fatalf("expected sample.caller as a direct dependent in snapshot 2 (edge must survive caller.go's skip), got %+v", impact2.DirectDependents)
+	}
+
+	// Confirm the skip actually happened (caller.go's symbol_version row in
+	// snapshot 2 was copied, not re-inserted from a fresh parse) by checking
+	// its declaration count matches snapshot 1's -- a re-parse of identical
+	// source would produce the same count too, so this alone doesn't prove
+	// the skip path ran, but combined with the edge surviving above it
+	// confirms the copy path is at minimum not corrupting anything.
+	var count1, count2 int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM code_symbol_versions sv
+		JOIN code_file_versions fv ON fv.id = sv.file_version_id
+		WHERE fv.snapshot_id = $1 AND fv.path = 'pkg/caller.go' AND sv.kind != 'file'`, snap1).Scan(&count1); err != nil {
+		t.Fatalf("count snapshot 1 caller declarations: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM code_symbol_versions sv
+		JOIN code_file_versions fv ON fv.id = sv.file_version_id
+		WHERE fv.snapshot_id = $1 AND fv.path = 'pkg/caller.go' AND sv.kind != 'file'`, snap2).Scan(&count2); err != nil {
+		t.Fatalf("count snapshot 2 caller declarations: %v", err)
+	}
+	if count1 != count2 || count1 == 0 {
+		t.Fatalf("expected matching non-zero declaration counts for caller.go across snapshots, got %d vs %d", count1, count2)
+	}
+}
+
 func TestPGChangeImpactReturnsErrSymbolNotFoundForUnknownQuery(t *testing.T) {
 	store, db := testPGStore(t)
 	ctx := context.Background()
