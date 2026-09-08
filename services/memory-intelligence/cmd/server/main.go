@@ -24,6 +24,7 @@ import (
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/llmclient"
+	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -529,6 +530,19 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			fact.Scope = "global"
 		}
 		fact.RecordedAt = time.Now().UTC().Format(time.RFC3339)
+
+		// Write-time secret/PII gate (P0-B), applied here rather than only
+		// inside insertFact: every downstream consumer of fact.Content below
+		// -- resolveEntityMentions and maybePromoteToOKF, both of which can
+		// call DeepSeek -- must see the redacted form too, not just what
+		// eventually lands in Postgres. Redacting only inside insertFact
+		// left a secret in an unredacted fact.Content shipped to a
+		// third-party LLM API in the same request that redacted it in
+		// storage. insertFact's own scan is now a harmless no-op safety net
+		// on already-redacted text, not the sole gate.
+		if findings := secretscan.Scan(fact.Content); len(findings) > 0 {
+			fact.Content = secretscan.Redact(fact.Content, findings)
+		}
 
 		ctx := r.Context()
 		// Resolved before the transaction opens: both of these may be LLM

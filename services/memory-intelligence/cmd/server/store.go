@@ -407,6 +407,12 @@ func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID,
 	if old.NamespaceID == "" {
 		return nil, fmt.Errorf("existing fact %q has no namespace on record", oldFactID)
 	}
+	// Same P0-B gate as handleFacts POST: redact before newContent reaches
+	// resolveEntityMentions (an LLM call) or ends up on the corrected Fact
+	// that maybePromoteToOKF later sends to DeepSeek.
+	if findings := secretscan.Scan(newContent); len(findings) > 0 {
+		newContent = secretscan.Redact(newContent, findings)
+	}
 	// Resolved before the transaction opens: this may be an LLM call
 	// (resolveEntityMentions), and an outbound HTTP request must never hold a
 	// database transaction open.
