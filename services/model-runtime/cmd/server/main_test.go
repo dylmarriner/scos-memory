@@ -125,8 +125,10 @@ func TestRerankRejectsInvalidBackendIndex(t *testing.T) {
 	}
 }
 
-func TestEmptyInputRejectedBeforeBackend(t *testing.T) {
-	h := newRuntimeHandler(runtimeConfig{}, &http.Client{Timeout: time.Second})
+func TestEmptyInputRejectedBeforeBackendRequest(t *testing.T) {
+	h := newRuntimeHandler(runtimeConfig{
+		Text: backendConfig{URL: "http://127.0.0.1:1", Model: "BAAI/bge-m3", Revision: "rev-a", Dimensions: 3},
+	}, &http.Client{Timeout: time.Second})
 	req := httptest.NewRequest(http.MethodPost, "/v1/embed/text", strings.NewReader(`{"input":"   "}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
