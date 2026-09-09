@@ -136,3 +136,10 @@ func TestEmptyInputRejectedBeforeBackendRequest(t *testing.T) {
 		t.Fatalf("expected 400, got %d", rec.Code)
 	}
 }
+
+func TestConfigRejectsMalformedRequiredFlag(t *testing.T) {
+	t.Setenv("SCOS_MODEL_TEXT_REQUIRED", "ture")
+	if _, err := configFromEnvironment(); err == nil {
+		t.Fatal("expected malformed required flag to fail configuration")
+	}
+}
