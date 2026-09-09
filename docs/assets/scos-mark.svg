@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">SCOS Memory Fabric mark</title>
+  <desc id="desc">Three linked nodes forming a durable fabric</desc>
+  <rect width="128" height="128" rx="28" fill="#0b1020"/>
+  <path d="M32 42 64 24l32 18v36l-32 18-32-18z" fill="none" stroke="#7dd3fc" stroke-width="6" stroke-linejoin="round"/>
+  <path d="m32 42 32 18 32-18M64 60v36" fill="none" stroke="#c4b5fd" stroke-width="6" stroke-linejoin="round"/>
+  <circle cx="32" cy="42" r="7" fill="#f8fafc"/><circle cx="64" cy="60" r="7" fill="#f8fafc"/><circle cx="96" cy="42" r="7" fill="#f8fafc"/>
+</svg>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
+  <title id="title">SCOS Memory Fabric architecture</title>
+  <desc id="desc">Clients flow through the control plane into governed services and authoritative storage</desc>
+  <defs><style>text{font-family:Inter,ui-sans-serif,system-ui,sans-serif} .box{fill:#111827;stroke:#334155;stroke-width:2} .label{fill:#f8fafc;font-size:22px;font-weight:650} .sub{fill:#94a3b8;font-size:15px} .line{stroke:#7dd3fc;stroke-width:3;fill:none;marker-end:url(#arrow)}</style><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 10 5 0 10z" fill="#7dd3fc"/></marker></defs>
+  <rect width="1200" height="330" rx="24" fill="#080d19"/>
+  <text x="54" y="48" fill="#7dd3fc" font-size="14" letter-spacing="3">ONE GOVERNED MEMORY PLANE</text>
+  <rect class="box" x="55" y="105" width="205" height="115" rx="16"/><text class="label" x="82" y="150">Clients</text><text class="sub" x="82" y="180">MCP · HTTP · SDK</text><text class="sub" x="82" y="202">agents · IDEs · CLIs</text>
+  <rect class="box" x="335" y="85" width="250" height="155" rx="16"/><text class="label" x="363" y="133">Control Plane</text><text class="sub" x="363" y="166">journal → scope → route</text><text class="sub" x="363" y="190">dispatch → commit</text><text class="sub" x="363" y="214">recoverable lifecycle</text>
+  <rect class="box" x="660" y="72" width="245" height="180" rx="16"/><text class="label" x="688" y="118">Governed services</text><text class="sub" x="688" y="151">retrieval · security</text><text class="sub" x="688" y="175">tools · extensions</text><text class="sub" x="688" y="199">code intelligence</text><text class="sub" x="688" y="223">observability</text>
+  <rect class="box" x="980" y="105" width="165" height="115" rx="16"/><text class="label" x="1008" y="150">Authority</text><text class="sub" x="1008" y="180">PostgreSQL</text><text class="sub" x="1008" y="202">OKF · Git</text>
+  <path class="line" d="M260 162h68"/><path class="line" d="M585 162h68"/><path class="line" d="M905 162h68"/>
+  <text x="55" y="290" class="sub">Derived indexes and embeddings are rebuildable. Durable state and approved knowledge are not.</text>
+</svg>
