@@ -1,15 +1,18 @@
-# Optional SCOS retrieval-model overlay.
+# Optional SCOS retrieval-model overlay for the hosted Linode deployment.
 #
-# Production topology: SCOS runs on the Linode VPS. model-runtime stays with
-# the SCOS services on Linode and routes inference either to local TEI
-# containers on that VPS or to private/Tailscale-connected GPU backends.
+# model-runtime stays inside the SCOS service network. Inference can run in
+# local TEI containers on the Linode or at explicitly configured backend URLs.
+# No model service is published through Nginx and none accepts customer API
+# keys.
 #
 # Local x86_64 CPU example:
-#   docker compose -f docker-compose.yml -f docker-compose.models.yml \
-#     --profile text-model up -d model-runtime bge-m3 embeddings-worker retrieval-orchestrator
+#   COMPOSE_PROFILES=text-model docker compose \
+#     -f docker-compose.yml -f docker-compose.models.yml \
+#     up -d model-runtime bge-m3 embeddings-worker retrieval-orchestrator
 #
-# Start reranker/code profiles only when the Linode has enough RAM/CPU, or
-# point SCOS_MODEL_*_URL at a separate GPU inference node instead.
+# Start reranker/code profiles only when their consumers are enabled and the
+# Linode has enough RAM/CPU, or point SCOS_MODEL_*_URL at another governed
+# inference backend.
 
 services:
   model-runtime-tls-certs:
@@ -100,9 +103,8 @@ services:
       model-runtime:
         condition: service_healthy
 
-  # Default is x86_64 CPU because the production SCOS host is the Linode VPS.
-  # Override SCOS_TEI_IMAGE for a GPU-equipped inference host/container, e.g.
-  # :89-1.9 for Ada/RTX 4000 or :86-1.9 for A10/A40.
+  # Production host is x86_64 Linode. Override SCOS_TEI_IMAGE when using a
+  # compatible GPU image or a different supported TEI build.
   bge-m3:
     image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
     profiles: ["text-model"]
