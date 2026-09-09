@@ -5,10 +5,9 @@
 # No model service is published through Nginx and none accepts customer API
 # keys.
 #
-# Local x86_64 CPU example:
-#   COMPOSE_PROFILES=text-model docker compose \
-#     -f docker-compose.yml -f docker-compose.models.yml \
-#     up -d model-runtime bge-m3 embeddings-worker retrieval-orchestrator
+# Enable deployment with:
+#   SCOS_MODEL_RUNTIME_ENABLED=true
+#   SCOS_MODEL_PROFILES=text-model
 #
 # Start reranker/code profiles only when their consumers are enabled and the
 # Linode has enough RAM/CPU, or point SCOS_MODEL_*_URL at another governed
@@ -103,13 +102,14 @@ services:
       model-runtime:
         condition: service_healthy
 
-  # Production host is x86_64 Linode. Override SCOS_TEI_IMAGE when using a
-  # compatible GPU image or a different supported TEI build.
+  # These local TEI commands consume the same model/revision variables the
+  # runtime advertises. That prevents a configured revision from being
+  # metadata-only while TEI silently loads a different one.
   bge-m3:
     image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
     profiles: ["text-model"]
     restart: unless-stopped
-    command: ["--model-id", "BAAI/bge-m3", "--port", "80"]
+    command: ["--model-id", "${SCOS_MODEL_TEXT_MODEL:-BAAI/bge-m3}", "--revision", "${SCOS_MODEL_TEXT_REVISION:-main}", "--port", "80"]
     volumes:
       - bge-m3-cache:/data
     expose:
@@ -119,7 +119,7 @@ services:
     image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
     profiles: ["rerank-model"]
     restart: unless-stopped
-    command: ["--model-id", "BAAI/bge-reranker-v2-m3", "--port", "80"]
+    command: ["--model-id", "${SCOS_MODEL_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}", "--revision", "${SCOS_MODEL_RERANK_REVISION:-main}", "--port", "80"]
     volumes:
       - bge-reranker-cache:/data
     expose:
@@ -129,7 +129,7 @@ services:
     image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
     profiles: ["code-model"]
     restart: unless-stopped
-    command: ["--model-id", "BAAI/bge-code-v1", "--port", "80"]
+    command: ["--model-id", "${SCOS_MODEL_CODE_MODEL:-BAAI/bge-code-v1}", "--revision", "${SCOS_MODEL_CODE_REVISION:-main}", "--port", "80"]
     volumes:
       - bge-code-cache:/data
     expose:
