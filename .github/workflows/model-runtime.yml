@@ -1,0 +1,65 @@
+name: Model Runtime
+
+on:
+  pull_request:
+    paths:
+      - "services/model-runtime/**"
+      - "workers/embeddings/**"
+      - "deploy/compose/docker-compose.models.yml"
+      - ".github/workflows/model-runtime.yml"
+      - "docs/model-runtime.md"
+      - "docs/superpowers/specs/2026-09-09-model-runtime-bge-design.md"
+      - "docs/superpowers/plans/2026-09-09-model-runtime-bge.md"
+  push:
+    branches:
+      - "feature/model-runtime-bge"
+    paths:
+      - "services/model-runtime/**"
+      - "workers/embeddings/**"
+      - "deploy/compose/docker-compose.models.yml"
+      - ".github/workflows/model-runtime.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  model-runtime:
+    name: Go runtime contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/model-runtime)
+          if [ -n "$diff" ]; then
+            echo "gofmt needs to be run on:"; echo "$diff"; exit 1
+          fi
+      - name: Focused go vet
+        run: go vet ./services/model-runtime/cmd/server
+      - name: Focused Go tests
+        run: go test -count=1 ./services/model-runtime/cmd/server
+      - name: Build runtime container
+        run: docker build -f services/model-runtime/Dockerfile -t scos-model-runtime:ci .
+
+  embeddings-worker:
+    name: Embedding model-space regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install embedding worker
+        run: pip install -e workers/embeddings
+      - name: Compile worker
+        run: python3 -m compileall -q workers/embeddings
+      - name: Run embedding worker tests
+        run: python3 -m unittest discover -s workers/embeddings/tests -v
