@@ -330,18 +330,31 @@ func decodeEmbedding(raw []byte) ([]float64, error) {
 }
 
 func configFromEnvironment() (runtimeConfig, error) {
+	textRequired, err := envBoolStrict("SCOS_MODEL_TEXT_REQUIRED", false)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	codeRequired, err := envBoolStrict("SCOS_MODEL_CODE_REQUIRED", false)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	rerankRequired, err := envBoolStrict("SCOS_MODEL_RERANK_REQUIRED", false)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+
 	cfg := runtimeConfig{
 		Text: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_TEXT_URL")), Model: envString("SCOS_MODEL_TEXT_MODEL", "BAAI/bge-m3"),
-			Revision: envString("SCOS_MODEL_TEXT_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_TEXT_DIMENSIONS", 1024), Required: envBool("SCOS_MODEL_TEXT_REQUIRED", false),
+			Revision: envString("SCOS_MODEL_TEXT_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_TEXT_DIMENSIONS", 1024), Required: textRequired,
 		},
 		Code: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_CODE_URL")), Model: envString("SCOS_MODEL_CODE_MODEL", "BAAI/bge-code-v1"),
-			Revision: envString("SCOS_MODEL_CODE_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_CODE_DIMENSIONS", 1536), Required: envBool("SCOS_MODEL_CODE_REQUIRED", false),
+			Revision: envString("SCOS_MODEL_CODE_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_CODE_DIMENSIONS", 1536), Required: codeRequired,
 		},
 		Rerank: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_RERANK_URL")), Model: envString("SCOS_MODEL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
-			Revision: envString("SCOS_MODEL_RERANK_REVISION", "main"), Required: envBool("SCOS_MODEL_RERANK_REQUIRED", false),
+			Revision: envString("SCOS_MODEL_RERANK_REVISION", "main"), Required: rerankRequired,
 		},
 	}
 	for name, backend := range map[string]backendConfig{"text": cfg.Text, "code": cfg.Code, "rerank": cfg.Rerank} {
@@ -390,16 +403,16 @@ func envInt(name string, fallback int) int {
 	return parsed
 }
 
-func envBool(name string, fallback bool) bool {
+func envBoolStrict(name string, fallback bool) (bool, error) {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
-		return fallback
+		return fallback, nil
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
-		return fallback
+		return false, fmt.Errorf("%s must be a boolean: %w", name, err)
 	}
-	return parsed
+	return parsed, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
