@@ -85,18 +85,31 @@ if [ -n "$DRIFTED" ]; then
   exit 1
 fi
 
-# Verify the internal model runtime is actually healthy after the BGE profile
-# starts. This prevents a deploy from reporting success while embeddings are
-# silently stuck behind an unavailable model backend.
+# TEI may need time to load BGE-M3 on CPU. Wait for model-runtime readiness
+# rather than sampling health immediately after `up -d` and falsely failing a
+# healthy cold start.
 MODEL_RUNTIME_ID="$(${COMPOSE[@]} ps -q model-runtime)"
 if [ -z "$MODEL_RUNTIME_ID" ]; then
   echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime has no running container"
   exit 1
 fi
-MODEL_RUNTIME_HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$MODEL_RUNTIME_ID")"
-if [ "$MODEL_RUNTIME_HEALTH" != "healthy" ]; then
-  echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime health=$MODEL_RUNTIME_HEALTH"
-  exit 1
-fi
+
+MODEL_RUNTIME_WAIT_SECONDS="${SCOS_MODEL_RUNTIME_DEPLOY_WAIT_SECONDS:-300}"
+DEADLINE=$((SECONDS + MODEL_RUNTIME_WAIT_SECONDS))
+while :; do
+  MODEL_RUNTIME_HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$MODEL_RUNTIME_ID")"
+  if [ "$MODEL_RUNTIME_HEALTH" = "healthy" ]; then
+    break
+  fi
+  if [ "$MODEL_RUNTIME_HEALTH" = "exited" ] || [ "$MODEL_RUNTIME_HEALTH" = "dead" ]; then
+    echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime state=$MODEL_RUNTIME_HEALTH"
+    exit 1
+  fi
+  if [ "$SECONDS" -ge "$DEADLINE" ]; then
+    echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime did not become healthy within ${MODEL_RUNTIME_WAIT_SECONDS}s (last=$MODEL_RUNTIME_HEALTH)"
+    exit 1
+  fi
+  sleep 5
+done
 
 echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD), fabric parity verified and model-runtime healthy"
