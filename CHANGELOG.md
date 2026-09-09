@@ -11,7 +11,7 @@ once it cuts its first tagged release.
 ### Added
 
 - Native (Docker-free) deployment path: systemd units, native PostgreSQL +
-  pgvector setup, and a build script covering all 19 services and the
+  pgvector setup, and a build script covering the Go service fleet and the
   consolidation worker. See [`deploy/native/README.md`](deploy/native/README.md).
 - Shared production-hardening packages: `packages/httpmid` (panic recovery,
   structured JSON request logging) and graceful shutdown in
@@ -30,8 +30,8 @@ once it cuts its first tagged release.
 
 - Upgraded the Go toolchain from 1.22 (end-of-life) to 1.26.6, resolving the
   standard-library CVEs that could only be fixed by a major-version move.
-- README rewritten as a landing page: architecture diagram, technical
-  highlights backed by `indexes/CODE_INDEX.md`, and a verified quick start.
+- README and architecture documentation maintained as the primary project
+  landing page, with technical claims separated from deployment-owned evidence.
 
 ### Fixed
 

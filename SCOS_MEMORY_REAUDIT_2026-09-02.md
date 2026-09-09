@@ -1,5 +1,9 @@
 # SCOS Memory Re-Audit — 2026-09-02
 
+> Historical re-audit snapshot. The repository has moved since this report;
+> treat its commit hashes and implementation status as historical. Current
+> evidence is maintained under [`audit-results/`](audit-results/).
+
 **Repository:** `dylmarriner/scos-memory`  
 **Previous audit baseline:** `78755c40b2ba36300313da1ba5c5df029ff4aab6`  
 **Re-audit head:** `1898f0453f37d9c3166f598c2193622357d2b6cb`  

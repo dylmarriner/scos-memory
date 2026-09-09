@@ -1,5 +1,10 @@
 # SCOS Memory — Competitive Audit and Master Plan
 
+> Historical audit snapshot. Audited 2026-09-01 against an in-flight working
+> tree. For current implementation and verification status, use
+> [`docs/governance-audit-current.md`](docs/governance-audit-current.md) and
+> [`audit-results/`](audit-results/).
+
 **Repository audited:** `dylmarriner/scos-memory` (local working tree, folder `scos-memory-fabric`)
 **HEAD at audit time:** commit `67e2e59` ("docs: add SCOS memory competitive audit and master plan") **plus 18 uncommitted modified files** on top of it — the code-intelligence rewrite (SCIP ingestion, Tree-sitter, Go-native extraction, pgstore, graphify) is mid-flight, not a clean snapshot.
 **Audit date:** 2026-09-01 (Pacific/Auckland)

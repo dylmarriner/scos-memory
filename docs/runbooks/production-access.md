@@ -1,5 +1,8 @@
 # Production access: hermes
 
+> Operational snapshot recorded 2026-09-07. Verify the host, checkout, service
+> health, and certificate state before relying on any detail below.
+
 The only currently running deployment of scos-memory-fabric lives on the
 Linode instance nicknamed **hermes**.
 
@@ -46,7 +49,8 @@ cd /opt/scos-memory-fabric
 docker compose -f deploy/compose/docker-compose.yml ps
 ```
 
-All 19 Go services + the Python consolidation worker run as
+All Go service containers defined by the Compose file plus the Python
+consolidation worker run as
 `compose-<service>-1` containers, each bound to `127.0.0.1:<port>` only
 (no ports exposed on the public interface directly). `compose-postgres-1`
 (pgvector/pgvector:pg17) and `compose-tunnel-client-1` round out the stack.

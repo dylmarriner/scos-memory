@@ -1,6 +1,12 @@
 # scos-memory: Full P0–P3 Implementation Plan
 
-## Implementation status (updated 2026-09-02)
+## Implementation status (snapshot updated 2026-09-09)
+
+This plan is a backlog document, not a live implementation inventory. The
+2026-09-02 status below predates several commits now on `main`, including the
+standing-answer read path, content-hash-gated incremental indexing, and recent
+RLS/identity fixes. Check the current source and `audit-results/` before treating
+an item below as still open.
 
 - **P0-0 (Make RLS actually enforce): implemented, not yet live-verified.** All files below are written into this repo and `go build ./...`/`go vet ./...` are clean, but `database/integration/rls_deployed_role_test.go` still needs a run against a live Compose stack with `SCOS_APP_DATABASE_URL` set (it's gated on a real deployment, not just any Postgres) before this ships. Treat "written and compiling" and "live-verified" as separate claims here.
   - New: `database/policies/000010_capabilities_rls.sql`, `000011_app_role.sql`, `000012_force_rls.sql`, `docs/adr/0012-rls-enforcement.md`, `packages/database/rls_guard.go`, `database/integration/rls_deployed_role_test.go`
@@ -9,7 +15,9 @@
   - New: `services/code-intelligence/cmd/server/pagerank.go`, `pagerank_test.go` (4 unit tests on the ranking algorithm itself: hub-outranks-leaf, seed biases toward neighbors, dangling mass doesn't leak, empty input)
   - Modified: `services/code-intelligence/cmd/server/pgstore.go` (`PGSymbolVersion.Centrality`, `ChangeImpact` now ranks `DirectDependents`/`TransitiveDependents` by personalized PageRank seeded on the matched symbols, new `edgesAmong` helper scoped to the BFS-visited subgraph — not the whole repository graph), `pgstore_integration_test.go` (`TestPGChangeImpactRanksDependentsByCentrality`, a fan-in fixture asserting a caller-of-a-caller outranks a dead-end caller)
   - Not done: `QueryByPathOrFQN` has no ranking field — left alone deliberately, since it resolves to an exact path/FQN match (0 or 1 result in practice), where a centrality score adds no decision value; a dedicated `scos_code_rank` MCP tool (mentioned as a possible follow-on in the design below) was not built.
-- **P0-B, P0-C, and everything P1–P3**: designed below, not yet built.
+- **Remaining P0–P3 entries:** the detailed designs below are retained as
+  historical planning context; their “not yet built” wording is not a current
+  status guarantee. Reconcile each item against `git log`, source, and tests.
 
 ---
 
@@ -49,7 +57,11 @@ Following the audit's own §27 recommendation, corrected for what my research ch
 
 ## P0-0: Make RLS actually enforce
 
-**Problem** (independently verified against current HEAD, not just relayed from `audit-results/`): no file under `database/` sets `FORCE ROW LEVEL SECURITY`. Both `deploy/compose/docker-compose.yml` and `deploy/native/postgres-setup.sh` connect every one of the 22 DB-backed services (via the shared `DATABASE_URL`/`SCOS_DATABASE_URL` env var, consumed through `packages/database/pool.go`) as the single `POSTGRES_USER` (`scos`), which **owns** every table. Postgres exempts table owners from RLS regardless of what policies exist, unless `FORCE ROW LEVEL SECURITY` is set. The only `NOSUPERUSER NOBYPASSRLS` role anywhere in the repo is a throwaway fixture in `database/integration/rls_test.go` (`it_role_<random>`), never wired into a real deployment.
+**Historical problem statement:** the original audit found that RLS was not
+enforced for the deployed application role. The current tree contains the
+`scos_app` role, FORCE RLS policies, deployment wiring, and a deployment-role
+integration test. Live verification still requires a running stack with
+`SCOS_APP_DATABASE_URL`; do not infer production proof from source alone.
 
 **A gap the audit missed, found in this pass:** `database/migrations/000003_control_plane.sql` enables RLS on `capabilities` (line 74) but never adds a policy for it — the file adds policies for the other 3 tables it enables (`lifecycle_stages`, `routing_decisions`, `outbox_dead_letters`) but not `capabilities`. `capabilities` has no `tenant_id` column — it's shared reference data (a capability registry read/written by `agent-registry`, `autonomous-control-plane`, `compatibility-gateway`, `extension-manager`, `mcp-gateway`, `code-intelligence`). If `FORCE ROW LEVEL SECURITY` goes on this table without a policy, it becomes **deny-all** under the new restricted role — capability registration breaks across six services on day one. Every other RLS-enabled table in the repo (confirmed by reading all 9 `database/policies/*.sql` files plus every `ENABLE ROW LEVEL SECURITY` in `database/migrations/*.sql`) already has a matching policy — `capabilities` is the one real hole.
 

@@ -1,6 +1,6 @@
 # Native (systemd) deployment
 
-A Docker-free way to run the SCOS Memory Fabric: 19 Go binaries and the
+A Docker-free way to run the SCOS Memory Fabric: the Go service fleet and the
 Python consolidation worker as systemd services, against a natively
 installed PostgreSQL — no container runtime involved.
 
@@ -23,12 +23,12 @@ manager calls for another distro.
 deploy/native/
 ├── README.md                       this file
 ├── install.sh                      one-time: user, dirs, TLS, systemd units, env templates
-├── build.sh                        builds the 19 Go binaries + consolidation-worker venv
+├── build.sh                        builds the Go service fleet + consolidation-worker venv
 ├── postgres-setup.sh                native PostgreSQL + pgvector + TLS + tuning
 ├── renew-mcp-gateway-cert.sh       native equivalent of deploy/scripts/renew-mcp-gateway-cert.sh
 ├── systemd/
 │   ├── scos-fabric.target          groups every unit; `systemctl start` brings up the whole fleet
-│   ├── scos-fabric@.service        templated unit for the 19 Go services (instance = service name)
+│   ├── scos-fabric@.service        templated unit for the Go services (instance = service name)
 │   ├── scos-fabric-migrations.service   oneshot, runs scripts/scos-migrate before anything else
 │   └── scos-consolidation-worker.service
 └── env/

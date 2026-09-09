@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds all 21 Go service binaries and the consolidation-worker Python
+# Builds all 23 Go service binaries and the consolidation-worker Python
 # package, without Docker. Mirrors deploy/Dockerfile's build stage exactly --
 # same service list, same build flags -- so a native build produces the same
 # binaries the container image would.

@@ -1,8 +1,13 @@
-# Governance Audit — Current (Consolidated)
+# Governance Audit — Consolidated Snapshot
 
 **Authority audited:** `GOVERNANCE.md` v1.3.0 (2766 lines, sections 1-43)
-**Audit date:** 2026-07-31 (working-tree verification refreshed 2026-07-31)
-**Scope:** current working tree, all 43 sections
+**Audit date:** 2026-07-31 (historical working-tree verification)
+**Scope:** all 43 sections at that snapshot
+**Current-state note (2026-09-09):** this document is not the live status page.
+Subsequent commits added RLS enforcement, incremental code indexing, standing
+answers, and further identity/retrieval fixes. Use the current evidence ledger
+under [`audit-results/`](../audit-results/) and the repository
+[`CHANGELOG.md`](../CHANGELOG.md) before making present-tense claims.
 **Supersedes:** `docs/governance-implementation-audit.md` and
 `docs/governance-audit-full.md`, both deleted by this document's commit.
 
@@ -98,7 +103,7 @@ independently re-checked here.
 | 35 | Change governance | PASS (Fresh) | `observability-governance` group; ADRs 0001-0010 confirmed to cover the required decision surface. |
 | 36 | Implementation baseline | PARTIAL (Carried) | Docker hardening (pinned images, non-root) confirmed by prior audit; production secret/key management deployment-owned. Not re-verified this pass. |
 | 37 | Repository layout | PARTIAL (Carried) | Naming drift (`execution-proxy`, dashboard/transparency-projection split) already documented in ADR-0003 per prior audit. Not re-verified this pass. |
-| 38 | Required interfaces | PASS (Fresh) | `contracts-crosscheck` group; every OpenAPI path cross-checked against a real, authenticated handler registration across all 19 services. |
+| 38 | Required interfaces | PASS (Fresh) | `contracts-crosscheck` group; every OpenAPI path cross-checked against a real, authenticated handler registration across the declared service fleet. |
 | 39 | Failure-injection tests | PASS (Carried, not re-litigated per task scope) | 58/58 scenarios previously run live against a real 19-service compose stack across three consecutive runs, per `governance-implementation-audit.md`'s "Live Failure-Injection Verification." Not re-run this pass. |
 | 40 | Delivery phases | PASS (Fresh) | `contracts-crosscheck` group; every named phase maps to an existing, buildable service. |
 | 41 | Definition of done | PARTIAL (Carried, synthesized) | Cannot be marked PASS while §22 hook integration, §32 cross-service metric rollout, full §25 integration evidence, and several Carried-FAIL/PARTIAL sections above remain open. |
@@ -272,7 +277,7 @@ workers/consolidation/tests` — PASS (47). `python3 scripts/validate_json.py`
 `audit_governance_runtime.py` — both PASS. `docker compose -f
 deploy/compose/docker-compose.yml config` — PASS with required secrets set.
 
-**Bottom line:** this pass closed 15 concrete code-level gaps across events,
+**Bottom line at the 2026-07-31 snapshot:** this pass closed 15 concrete code-level gaps across events,
 code intelligence, execution proxy, extensions, compatibility, multi-agent
 registration, crash recovery, backup verification, and observability
 correlation — each with real fixes and tests, not just findings, and the
