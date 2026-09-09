@@ -1,0 +1,109 @@
+# Optional SCOS retrieval-model overlay.
+#
+# Recommended on the Pi: run model-runtime here but point SCOS_MODEL_*_URL at
+# TEI instances on an x86/GPU node reachable over the private network.
+#
+# Local ARM64 CPU example (expensive):
+#   docker compose -f docker-compose.yml -f docker-compose.models.yml \
+#     --profile text-model up -d model-runtime bge-m3 embeddings-worker retrieval-orchestrator
+#
+# Start reranker/code profiles only on hosts with enough RAM. All three large
+# models at once are not part of the Raspberry Pi memory budget.
+
+services:
+  model-runtime:
+    build:
+      context: ../..
+      dockerfile: services/model-runtime/Dockerfile
+    restart: unless-stopped
+    mem_limit: ${SCOS_MODEL_RUNTIME_MEM_LIMIT:-192m}
+    memswap_limit: ${SCOS_MODEL_RUNTIME_MEM_LIMIT:-192m}
+    cpus: ${SCOS_MODEL_RUNTIME_CPUS:-1}
+    environment:
+      SCOS_INTERNAL_SERVICE_TOKEN: ${SCOS_INTERNAL_SERVICE_TOKEN:?SCOS_INTERNAL_SERVICE_TOKEN must be set}
+      SCOS_CONTROL_PLANE_TOKEN: ${SCOS_CONTROL_PLANE_TOKEN:?SCOS_CONTROL_PLANE_TOKEN must be set}
+      SCOS_SERVICE_IDENTITY: ${SCOS_SERVICE_IDENTITY_PREFIX:-scos-service}-model-runtime
+      # The runtime stays on the private compose/Tailscale fabric. Backend TEI
+      # services are not published. TLS can be enabled later with a certificate
+      # whose SAN includes model-runtime; the base development certificate does
+      # not yet include this new service name.
+      SCOS_TLS_REQUIRED: "false"
+      SCOS_MODEL_RUNTIME_HTTP_ADDR: ${SCOS_MODEL_RUNTIME_HTTP_ADDR:-:8103}
+      SCOS_MODEL_RUNTIME_TIMEOUT_SECONDS: ${SCOS_MODEL_RUNTIME_TIMEOUT_SECONDS:-60}
+
+      SCOS_MODEL_TEXT_URL: ${SCOS_MODEL_TEXT_URL:-http://bge-m3:80}
+      SCOS_MODEL_TEXT_MODEL: ${SCOS_MODEL_TEXT_MODEL:-BAAI/bge-m3}
+      SCOS_MODEL_TEXT_REVISION: ${SCOS_MODEL_TEXT_REVISION:-main}
+      SCOS_MODEL_TEXT_DIMENSIONS: ${SCOS_MODEL_TEXT_DIMENSIONS:-1024}
+      SCOS_MODEL_TEXT_REQUIRED: ${SCOS_MODEL_TEXT_REQUIRED:-true}
+
+      SCOS_MODEL_RERANK_URL: ${SCOS_MODEL_RERANK_URL:-http://bge-reranker:80}
+      SCOS_MODEL_RERANK_MODEL: ${SCOS_MODEL_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      SCOS_MODEL_RERANK_REVISION: ${SCOS_MODEL_RERANK_REVISION:-main}
+      SCOS_MODEL_RERANK_REQUIRED: ${SCOS_MODEL_RERANK_REQUIRED:-false}
+
+      SCOS_MODEL_CODE_URL: ${SCOS_MODEL_CODE_URL:-http://bge-code:80}
+      SCOS_MODEL_CODE_MODEL: ${SCOS_MODEL_CODE_MODEL:-BAAI/bge-code-v1}
+      SCOS_MODEL_CODE_REVISION: ${SCOS_MODEL_CODE_REVISION:-main}
+      SCOS_MODEL_CODE_DIMENSIONS: ${SCOS_MODEL_CODE_DIMENSIONS:-1536}
+      SCOS_MODEL_CODE_REQUIRED: ${SCOS_MODEL_CODE_REQUIRED:-false}
+    expose:
+      - "8103"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8103/health/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 10
+
+  embeddings-worker:
+    environment:
+      SCOS_MODEL_RUNTIME_URL: ${SCOS_MODEL_RUNTIME_URL:-http://model-runtime:8103}
+      SCOS_INTERNAL_SERVICE_TOKEN: ${SCOS_INTERNAL_SERVICE_TOKEN:?SCOS_INTERNAL_SERVICE_TOKEN must be set}
+      SCOS_CONTROL_PLANE_TOKEN: ${SCOS_CONTROL_PLANE_TOKEN:?SCOS_CONTROL_PLANE_TOKEN must be set}
+      SCOS_EMBED_MODEL: ${SCOS_MODEL_TEXT_MODEL:-BAAI/bge-m3}
+      SCOS_EMBED_MODEL_REVISION: ${SCOS_MODEL_TEXT_REVISION:-main}
+      SCOS_EMBED_DIMENSIONS: ${SCOS_MODEL_TEXT_DIMENSIONS:-1024}
+      # Remote BGE-M3 calls are heavier than the old 384-d local model, so use
+      # a conservative write batch until deployed benchmarks justify more.
+      SCOS_EMBEDDINGS_BATCH_SIZE: ${SCOS_EMBEDDINGS_BATCH_SIZE:-8}
+    depends_on:
+      model-runtime:
+        condition: service_healthy
+
+  # Hugging Face Text Embeddings Inference 1.9 supports ARM64 CPU. Override
+  # SCOS_TEI_IMAGE on x86/GPU hosts, e.g. :89-1.9 for RTX 4000/Ada.
+  bge-m3:
+    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9}
+    profiles: ["text-model"]
+    restart: unless-stopped
+    command: ["--model-id", "BAAI/bge-m3", "--port", "80"]
+    volumes:
+      - bge-m3-cache:/data
+    expose:
+      - "80"
+
+  bge-reranker:
+    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9}
+    profiles: ["rerank-model"]
+    restart: unless-stopped
+    command: ["--model-id", "BAAI/bge-reranker-v2-m3", "--port", "80"]
+    volumes:
+      - bge-reranker-cache:/data
+    expose:
+      - "80"
+
+  bge-code:
+    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9}
+    profiles: ["code-model"]
+    restart: unless-stopped
+    command: ["--model-id", "BAAI/bge-code-v1", "--port", "80"]
+    volumes:
+      - bge-code-cache:/data
+    expose:
+      - "80"
+
+volumes:
+  bge-m3-cache:
+  bge-reranker-cache:
+  bge-code-cache:
