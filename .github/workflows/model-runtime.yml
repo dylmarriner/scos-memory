@@ -6,6 +6,8 @@ on:
       - "services/model-runtime/**"
       - "workers/embeddings/**"
       - "deploy/compose/docker-compose.models.yml"
+      - "deploy/scripts/auto-deploy.sh"
+      - ".env.example"
       - ".github/workflows/model-runtime.yml"
       - "docs/model-runtime.md"
       - "docs/superpowers/specs/2026-09-09-model-runtime-bge-design.md"
@@ -17,6 +19,8 @@ on:
       - "services/model-runtime/**"
       - "workers/embeddings/**"
       - "deploy/compose/docker-compose.models.yml"
+      - "deploy/scripts/auto-deploy.sh"
+      - ".env.example"
       - ".github/workflows/model-runtime.yml"
 
 permissions:
@@ -63,3 +67,17 @@ jobs:
         run: python3 -m compileall -q workers/embeddings
       - name: Run embedding worker tests
         run: python3 -m unittest discover -s workers/embeddings/tests -v
+
+  hosted-deployment:
+    name: Hosted deployment syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate auto-deploy shell syntax
+        run: bash -n deploy/scripts/auto-deploy.sh
+      - name: Validate merged Compose model overlay
+        run: |
+          docker compose \
+            -f deploy/compose/docker-compose.yml \
+            -f deploy/compose/docker-compose.models.yml \
+            config --no-interpolate >/dev/null
