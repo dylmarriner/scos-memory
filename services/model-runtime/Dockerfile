@@ -9,7 +9,7 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/model-runtime ./services/model-r
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates && \
-    addgroup -S scos && adduser -S -G scos scos
+    addgroup -S -g 101 scos && adduser -S -D -H -u 100 -G scos scos
 COPY --from=build /out/model-runtime /usr/local/bin/model-runtime
 USER scos
 ENTRYPOINT ["model-runtime"]
