@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
 # Polls origin/main and deploys new commits: pulls, rebuilds the shared
-# scos-fabric image, and force-recreates every service built from it.
-#
-# Force-recreate is deliberate, not automatic compose diffing: on 2026-08-30
-# six of twenty-two fabric services (compatibility-gateway, backup-manager,
-# execution-proxy, context-optimisation, retrieval-orchestrator,
-# memory-gateway) were left running a stale image for 42+ hours after a
-# rebuild because whatever deployed that build didn't recreate them. This
-# script always force-recreates the full fabric-image service list on every
-# run that has a new commit, so that specific failure mode can't recur
-# regardless of whether compose's own change detection would have caught it.
-# Keep FABRIC_SERVICES in sync with deploy/native/build.sh's SERVICES list.
-#
-# Safe to run frequently via a timer: exits immediately (before the lock)
-# when origin/main hasn't moved, and flock prevents overlapping runs if a
-# deploy is still in progress when the next tick fires.
+# scos-fabric image, the internal model-runtime image, and force-recreates
+# services that need deterministic image refresh.
 set -euo pipefail
 
 REPO_DIR="${SCOS_REPO_DIR:-/opt/scos-memory-fabric}"
 LOCK_FILE="/tmp/scos-auto-deploy.lock"
-COMPOSE=(docker compose --env-file .env -f deploy/compose/docker-compose.yml)
+
+# The hosted Linode deployment uses the model-runtime overlay as part of the
+# normal stack. BGE-M3 is the baseline model profile; reranker/code profiles
+# can be enabled in .env with SCOS_MODEL_PROFILES=text-model,rerank-model,code-model.
+export COMPOSE_PROFILES="${SCOS_MODEL_PROFILES:-text-model}"
+COMPOSE=(docker compose --env-file .env \
+  -f deploy/compose/docker-compose.yml \
+  -f deploy/compose/docker-compose.models.yml)
 
 FABRIC_SERVICES="agent-registry autonomous-control-plane backup-manager \
 code-intelligence compatibility-gateway context-optimisation credential-vault execution-proxy \
@@ -43,44 +37,31 @@ flock -n 9 || { echo "$(date -Iseconds) deploy already in progress, skipping thi
 echo "$(date -Iseconds) deploying $BEFORE -> $AFTER"
 git merge --ff-only origin/main
 
-"${COMPOSE[@]}" build --build-arg "SOURCE_SHA=$AFTER" --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+"${COMPOSE[@]}" build \
+  --build-arg "SOURCE_SHA=$AFTER" \
+  --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# `database/migrations` is bind-mounted into the migrations container from
-# this checkout, not baked into its image (see docker-compose.yml) -- so a
-# new .sql file landing on disk is not a service-definition change compose's
-# own `up` will notice, and a one-shot container that already exited 0 stays
-# exited. `up -d` alone would silently never re-run this container, so a new
-# migration added to the repo would never apply here even though it applies
-# on a fresh install. `run --rm` always executes it fresh; the runner itself
-# (scripts/scos-migrate) tracks applied versions in scos_schema_migrations,
-# so running it on every deploy is a no-op except for genuinely new files,
-# and it runs before the fabric services below so new schema is present
-# before app code that might depend on it starts.
+# Migrations are bind-mounted and the migrations container is one-shot, so a
+# normal compose up cannot be trusted to re-run it after a new SQL file lands.
 "${COMPOSE[@]}" run --rm migrations
 
+# Shared fabric image services are force-recreated so they cannot quietly keep
+# running the previous shared image after a successful build.
 # shellcheck disable=SC2086
 "${COMPOSE[@]}" up -d --no-deps --force-recreate $FABRIC_SERVICES
 
-# Second pass with normal (non-force) semantics so anything else declared in
-# the compose file -- workers, tunnel-client, postgres config changes --
-# also lands, without bouncing postgres on every deploy.
+# model-runtime has its own image rather than the shared scos-fabric image.
+# Recreate it explicitly too. Dependencies are allowed here so its internal
+# certificate volume exists before the TLS listener starts.
+"${COMPOSE[@]}" up -d --force-recreate model-runtime
+
+# Bring up/update everything else, including the active model profile(s),
+# embeddings-worker, tunnel-client, Postgres config changes, and optional
+# services. This keeps BGE backends internal to the Compose network; no Nginx
+# route or public model port is created by this deployment.
 "${COMPOSE[@]}" up -d
 
-# Verify parity instead of trusting that force-recreate landed everywhere:
-# every fabric service shares one built image (see deploy/Dockerfile), so
-# each running container's image ID must match what was just built. This is
-# the actual check for the failure mode this script exists to prevent --
-# force-recreate is a mechanism, not proof it worked. A drifted service is
-# named loudly and the script exits non-zero so the systemd timer's own
-# failure state surfaces it, rather than a container quietly running the
-# previous commit until someone happens to notice.
-# `docker compose images -q` prints the bare digest ("78bb4cdc...");
-# `docker inspect --format '{{.Image}}'` prints it "sha256:"-prefixed. Both
-# name the same image, but compared as strings they never match -- every
-# service failed this check on 2026-09-01 with running_image and
-# EXPECTED_IMAGE printed identically in the log, which is what actually
-# gave this away. Stripping the prefix from both sides makes the
-# comparison compare the digest, not incidental formatting.
+# Verify the shared fabric-image services all run the image we just built.
 EXPECTED_IMAGE="$(${COMPOSE[@]} images -q agent-registry)"
 EXPECTED_IMAGE="${EXPECTED_IMAGE#sha256:}"
 DRIFTED=""
@@ -104,4 +85,18 @@ if [ -n "$DRIFTED" ]; then
   exit 1
 fi
 
-echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD), parity verified across$(printf ' %s' $FABRIC_SERVICES)"
+# Verify the internal model runtime is actually healthy after the BGE profile
+# starts. This prevents a deploy from reporting success while embeddings are
+# silently stuck behind an unavailable model backend.
+MODEL_RUNTIME_ID="$(${COMPOSE[@]} ps -q model-runtime)"
+if [ -z "$MODEL_RUNTIME_ID" ]; then
+  echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime has no running container"
+  exit 1
+fi
+MODEL_RUNTIME_HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$MODEL_RUNTIME_ID")"
+if [ "$MODEL_RUNTIME_HEALTH" != "healthy" ]; then
+  echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime health=$MODEL_RUNTIME_HEALTH"
+  exit 1
+fi
+
+echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD), fabric parity verified and model-runtime healthy"
