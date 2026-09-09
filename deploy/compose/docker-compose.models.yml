@@ -1,14 +1,15 @@
 # Optional SCOS retrieval-model overlay.
 #
-# Recommended on the Pi: run model-runtime here but point SCOS_MODEL_*_URL at
-# TEI instances on an x86/GPU node reachable over the private network.
+# Production topology: SCOS runs on the Linode VPS. model-runtime stays with
+# the SCOS services on Linode and routes inference either to local TEI
+# containers on that VPS or to private/Tailscale-connected GPU backends.
 #
-# Local ARM64 CPU example (expensive):
+# Local x86_64 CPU example:
 #   docker compose -f docker-compose.yml -f docker-compose.models.yml \
 #     --profile text-model up -d model-runtime bge-m3 embeddings-worker retrieval-orchestrator
 #
-# Start reranker/code profiles only on hosts with enough RAM. All three large
-# models at once are not part of the Raspberry Pi memory budget.
+# Start reranker/code profiles only when the Linode has enough RAM/CPU, or
+# point SCOS_MODEL_*_URL at a separate GPU inference node instead.
 
 services:
   model-runtime-tls-certs:
@@ -92,8 +93,6 @@ services:
       SCOS_EMBED_MODEL: ${SCOS_MODEL_TEXT_MODEL:-BAAI/bge-m3}
       SCOS_EMBED_MODEL_REVISION: ${SCOS_MODEL_TEXT_REVISION:-main}
       SCOS_EMBED_DIMENSIONS: ${SCOS_MODEL_TEXT_DIMENSIONS:-1024}
-      # Remote BGE-M3 calls are heavier than the old 384-d local model, so use
-      # a conservative write batch until deployed benchmarks justify more.
       SCOS_EMBEDDINGS_BATCH_SIZE: ${SCOS_EMBEDDINGS_BATCH_SIZE:-8}
     volumes:
       - model-runtime-tls:/etc/scos/model-runtime-tls:ro
@@ -101,10 +100,11 @@ services:
       model-runtime:
         condition: service_healthy
 
-  # Hugging Face Text Embeddings Inference 1.9 supports ARM64 CPU. Override
-  # SCOS_TEI_IMAGE on x86/GPU hosts, e.g. :89-1.9 for RTX 4000/Ada.
+  # Default is x86_64 CPU because the production SCOS host is the Linode VPS.
+  # Override SCOS_TEI_IMAGE for a GPU-equipped inference host/container, e.g.
+  # :89-1.9 for Ada/RTX 4000 or :86-1.9 for A10/A40.
   bge-m3:
-    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9}
+    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
     profiles: ["text-model"]
     restart: unless-stopped
     command: ["--model-id", "BAAI/bge-m3", "--port", "80"]
@@ -114,7 +114,7 @@ services:
       - "80"
 
   bge-reranker:
-    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9}
+    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
     profiles: ["rerank-model"]
     restart: unless-stopped
     command: ["--model-id", "BAAI/bge-reranker-v2-m3", "--port", "80"]
@@ -124,7 +124,7 @@ services:
       - "80"
 
   bge-code:
-    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9}
+    image: ${SCOS_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
     profiles: ["code-model"]
     restart: unless-stopped
     command: ["--model-id", "BAAI/bge-code-v1", "--port", "80"]
