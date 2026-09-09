@@ -115,28 +115,43 @@ class EmbedTextsTests(unittest.TestCase):
 
 
 class ReplacementTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self, rowcount=0):
+            self.calls = []
+            self.rowcount = rowcount
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+    class FakeConn:
+        def __init__(self, rowcount=0):
+            self.cur = ReplacementTests.FakeCursor(rowcount=rowcount)
+
+        def cursor(self, row_factory=None):
+            return self.cur
+
+    def test_purge_removes_every_non_active_space(self):
+        conn = self.FakeConn(rowcount=4)
+        removed = worker._purge_stale_spaces(
+            conn, "BAAI/bge-m3", "rev-a", 1024
+        )
+        self.assertEqual(removed, 4)
+        self.assertEqual(len(conn.cur.calls), 1)
+        sql, params = conn.cur.calls[0]
+        self.assertIn("DELETE FROM memory_embeddings", sql)
+        self.assertIn("model <> %s", sql)
+        self.assertIn("model_revision <> %s", sql)
+        self.assertIn("dimensions <> %s", sql)
+        self.assertEqual(params, ("BAAI/bge-m3", "rev-a", 1024))
+
     def test_replace_embedding_deletes_stale_spaces_before_insert(self):
-        class FakeCursor:
-            def __init__(self):
-                self.calls = []
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-            def execute(self, sql, params):
-                self.calls.append((sql, params))
-
-        class FakeConn:
-            def __init__(self):
-                self.cur = FakeCursor()
-
-            def cursor(self):
-                return self.cur
-
-        conn = FakeConn()
+        conn = self.FakeConn()
         worker._replace_embedding(
             conn,
             version_id="v1",
