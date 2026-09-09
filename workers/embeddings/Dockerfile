@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     pip install --no-cache-dir \
       "psycopg[binary]>=3.2,<4" \
       "onnxruntime>=1.17,<2" \
-      "fastembed>=0.4,<1"
+      "fastembed>=0.8,<1"
 COPY --from=builder /dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl && \
     mkdir -p /var/lib/scos/embeddings && chown -R scos:scos /var/lib/scos

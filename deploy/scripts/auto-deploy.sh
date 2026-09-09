@@ -12,6 +12,10 @@
 # regardless of whether compose's own change detection would have caught it.
 # Keep FABRIC_SERVICES in sync with deploy/native/build.sh's SERVICES list.
 #
+# The BGE model overlay is opt-in through SCOS_MODEL_RUNTIME_ENABLED=true.
+# This keeps ordinary production deploys behavior-compatible until the live
+# host's model backend/profile has been explicitly provisioned.
+#
 # Safe to run frequently via a timer: exits immediately (before the lock)
 # when origin/main hasn't moved, and flock prevents overlapping runs if a
 # deploy is still in progress when the next tick fires.
@@ -19,7 +23,13 @@ set -euo pipefail
 
 REPO_DIR="${SCOS_REPO_DIR:-/opt/scos-memory-fabric}"
 LOCK_FILE="/tmp/scos-auto-deploy.lock"
+MODEL_RUNTIME_ENABLED="${SCOS_MODEL_RUNTIME_ENABLED:-false}"
+
 COMPOSE=(docker compose --env-file .env -f deploy/compose/docker-compose.yml)
+if [ "$MODEL_RUNTIME_ENABLED" = "true" ]; then
+  export COMPOSE_PROFILES="${SCOS_MODEL_PROFILES:-text-model}"
+  COMPOSE+=( -f deploy/compose/docker-compose.models.yml )
+fi
 
 FABRIC_SERVICES="agent-registry autonomous-control-plane backup-manager \
 code-intelligence compatibility-gateway context-optimisation credential-vault execution-proxy \
@@ -61,9 +71,16 @@ git merge --ff-only origin/main
 # shellcheck disable=SC2086
 "${COMPOSE[@]}" up -d --no-deps --force-recreate $FABRIC_SERVICES
 
+# model-runtime has its own image rather than the shared scos-fabric image.
+# Only touch it when the live deployment explicitly opted into the overlay.
+if [ "$MODEL_RUNTIME_ENABLED" = "true" ]; then
+  "${COMPOSE[@]}" up -d --force-recreate model-runtime
+fi
+
 # Second pass with normal (non-force) semantics so anything else declared in
-# the compose file -- workers, tunnel-client, postgres config changes --
-# also lands, without bouncing postgres on every deploy.
+# the active compose set -- workers, tunnel-client, postgres config changes,
+# and, when enabled, model profiles -- also lands without bouncing postgres
+# on every deploy.
 "${COMPOSE[@]}" up -d
 
 # Verify parity instead of trusting that force-recreate landed everywhere:
@@ -104,4 +121,34 @@ if [ -n "$DRIFTED" ]; then
   exit 1
 fi
 
-echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD), parity verified across$(printf ' %s' $FABRIC_SERVICES)"
+if [ "$MODEL_RUNTIME_ENABLED" = "true" ]; then
+  MODEL_RUNTIME_ID="$(${COMPOSE[@]} ps -q model-runtime)"
+  if [ -z "$MODEL_RUNTIME_ID" ]; then
+    echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime has no running container"
+    exit 1
+  fi
+
+  MODEL_RUNTIME_WAIT_SECONDS="${SCOS_MODEL_RUNTIME_DEPLOY_WAIT_SECONDS:-300}"
+  DEADLINE=$((SECONDS + MODEL_RUNTIME_WAIT_SECONDS))
+  while :; do
+    MODEL_RUNTIME_HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$MODEL_RUNTIME_ID")"
+    if [ "$MODEL_RUNTIME_HEALTH" = "healthy" ]; then
+      break
+    fi
+    if [ "$MODEL_RUNTIME_HEALTH" = "exited" ] || [ "$MODEL_RUNTIME_HEALTH" = "dead" ]; then
+      echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime state=$MODEL_RUNTIME_HEALTH"
+      exit 1
+    fi
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+      echo "$(date -Iseconds) deploy to $AFTER FAILED: model-runtime did not become healthy within ${MODEL_RUNTIME_WAIT_SECONDS}s (last=$MODEL_RUNTIME_HEALTH)"
+      exit 1
+    fi
+    sleep 5
+  done
+fi
+
+if [ "$MODEL_RUNTIME_ENABLED" = "true" ]; then
+  echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD), fabric parity verified and model-runtime healthy"
+else
+  echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD), parity verified across$(printf ' %s' $FABRIC_SERVICES)"
+fi
