@@ -76,8 +76,23 @@ jobs:
       - name: Validate auto-deploy shell syntax
         run: bash -n deploy/scripts/auto-deploy.sh
       - name: Validate merged Compose model overlay
+        env:
+          SCOS_INTERNAL_SERVICE_TOKEN: ci-internal-token
+          SCOS_CONTROL_PLANE_TOKEN: ci-control-token
+          SCOS_SECURITY_ISSUER_SECRET: ci-issuer-secret
+          POSTGRES_PASSWORD: ci-postgres-password
+          SCOS_DATABASE_URL: postgresql://scos:ci@postgres:5432/scos_memory?sslmode=require
+          SCOS_APP_PASSWORD: ci-app-password
+          SCOS_APP_DATABASE_URL: postgresql://scos_app:ci@postgres:5432/scos_memory?sslmode=require
+          SCOS_CREDENTIAL_VAULT_MASTER_KEY: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+          GRAPHIFY_WORKSPACE_HOST_PATH: /tmp
+          CONTROL_PLANE_API_KEY: ci-openai-control-key
+          CONTROL_PLANE_TUNNEL_ID: ci-tunnel-id
+          SCOS_GATEWAY_AUTHORIZATION: Bearer ci-gateway-token
+          SCOS_PUBLIC_GATEWAY_URL: https://example.invalid/mcp
+          SCOS_MODEL_PROFILES: text-model
         run: |
           docker compose \
             -f deploy/compose/docker-compose.yml \
             -f deploy/compose/docker-compose.models.yml \
-            config --no-interpolate >/dev/null
+            config >/dev/null
