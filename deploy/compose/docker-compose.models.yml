@@ -11,6 +11,29 @@
 # models at once are not part of the Raspberry Pi memory budget.
 
 services:
+  model-runtime-tls-certs:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - model-runtime-tls:/etc/scos/model-runtime-tls
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ -f /etc/scos/model-runtime-tls/tls.crt ] && [ -f /etc/scos/model-runtime-tls/tls.key ]; then
+          echo "model-runtime-tls-certs: existing certificate found"
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+          -keyout /etc/scos/model-runtime-tls/tls.key \
+          -out /etc/scos/model-runtime-tls/tls.crt \
+          -subj "/O=scos-model-runtime-dev" \
+          -addext "subjectAltName=DNS:model-runtime,DNS:localhost,IP:127.0.0.1"
+        chown 100:101 /etc/scos/model-runtime-tls/tls.key /etc/scos/model-runtime-tls/tls.crt
+        chmod 600 /etc/scos/model-runtime-tls/tls.key
+        chmod 644 /etc/scos/model-runtime-tls/tls.crt
+
   model-runtime:
     build:
       context: ../..
@@ -23,11 +46,10 @@ services:
       SCOS_INTERNAL_SERVICE_TOKEN: ${SCOS_INTERNAL_SERVICE_TOKEN:?SCOS_INTERNAL_SERVICE_TOKEN must be set}
       SCOS_CONTROL_PLANE_TOKEN: ${SCOS_CONTROL_PLANE_TOKEN:?SCOS_CONTROL_PLANE_TOKEN must be set}
       SCOS_SERVICE_IDENTITY: ${SCOS_SERVICE_IDENTITY_PREFIX:-scos-service}-model-runtime
-      # The runtime stays on the private compose/Tailscale fabric. Backend TEI
-      # services are not published. TLS can be enabled later with a certificate
-      # whose SAN includes model-runtime; the base development certificate does
-      # not yet include this new service name.
-      SCOS_TLS_REQUIRED: "false"
+      SCOS_TLS_REQUIRED: "true"
+      SCOS_TLS_CERT_FILE: /etc/scos/model-runtime-tls/tls.crt
+      SCOS_TLS_KEY_FILE: /etc/scos/model-runtime-tls/tls.key
+      SCOS_TLS_CA_FILE: /etc/scos/model-runtime-tls/tls.crt
       SCOS_MODEL_RUNTIME_HTTP_ADDR: ${SCOS_MODEL_RUNTIME_HTTP_ADDR:-:8103}
       SCOS_MODEL_RUNTIME_TIMEOUT_SECONDS: ${SCOS_MODEL_RUNTIME_TIMEOUT_SECONDS:-60}
 
@@ -47,10 +69,15 @@ services:
       SCOS_MODEL_CODE_REVISION: ${SCOS_MODEL_CODE_REVISION:-main}
       SCOS_MODEL_CODE_DIMENSIONS: ${SCOS_MODEL_CODE_DIMENSIONS:-1536}
       SCOS_MODEL_CODE_REQUIRED: ${SCOS_MODEL_CODE_REQUIRED:-false}
+    volumes:
+      - model-runtime-tls:/etc/scos/model-runtime-tls:ro
     expose:
       - "8103"
+    depends_on:
+      model-runtime-tls-certs:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8103/health/ready"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8103/health/ready"]
       interval: 30s
       timeout: 5s
       start_period: 10s
@@ -58,7 +85,8 @@ services:
 
   embeddings-worker:
     environment:
-      SCOS_MODEL_RUNTIME_URL: ${SCOS_MODEL_RUNTIME_URL:-http://model-runtime:8103}
+      SCOS_MODEL_RUNTIME_URL: ${SCOS_MODEL_RUNTIME_URL:-https://model-runtime:8103}
+      SCOS_MODEL_RUNTIME_CA_FILE: /etc/scos/model-runtime-tls/tls.crt
       SCOS_INTERNAL_SERVICE_TOKEN: ${SCOS_INTERNAL_SERVICE_TOKEN:?SCOS_INTERNAL_SERVICE_TOKEN must be set}
       SCOS_CONTROL_PLANE_TOKEN: ${SCOS_CONTROL_PLANE_TOKEN:?SCOS_CONTROL_PLANE_TOKEN must be set}
       SCOS_EMBED_MODEL: ${SCOS_MODEL_TEXT_MODEL:-BAAI/bge-m3}
@@ -67,6 +95,8 @@ services:
       # Remote BGE-M3 calls are heavier than the old 384-d local model, so use
       # a conservative write batch until deployed benchmarks justify more.
       SCOS_EMBEDDINGS_BATCH_SIZE: ${SCOS_EMBEDDINGS_BATCH_SIZE:-8}
+    volumes:
+      - model-runtime-tls:/etc/scos/model-runtime-tls:ro
     depends_on:
       model-runtime:
         condition: service_healthy
@@ -104,6 +134,7 @@ services:
       - "80"
 
 volumes:
+  model-runtime-tls:
   bge-m3-cache:
   bge-reranker-cache:
   bge-code-cache:
