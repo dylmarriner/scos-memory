@@ -12,7 +12,7 @@ from scos_embeddings import worker  # noqa: E402
 class VectorLiteralTests(unittest.TestCase):
     def test_vector_literal_format(self):
         lit = worker._vector_literal([1.5, -0.25, 3.0])
-        self.assertEqual(lit, "[1.500000,-0.250000,3.000000]")
+        self.assertEqual(lit, "[1.50000000,-0.25000000,3.00000000]")
 
     def test_content_hash_is_hash_of_source_content(self):
         h1 = worker._content_hash_for("exact source text")
@@ -79,8 +79,9 @@ class EmbedTextsTests(unittest.TestCase):
                     yield [float(i) for i in range(3)]
 
         with patch.object(worker, "MODEL_RUNTIME_URL", ""):
-            with patch.object(worker, "get_embedder", return_value=FakeEmbedder()):
-                vecs = worker.embed_texts(["a", "b"])
+            with patch.object(worker, "MODEL_DIMENSIONS", 3):
+                with patch.object(worker, "get_embedder", return_value=FakeEmbedder()):
+                    vecs = worker.embed_texts(["a", "b"])
         self.assertEqual(len(vecs), 2)
         self.assertEqual(len(vecs[0]), 3)
         self.assertEqual(type(vecs[0][0]), float)
@@ -92,8 +93,9 @@ class EmbedTextsTests(unittest.TestCase):
                     yield [0.1, 0.2, 0.3]
 
         with patch.object(worker, "MODEL_RUNTIME_URL", ""):
-            with patch.object(worker, "get_embedder", return_value=FakeEmbedder()):
-                vec = worker.embed_texts(["question"])
+            with patch.object(worker, "MODEL_DIMENSIONS", 3):
+                with patch.object(worker, "get_embedder", return_value=FakeEmbedder()):
+                    vec = worker.embed_texts(["question"])
         self.assertEqual(len(vec[0]), 3)
 
 
