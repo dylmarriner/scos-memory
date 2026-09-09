@@ -5,9 +5,11 @@ backfill inference can be supplied by the internal SCOS model-runtime service
 or, when that URL is unset, by a local FastEmbed model.
 
 The active vector space is explicit: model + revision + dimensions. Existing
-vectors from another space do not count as current and are replaced atomically
-when a memory version is re-embedded. The existing local cross-encoder rerank
-endpoint is retained as a compatibility/degraded-mode path.
+vectors from another space do not count as current. Because the current
+retrieval query predates per-space SQL filtering, this worker also removes
+stale memory-vector spaces before each backfill cycle so pgvector can never be
+asked to compare 384-d and 1024-d memory vectors during rollout. The existing
+local cross-encoder rerank endpoint is retained as a compatibility path.
 """
 
 from __future__ import annotations
@@ -67,8 +69,8 @@ MODEL_RUNTIME_TIMEOUT_SECONDS = float(
 )
 
 # Existing local cross-encoder compatibility path. The retrieval orchestrator
-# uses the dedicated BGE reranker through model-runtime when configured, but
-# this endpoint remains available so current callers are not regressed.
+# can move to the dedicated BGE reranker through model-runtime separately; this
+# endpoint remains available so current callers are not regressed.
 RERANK_MODEL_NAME = os.environ.get(
     "SCOS_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2"
 )
@@ -225,6 +227,30 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
     return out
 
 
+def _purge_stale_spaces(
+    conn: psycopg.Connection,
+    model: str,
+    revision: str,
+    dimensions: int,
+) -> int:
+    """Delete memory vectors outside the one active retrieval space.
+
+    This is deliberately global for memory_embeddings while the current
+    retrieval SQL has no model-space predicate. Once retrieval filters spaces
+    itself, this can be relaxed to retain multiple historical/experimental
+    spaces without risking cross-dimensional pgvector comparisons.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM memory_embeddings
+             WHERE model <> %s OR model_revision <> %s OR dimensions <> %s
+            """,
+            (model, revision, dimensions),
+        )
+        return int(cur.rowcount or 0)
+
+
 def _unembedded_batch(
     conn: psycopg.Connection,
     limit: int,
@@ -308,6 +334,15 @@ def _replace_embedding(
 
 def run_cycle(conn: psycopg.Connection) -> int:
     """Embed one batch of versions missing the active text model space."""
+    purged = _purge_stale_spaces(
+        conn,
+        MODEL_NAME,
+        MODEL_REV,
+        MODEL_DIMENSIONS,
+    )
+    if purged:
+        logger.info("removed %d stale memory embedding(s)", purged)
+
     batch = _unembedded_batch(
         conn,
         BATCH_SIZE,
@@ -316,9 +351,11 @@ def run_cycle(conn: psycopg.Connection) -> int:
         MODEL_DIMENSIONS,
     )
     if not batch:
+        conn.commit()
         return 0
     embeddings = embed_texts([row["content"] for row in batch])
     if embeddings is None:
+        conn.rollback()
         return 0
     written = 0
     for row, vec in zip(batch, embeddings):
