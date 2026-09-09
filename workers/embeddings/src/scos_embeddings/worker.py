@@ -42,12 +42,18 @@ BATCH_SIZE = int(os.environ.get("SCOS_EMBEDDINGS_BATCH_SIZE", "16"))
 HTTP_ADDR = os.environ.get("SCOS_EMBEDDINGS_HTTP_ADDR", ":8102")
 
 MODEL_NAME = os.environ.get("SCOS_EMBED_MODEL", "BAAI/bge-m3")
-MODEL_REV = os.environ.get("SCOS_EMBED_MODEL_REVISION", "main")
-MODEL_DIMENSIONS = int(os.environ.get("SCOS_EMBED_DIMENSIONS", "1024"))
+_legacy_bge_small = MODEL_NAME == "BAAI/bge-small-en-v1.5"
+MODEL_REV = os.environ.get(
+    "SCOS_EMBED_MODEL_REVISION", "local" if _legacy_bge_small else "main"
+)
+MODEL_DIMENSIONS = int(
+    os.environ.get("SCOS_EMBED_DIMENSIONS", "384" if _legacy_bge_small else "1024")
+)
 CACHE_DIR = os.environ.get("SCOS_EMBED_CACHE", "/var/lib/scos/embeddings")
 
 MODEL_RUNTIME_URL = os.environ.get("SCOS_MODEL_RUNTIME_URL", "").rstrip("/")
 MODEL_RUNTIME_TOKEN = os.environ.get("SCOS_INTERNAL_SERVICE_TOKEN", "")
+MODEL_RUNTIME_CONTROL_TOKEN = os.environ.get("SCOS_CONTROL_PLANE_TOKEN", "")
 MODEL_RUNTIME_CA_FILE = os.environ.get("SCOS_MODEL_RUNTIME_CA_FILE", "")
 MODEL_RUNTIME_TIMEOUT_SECONDS = float(
     os.environ.get("SCOS_MODEL_RUNTIME_TIMEOUT_SECONDS", "60")
@@ -116,6 +122,8 @@ def _runtime_embed_text(text: str) -> list[float]:
     )
     if MODEL_RUNTIME_TOKEN:
         req.add_header("Authorization", "Bearer " + MODEL_RUNTIME_TOKEN)
+    if MODEL_RUNTIME_CONTROL_TOKEN:
+        req.add_header("X-SCOS-Control-Plane-Token", MODEL_RUNTIME_CONTROL_TOKEN)
     try:
         with urlrequest.urlopen(
             req,
