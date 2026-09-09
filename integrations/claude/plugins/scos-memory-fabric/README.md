@@ -1,13 +1,10 @@
 # scos-memory-fabric (Claude Code plugin)
 
-Wires Claude Code to the SCOS Memory Fabric's `mcp-gateway` service
-(`services/mcp-gateway`, deployed at `https://100.93.75.87:8098/mcp` — see
-`docs/agent-connection-guide.md`) over the native `http` MCP transport. No
-local bridge script; the gateway serves the full governed tool surface (136
-tools incl. the code indexer). The internal cert is self-signed for
-127.0.0.1, so remote clients use `claude mcp add --transport http` with the
-bearer/tenant headers (see the connection guide) or the `tls-external/`
-Tailscale cert recipe.
+Wires Claude Code to a SCOS Memory Fabric `mcp-gateway` service over the
+native `http` MCP transport. No default URL is baked in — point `gateway_url`
+at any `mcp-gateway` deployment, self-hosted or otherwise. No local bridge
+script; the gateway serves the full governed tool surface (136 tools incl.
+the code indexer).
 
 Tools exposed once connected: the full gateway set, incl. `scos_recall`,
 `scos_status`, `scos_explain`, `scos_user_model`, `scos_memory_graph`,

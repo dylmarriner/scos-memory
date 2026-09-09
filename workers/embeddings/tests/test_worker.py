@@ -97,5 +97,29 @@ class EmbedTextsTests(unittest.TestCase):
         self.assertEqual(len(vec[0]), 3)
 
 
+class RerankCandidatesTests(unittest.TestCase):
+    def test_returns_none_when_disabled(self):
+        with patch.object(worker, "get_reranker", return_value=None):
+            self.assertIsNone(worker.rerank_candidates("q", ["a", "b"]))
+
+    def test_returns_none_for_empty_candidates(self):
+        class FakeReranker:
+            def rerank(self, query, candidates):
+                return []
+
+        with patch.object(worker, "get_reranker", return_value=FakeReranker()):
+            self.assertIsNone(worker.rerank_candidates("q", []))
+
+    def test_returns_float_scores_when_available(self):
+        class FakeReranker:
+            def rerank(self, query, candidates):
+                return [0.9, 0.1]
+
+        with patch.object(worker, "get_reranker", return_value=FakeReranker()):
+            scores = worker.rerank_candidates("q", ["a", "b"])
+            self.assertEqual(scores, [0.9, 0.1])
+            self.assertEqual(type(scores[0]), float)
+
+
 if __name__ == "__main__":
     unittest.main()

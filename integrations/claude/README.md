@@ -1,26 +1,29 @@
-# Claude Code + Claude Desktop integrations
+# Claude Code + Claude Cowork + Claude Desktop integrations
 
-Packaged installers for connecting Claude to the SCOS Memory Fabric's
+Packaged installers for connecting Claude to a SCOS Memory Fabric
 `mcp-gateway` service, instead of the manual `~/.claude.json` / `claude mcp
-add` steps in `docs/agent-connection-guide.md`. Both point at the same
-backend (`https://rabuntu.tail2c15c8.ts.net:8098/mcp` by default) and expose
-the same tools: `scos_recall`, `scos_status`, `scos_explain`,
-`scos_user_model`, `scos_memory_graph`, `scos_correct`, `scos_forget`.
+add` steps in `docs/agent-connection-guide.md`. None bakes in a default
+server — each is configured against whatever `mcp-gateway` deployment you
+point it at (self-hosted or otherwise) — and all three expose the same core
+tools: `scos_recall`, `scos_status`, `scos_explain`, `scos_user_model`,
+`scos_memory_graph`, `scos_correct`, `scos_forget`.
 
-| | Claude Code | Claude Desktop |
-|---|---|---|
-| Directory | `plugins/scos-memory-fabric/` | `desktop-extension/` |
-| Mechanism | Plugin, installed via this dir's `.claude-plugin/marketplace.json` | `.mcpb` bundle (Desktop Extension) |
-| Transport | Native `http` MCP transport, direct to `mcp-gateway` | Bundled local stdio↔HTTP relay (`server/index.js`), because Desktop only launches local stdio servers |
-| Secrets | `userConfig`, prompted on `/plugin install`, sensitive fields in OS keychain | `user_config`, prompted on `.mcpb` install, sensitive fields in OS keychain |
+| | Claude Code | Claude Cowork | Claude Desktop |
+|---|---|---|---|
+| Directory | `plugins/scos-memory-fabric/` | `plugins/scos-memory-fabric-cowork/` | `desktop-extension/` |
+| Mechanism | Plugin, installed via this dir's `.claude-plugin/marketplace.json` | Same marketplace, `.plugin` install | `.mcpb` bundle (Desktop Extension) |
+| Transport | Native `http` MCP transport, direct to `mcp-gateway` | Native `http` MCP transport, direct to `mcp-gateway` | Bundled local stdio↔HTTP relay (`server/index.js`), because Desktop only launches local stdio servers |
+| Extras | Slash commands + `SessionStart` hook + full skill (incl. graphify/code-intelligence tools) | Single skill, memory tools only — no commands/hooks (Cowork convention) | None — raw MCP connection |
+| Secrets | `userConfig`, prompted on `/plugin install`, sensitive fields in OS keychain | `userConfig`, prompted on install, sensitive fields in OS keychain | `user_config`, prompted on `.mcpb` install, sensitive fields in OS keychain |
 
-Both need the same four values, sourced from your own `~/.hermes/scos.env`
-per `docs/agent-connection-guide.md` §2: gateway URL (default is fine unless
-you're pointed at a different environment), bearer token, tenant ID,
-principal ID. Neither packaging embeds a token — see each subdirectory's
-README for exact install steps.
+All three need the same four values — gateway URL, bearer token, tenant ID,
+principal ID — from whoever runs your SCOS Memory Fabric deployment (see
+`docs/agent-connection-guide.md` §2 for what each one is). None of the
+packagings embed a token — see each subdirectory's README for exact install
+steps.
 
 - [`plugins/scos-memory-fabric/README.md`](plugins/scos-memory-fabric/README.md)
+- [`plugins/scos-memory-fabric-cowork/README.md`](plugins/scos-memory-fabric-cowork/README.md)
 - [`desktop-extension/README.md`](desktop-extension/README.md)
 
 ## Quick start
@@ -30,6 +33,10 @@ README for exact install steps.
 claude
 /plugin marketplace add ./integrations/claude
 /plugin install scos-memory-fabric@scos-fabric-tools
+
+# Claude Cowork
+# In the Cowork app: Add plugin from ./integrations/claude,
+# then install scos-memory-fabric-cowork
 
 # Claude Desktop
 npm install -g @anthropic-ai/mcpb

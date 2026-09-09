@@ -38,6 +38,11 @@ try:
 except Exception:  # pragma: no cover - import guard for test environments
     TextEmbedding = None
 
+try:
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+except Exception:  # pragma: no cover - import guard for test environments
+    TextCrossEncoder = None
+
 logger = logging.getLogger("scos_embeddings")
 
 # ── configuration ─────────────────────────────────────────────────────────
@@ -56,8 +61,16 @@ MODEL_NAME = os.environ.get("SCOS_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 CACHE_DIR = os.environ.get("SCOS_EMBED_CACHE", "/var/lib/scos/embeddings")
 MODEL_REV = os.environ.get("SCOS_EMBED_MODEL_REVISION", "local")
 
+# P1-A cross-encoder rerank stage (§ plan). A second small ONNX model,
+# same fastembed runtime already loaded above -- not a new service, not a
+# new dependency, consistent with the local-first embeddings philosophy.
+RERANK_MODEL_NAME = os.environ.get("SCOS_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+RERANK_CACHE_DIR = os.environ.get("SCOS_RERANK_CACHE", "/var/lib/scos/embeddings")
+
 _embedder: Any = None
 _embedder_lock = threading.Lock()
+_reranker: Any = None
+_reranker_lock = threading.Lock()
 
 
 def require_tls_database_url(value: str) -> None:
@@ -100,6 +113,37 @@ def get_embedder():
                 logger.warning("failed to load embedding model (%s); vector write disabled", exc)
                 _embedder = None
     return _embedder
+
+
+def get_reranker():
+    """Lazily load the fastembed cross-encoder (thread-safe). Returns None
+    if the optional dependency/model is unavailable, same degrade-gracefully
+    contract as get_embedder."""
+    global _reranker
+    if _reranker is not None:
+        return _reranker
+    if TextCrossEncoder is None:
+        logger.warning("fastembed cross-encoder not installed; rerank disabled")
+        return None
+    with _reranker_lock:
+        if _reranker is None:
+            try:
+                _reranker = TextCrossEncoder(RERANK_MODEL_NAME, cache_dir=RERANK_CACHE_DIR)
+                logger.info("rerank model loaded: %s", RERANK_MODEL_NAME)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("failed to load rerank model (%s); rerank disabled", exc)
+                _reranker = None
+    return _reranker
+
+
+def rerank_candidates(query: str, candidates: list[str]) -> list[float] | None:
+    """Scores each candidate's relevance to query. Returns None (not an
+    error) when the reranker is unavailable, so a caller's fallback path
+    (the existing linear boost) is a deliberate choice, never a silent skip."""
+    ce = get_reranker()
+    if ce is None or not candidates:
+        return None
+    return [float(s) for s in ce.rerank(query, candidates)]
 
 
 def embed_texts(texts: list[str]) -> list[list[float]] | None:
@@ -212,9 +256,14 @@ def _serve_http() -> None:
                 self.wfile.write(body)
 
             def do_POST(self):  # noqa: N802
-                if self.path != "/v1/embed":
+                if self.path == "/v1/embed":
+                    self._handle_embed()
+                elif self.path == "/v1/rerank":
+                    self._handle_rerank()
+                else:
                     self._write(404, {"error": "not found"})
-                    return
+
+            def _handle_embed(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length else b"{}"
                 try:
@@ -238,6 +287,28 @@ def _serve_http() -> None:
                     "dimensions": len(vec[0]),
                     "provider": "fastembed",
                 })
+
+            def _handle_rerank(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b"{}"
+                try:
+                    req = json.loads(body.decode("utf-8") or "{}")
+                except ValueError:
+                    self._write(400, {"error": "invalid json"})
+                    return
+                query = req.get("query") or ""
+                candidates = req.get("candidates")
+                if not isinstance(query, str) or not query.strip():
+                    self._write(400, {"error": "query is required"})
+                    return
+                if not isinstance(candidates, list) or not candidates or not all(isinstance(c, str) for c in candidates):
+                    self._write(400, {"error": "candidates must be a non-empty array of strings"})
+                    return
+                scores = rerank_candidates(query, candidates)
+                if scores is None:
+                    self._write(503, {"error": "reranker unavailable"})
+                    return
+                self._write(200, {"scores": scores, "model": RERANK_MODEL_NAME})
 
             def do_GET(self):  # noqa: N802
                 if self.path == "/health/live":

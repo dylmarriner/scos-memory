@@ -1,0 +1,41 @@
+{
+  "name": "scos-memory-fabric-cowork",
+  "displayName": "SCOS Memory Fabric (Cowork)",
+  "description": "Connects Claude Cowork to the SCOS Memory Fabric via the mcp-gateway service, exposing scos_recall, scos_status, scos_explain, scos_user_model, scos_memory_graph, scos_correct and scos_forget through a single scos-memory skill.",
+  "version": "1.0.0",
+  "author": {
+    "name": "SCOS Core Team"
+  },
+  "homepage": "https://github.com/dylmarriner/scos-memory/blob/main/docs/agent-connection-guide.md",
+  "license": "UNLICENSED",
+  "keywords": ["scos", "memory", "mcp-gateway", "cowork"],
+  "defaultEnabled": false,
+  "skills": ["./skills/"],
+  "userConfig": {
+    "gateway_url": {
+      "type": "string",
+      "title": "mcp-gateway URL",
+      "description": "The web address of your SCOS Memory Fabric server (the mcp-gateway service). Ask whoever set up your SCOS deployment for this URL.",
+      "required": true
+    },
+    "bearer_token": {
+      "type": "string",
+      "title": "SCOS bearer token",
+      "description": "Your login credential (like a password) for the SCOS server, proving Claude Cowork is allowed to connect. Get one from whoever administers your SCOS deployment.",
+      "sensitive": true,
+      "required": true
+    },
+    "tenant_id": {
+      "type": "string",
+      "title": "Tenant ID",
+      "description": "Identifies which organization's/workspace's data you're allowed to see on a shared SCOS server (like a company/workspace ID) — memories are isolated per tenant so one tenant can never read another's. Get it from whoever administers your SCOS deployment; it's not something you choose yourself.",
+      "required": true
+    },
+    "principal_id": {
+      "type": "string",
+      "title": "Principal ID",
+      "description": "Identifies you (or this agent identity) within the tenant above — like a username, used so memories can be attributed to a specific caller. Get it from whoever administers your SCOS deployment.",
+      "required": true
+    }
+  }
+}
