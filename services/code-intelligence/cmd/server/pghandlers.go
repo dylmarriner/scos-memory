@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -236,6 +237,13 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "index snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	degradedModels := []string{}
+	if codeModelRuntimeConfigured() {
+		if err := s.embedCodeSnapshot(r.Context(), tenant, snapshotID); err != nil {
+			log.Printf("code embedding backfill degraded for snapshot %s: %v", snapshotID, err)
+			degradedModels = append(degradedModels, "code_embedding")
+		}
+	}
 	// The diff against whatever was previously active for this branch is
 	// returned inline rather than requiring a second round-trip: it's the
 	// cheapest possible way for a caller to confirm an incremental index
@@ -249,9 +257,10 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{
-		"snapshot_id": snapshotID,
-		"file_count":  len(files),
-		"diff":        diff,
+		"snapshot_id":     snapshotID,
+		"file_count":      len(files),
+		"diff":            diff,
+		"degraded_models": degradedModels,
 	})
 }
 
@@ -341,6 +350,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		RepositoryID string `json:"repository_id"`
 		Branch       string `json:"branch"`
 		Query        string `json:"query"`
+		MaxResults   int    `json:"max_results,omitempty"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
 	dec.DisallowUnknownFields()
@@ -351,6 +361,13 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	if req.RepositoryID == "" || req.Branch == "" || req.Query == "" {
 		http.Error(w, "repository_id, branch and query are required", http.StatusBadRequest)
 		return
+	}
+	limit := req.MaxResults
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
 	}
 
 	// The tenant scope always comes from the authenticated caller, never a
@@ -372,25 +389,103 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, req.Query)
+	exact, err := s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, req.Query)
 	if err != nil {
 		http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Lexical fallback only, never a blend: an exact path/FQN match is
-	// unambiguous, so a caller who typed the identifier they meant should
-	// never see it buried under ranked full-text guesses.
-	if len(results) == 0 {
-		results, err = s.pgStore.QueryLexical(r.Context(), req.RepositoryID, req.Branch, req.Query, 20)
-		if err != nil {
-			http.Error(w, "lexical query: "+err.Error(), http.StatusInternalServerError)
-			return
+	// Exact path/FQN matches are precision anchors. Never bury one under
+	// learned or lexical ranking just because a model happens to like another
+	// symbol more.
+	if len(exact) > 0 {
+		if len(exact) > limit {
+			exact = exact[:limit]
+		}
+		writeJSON(w, map[string]any{
+			"results":         exact,
+			"retrieval_mode":  "exact",
+			"degraded_models": []string{},
+		})
+		return
+	}
+
+	lexical, err := s.pgStore.QueryLexical(r.Context(), req.RepositoryID, req.Branch, req.Query, limit)
+	if err != nil {
+		http.Error(w, "lexical query: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	lexicalHybrid := lexicalCodeResults(lexical)
+	dense := []codeHybridResult{}
+	degradedModels := []string{}
+	mode := "lexical"
+	var codeSpace any
+
+	if codeModelRuntimeConfigured() {
+		space, spaceErr := activeCodeEmbeddingSpaceFromEnvironment()
+		if spaceErr != nil {
+			log.Printf("code embedding space invalid: %v", spaceErr)
+			degradedModels = append(degradedModels, "code_embedding")
+		} else {
+			codeSpace = space
+			if err := s.ensureActiveCodeEmbeddings(r.Context(), tenant, req.RepositoryID, req.Branch); err != nil {
+				log.Printf("code embedding backfill degraded for %s/%s: %v", req.RepositoryID, req.Branch, err)
+				degradedModels = append(degradedModels, "code_embedding")
+			} else if dense, err = s.queryDenseCode(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query, limit); err != nil {
+				log.Printf("dense code query degraded: %v", err)
+				degradedModels = append(degradedModels, "code_embedding")
+				dense = []codeHybridResult{}
+			} else {
+				mode = "hybrid"
+			}
 		}
 	}
-	if results == nil {
-		results = []PGSymbolVersion{}
+
+	seedIDs := make([]string, 0, len(lexicalHybrid)+len(dense))
+	seenSeeds := make(map[string]bool, cap(seedIDs))
+	for _, item := range append(append([]codeHybridResult(nil), lexicalHybrid...), dense...) {
+		if item.SymbolVersionID != "" && !seenSeeds[item.SymbolVersionID] {
+			seenSeeds[item.SymbolVersionID] = true
+			seedIDs = append(seedIDs, item.SymbolVersionID)
+		}
 	}
-	writeJSON(w, map[string]any{"results": results})
+	structural := []codeHybridResult{}
+	degradedSources := []string{}
+	if len(seedIDs) > 0 {
+		var ranks map[string]float64
+		structural, ranks, err = s.pgStore.QueryStructuralCandidates(r.Context(), req.RepositoryID, req.Branch, seedIDs, 2, limit)
+		if err != nil {
+			log.Printf("structural code retrieval degraded: %v", err)
+			degradedSources = append(degradedSources, "structural_graph")
+			structural = []codeHybridResult{}
+		} else {
+			for i := range lexicalHybrid {
+				lexicalHybrid[i].Centrality = ranks[lexicalHybrid[i].SymbolVersionID]
+			}
+			for i := range dense {
+				dense[i].Centrality = ranks[dense[i].SymbolVersionID]
+			}
+		}
+	}
+
+	results := fuseCodeSignals(lexicalHybrid, dense, structural, 60)
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	signals := []string{"lexical"}
+	if len(dense) > 0 {
+		signals = append(signals, "dense")
+	}
+	if len(structural) > 0 {
+		signals = append(signals, "structural", "pagerank")
+	}
+	writeJSON(w, map[string]any{
+		"results":          results,
+		"retrieval_mode":   mode,
+		"signals":          signals,
+		"degraded_models":  degradedModels,
+		"degraded_sources": degradedSources,
+		"embedding_space":  codeSpace,
+	})
 }
 
 func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {

@@ -4,12 +4,10 @@ The worker owns persistence of the active text embedding space. Query and
 backfill inference can be supplied by the internal SCOS model-runtime service
 or, when that URL is unset, by a local FastEmbed model.
 
-The active vector space is explicit: model + revision + dimensions. Existing
-vectors from another space do not count as current. Because the current
-retrieval query predates per-space SQL filtering, this worker also removes
-stale memory-vector spaces before each backfill cycle so pgvector can never be
-asked to compare 384-d and 1024-d memory vectors during rollout. The existing
-local cross-encoder rerank endpoint is retained as a compatibility path.
+The active vector space is explicit: role + provider + model + revision +
+dimensions + generation. Historical spaces are retained; retrieval selects one
+exact space before any pgvector distance operation. The existing local
+cross-encoder rerank endpoint is retained as a compatibility path.
 """
 
 from __future__ import annotations
@@ -58,6 +56,7 @@ MODEL_REV = os.environ.get(
 MODEL_DIMENSIONS = int(
     os.environ.get("SCOS_EMBED_DIMENSIONS", "384" if _legacy_bge_small else "1024")
 )
+MODEL_GENERATION = int(os.environ.get("SCOS_EMBED_GENERATION", "1"))
 CACHE_DIR = os.environ.get("SCOS_EMBED_CACHE", "/var/lib/scos/embeddings")
 
 MODEL_RUNTIME_URL = os.environ.get("SCOS_MODEL_RUNTIME_URL", "").rstrip("/")
@@ -227,38 +226,50 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
     return out
 
 
-def _purge_stale_spaces(
+def _purge_stale_spaces(*_args, **_kwargs) -> int:
+    """Compatibility guard: explicit spaces make global purges unnecessary."""
+    return 0
+
+
+def _embedding_provider() -> str:
+    return "scos-model-runtime" if MODEL_RUNTIME_URL else "fastembed"
+
+
+def _ensure_embedding_space(
     conn: psycopg.Connection,
+    provider: str,
     model: str,
     revision: str,
     dimensions: int,
-) -> int:
-    """Delete memory vectors outside the one active retrieval space.
-
-    This is deliberately global for memory_embeddings while the current
-    retrieval SQL has no model-space predicate. Once retrieval filters spaces
-    itself, this can be relaxed to retain multiple historical/experimental
-    spaces without risking cross-dimensional pgvector comparisons.
-    """
+    generation: int,
+) -> str:
+    """Resolve the immutable text embedding-space identity used by this cycle."""
+    if not provider or not model or not revision or dimensions <= 0 or generation <= 0:
+        raise ValueError("embedding space identity is incomplete")
     with conn.cursor() as cur:
         cur.execute(
             """
-            DELETE FROM memory_embeddings
-             WHERE model <> %s OR model_revision <> %s OR dimensions <> %s
+            INSERT INTO embedding_spaces
+                (role, provider, model, model_revision, dimensions, generation)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (role, provider, model, model_revision, dimensions, generation)
+            DO UPDATE SET provider = EXCLUDED.provider
+            RETURNING id::text
             """,
-            (model, revision, dimensions),
+            ("text", provider, model, revision, dimensions, generation),
         )
-        return int(cur.rowcount or 0)
+        row = cur.fetchone()
+    if not row or not row[0]:
+        raise RuntimeError("embedding space could not be resolved")
+    return str(row[0])
 
 
 def _unembedded_batch(
     conn: psycopg.Connection,
     limit: int,
-    model: str,
-    revision: str,
-    dimensions: int,
+    space_id: str,
 ) -> list[dict[str, Any]]:
-    """Return memory versions missing the active model space."""
+    """Return memory versions missing the exact active embedding space."""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -267,16 +278,14 @@ def _unembedded_batch(
             WHERE NOT EXISTS (
                 SELECT 1 FROM memory_embeddings me
                 WHERE me.memory_version_id = mv.id
-                  AND me.model = %s
-                  AND me.model_revision = %s
-                  AND me.dimensions = %s
+                  AND me.embedding_space_id = %s::uuid
                   AND me.chunk_number = 0
                   AND me.embedding IS NOT NULL
             )
             ORDER BY mv.created_at ASC
             LIMIT %s
             """,
-            (model, revision, dimensions, limit),
+            (space_id, limit),
         )
         return cur.fetchall()
 
@@ -294,35 +303,33 @@ def _replace_embedding(
     version_id: str,
     content: str,
     embedding: list[float],
+    space_id: str,
+    provider: str,
     model: str,
     revision: str,
 ) -> None:
-    """Replace stale vector spaces for one memory version atomically."""
+    """Upsert one projection without deleting any historical embedding spaces."""
     dimensions = len(embedding)
     with conn.cursor() as cur:
         cur.execute(
             """
-            DELETE FROM memory_embeddings
-             WHERE memory_version_id = %s
-               AND (model <> %s OR model_revision <> %s OR dimensions <> %s)
-            """,
-            (version_id, model, revision, dimensions),
-        )
-        cur.execute(
-            """
             INSERT INTO memory_embeddings
-                (memory_version_id, provider, model, model_revision, dimensions,
-                 chunk_number, chunk_content_hash, embedding)
-            VALUES (%s, %s, %s, %s, %s, 0, %s, %s::vector)
-            ON CONFLICT (memory_version_id, model, model_revision, chunk_number)
+                (memory_version_id, embedding_space_id, provider, model, model_revision,
+                 dimensions, chunk_number, chunk_content_hash, embedding)
+            VALUES (%s, %s::uuid, %s, %s, %s, %s, 0, %s, %s::vector)
+            ON CONFLICT (memory_version_id, embedding_space_id, chunk_number)
             DO UPDATE SET embedding = EXCLUDED.embedding,
+                          provider = EXCLUDED.provider,
+                          model = EXCLUDED.model,
+                          model_revision = EXCLUDED.model_revision,
                           dimensions = EXCLUDED.dimensions,
                           chunk_content_hash = EXCLUDED.chunk_content_hash,
                           created_at = now()
             """,
             (
                 version_id,
-                "scos-model-runtime" if MODEL_RUNTIME_URL else "fastembed",
+                space_id,
+                provider,
                 model,
                 revision,
                 dimensions,
@@ -333,30 +340,26 @@ def _replace_embedding(
 
 
 def run_cycle(conn: psycopg.Connection) -> int:
-    """Embed one batch of versions missing the active text model space."""
-    purged = _purge_stale_spaces(
+    """Embed one batch of versions missing the active explicit text space."""
+    provider = _embedding_provider()
+    space_id = _ensure_embedding_space(
         conn,
-        MODEL_NAME,
-        MODEL_REV,
-        MODEL_DIMENSIONS,
+        provider=provider,
+        model=MODEL_NAME,
+        revision=MODEL_REV,
+        dimensions=MODEL_DIMENSIONS,
+        generation=MODEL_GENERATION,
     )
-    if purged:
-        logger.info("removed %d stale memory embedding(s)", purged)
-
-    batch = _unembedded_batch(
-        conn,
-        BATCH_SIZE,
-        MODEL_NAME,
-        MODEL_REV,
-        MODEL_DIMENSIONS,
-    )
+    batch = _unembedded_batch(conn, BATCH_SIZE, space_id)
     if not batch:
         conn.commit()
         return 0
+
     embeddings = embed_texts([row["content"] for row in batch])
     if embeddings is None:
         conn.rollback()
         return 0
+
     written = 0
     for row, vec in zip(batch, embeddings):
         if len(vec) != MODEL_DIMENSIONS:
@@ -366,6 +369,8 @@ def run_cycle(conn: psycopg.Connection) -> int:
             version_id=row["id"],
             content=row["content"],
             embedding=vec,
+            space_id=space_id,
+            provider=provider,
             model=MODEL_NAME,
             revision=MODEL_REV,
         )
@@ -505,6 +510,8 @@ def main() -> None:
     require_tls_database_url(DATABASE_URL)
     if MODEL_DIMENSIONS <= 0:
         raise SystemExit("SCOS_EMBED_DIMENSIONS must be positive")
+    if MODEL_GENERATION <= 0:
+        raise SystemExit("SCOS_EMBED_GENERATION must be positive")
 
     if MODEL_RUNTIME_URL:
         logger.info(

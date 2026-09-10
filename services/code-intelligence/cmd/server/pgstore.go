@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -35,6 +36,53 @@ func decodeCalledNames(raw string) []string {
 		return nil
 	}
 	return names
+}
+
+func sourceLineRange(content string, startLine, endLine int) string {
+	if startLine < 1 || endLine < startLine {
+		return ""
+	}
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	if startLine > len(lines) {
+		return ""
+	}
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+	return strings.TrimSuffix(strings.Join(lines[startLine-1:endLine], "\n"), "\n")
+}
+
+func sourceTextForRange(content, rangeText string) string {
+	parts := strings.SplitN(strings.TrimSpace(rangeText), "-", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	startLine, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return ""
+	}
+	endLine, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return ""
+	}
+	return sourceLineRange(content, startLine, endLine)
+}
+
+func insertCodeChunkLocked(ctx context.Context, tx *sql.Tx, symbolVersionID, content, path, rangeText string) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO code_chunks (symbol_version_id, content, path, range, content_hash)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5)
+		ON CONFLICT (symbol_version_id) DO UPDATE
+		SET content = EXCLUDED.content, path = EXCLUDED.path, range = EXCLUDED.range, content_hash = EXCLUDED.content_hash`,
+		symbolVersionID, content, path, rangeText, codeDocumentHash(content)); err != nil {
+		return fmt.Errorf("persist code chunk: %w", err)
+	}
+	return nil
 }
 
 // pgCodeStore is the durable, snapshot-based code-intelligence persistence
@@ -313,11 +361,16 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		repositoryID, f.ContentHash, f.Language, snapshotID).Scan(&symbolID); err != nil {
 		return nil, fmt.Errorf("upsert symbol identity: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	var fileSymbolVersionID string
+	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO code_symbol_versions (symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, content_hash, confidence_class, extractor)
-		VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $4, 'file', $5, 'heuristic', 'path-convention')`,
-		symbolID, snapshotID, fileID, f.Path, f.ContentHash); err != nil {
+		VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $4, 'file', $5, 'heuristic', 'path-convention')
+		RETURNING id`,
+		symbolID, snapshotID, fileID, f.Path, f.ContentHash).Scan(&fileSymbolVersionID); err != nil {
 		return nil, fmt.Errorf("create symbol version: %w", err)
+	}
+	if err := insertCodeChunkLocked(ctx, tx, fileSymbolVersionID, f.Content, f.Path, ""); err != nil {
+		return nil, err
 	}
 
 	if parentSnapshotID != "" {
@@ -371,26 +424,28 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 // had been re-parsed.
 func (s *pgCodeStore) copyDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, fileID, parentFileVersionID string) ([]indexedDecl, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT symbol_id, fully_qualified_name, path, kind, range, signature, content_hash,
-		       doc_comment, confidence_class, extractor, COALESCE(scope, ''), called_names
-		FROM code_symbol_versions
-		WHERE file_version_id = $1 AND kind != 'file'`, parentFileVersionID)
+		SELECT sv.symbol_id, sv.fully_qualified_name, sv.path, sv.kind, sv.range, sv.signature, sv.content_hash,
+		       sv.doc_comment, sv.confidence_class, sv.extractor, COALESCE(sv.scope, ''), sv.called_names,
+		       COALESCE(cc.content, '')
+		FROM code_symbol_versions sv
+		LEFT JOIN code_chunks cc ON cc.symbol_version_id = sv.id
+		WHERE sv.file_version_id = $1 AND sv.kind != 'file'`, parentFileVersionID)
 	if err != nil {
 		return nil, fmt.Errorf("load parent declarations: %w", err)
 	}
 	defer rows.Close()
 
 	type parentDecl struct {
-		symbolID, fqn, path, kind, rng, signature, contentHash, docComment, confidenceClass, extractor, scope string
-		calledNamesRaw                                                                                        sql.NullString
-		calledNames                                                                                           []string
+		symbolID, fqn, path, kind, rng, signature, contentHash, docComment, confidenceClass, extractor, scope, chunkContent string
+		calledNamesRaw                                                                                                      sql.NullString
+		calledNames                                                                                                         []string
 	}
 	var parents []parentDecl
 	for rows.Next() {
 		var d parentDecl
 		var rng, signature, docComment sql.NullString
 		if err := rows.Scan(&d.symbolID, &d.fqn, &d.path, &d.kind, &rng, &signature, &d.contentHash,
-			&docComment, &d.confidenceClass, &d.extractor, &d.scope, &d.calledNamesRaw); err != nil {
+			&docComment, &d.confidenceClass, &d.extractor, &d.scope, &d.calledNamesRaw, &d.chunkContent); err != nil {
 			return nil, fmt.Errorf("scan parent declaration: %w", err)
 		}
 		d.rng, d.signature, d.docComment = rng.String, signature.String, docComment.String
@@ -412,6 +467,9 @@ func (s *pgCodeStore) copyDeclarationsLocked(ctx context.Context, tx *sql.Tx, sn
 			d.symbolID, snapshotID, fileID, d.fqn, d.path, d.kind, d.rng, d.signature, d.contentHash,
 			d.docComment, d.confidenceClass, d.extractor, d.scope, encodeCalledNames(d.calledNames)).Scan(&symbolVersionID); err != nil {
 			return nil, fmt.Errorf("copy declaration version for %s: %w", d.fqn, err)
+		}
+		if err := insertCodeChunkLocked(ctx, tx, symbolVersionID, d.chunkContent, d.path, d.rng); err != nil {
+			return nil, err
 		}
 		name := d.fqn
 		if idx := strings.LastIndex(d.fqn, "."); idx >= 0 {
@@ -466,6 +524,13 @@ func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx 
 			symbolID, snapshotID, fileID, symbol.FullyQualifiedName, symbol.Path, symbol.Kind, symbol.Range, symbol.Signature, symbol.ContentHash, extractor, module, encodeCalledNames(symbol.CalledNames)).Scan(&symbolVersionID); err != nil {
 			return nil, fmt.Errorf("insert %s version: %w", symbol.FullyQualifiedName, err)
 		}
+		chunkContent := sourceTextForRange(f.Content, symbol.Range)
+		if chunkContent == "" {
+			chunkContent = symbol.Signature
+		}
+		if err := insertCodeChunkLocked(ctx, tx, symbolVersionID, chunkContent, symbol.Path, symbol.Range); err != nil {
+			return nil, err
+		}
 		out = append(out, indexedDecl{
 			SymbolID:    symbolID,
 			SymbolVerID: symbolVersionID,
@@ -513,6 +578,13 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 			RETURNING id`,
 			symbolID, snapshotID, fileID, d.FullyQualifiedName(pkgName), f.Path, d.Kind, rangeText, d.Signature, d.ContentHash, d.DocComment, pkgName, encodeCalledNames(d.CalledNames)).Scan(&symbolVersionID); err != nil {
 			return nil, fmt.Errorf("create go declaration version for %s: %w", d.Name, err)
+		}
+		chunkContent := sourceLineRange(f.Content, d.StartLine, d.EndLine)
+		if chunkContent == "" {
+			chunkContent = d.Signature
+		}
+		if err := insertCodeChunkLocked(ctx, tx, symbolVersionID, chunkContent, f.Path, rangeText); err != nil {
+			return nil, err
 		}
 		out = append(out, indexedDecl{
 			SymbolID:    symbolID,

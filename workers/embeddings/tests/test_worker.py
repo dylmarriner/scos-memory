@@ -40,8 +40,53 @@ class TLSURLTests(unittest.TestCase):
             )
 
 
+class EmbeddingSpaceTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchone(self):
+            return ("space-1",)
+
+    class FakeConn:
+        def __init__(self):
+            self.cur = EmbeddingSpaceTests.FakeCursor()
+
+        def cursor(self, row_factory=None):
+            return self.cur
+
+    def test_ensure_embedding_space_uses_full_identity(self):
+        conn = self.FakeConn()
+        space_id = worker._ensure_embedding_space(
+            conn,
+            provider="scos-model-runtime",
+            model="BAAI/bge-m3",
+            revision="rev-a",
+            dimensions=1024,
+            generation=2,
+        )
+        self.assertEqual(space_id, "space-1")
+        sql, params = conn.cur.calls[0]
+        self.assertIn("INSERT INTO embedding_spaces", sql)
+        self.assertIn("generation", sql)
+        self.assertIn("RETURNING id::text", sql)
+        self.assertEqual(
+            params,
+            ("text", "scos-model-runtime", "BAAI/bge-m3", "rev-a", 1024, 2),
+        )
+
+
 class RemainingBatchTests(unittest.TestCase):
-    def test_unembedded_query_requires_current_model_space(self):
+    def test_unembedded_query_requires_exact_space_id(self):
         class FakeConn:
             def cursor(self, row_factory=None):
                 return self
@@ -60,14 +105,11 @@ class RemainingBatchTests(unittest.TestCase):
                 return [{"id": "1", "content": "x"}]
 
         conn = FakeConn()
-        rows = worker._unembedded_batch(
-            conn, 10, "BAAI/bge-m3", "rev-a", 1024
-        )
+        rows = worker._unembedded_batch(conn, 10, "space-1")
         self.assertEqual(len(rows), 1)
-        self.assertIn("me.model = %s", conn._sql)
-        self.assertIn("me.model_revision = %s", conn._sql)
-        self.assertIn("me.dimensions = %s", conn._sql)
-        self.assertEqual(conn._params, ("BAAI/bge-m3", "rev-a", 1024, 10))
+        self.assertIn("me.embedding_space_id = %s::uuid", conn._sql)
+        self.assertNotIn("me.model = %s", conn._sql)
+        self.assertEqual(conn._params, ("space-1", 10))
 
 
 class EmbedTextsTests(unittest.TestCase):
@@ -116,9 +158,8 @@ class EmbedTextsTests(unittest.TestCase):
 
 class ReplacementTests(unittest.TestCase):
     class FakeCursor:
-        def __init__(self, rowcount=0):
+        def __init__(self):
             self.calls = []
-            self.rowcount = rowcount
 
         def __enter__(self):
             return self
@@ -130,39 +171,57 @@ class ReplacementTests(unittest.TestCase):
             self.calls.append((sql, params))
 
     class FakeConn:
-        def __init__(self, rowcount=0):
-            self.cur = ReplacementTests.FakeCursor(rowcount=rowcount)
+        def __init__(self):
+            self.cur = ReplacementTests.FakeCursor()
 
         def cursor(self, row_factory=None):
             return self.cur
 
-    def test_purge_removes_every_non_active_space(self):
-        conn = self.FakeConn(rowcount=4)
-        removed = worker._purge_stale_spaces(
-            conn, "BAAI/bge-m3", "rev-a", 1024
-        )
-        self.assertEqual(removed, 4)
-        self.assertEqual(len(conn.cur.calls), 1)
-        sql, params = conn.cur.calls[0]
-        self.assertIn("DELETE FROM memory_embeddings", sql)
-        self.assertIn("model <> %s", sql)
-        self.assertIn("model_revision <> %s", sql)
-        self.assertIn("dimensions <> %s", sql)
-        self.assertEqual(params, ("BAAI/bge-m3", "rev-a", 1024))
-
-    def test_replace_embedding_deletes_stale_spaces_before_insert(self):
+    def test_replace_embedding_keeps_other_spaces_and_writes_space_id(self):
         conn = self.FakeConn()
         worker._replace_embedding(
             conn,
             version_id="v1",
             content="source content",
             embedding=[0.1, 0.2, 0.3],
+            space_id="space-1",
+            provider="scos-model-runtime",
             model="BAAI/bge-m3",
             revision="rev-a",
         )
-        self.assertEqual(len(conn.cur.calls), 2)
-        self.assertIn("DELETE FROM memory_embeddings", conn.cur.calls[0][0])
-        self.assertIn("INSERT INTO memory_embeddings", conn.cur.calls[1][0])
+        self.assertEqual(len(conn.cur.calls), 1)
+        sql, params = conn.cur.calls[0]
+        self.assertNotIn("DELETE FROM memory_embeddings", sql)
+        self.assertIn("embedding_space_id", sql)
+        self.assertIn(
+            "ON CONFLICT (memory_version_id, embedding_space_id, chunk_number)", sql
+        )
+        self.assertIn("space-1", params)
+
+
+class RunCycleTests(unittest.TestCase):
+    class FakeConn:
+        def __init__(self):
+            self.commits = 0
+            self.rollbacks = 0
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    def test_cycle_resolves_space_once_and_does_not_globally_purge_history(self):
+        conn = self.FakeConn()
+        with patch.object(worker, "_ensure_embedding_space", return_value="space-1") as ensure:
+            with patch.object(worker, "_unembedded_batch", return_value=[]) as batch:
+                with patch.object(worker, "_purge_stale_spaces", return_value=99) as purge:
+                    written = worker.run_cycle(conn)
+        self.assertEqual(written, 0)
+        ensure.assert_called_once()
+        batch.assert_called_once_with(conn, worker.BATCH_SIZE, "space-1")
+        purge.assert_not_called()
+        self.assertEqual(conn.commits, 1)
 
 
 class RerankCandidatesTests(unittest.TestCase):

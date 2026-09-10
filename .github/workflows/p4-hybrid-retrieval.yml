@@ -1,0 +1,221 @@
+name: P4 Hybrid Retrieval
+
+on:
+  pull_request:
+    paths:
+      - "database/migrations/**"
+      - "services/retrieval-orchestrator/**"
+      - "services/code-intelligence/**"
+      - "services/mcp-gateway/**"
+      - "workers/embeddings/**"
+      - "services/model-runtime/**"
+      - "deploy/compose/docker-compose.models.yml"
+      - "deploy/scripts/auto-deploy.sh"
+      - ".env.example"
+      - ".github/workflows/p4-hybrid-retrieval.yml"
+      - "benchmarks/p4/**"
+      - "docs/SCOS_P0_P8_ROADMAP.md"
+      - "docs/model-runtime.md"
+  push:
+    branches:
+      - "feat/p4-hybrid-retrieval"
+      - "main"
+    paths:
+      - "database/migrations/**"
+      - "services/retrieval-orchestrator/**"
+      - "services/code-intelligence/**"
+      - "services/mcp-gateway/**"
+      - "workers/embeddings/**"
+      - "services/model-runtime/**"
+      - "deploy/compose/docker-compose.models.yml"
+      - "deploy/scripts/auto-deploy.sh"
+      - ".env.example"
+      - ".github/workflows/p4-hybrid-retrieval.yml"
+      - "benchmarks/p4/**"
+      - "docs/SCOS_P0_P8_ROADMAP.md"
+      - "docs/model-runtime.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p4-hybrid-retrieval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  schema:
+    name: Embedding-space schema contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Run P4 migration contract
+        run: go test -count=1 ./database/migrations
+
+  retrieval:
+    name: Retrieval orchestrator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/retrieval-orchestrator)
+          if [ -n "$diff" ]; then echo "$diff"; exit 1; fi
+      - name: Vet
+        run: go vet ./services/retrieval-orchestrator/cmd/server
+      - name: Test
+        run: go test -count=1 ./services/retrieval-orchestrator/cmd/server
+
+  code-intelligence:
+    name: Code intelligence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/code-intelligence)
+          if [ -n "$diff" ]; then echo "$diff"; exit 1; fi
+      - name: Vet
+        run: go vet ./services/code-intelligence/cmd/server
+      - name: Test
+        run: go test -count=1 ./services/code-intelligence/cmd/server
+
+  mcp-gateway:
+    name: MCP gateway P4 exposure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/mcp-gateway)
+          if [ -n "$diff" ]; then echo "$diff"; exit 1; fi
+      - name: Vet
+        run: go vet ./services/mcp-gateway/cmd/server
+      - name: Test
+        run: go test -count=1 ./services/mcp-gateway/cmd/server
+
+  postgres-integration:
+    name: PostgreSQL + pgvector integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: scos
+          POSTGRES_PASSWORD: scos-ci
+          POSTGRES_DB: scos_memory
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U scos -d scos_memory"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      PGPASSWORD: scos-ci
+      SCOS_CODE_STORE_TEST_DSN: postgresql://scos:scos-ci@127.0.0.1:5432/scos_memory?sslmode=disable
+      SCOS_RETRIEVAL_TEST_DSN: postgresql://scos:scos-ci@127.0.0.1:5432/scos_memory?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
+      - name: Apply all migrations from zero
+        run: |
+          for migration in database/migrations/*.sql; do
+            psql -h 127.0.0.1 -U scos -d scos_memory -v ON_ERROR_STOP=1 -f "$migration"
+          done
+      - name: Run code-intelligence integration tests
+        run: go test -count=1 ./services/code-intelligence/cmd/server
+      - name: Run retrieval integration tests
+        run: go test -count=1 ./services/retrieval-orchestrator/cmd/server
+
+  embeddings-worker:
+    name: Embeddings worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install worker dependencies
+        run: python -m pip install -e workers/embeddings
+      - name: Test
+        run: python -m unittest discover -s workers/embeddings/tests -p 'test_*.py' -v
+
+  model-runtime:
+    name: Model runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/model-runtime)
+          if [ -n "$diff" ]; then echo "$diff"; exit 1; fi
+      - name: Vet
+        run: go vet ./services/model-runtime/cmd/server
+      - name: Test
+        run: go test -count=1 ./services/model-runtime/cmd/server
+
+  benchmark-fixture:
+    name: P0/P4 benchmark fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Validate frozen P4 fixture
+        run: python -m unittest benchmarks.p4.test_fixture -v
+
+  hosted-deployment:
+    name: Hosted model-overlay syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate auto-deploy shell syntax
+        run: bash -n deploy/scripts/auto-deploy.sh
+      - name: Validate all P4 model profiles together
+        env:
+          COMPOSE_PROFILES: text-model,rerank-model,code-model
+          SCOS_MODEL_RUNTIME_ENABLED: "true"
+          SCOS_INTERNAL_SERVICE_TOKEN: ci-internal-token
+          SCOS_CONTROL_PLANE_TOKEN: ci-control-token
+          SCOS_SECURITY_ISSUER_SECRET: ci-issuer-secret
+          POSTGRES_PASSWORD: ci-postgres-password
+          SCOS_DATABASE_URL: postgresql://scos:ci@postgres:5432/scos_memory?sslmode=require
+          SCOS_APP_PASSWORD: ci-app-password
+          SCOS_APP_DATABASE_URL: postgresql://scos_app:ci@postgres:5432/scos_memory?sslmode=require
+          SCOS_CREDENTIAL_VAULT_MASTER_KEY: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+          GRAPHIFY_WORKSPACE_HOST_PATH: /tmp
+          CONTROL_PLANE_API_KEY: ci-openai-control-key
+          CONTROL_PLANE_TUNNEL_ID: ci-tunnel-id
+          SCOS_GATEWAY_AUTHORIZATION: Bearer ci-gateway-token
+          SCOS_PUBLIC_GATEWAY_URL: https://example.invalid/mcp
+        run: |
+          docker compose \
+            -f deploy/compose/docker-compose.yml \
+            -f deploy/compose/docker-compose.models.yml \
+            config >/dev/null

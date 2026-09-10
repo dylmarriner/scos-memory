@@ -1,10 +1,10 @@
 # SCOS Model Runtime
 
-SCOS is hosted on the Linode VPS. The public SCOS API remains behind Nginx and the existing `cloud-control-plane` API-key boundary. The model runtime is an internal service and is not a new public API.
+SCOS is hosted on the Linode VPS documented in `docs/runbooks/production-access.md`. The public SCOS API remains behind Nginx and the existing `cloud-control-plane` API-key boundary. `model-runtime` is internal retrieval infrastructure, not a public model API.
 
 ## Production request path
 
-External traffic keeps the existing path:
+External traffic keeps the existing governed path:
 
 ```text
 client / agent
@@ -17,26 +17,32 @@ client / agent
   -> governed SCOS services
 ```
 
-The model path currently implemented is:
+DeepSeek remains SCOS's existing generative/reasoning layer. BGE is the specialist retrieval layer underneath it.
 
 ```text
-memory query / memory backfill
-  -> embeddings-worker /v1/embed
-  -> model-runtime /v1/embed/text
-  -> BGE-M3 backend
-  -> pgvector memory retrieval
+memory query
+  -> retrieval-orchestrator
+       -> model-runtime /v1/embed/text -> BGE-M3
+       -> exact / FTS / pgvector / relation / session lanes
+       -> RRF
+       -> model-runtime /v1/rerank -> BGE reranker
+       -> authority/confidence governance weighting
+
+memory backfill
+  -> embeddings-worker
+       -> model-runtime /v1/embed/text -> BGE-M3
+       -> explicit text embedding space
+       -> memory_embeddings
+
+code index/query
+  -> code-intelligence
+       -> model-runtime /v1/embed/code -> BGE-Code
+       -> durable code_embeddings on immutable symbol versions
+       -> exact / lexical / dense / structural-SCIP / graph-PageRank signals
+       -> RRF fusion
 ```
 
-The runtime also exposes governed contracts for the next P4 consumers:
-
-```text
-retrieval-orchestrator -> model-runtime /v1/rerank -> BGE reranker
-code-intelligence      -> model-runtime /v1/embed/code -> BGE-Code
-```
-
-Those two consumers are not claimed as complete by this merge. The runtime contract exists so they can be added without exposing raw model servers or changing the public SCOS API.
-
-Neither `model-runtime` nor the raw model servers belongs in Nginx. Customer API keys never get forwarded to them.
+Neither `model-runtime` nor the raw TEI model servers belongs in Nginx. Customer API keys never get forwarded to them.
 
 ## Models
 
@@ -46,7 +52,7 @@ Neither `model-runtime` nor the raw model servers belongs in Nginx. Customer API
 | rerank | `BAAI/bge-reranker-v2-m3` | relevance score per candidate |
 | code | `BAAI/bge-code-v1` | configured 1536-dimensional dense vector |
 
-`BAAI/BGE-VL-large` remains separate because it needs a multimodal image/text contract rather than the text-only TEI path.
+`BAAI/BGE-VL-large` remains later multimodal work because it needs a separate visual/image contract and embedding space.
 
 ## Internal SCOS API
 
@@ -69,7 +75,7 @@ The reference backend is Hugging Face Text Embeddings Inference 1.9. The hosted 
 ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
 ```
 
-The backend URLs are private configuration:
+Backend URLs are private configuration:
 
 ```text
 SCOS_MODEL_TEXT_URL
@@ -77,30 +83,68 @@ SCOS_MODEL_RERANK_URL
 SCOS_MODEL_CODE_URL
 ```
 
-For local TEI services, Compose passes the same `SCOS_MODEL_*_MODEL` and `SCOS_MODEL_*_REVISION` values to both TEI and model-runtime. This prevents model-runtime from advertising a revision that the locally managed backend was never instructed to load.
+For local TEI services, Compose passes the same `SCOS_MODEL_*_MODEL` and `SCOS_MODEL_*_REVISION` values to both TEI and `model-runtime`. This prevents the runtime from advertising a revision that the managed backend was never instructed to load.
 
-For externally hosted backends, the operator remains responsible for configuring the URL to the model/revision declared in SCOS. Raw backend access should remain on a private governed network.
+For externally hosted backends, the operator remains responsible for configuring each URL to the model/revision declared in SCOS. Raw backend access should remain private and governed.
+
+## Explicit embedding spaces
+
+P4 defines embedding-space identity as:
+
+```text
+role + provider + model + revision + dimensions + generation
+```
+
+Migration `000036_embedding_spaces_and_code_embeddings.sql` creates the shared `embedding_spaces` registry, backfills legacy memory vectors into explicit generation-1 spaces, and adds durable tenant-owned `code_embeddings` tied to immutable `code_symbol_versions`.
+
+Memory retrieval resolves the exact configured text-space ID before any pgvector distance operation and filters `memory_embeddings` by that ID. Historical BGE-small and experimental spaces can therefore coexist without participating in the same distance calculation.
+
+The embeddings worker no longer purges other vector spaces. It resolves/creates the active text space and idempotently writes `(memory_version_id, embedding_space_id, chunk_number)` projections while retaining historical spaces.
+
+Code retrieval uses the same space abstraction for BGE-Code. Dense code queries require the active code space and active repository snapshot, so old snapshots and mismatched model spaces cannot leak into current results.
+
+`chunk_content_hash` is SHA-256 of the exact source/document content used for a projection, not a hash of generated vector values.
+
+## Retrieval degradation rules
+
+Model failure never creates fake semantic evidence.
+
+```text
+text embedding unavailable -> zero memory semantic candidates
+pgvector lane unavailable  -> zero memory semantic candidates
+reranker unavailable       -> RRF + governance fallback
+BGE-Code unavailable       -> lexical/structural code path continues with degraded metadata
+```
+
+Raw scoring signals remain distinct. Memory retrieval preserves raw lexical score, raw cosine similarity, RRF score, reranker score and final governance-weighted score. Code retrieval preserves lexical, dense, structural/graph and fused scores independently.
+
+## Code retrieval and agent exposure
+
+Durable `/v2/code/query` keeps exact path/FQN matches as precision anchors. Non-exact searches combine lexical, BGE-Code dense, persisted structural/SCIP edges and bounded personalized PageRank signal.
+
+`scos_code_query` retains legacy v1 compatibility while supporting the durable v2 path when durable repository context is supplied. `scos_retrieve` accepts optional durable `repository_id` + `branch`; deterministic `code`/`mixed` plans can then retrieve code evidence independently of memory namespaces. Selected immutable code-symbol-version IDs are recorded with the retrieval run rather than being disguised as memory IDs.
 
 ## Safe production activation
 
-The model overlay is intentionally **opt-in**. Merging model-runtime code into `main` must not unexpectedly cold-load multi-GB inference models on an already-running host.
+The model overlay is intentionally **opt-in**. Merging retrieval support into `main` must not unexpectedly cold-load multi-GB inference models on the existing Linode.
 
-In the live `.env`:
+Production activation uses the live `.env`:
 
 ```bash
 SCOS_MODEL_RUNTIME_ENABLED=true
 SCOS_MODEL_PROFILES=text-model
 ```
 
-`deploy/scripts/auto-deploy.sh` then automatically adds:
+or, only after host-capacity validation:
 
-```text
-deploy/compose/docker-compose.models.yml
+```bash
+SCOS_MODEL_RUNTIME_ENABLED=true
+SCOS_MODEL_PROFILES=text-model,rerank-model,code-model
 ```
 
-and waits for `model-runtime` to become healthy before declaring the deployment successful.
+`deploy/scripts/auto-deploy.sh` adds `deploy/compose/docker-compose.models.yml` when enabled. On the first model-enabled deployment it initializes the private model-runtime TLS certificate before force-recreating retrieval/code clients, then waits for `model-runtime` readiness.
 
-Without `SCOS_MODEL_RUNTIME_ENABLED=true`, the existing base deployment remains on the current local bge-small embedding worker path.
+Without `SCOS_MODEL_RUNTIME_ENABLED=true`, base deployment behavior remains unchanged.
 
 ## Local model profiles
 
@@ -132,7 +176,7 @@ COMPOSE_PROFILES=text-model,rerank-model,code-model docker compose \
   up -d
 ```
 
-Do not enable every model just because YAML has developed ambitions. Measure resident memory and inference latency on the actual host first.
+Do not enable every model merely because Compose permits it. Measure resident memory, CPU saturation and query latency on the actual Linode first.
 
 ## Public ingress is unchanged
 
@@ -154,78 +198,24 @@ SCOS_INTERNAL_SERVICE_TOKEN
 SCOS_CONTROL_PLANE_TOKEN
 ```
 
-Its SCOS-facing listener is HTTPS. `embeddings-worker` trusts the model-runtime certificate through `SCOS_MODEL_RUNTIME_CA_FILE` and sends both internal authentication headers.
+Its SCOS-facing listener is HTTPS. `embeddings-worker`, `retrieval-orchestrator` and `code-intelligence` trust its certificate through `SCOS_MODEL_RUNTIME_CA_FILE` and use governed internal credentials.
 
-This is separate from the `scos_live_...` customer key system. Customer credentials terminate at `cloud-control-plane`.
+This is separate from the `scos_live_...` customer-key system. Customer credentials terminate at `cloud-control-plane`.
 
-## Memory embedding migration
+## Production revision policy
 
-Base Compose stays compatible with the current vector space:
-
-```text
-model:      BAAI/bge-small-en-v1.5
-revision:   local
-dimensions: 384
-```
-
-When the model overlay is enabled, it changes the active text space to:
-
-```text
-model:      BAAI/bge-m3
-revision:   SCOS_MODEL_TEXT_REVISION
-dimensions: 1024
-```
-
-The current retrieval SQL predates per-model-space predicates. To make the migration safe with that current repository code, `embeddings-worker` first deletes `memory_embeddings` rows outside the one active model/revision/dimension space, then backfills missing memory versions. This prevents a 1024-dimensional BGE-M3 query from being compared to a remaining 384-dimensional BGE-small row during rollout.
-
-This is deliberately a compatibility bridge. The P4 retrieval work should still add explicit active-space predicates so multiple historical/experimental spaces can coexist later.
-
-`chunk_content_hash` is SHA-256 of the source content rather than a hash of generated vector values.
-
-Production should pin each model to an exact Hugging Face revision after validation rather than leaving `main` mutable indefinitely.
-
-## Current implementation state
-
-Implemented by this merge:
-
-```text
-memory version
-  -> embeddings-worker
-  -> model-runtime /v1/embed/text
-  -> configured BGE-M3 backend
-  -> validated 1024-dimensional vector
-  -> PostgreSQL memory_embeddings
-  -> existing retrieval-orchestrator pgvector path
-```
-
-Also present as governed runtime contracts:
-
-```text
-/v1/rerank
-/v1/embed/code
-```
-
-Still separate P4 work:
-
-- query-aware BGE reranker consumption in `retrieval-orchestrator`;
-- explicit model-space predicates in retrieval SQL instead of the single-active-space compatibility purge;
-- removal of the current semantic fallback behavior;
-- durable BGE-Code vector persistence and hybrid code fusion;
-- BGE-VL multimodal indexing.
+Development defaults may still use `main`, but production must pin each validated Hugging Face model to an immutable revision before activation. Changing a model/revision/dimension/generation creates a new explicit embedding space rather than silently reinterpreting old vectors.
 
 ## Verification
 
-Focused CI lives in `.github/workflows/model-runtime.yml` and checks:
+Focused source checks live in `.github/workflows/model-runtime.yml` and `.github/workflows/p4-hybrid-retrieval.yml`. They cover model-runtime, retrieval-orchestrator, code-intelligence, embeddings-worker, migration contracts, the P0/P4 smoke fixture, auto-deploy shell syntax and the merged Compose overlay with text/rerank/code profiles.
 
-```text
-model-runtime gofmt
-go vet
-model-runtime unit tests
-model-runtime container build
-embedding-worker compile
-embedding-worker unit tests
-auto-deploy shell syntax
-active text-model Compose configuration
-```
+Local P4 verification additionally uses a fresh PostgreSQL 17 + pgvector database so migrations, tenant RLS, active-snapshot filtering and retrieval SQL are exercised against real storage.
 
-Global repository CI is a separate signal and may include unrelated pre-existing failures; model-runtime merge decisions must use fresh focused results plus the relevant repository checks, not a stale run from an older branch.
+GitHub Actions runner launch failures are infrastructure failures when jobs contain no executed steps; they must not be reported as product test failures or as successful verification.
+
+## Current source status versus live deployment
+
+The P4 source implementation contains explicit memory/code spaces, honest degradation, BGE reranking, durable BGE-Code hybrid retrieval, structural/graph fusion and deterministic repo-aware query planning.
+
+That source status is distinct from live production activation. The Linode must still be inspected for current checkout, environment flags, available memory/CPU, pinned model revisions and actual model-runtime readiness before claiming the BGE profiles are live in production.

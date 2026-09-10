@@ -68,6 +68,14 @@ git merge --ff-only origin/main
 # before app code that might depend on it starts.
 "${COMPOSE[@]}" run --rm migrations
 
+# On the first model-enabled deploy the client services need the private CA
+# file before they can even construct their model-runtime HTTP clients. The
+# certificate initializer is idempotent, so run it before force-recreating
+# retrieval/code-intelligence; --no-deps below deliberately cannot do this.
+if [ "$MODEL_RUNTIME_ENABLED" = "true" ]; then
+  "${COMPOSE[@]}" up --no-deps model-runtime-tls-certs
+fi
+
 # shellcheck disable=SC2086
 "${COMPOSE[@]}" up -d --no-deps --force-recreate $FABRIC_SERVICES
 

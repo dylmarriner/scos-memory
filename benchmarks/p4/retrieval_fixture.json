@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "name": "p4-hybrid-retrieval-smoke",
+  "frozen_at": "2026-09-10",
+  "purpose": "Small deterministic corpus for regression testing P4 retrieval behavior. It is not a superiority benchmark.",
+  "corpus": [
+    {"id":"mem_exact_db","domain":"memory","text":"The authoritative SCOS operational database is PostgreSQL with pgvector."},
+    {"id":"mem_semantic_auth","domain":"memory","text":"Customer credentials terminate at cloud-control-plane; only short-lived signed internal claims enter the governed service mesh."},
+    {"id":"mem_old_deploy","domain":"memory","text":"Historical local deployment used kubuntux and Tailscale.","stale":true},
+    {"id":"mem_live_deploy","domain":"memory","text":"Production SCOS runs on the Linode host behind Nginx and cloud-control-plane."},
+    {"id":"code_auth_handler","domain":"code","fqn":"auth.ControlPlaneHandler","path":"packages/auth/middleware.go","text":"ControlPlaneHandler authenticates governed internal service traffic."},
+    {"id":"code_dense_store","domain":"code","fqn":"pgCodeStore.QueryDense","path":"services/code-intelligence/cmd/server/dense_store.go","text":"QueryDense performs active-snapshot code vector search within one embedding space."},
+    {"id":"code_retrieval_planner","domain":"code","fqn":"planRetrieval","path":"services/retrieval-orchestrator/cmd/server/query_planner.go","text":"planRetrieval deterministically selects safe retrieval lanes and candidate budgets."}
+  ],
+  "cases": [
+    {"id":"memory_exact","domain":"memory","query":"PostgreSQL pgvector","expected_ids":["mem_exact_db"],"expected_mode":"memory"},
+    {"id":"memory_semantic","domain":"memory","query":"where do user API credentials stop before internal services?","expected_ids":["mem_semantic_auth"],"expected_mode":"memory","requires_semantic":true},
+    {"id":"memory_temporal","domain":"memory","query":"what is the current production deployment?","expected_ids":["mem_live_deploy"],"forbidden_ids":["mem_old_deploy"],"expected_mode":"temporal"},
+    {"id":"code_exact","domain":"code","query":"auth.ControlPlaneHandler","expected_ids":["code_auth_handler"],"expected_mode":"exact_navigation"},
+    {"id":"code_semantic","domain":"code","query":"find the function that searches code vectors only in the active snapshot","expected_ids":["code_dense_store"],"expected_mode":"code","requires_semantic":true},
+    {"id":"code_planner","domain":"code","query":"where are retrieval lanes and candidate budgets chosen?","expected_ids":["code_retrieval_planner"],"expected_mode":"code","requires_semantic":true},
+    {"id":"mixed","domain":"mixed","query":"which auth code supports the memory rule that customer credentials stay outside the service mesh?","expected_ids":["mem_semantic_auth","code_auth_handler"],"expected_mode":"mixed","requires_semantic":true}
+  ]
+}
