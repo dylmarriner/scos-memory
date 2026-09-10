@@ -1,0 +1,81 @@
+name: P4 Hybrid Retrieval
+
+on:
+  pull_request:
+    paths:
+      - "database/migrations/**"
+      - "services/retrieval-orchestrator/**"
+      - "services/code-intelligence/**"
+      - "deploy/compose/docker-compose.models.yml"
+      - ".env.example"
+      - ".github/workflows/p4-hybrid-retrieval.yml"
+      - "benchmarks/p4/**"
+      - "docs/SCOS_P0_P8_ROADMAP.md"
+      - "docs/model-runtime.md"
+  push:
+    branches:
+      - "feat/p4-hybrid-retrieval"
+      - "main"
+    paths:
+      - "database/migrations/**"
+      - "services/retrieval-orchestrator/**"
+      - "services/code-intelligence/**"
+      - "deploy/compose/docker-compose.models.yml"
+      - ".env.example"
+      - ".github/workflows/p4-hybrid-retrieval.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p4-hybrid-retrieval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  schema:
+    name: Embedding-space schema contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Run P4 migration contract
+        run: go test -count=1 ./database/migrations
+
+  retrieval:
+    name: Retrieval orchestrator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/retrieval-orchestrator)
+          if [ -n "$diff" ]; then echo "$diff"; exit 1; fi
+      - name: Vet
+        run: go vet ./services/retrieval-orchestrator/cmd/server
+      - name: Test
+        run: go test -count=1 ./services/retrieval-orchestrator/cmd/server
+
+  code-intelligence:
+    name: Code intelligence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/code-intelligence)
+          if [ -n "$diff" ]; then echo "$diff"; exit 1; fi
+      - name: Vet
+        run: go vet ./services/code-intelligence/cmd/server
+      - name: Test
+        run: go test -count=1 ./services/code-intelligence/cmd/server
