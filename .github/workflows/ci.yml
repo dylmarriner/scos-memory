@@ -60,6 +60,26 @@ jobs:
       - name: Governance structural audit
         run: python3 scripts/audit_governance.py
 
+  openclaw:
+    name: OpenClaw memory plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+          cache: npm
+          cache-dependency-path: integrations/openclaw/plugin/package-lock.json
+      - name: Install dependencies
+        working-directory: integrations/openclaw/plugin
+        run: npm install --ignore-scripts
+      - name: Contract tests
+        working-directory: integrations/openclaw/plugin
+        run: npm test
+      - name: Package validation
+        working-directory: integrations/openclaw/plugin
+        run: npm run pack:check
+
   security:
     name: Supply chain (vuln scan, secrets, SBOM)
     runs-on: ubuntu-latest
