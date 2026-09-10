@@ -80,9 +80,9 @@ CREATE POLICY code_impact_tenant_access ON code_impact_reconciliations FOR ALL U
 
 -- Idempotent backfill makes prior P1/P4 rows traversable immediately.
 INSERT INTO unified_graph_nodes (tenant_id,node_type,node_key,source_table,source_id,snapshot_id,provenance)
-SELECT tenant_id,'memory_fact',id::text,'memory_items',id,NULL,jsonb_build_object('source_table','memory_items','source_id',id) FROM memory_items ON CONFLICT DO NOTHING;
+SELECT mi.tenant_id,'memory_fact',mi.id::text,'memory_items',mi.id,NULL,jsonb_build_object('source_table','memory_items','source_id',mi.id) FROM memory_items mi ON CONFLICT DO NOTHING;
 INSERT INTO unified_graph_nodes (tenant_id,node_type,node_key,source_table,source_id,snapshot_id,provenance)
-SELECT tenant_id,'code_snapshot',id::text,'code_repository_snapshots',id,id,jsonb_build_object('source_table','code_repository_snapshots','source_id',id,'commit_id',commit_id,'branch',branch) FROM code_repository_snapshots ON CONFLICT DO NOTHING;
+SELECT crs.tenant_id,'code_snapshot',crs.id::text,'code_repository_snapshots',crs.id,crs.id,jsonb_build_object('source_table','code_repository_snapshots','source_id',crs.id,'commit_id',crs.commit_id,'branch',crs.branch) FROM code_repository_snapshots crs ON CONFLICT DO NOTHING;
 INSERT INTO unified_graph_nodes (tenant_id,node_type,node_key,source_table,source_id,snapshot_id,provenance)
 SELECT s.tenant_id,'code_symbol_version',v.id::text,'code_symbol_versions',v.id,v.snapshot_id,jsonb_build_object('source_table','code_symbol_versions','source_id',v.id,'snapshot_id',v.snapshot_id,'path',v.path,'range',v.range) FROM code_symbol_versions v JOIN code_repository_snapshots s ON s.id=v.snapshot_id ON CONFLICT DO NOTHING;
 INSERT INTO unified_graph_nodes (tenant_id,node_type,node_key,source_table,source_id,provenance)
@@ -90,7 +90,7 @@ SELECT r.tenant_id,'code_symbol',c.id::text,'code_symbols',c.id,jsonb_build_obje
 INSERT INTO unified_graph_nodes (tenant_id,node_type,node_key,source_table,source_id,provenance)
 SELECT i.tenant_id,'evidence',e.id::text,'memory_evidence',e.id,jsonb_build_object('source_table','memory_evidence','source_id',e.id,'evidence_kind',e.evidence_kind) FROM memory_evidence e JOIN memory_items i ON i.id=e.memory_id ON CONFLICT DO NOTHING;
 INSERT INTO unified_graph_nodes (tenant_id,node_type,node_key,source_table,source_id,snapshot_id,provenance)
-SELECT tenant_id,'impact',id::text,'code_impact_reconciliations',id,snapshot_id,jsonb_build_object('source_table','code_impact_reconciliations','source_id',id,'snapshot_id',snapshot_id,'commit_id',commit_id) FROM code_impact_reconciliations ON CONFLICT DO NOTHING;
+SELECT rp.tenant_id,'impact',cir.id::text,'code_impact_reconciliations',cir.id,cir.snapshot_id,jsonb_build_object('source_table','code_impact_reconciliations','source_id',cir.id,'snapshot_id',cir.snapshot_id,'commit_id',cir.commit_id) FROM code_impact_reconciliations cir JOIN code_repositories rp ON rp.id=cir.repository_id ON CONFLICT DO NOTHING;
 INSERT INTO unified_graph_edges (tenant_id,source_node_id,target_node_id,relation,confidence,provenance)
 SELECT l.tenant_id,sf.id,ss.id,'memory_code_'||l.link_type,l.confidence,jsonb_build_object('source_table','memory_code_links','source_id',l.id,'source',l.source)
 FROM memory_code_links l JOIN unified_graph_nodes sf ON sf.tenant_id=l.tenant_id AND sf.node_type='memory_fact' AND sf.source_id=l.fact_id JOIN unified_graph_nodes ss ON ss.tenant_id=l.tenant_id AND ss.node_type='code_symbol_version' AND ss.source_id=l.code_symbol_version_id ON CONFLICT DO NOTHING;
@@ -108,10 +108,10 @@ FROM code_symbol_versions v JOIN code_repository_snapshots s ON s.id=v.snapshot_
 JOIN unified_graph_nodes vn ON vn.tenant_id=s.tenant_id AND vn.node_type='code_symbol_version' AND vn.source_id=v.id
 JOIN unified_graph_nodes cn ON cn.tenant_id=s.tenant_id AND cn.node_type='code_symbol' AND cn.source_id=v.symbol_id ON CONFLICT DO NOTHING;
 INSERT INTO unified_graph_edges (tenant_id,source_node_id,target_node_id,relation,provenance)
-SELECT r.tenant_id,an.id,sn.id,'impact_snapshot',jsonb_build_object('source_table','code_impact_reconciliations','source_id',r.id,'snapshot_id',r.snapshot_id)
+SELECT rp.tenant_id,an.id,sn.id,'impact_snapshot',jsonb_build_object('source_table','code_impact_reconciliations','source_id',r.id,'snapshot_id',r.snapshot_id)
 FROM code_impact_reconciliations r JOIN code_repositories rp ON rp.id=r.repository_id
-JOIN unified_graph_nodes an ON an.tenant_id=r.tenant_id AND an.node_type='impact' AND an.source_id=r.id
-JOIN unified_graph_nodes sn ON sn.tenant_id=r.tenant_id AND sn.node_type='code_snapshot' AND sn.source_id=r.snapshot_id
+JOIN unified_graph_nodes an ON an.tenant_id=rp.tenant_id AND an.node_type='impact' AND an.source_id=r.id
+JOIN unified_graph_nodes sn ON sn.tenant_id=rp.tenant_id AND sn.node_type='code_snapshot' AND sn.source_id=r.snapshot_id
 WHERE r.snapshot_id IS NOT NULL ON CONFLICT DO NOTHING;
 INSERT INTO unified_graph_edges (tenant_id,source_node_id,target_node_id,relation,provenance)
 SELECT i.tenant_id,en.id,fn.id,'evidence_for',jsonb_build_object('source_table','memory_evidence','source_id',e.id,'evidence_kind',e.evidence_kind)
@@ -163,7 +163,7 @@ CREATE OR REPLACE FUNCTION traverse_unified_graph(p_tenant_id uuid,p_node_type t
 RETURNS TABLE (node_id uuid,node_type text,node_key text,depth integer,node_provenance jsonb,path_node_ids uuid[],path_edge_ids uuid[],edge_provenance jsonb[])
 LANGUAGE sql STABLE AS $$
 WITH RECURSIVE walk AS (
- SELECT n.id,n.node_type,n.node_key,0,n.provenance,ARRAY[n.id]::uuid[],ARRAY[]::uuid[],ARRAY[]::jsonb[] FROM unified_graph_nodes n WHERE n.tenant_id=p_tenant_id AND n.node_type=p_node_type AND n.node_key=p_node_key
+ SELECT n.id AS id,n.node_type AS node_type,n.node_key AS node_key,0 AS depth,n.provenance AS provenance,ARRAY[n.id]::uuid[] AS path_node_ids,ARRAY[]::uuid[] AS path_edge_ids,ARRAY[]::jsonb[] AS edge_provenance FROM unified_graph_nodes n WHERE n.tenant_id=p_tenant_id AND n.node_type=p_node_type AND n.node_key=p_node_key
  UNION ALL
  SELECT n.id,n.node_type,n.node_key,w.depth+1,n.provenance,w.path_node_ids||n.id,w.path_edge_ids||e.id,w.edge_provenance||e.provenance FROM walk w JOIN unified_graph_edges e ON e.tenant_id=p_tenant_id AND e.source_node_id=w.id JOIN unified_graph_nodes n ON n.id=e.target_node_id AND n.tenant_id=p_tenant_id WHERE w.depth<GREATEST(0,LEAST(p_max_depth,8)) AND NOT n.id=ANY(w.path_node_ids)
 ) SELECT id,node_type,node_key,depth,provenance,path_node_ids,path_edge_ids,edge_provenance FROM walk;
@@ -176,7 +176,7 @@ CREATE OR REPLACE FUNCTION traverse_unified_graph_reverse(p_tenant_id uuid,p_nod
 RETURNS TABLE (node_id uuid,node_type text,node_key text,depth integer,node_provenance jsonb,path_node_ids uuid[],path_edge_ids uuid[],edge_provenance jsonb[])
 LANGUAGE sql STABLE AS $$
 WITH RECURSIVE walk AS (
- SELECT n.id,n.node_type,n.node_key,0,n.provenance,ARRAY[n.id]::uuid[],ARRAY[]::uuid[],ARRAY[]::jsonb[] FROM unified_graph_nodes n WHERE n.tenant_id=p_tenant_id AND n.node_type=p_node_type AND n.node_key=p_node_key
+ SELECT n.id AS id,n.node_type AS node_type,n.node_key AS node_key,0 AS depth,n.provenance AS provenance,ARRAY[n.id]::uuid[] AS path_node_ids,ARRAY[]::uuid[] AS path_edge_ids,ARRAY[]::jsonb[] AS edge_provenance FROM unified_graph_nodes n WHERE n.tenant_id=p_tenant_id AND n.node_type=p_node_type AND n.node_key=p_node_key
  UNION ALL
  SELECT n.id,n.node_type,n.node_key,w.depth+1,n.provenance,w.path_node_ids||n.id,e.id||w.path_edge_ids,e.provenance||w.edge_provenance FROM walk w JOIN unified_graph_edges e ON e.tenant_id=p_tenant_id AND e.target_node_id=w.id JOIN unified_graph_nodes n ON n.id=e.source_node_id AND n.tenant_id=p_tenant_id WHERE w.depth<GREATEST(0,LEAST(p_max_depth,8)) AND NOT n.id=ANY(w.path_node_ids)
 ) SELECT id,node_type,node_key,depth,provenance,path_node_ids,path_edge_ids,edge_provenance FROM walk;
