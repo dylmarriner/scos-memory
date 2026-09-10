@@ -10,14 +10,7 @@ import (
 )
 
 func TestCodeModelRuntimeEmbedCodeUsesGovernedAuthAndExactSpace(t *testing.T) {
-	space := codeEmbeddingSpace{
-		Role:       "code",
-		Provider:   "scos-model-runtime",
-		Model:      "BAAI/bge-code-v1",
-		Revision:   "rev-a",
-		Dimensions: 3,
-		Generation: 2,
-	}
+	space := codeEmbeddingSpace{Role: "code", Provider: "scos-model-runtime", Model: "BAAI/bge-code-v1", Revision: "rev-a", Dimensions: 3, Generation: 2}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/embed/code" {
 			t.Fatalf("path = %q", r.URL.Path)
@@ -35,22 +28,11 @@ func TestCodeModelRuntimeEmbedCodeUsesGovernedAuthAndExactSpace(t *testing.T) {
 		if body["input"] != "package symbol document" {
 			t.Fatalf("input = %q", body["input"])
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"embedding":      []float64{0.1, 0.2, 0.3},
-			"model":          space.Model,
-			"model_revision": space.Revision,
-			"dimensions":     space.Dimensions,
-			"role":           space.Role,
-		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float64{0.1, 0.2, 0.3}, "model": space.Model, "model_revision": space.Revision, "dimensions": space.Dimensions, "role": space.Role})
 	}))
 	defer server.Close()
 
-	client := &codeModelRuntimeClient{
-		baseURL:           server.URL,
-		httpClient:        server.Client(),
-		serviceToken:      "service-token",
-		controlPlaneToken: "control-token",
-	}
+	client := &codeModelRuntimeClient{baseURL: server.URL, httpClient: server.Client(), serviceToken: "service-token", controlPlaneToken: "control-token"}
 	result, err := client.EmbedCode(context.Background(), "package symbol document", space)
 	if err != nil {
 		t.Fatal(err)
@@ -62,31 +44,22 @@ func TestCodeModelRuntimeEmbedCodeUsesGovernedAuthAndExactSpace(t *testing.T) {
 
 func TestCodeModelRuntimeEmbedCodeRejectsMismatchedSpace(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"embedding":      []float64{0.1, 0.2},
-			"model":          "other-model",
-			"model_revision": "rev-a",
-			"dimensions":     2,
-			"role":           "code",
-		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float64{0.1, 0.2}, "model": "other-model", "model_revision": "rev-a", "dimensions": 2, "role": "code"})
 	}))
 	defer server.Close()
-
 	client := &codeModelRuntimeClient{baseURL: server.URL, httpClient: server.Client()}
-	_, err := client.EmbedCode(context.Background(), "x", codeEmbeddingSpace{
-		Role: "code", Provider: "scos-model-runtime", Model: "BAAI/bge-code-v1", Revision: "rev-a", Dimensions: 2, Generation: 1,
-	})
+	_, err := client.EmbedCode(context.Background(), "x", codeEmbeddingSpace{Role: "code", Provider: "scos-model-runtime", Model: "BAAI/bge-code-v1", Revision: "rev-a", Dimensions: 2, Generation: 1})
 	if err == nil || !strings.Contains(err.Error(), "outside active space") {
 		t.Fatalf("expected space mismatch, got %v", err)
 	}
 }
 
 func TestCodeEmbeddingDocumentIsDeterministicAndContentBearing(t *testing.T) {
-	symbol := PGSymbolVersion{
+	symbol := codeSymbolDocument{
 		FullyQualifiedName: "pkg.Repository.QueryDense",
 		Path:               "services/code-intelligence/cmd/server/pgstore.go",
 		Kind:               "method",
-		Signature:          "func (s *pgCodeStore) QueryDense(...) ([]PGSymbolVersion, error)",
+		Signature:          "func (s *pgCodeStore) QueryDense(...) ([]codeHybridResult, error)",
 		DocComment:         "QueryDense searches the active snapshot.",
 		ChunkContent:       "SELECT sv.id FROM code_symbol_versions sv",
 	}
@@ -103,15 +76,14 @@ func TestCodeEmbeddingDocumentIsDeterministicAndContentBearing(t *testing.T) {
 }
 
 func TestFuseCodeResultsKeepsLexicalAndDenseScoresSeparate(t *testing.T) {
-	lexical := []PGSymbolVersion{
-		{SymbolVersionID: "a", FullyQualifiedName: "pkg.A", Path: "a.go", Relevance: 0.9, MatchType: "lexical"},
-		{SymbolVersionID: "b", FullyQualifiedName: "pkg.B", Path: "b.go", Relevance: 0.5, MatchType: "lexical"},
+	lexical := []codeHybridResult{
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "a", FullyQualifiedName: "pkg.A", Path: "a.go", Relevance: 0.9, MatchType: "lexical"}, RawLexicalScore: 0.9},
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "b", FullyQualifiedName: "pkg.B", Path: "b.go", Relevance: 0.5, MatchType: "lexical"}, RawLexicalScore: 0.5},
 	}
-	dense := []PGSymbolVersion{
-		{SymbolVersionID: "b", FullyQualifiedName: "pkg.B", Path: "b.go", DenseScore: 0.98, MatchType: "dense"},
-		{SymbolVersionID: "c", FullyQualifiedName: "pkg.C", Path: "c.go", DenseScore: 0.8, MatchType: "dense"},
+	dense := []codeHybridResult{
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "b", FullyQualifiedName: "pkg.B", Path: "b.go", MatchType: "dense"}, RawDenseScore: 0.98},
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "c", FullyQualifiedName: "pkg.C", Path: "c.go", MatchType: "dense"}, RawDenseScore: 0.8},
 	}
-
 	got := fuseCodeResults(lexical, dense, 60)
 	if len(got) != 3 {
 		t.Fatalf("len = %d", len(got))
@@ -119,7 +91,7 @@ func TestFuseCodeResultsKeepsLexicalAndDenseScoresSeparate(t *testing.T) {
 	if got[0].SymbolVersionID != "b" {
 		t.Fatalf("cross-lane agreement should rank b first, got %#v", got)
 	}
-	if got[0].Relevance != 0.5 || got[0].DenseScore != 0.98 || got[0].RRFScore <= 0 {
+	if got[0].RawLexicalScore != 0.5 || got[0].RawDenseScore != 0.98 || got[0].RRFScore <= 0 {
 		t.Fatalf("score provenance lost: %#v", got[0])
 	}
 	if got[0].MatchType != "hybrid" {
