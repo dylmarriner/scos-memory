@@ -34,9 +34,9 @@ func TestModelRuntimeEmbedTextSendsGovernedAuthAndValidatesSpace(t *testing.T) {
 	defer backend.Close()
 
 	client := &modelRuntimeClient{
-		baseURL:          backend.URL,
-		httpClient:       backend.Client(),
-		serviceToken:     "svc-token",
+		baseURL:           backend.URL,
+		httpClient:        backend.Client(),
+		serviceToken:      "svc-token",
 		controlPlaneToken: "cp-token",
 	}
 	space := embeddingSpace{Role: "text", Provider: "scos-model-runtime", Model: "BAAI/bge-m3", Revision: "rev-1", Dimensions: 3, Generation: 1}
