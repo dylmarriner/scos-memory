@@ -286,10 +286,6 @@ func searchMemories(ctx context.Context, db *sql.Tx, tenantID, query string, lim
 		return []SearchedMemory{}, nil
 	}
 
-	// OR the per-word tsqueries rather than ANDing the whole phrase: a
-	// natural-language query like "docker containers rabuntu" should surface
-	// memories matching any of those terms, ranked by how many/how well they
-	// match, not only memories containing every term.
 	tsExpr := make([]string, len(words))
 	args := make([]any, 0, len(words)+3)
 	args = append(args, tenantID)
@@ -323,9 +319,6 @@ func searchMemories(ctx context.Context, db *sql.Tx, tenantID, query string, lim
 		return results, nil
 	}
 
-	// Full-text search found nothing (common for short technical tokens the
-	// parser doesn't stem, e.g. hostnames and hyphenated tool names) --
-	// fall back to a substring match on any individual word.
 	ilikeExpr := make([]string, len(words))
 	args = args[:0]
 	args = append(args, tenantID)
@@ -354,8 +347,6 @@ func searchMemories(ctx context.Context, db *sql.Tx, tenantID, query string, lim
 	return scanSearchedMemories(rows)
 }
 
-// queryWords splits a free-text query into the distinct whitespace-separated
-// terms used to build the OR'd search below.
 func queryWords(query string) []string {
 	fields := strings.Fields(query)
 	seen := make(map[string]bool, len(fields))
@@ -389,32 +380,94 @@ func scanSearchedMemories(rows *sql.Rows) ([]SearchedMemory, error) {
 	return results, nil
 }
 
-// upsertMemory records a new version of the memory identified by key within
-// namespaceID, creating the memory_item on first write and superseding the
-// previous version on every subsequent write (per the append-only
-// versioning model in database/migrations/000001_initial.sql).
+// mirroredMemoryTransition decodes the state transition encoded by the Hermes
+// plugin without changing the public memory_write request schema. The key is
+// hermes:<target>:<SCOS content hash>. For replace/remove the hash identifies
+// the currently active old value, so the service can mutate state rather than
+// accidentally preserving a deleted fact as active memory.
+func mirroredMemoryTransition(req MemoryWriteRequest) (action, target, priorHash string) {
+	const sourcePrefix = "hermes_memory:"
+	if !strings.HasPrefix(req.Source, sourcePrefix) {
+		return "", "", ""
+	}
+	action = strings.TrimPrefix(req.Source, sourcePrefix)
+	if action != "add" && action != "replace" && action != "remove" {
+		return "", "", ""
+	}
+	parts := strings.Split(req.Key, ":")
+	if len(parts) != 3 || parts[0] != "hermes" || (parts[1] != "memory" && parts[1] != "user") {
+		return "", "", ""
+	}
+	if len(parts[2]) != 64 {
+		return "", "", ""
+	}
+	if _, err := hex.DecodeString(parts[2]); err != nil {
+		return "", "", ""
+	}
+	return action, parts[1], parts[2]
+}
+
+func canonicalMirroredKey(target, contentHash string) string {
+	if target != "memory" && target != "user" {
+		return ""
+	}
+	return "hermes:" + target + ":" + contentHash
+}
+
+// upsertMemory records a new version of a memory. Ordinary callers retain the
+// historical key-based behavior. Hermes built-in MEMORY/USER writes additionally
+// encode add/replace/remove semantics in source+key so replacements version the
+// current fact and removals mark that fact deleted while preserving its history.
 func upsertMemory(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID string, req MemoryWriteRequest) (memoryID string, versionNumber int, err error) {
 	memoryType, authority := classifyMemoryScope(req.Scope)
+	action, target, priorHash := mirroredMemoryTransition(req)
 
 	var existingID, currentVersionID string
 	var currentVersionNumber int
-	err = tx.QueryRowContext(ctx, `
-		SELECT mi.id, mv.id, mv.version_number
-		FROM memory_items mi
-		JOIN memory_versions mv ON mv.id = mi.current_version_id
-		WHERE mi.tenant_id = $1 AND mi.namespace_id = $2 AND mi.metadata->>'hermes_key' = $3 AND mi.status = 'active'
-		FOR UPDATE OF mi
-	`, id.TenantID, namespaceID, req.Key).Scan(&existingID, &currentVersionID, &currentVersionNumber)
+	if (action == "replace" || action == "remove") && priorHash != "" {
+		err = tx.QueryRowContext(ctx, `
+			SELECT mi.id, mv.id, mv.version_number
+			FROM memory_items mi
+			JOIN memory_versions mv ON mv.id = mi.current_version_id
+			WHERE mi.tenant_id = $1 AND mi.namespace_id = $2
+			  AND mi.metadata->>'hermes_target' = $3
+			  AND mv.content_hash = $4
+			  AND mi.status = 'active'
+			ORDER BY mi.created_at DESC
+			LIMIT 1
+			FOR UPDATE OF mi
+		`, id.TenantID, namespaceID, target, priorHash).Scan(&existingID, &currentVersionID, &currentVersionNumber)
+	} else {
+		err = tx.QueryRowContext(ctx, `
+			SELECT mi.id, mv.id, mv.version_number
+			FROM memory_items mi
+			JOIN memory_versions mv ON mv.id = mi.current_version_id
+			WHERE mi.tenant_id = $1 AND mi.namespace_id = $2 AND mi.metadata->>'hermes_key' = $3 AND mi.status = 'active'
+			FOR UPDATE OF mi
+		`, id.TenantID, namespaceID, req.Key).Scan(&existingID, &currentVersionID, &currentVersionNumber)
+	}
 
 	contentHash := sha256Hex(req.Value)
+	metadataKey := req.Key
+	if action == "add" || action == "replace" {
+		if canonical := canonicalMirroredKey(target, contentHash); canonical != "" {
+			metadataKey = canonical
+		}
+	}
 	metadata, _ := json.Marshal(map[string]any{
-		"hermes_key":   req.Key,
-		"scope":        req.Scope,
-		"source":       req.Source,
-		"profile_path": req.ProfilePath,
+		"hermes_key":    metadataKey,
+		"hermes_target": target,
+		"hermes_action": action,
+		"scope":         req.Scope,
+		"source":        req.Source,
+		"profile_path":  req.ProfilePath,
 	})
 
 	switch {
+	case err == sql.ErrNoRows && action == "remove":
+		// Desired state already holds: there is no active mirrored fact with
+		// this prior content hash. Treat removal as an idempotent no-op.
+		return "", 0, nil
 	case err == sql.ErrNoRows:
 		memoryID, genErr := newID()
 		if genErr != nil {
@@ -427,7 +480,7 @@ func upsertMemory(ctx context.Context, tx *sql.Tx, id requestIdentity, namespace
 		if _, execErr := tx.ExecContext(ctx, `
 			INSERT INTO memory_items (id, tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary, authority_level, confidence_score, sensitivity, metadata)
 			VALUES ($1,$2,$3,$4,$5,'active',$6,$7,$8,0.9,'internal',$9)
-		`, memoryID, id.TenantID, namespaceID, id.PrincipalID, memoryType, req.Key, truncate(req.Value, 500), authority, metadata); execErr != nil {
+		`, memoryID, id.TenantID, namespaceID, id.PrincipalID, memoryType, metadataKey, truncate(req.Value, 500), authority, metadata); execErr != nil {
 			return "", 0, fmt.Errorf("insert memory item: %w", execErr)
 		}
 		if _, execErr := tx.ExecContext(ctx, `
@@ -440,12 +493,6 @@ func upsertMemory(ctx context.Context, tx *sql.Tx, id requestIdentity, namespace
 		if execErr != nil {
 			return "", 0, fmt.Errorf("set current version: %w", execErr)
 		}
-		// RLS with no UPDATE policy makes this match zero rows rather than
-		// error (000001_rls.sql defined memory_items_candidate_write for
-		// INSERT only) -- the write above would silently commit with
-		// current_version_id left NULL forever, permanently invisible to
-		// searchMemories' JOIN on it. Checking affected rows turns that into
-		// a loud failure instead of a memory nothing can ever recall.
 		if n, raErr := res.RowsAffected(); raErr != nil {
 			return "", 0, fmt.Errorf("set current version: rows affected: %w", raErr)
 		} else if n != 1 {
@@ -456,18 +503,39 @@ func upsertMemory(ctx context.Context, tx *sql.Tx, id requestIdentity, namespace
 		return "", 0, fmt.Errorf("look up existing memory: %w", err)
 	}
 
+	if action == "remove" {
+		res, execErr := tx.ExecContext(ctx, `UPDATE memory_items SET status='deleted', metadata=$1 WHERE id=$2`, metadata, existingID)
+		if execErr != nil {
+			return "", 0, fmt.Errorf("delete mirrored memory: %w", execErr)
+		}
+		if n, raErr := res.RowsAffected(); raErr != nil {
+			return "", 0, fmt.Errorf("delete mirrored memory: rows affected: %w", raErr)
+		} else if n != 1 {
+			return "", 0, fmt.Errorf("delete mirrored memory: expected to update 1 row, updated %d", n)
+		}
+		return existingID, currentVersionNumber, nil
+	}
+
 	nextVersion := currentVersionNumber + 1
 	newVersionID, genErr := newID()
 	if genErr != nil {
 		return "", 0, genErr
 	}
+	changeReason := "superseding_write"
+	if action == "replace" {
+		changeReason = "hermes_replace"
+	}
 	if _, execErr := tx.ExecContext(ctx, `
 		INSERT INTO memory_versions (id, memory_id, version_number, content, content_hash, change_reason, previous_version_id, created_by)
-		VALUES ($1,$2,$3,$4,$5,'superseding_write',$6,$7)
-	`, newVersionID, existingID, nextVersion, req.Value, contentHash, currentVersionID, id.PrincipalID); execErr != nil {
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, newVersionID, existingID, nextVersion, req.Value, contentHash, changeReason, currentVersionID, id.PrincipalID); execErr != nil {
 		return "", 0, fmt.Errorf("insert superseding memory version: %w", execErr)
 	}
-	res, execErr := tx.ExecContext(ctx, `UPDATE memory_items SET current_version_id=$1, metadata=$2 WHERE id=$3`, newVersionID, metadata, existingID)
+	res, execErr := tx.ExecContext(ctx, `
+		UPDATE memory_items
+		SET current_version_id=$1, metadata=$2, canonical_summary=$3, status='active'
+		WHERE id=$4
+	`, newVersionID, metadata, truncate(req.Value, 500), existingID)
 	if execErr != nil {
 		return "", 0, fmt.Errorf("advance current version: %w", execErr)
 	}

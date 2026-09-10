@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -35,8 +36,6 @@ func TestProviderStatus(t *testing.T) {
 }
 
 func TestHandleStatusReflectsRealReadiness(t *testing.T) {
-	// A server with no DATABASE_URL/postgres dependency configured must
-	// report itself unhealthy, not a hardcoded true.
 	srv := newHermesServer()
 	req := httptest.NewRequest(http.MethodGet, "/v1/provider/status", nil)
 	rec := httptest.NewRecorder()
@@ -78,8 +77,6 @@ func TestToolSchemas(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&tools); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	// §24.5 names the complete supplemental tool set; all of it must be
-	// exposed, not a subset.
 	got := map[string]bool{}
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
@@ -114,6 +111,43 @@ func TestMemoryWriteRequestShape(t *testing.T) {
 	}
 	if req.Source != "user_message" {
 		t.Fatal("source mismatch")
+	}
+}
+
+func TestMirroredMemoryTransitionUsesPriorContentHash(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name       string
+		req        MemoryWriteRequest
+		wantAction string
+		wantTarget string
+		wantHash   string
+	}{
+		{
+			name: "ordinary write",
+			req:  MemoryWriteRequest{Key: "user.name", Source: "user_message"},
+		},
+		{
+			name:       "replace",
+			req:        MemoryWriteRequest{Key: "hermes:user:" + hash, Source: "hermes_memory:replace"},
+			wantAction: "replace",
+			wantTarget: "user",
+			wantHash:   hash,
+		},
+		{
+			name:       "remove",
+			req:        MemoryWriteRequest{Key: "hermes:memory:" + hash, Source: "hermes_memory:remove"},
+			wantAction: "remove",
+			wantTarget: "memory",
+			wantHash:   hash,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			action, target, priorHash := mirroredMemoryTransition(tc.req)
+			if action != tc.wantAction || target != tc.wantTarget || priorHash != tc.wantHash {
+				t.Fatalf("mirroredMemoryTransition() = (%q,%q,%q), want (%q,%q,%q)", action, target, priorHash, tc.wantAction, tc.wantTarget, tc.wantHash)
+			}
+		})
 	}
 }
 
