@@ -6,6 +6,8 @@ on:
       - "database/migrations/**"
       - "services/retrieval-orchestrator/**"
       - "services/code-intelligence/**"
+      - "workers/embeddings/**"
+      - "services/model-runtime/**"
       - "deploy/compose/docker-compose.models.yml"
       - ".env.example"
       - ".github/workflows/p4-hybrid-retrieval.yml"
@@ -20,9 +22,14 @@ on:
       - "database/migrations/**"
       - "services/retrieval-orchestrator/**"
       - "services/code-intelligence/**"
+      - "workers/embeddings/**"
+      - "services/model-runtime/**"
       - "deploy/compose/docker-compose.models.yml"
       - ".env.example"
       - ".github/workflows/p4-hybrid-retrieval.yml"
+      - "benchmarks/p4/**"
+      - "docs/SCOS_P0_P8_ROADMAP.md"
+      - "docs/model-runtime.md"
 
 permissions:
   contents: read
@@ -79,3 +86,34 @@ jobs:
         run: go vet ./services/code-intelligence/cmd/server
       - name: Test
         run: go test -count=1 ./services/code-intelligence/cmd/server
+
+  embeddings-worker:
+    name: Embeddings worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install worker dependencies
+        run: python -m pip install -e workers/embeddings
+      - name: Test
+        run: python -m unittest discover -s workers/embeddings/tests -p 'test_*.py' -v
+
+  model-runtime:
+    name: Model runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/model-runtime)
+          if [ -n "$diff" ]; then echo "$diff"; exit 1; fi
+      - name: Vet
+        run: go vet ./services/model-runtime/cmd/server
+      - name: Test
+        run: go test -count=1 ./services/model-runtime/cmd/server
