@@ -288,7 +288,13 @@ class ScosMemoryProvider(MemoryProvider):
         evidence synchronously and uses a content-derived turn id so retries are safe
         against the existing idempotent sync_turn endpoint.
         """
-        if not messages or not self._write_enabled:
+        if not messages:
+            return ""
+        if not self._write_enabled:
+            if require_checkpoint:
+                raise RuntimeError(
+                    "SCOS durable checkpoint is disabled for non-primary Hermes agent context"
+                )
             return ""
         if not self._persistence_configured():
             error = RuntimeError("SCOS durable checkpoint is not configured")
@@ -344,8 +350,6 @@ class ScosMemoryProvider(MemoryProvider):
         metadata = dict(metadata or {})
         old_text = str(metadata.get("old_text") or "")
         key_material = old_text if action in {"replace", "remove"} and old_text else content
-        # SCOS sha256Hex appends a NUL after each logical part. Match that
-        # exactly so the service can locate the current memory_versions row.
         content_hash = hashlib.sha256(key_material.encode("utf-8") + b"\0").hexdigest()
         payload = {
             "namespace_id": self._env.get("SCOS_NAMESPACE_ID", ""),
