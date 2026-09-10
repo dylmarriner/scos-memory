@@ -1801,15 +1801,34 @@
 
     function paintPanel(key) { paintAllMounts(key); }
 
+    const snapshotFetchState = { status: 'idle', generated: null, state: null, scope: null, freshness: null, viewStatus: {} };
     async function refreshSnapshot() {
+      snapshotFetchState.status = 'loading';
       const response = await fetch(snapshotEndpoint, { credentials: 'same-origin' });
       if (response.status === 401) {
         throw new Error('unauthorized (the transparency API should be public)');
       }
       if (!response.ok) throw new Error(`projection returned ${response.status}`);
       const payload = await response.json();
+      if (payload.schema_version !== 'transparency-snapshot.v1') {
+        throw new Error(`unsupported transparency snapshot schema: ${payload.schema_version || 'missing'}`);
+      }
       const views = payload.views || {};
       const unavailable = payload.unavailable || {};
+      snapshotFetchState.status = 'ready';
+      snapshotFetchState.generated = payload.generated || null;
+      snapshotFetchState.state = payload.state || null;
+      snapshotFetchState.scope = payload.scope || null;
+      snapshotFetchState.freshness = payload.freshness || null;
+      snapshotFetchState.viewStatus = payload.view_status || {};
+      const snapshotState = payload.state || (Object.keys(unavailable).length ? 'partial' : 'complete');
+      const attention = Array.isArray(payload.attention) ? payload.attention : Object.entries(unavailable).map(([source, detail]) => ({
+        id: `upstream-unavailable:${source}`,
+        severity: 'warning',
+        title: `${source} unavailable`,
+        detail,
+        source,
+      }));
       let anyUnavailable = false;
       for (const panel of PANELS) {
         const state = panelState.get(panel.key);
@@ -1829,11 +1848,14 @@
       }
       renderAgentTopology();
       statusPill.classList.remove('error');
-      statusText.textContent = `refreshed ${new Date().toISOString()}`;
-      if (anyUnavailable) statusText.textContent += ' (partial)';
+      const generated = payload.generated || new Date().toISOString();
+      const assembly = payload.freshness && Number.isFinite(payload.freshness.assembly_ms) ? ` · ${payload.freshness.assembly_ms}ms` : '';
+      statusText.textContent = `refreshed ${generated} · ${snapshotState}${assembly}`;
+      if (anyUnavailable || attention.length) statusText.textContent += ` · ${attention.length} attention item${attention.length === 1 ? '' : 's'}`;
     }
 
     function setStatusError(message) {
+      snapshotFetchState.status = 'error';
       statusPill.classList.add('error');
       statusText.textContent = message;
     }

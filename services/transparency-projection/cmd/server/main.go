@@ -201,6 +201,45 @@ type viewSource struct {
 	path string
 }
 
+const transparencySnapshotSchemaVersion = "transparency-snapshot.v1"
+
+type snapshotTenantScope struct {
+	TenantID    string `json:"tenant_id"`
+	PrincipalID string `json:"principal_id,omitempty"`
+}
+
+type snapshotFreshness struct {
+	GeneratedAt    string `json:"generated_at"`
+	AssemblyMS     int64  `json:"assembly_ms"`
+	ViewsAvailable int    `json:"views_available"`
+	ViewsTotal     int    `json:"views_total"`
+}
+
+type snapshotViewStatus struct {
+	Status      string `json:"status"`
+	FreshnessMS int64  `json:"freshness_ms,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+}
+
+func snapshotTenant(r *http.Request) snapshotTenantScope {
+	tenantID := strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
+	if tenantID == "" {
+		tenantID = strings.TrimSpace(os.Getenv("SCOS_SERVICE_TENANT_ID"))
+	}
+	if tenantID == "" {
+		tenantID = "11111111-2222-3333-4444-555555555555"
+	}
+	principalID := strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
+	if principalID == "" {
+		principalID = strings.TrimSpace(os.Getenv("SCOS_SERVICE_PRINCIPAL_ID"))
+	}
+	if principalID == "" {
+		principalID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	}
+	return snapshotTenantScope{TenantID: tenantID, PrincipalID: principalID}
+}
+
 func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -238,6 +277,7 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make(map[string]json.RawMessage, len(views))
 	errored := make(map[string]string)
+	viewStatus := make(map[string]snapshotViewStatus, len(views))
 	var mu sync.Mutex
 	projectionStarted := time.Now()
 	// Views are fetched concurrently: a slow upstream (contradictions can
@@ -249,6 +289,7 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(name string, view viewSource) {
 			defer wg.Done()
+			viewStarted := time.Now()
 			body, status, err := s.fetch(r, view.base, view.path)
 			mu.Lock()
 			defer mu.Unlock()
@@ -259,9 +300,11 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 				// empty state, not a broken view.
 				if name == "routing" && strings.Contains(err.Error(), "required") {
 					result[name] = json.RawMessage("[]")
+					viewStatus[name] = snapshotViewStatus{Status: "available", FreshnessMS: time.Since(viewStarted).Milliseconds()}
 					return
 				}
 				errored[name] = err.Error()
+				viewStatus[name] = snapshotViewStatus{Status: "unavailable", FreshnessMS: time.Since(viewStarted).Milliseconds(), Reason: snapshotReason(err), Detail: err.Error()}
 				return
 			}
 			if status/100 != 2 {
@@ -271,12 +314,16 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 				// valid empty state, not a broken view.
 				if name == "routing" && status == http.StatusUnauthorized && strings.Contains(string(body), "required") {
 					result[name] = json.RawMessage("[]")
+					viewStatus[name] = snapshotViewStatus{Status: "available", FreshnessMS: time.Since(viewStarted).Milliseconds()}
 					return
 				}
-				errored[name] = fmt.Sprintf("upstream returned status %d", status)
+				detail := fmt.Sprintf("upstream returned status %d", status)
+				errored[name] = detail
+				viewStatus[name] = snapshotViewStatus{Status: "unavailable", FreshnessMS: time.Since(viewStarted).Milliseconds(), Reason: "upstream_http_error", Detail: detail}
 				return
 			}
 			result[name] = body
+			viewStatus[name] = snapshotViewStatus{Status: "available", FreshnessMS: time.Since(viewStarted).Milliseconds()}
 		}(name, view)
 	}
 	wg.Wait()
@@ -293,11 +340,42 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 			"views_total":     strconv.Itoa(len(views)),
 		}, telemetry.Correlation{})
 
+	attention := make([]map[string]string, 0, len(errored))
+	for name, reason := range errored {
+		attention = append(attention, map[string]string{
+			"id":       "upstream-unavailable:" + name,
+			"severity": "warning",
+			"title":    name + " unavailable",
+			"detail":   reason,
+			"source":   name,
+		})
+	}
+	state := "complete"
+	if len(errored) > 0 {
+		state = "partial"
+	}
+	generated := time.Now().UTC().Format(time.RFC3339Nano)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"generated":   time.Now().UTC().Format(time.RFC3339Nano),
+		"schema_version": transparencySnapshotSchemaVersion,
+		"generated":      generated,
+		"state":          state,
+		"scope":          snapshotTenant(r),
+		"freshness": snapshotFreshness{
+			GeneratedAt: generated, AssemblyMS: time.Since(projectionStarted).Milliseconds(),
+			ViewsAvailable: len(result), ViewsTotal: len(views),
+		},
 		"views":       result,
+		"view_status": viewStatus,
 		"unavailable": errored,
+		"attention":   attention,
 	})
+}
+
+func snapshotReason(err error) string {
+	if strings.Contains(err.Error(), "invalid JSON") {
+		return "invalid_json"
+	}
+	return "upstream_unavailable"
 }
 
 func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {

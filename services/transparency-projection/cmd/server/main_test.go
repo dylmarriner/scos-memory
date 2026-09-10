@@ -226,6 +226,81 @@ func TestSnapshotToleratesPartialUpstreamUnavailability(t *testing.T) {
 	}
 }
 
+func TestSnapshotReportsTypedPartialStateAndAttention(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"projection","entries":[]}`))
+	}))
+	defer upstream.Close()
+
+	s := &projectionServer{upstream: upstream.URL, client: upstream.Client()}
+	res := httptest.NewRecorder()
+	s.snapshot(res, httptest.NewRequest(http.MethodGet, "/v1/transparency/snapshot", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", res.Code, res.Body.String())
+	}
+	var snapshot struct {
+		SchemaVersion string                    `json:"schema_version"`
+		State         string                    `json:"state"`
+		Scope         map[string]string         `json:"scope"`
+		Freshness     map[string]any            `json:"freshness"`
+		ViewStatus    map[string]map[string]any `json:"view_status"`
+		Attention     []map[string]string       `json:"attention"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if snapshot.State != "partial" {
+		t.Fatalf("state = %q, want partial", snapshot.State)
+	}
+	if snapshot.SchemaVersion != transparencySnapshotSchemaVersion {
+		t.Fatalf("schema_version = %q, want %q", snapshot.SchemaVersion, transparencySnapshotSchemaVersion)
+	}
+	if snapshot.Scope["tenant_id"] == "" {
+		t.Fatal("snapshot scope omitted tenant_id")
+	}
+	if _, ok := snapshot.Freshness["assembly_ms"]; !ok {
+		t.Fatal("snapshot freshness omitted assembly_ms")
+	}
+	var unavailable int
+	for _, status := range snapshot.ViewStatus {
+		if status["status"] == "unavailable" {
+			unavailable++
+			if status["reason"] == "" || status["detail"] == "" {
+				t.Fatalf("unavailable view lacks typed evidence: %#v", status)
+			}
+		}
+	}
+	if unavailable == 0 {
+		t.Fatal("expected per-view unavailable status")
+	}
+	if len(snapshot.Attention) == 0 {
+		t.Fatal("expected attention items for unavailable upstreams")
+	}
+	if snapshot.Attention[0]["severity"] == "" || snapshot.Attention[0]["detail"] == "" {
+		t.Fatalf("attention item lacks evidence: %#v", snapshot.Attention[0])
+	}
+}
+
+func TestSnapshotForwardsTenantIdentityToAuthoritativeUpstream(t *testing.T) {
+	seenTenant := make(chan string, 64)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenTenant <- r.Header.Get("X-SCOS-Tenant-ID")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"projection","entries":[]}`))
+	}))
+	defer upstream.Close()
+
+	s := &projectionServer{upstream: upstream.URL, client: upstream.Client()}
+	req := httptest.NewRequest(http.MethodGet, "/v1/transparency/snapshot", nil)
+	req.Header.Set("X-SCOS-Tenant-ID", "tenant-a")
+	res := httptest.NewRecorder()
+	s.snapshot(res, req)
+	if got := <-seenTenant; got != "tenant-a" {
+		t.Fatalf("tenant header = %q, want tenant-a", got)
+	}
+}
+
 func TestEventsResumesFromLastEventID(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Last-Event-ID"); got != "41" {

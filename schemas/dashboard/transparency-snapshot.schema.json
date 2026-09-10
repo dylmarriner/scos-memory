@@ -2,11 +2,68 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "TransparencySnapshot",
   "type": "object",
-  "required": ["timestamp", "active_sessions", "total_tokens_saved"],
+  "required": ["schema_version", "generated", "state", "scope", "freshness", "views", "view_status", "unavailable", "attention"],
+  "additionalProperties": false,
   "properties": {
-    "timestamp": { "type": "string" },
-    "active_sessions": { "type": "integer" },
-    "total_tokens_saved": { "type": "integer" },
-    "system_health": { "type": "string" }
+    "schema_version": { "const": "transparency-snapshot.v1" },
+    "generated": { "type": "string", "format": "date-time" },
+    "state": { "enum": ["complete", "partial"] },
+    "scope": {
+      "type": "object",
+      "required": ["tenant_id"],
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": { "type": "string" },
+        "principal_id": { "type": "string" }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "required": ["generated_at", "assembly_ms", "views_available", "views_total"],
+      "additionalProperties": false,
+      "properties": {
+        "generated_at": { "type": "string", "format": "date-time" },
+        "assembly_ms": { "type": "integer", "minimum": 0 },
+        "views_available": { "type": "integer", "minimum": 0 },
+        "views_total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "views": {
+      "type": "object",
+      "additionalProperties": { "type": ["object", "array", "string", "number", "boolean", "null"] }
+    },
+    "view_status": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status"],
+        "additionalProperties": false,
+        "properties": {
+          "status": { "enum": ["available", "unavailable"] },
+          "freshness_ms": { "type": "integer", "minimum": 0 },
+          "reason": { "enum": ["upstream_unavailable", "upstream_http_error", "invalid_json"] },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "unavailable": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "attention": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "title", "detail"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "enum": ["info", "warning", "critical"] },
+          "title": { "type": "string" },
+          "detail": { "type": "string" },
+          "source": { "type": "string" }
+        }
+      }
+    }
   }
 }
