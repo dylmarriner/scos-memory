@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -35,8 +36,6 @@ func TestProviderStatus(t *testing.T) {
 }
 
 func TestHandleStatusReflectsRealReadiness(t *testing.T) {
-	// A server with no DATABASE_URL/postgres dependency configured must
-	// report itself unhealthy, not a hardcoded true.
 	srv := newHermesServer()
 	req := httptest.NewRequest(http.MethodGet, "/v1/provider/status", nil)
 	rec := httptest.NewRecorder()
@@ -78,8 +77,6 @@ func TestToolSchemas(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&tools); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	// §24.5 names the complete supplemental tool set; all of it must be
-	// exposed, not a subset.
 	got := map[string]bool{}
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
@@ -117,39 +114,38 @@ func TestMemoryWriteRequestShape(t *testing.T) {
 	}
 }
 
-func TestMemoryWriteRequestCarriesStateTransition(t *testing.T) {
-	req := MemoryWriteRequest{
-		Action:        "replace",
-		Target:        "user",
-		PreviousValue: "old preference",
-		Value:         "new preference",
-	}
-	data, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded["action"] != "replace" || decoded["target"] != "user" || decoded["previous_value"] != "old preference" {
-		t.Fatalf("memory state transition was not preserved: %#v", decoded)
-	}
-}
-
-func TestMemoryWriteLookupUsesPreviousValueForMutation(t *testing.T) {
+func TestMirroredMemoryTransitionUsesPriorContentHash(t *testing.T) {
+	hash := strings.Repeat("a", 64)
 	for _, tc := range []struct {
-		name string
-		req  MemoryWriteRequest
-		want string
+		name       string
+		req        MemoryWriteRequest
+		wantAction string
+		wantTarget string
+		wantHash   string
 	}{
-		{name: "add", req: MemoryWriteRequest{Action: "add", Value: "new"}, want: "new"},
-		{name: "replace", req: MemoryWriteRequest{Action: "replace", Value: "new", PreviousValue: "old"}, want: "old"},
-		{name: "remove", req: MemoryWriteRequest{Action: "remove", PreviousValue: "old"}, want: "old"},
+		{
+			name: "ordinary write",
+			req: MemoryWriteRequest{Key: "user.name", Source: "user_message"},
+		},
+		{
+			name:       "replace",
+			req:        MemoryWriteRequest{Key: "hermes:user:" + hash, Source: "hermes_memory:replace"},
+			wantAction: "replace",
+			wantTarget: "user",
+			wantHash:   hash,
+		},
+		{
+			name:       "remove",
+			req:        MemoryWriteRequest{Key: "hermes:memory:" + hash, Source: "hermes_memory:remove"},
+			wantAction: "remove",
+			wantTarget: "memory",
+			wantHash:   hash,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := memoryWriteLookupValue(tc.req); got != tc.want {
-				t.Fatalf("memoryWriteLookupValue() = %q, want %q", got, tc.want)
+			action, target, priorHash := mirroredMemoryTransition(tc.req)
+			if action != tc.wantAction || target != tc.wantTarget || priorHash != tc.wantHash {
+				t.Fatalf("mirroredMemoryTransition() = (%q,%q,%q), want (%q,%q,%q)", action, target, priorHash, tc.wantAction, tc.wantTarget, tc.wantHash)
 			}
 		})
 	}
