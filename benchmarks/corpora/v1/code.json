@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "domain": "code",
+  "records": [
+    {"id": "code.retrieval-planner", "symbol": "planRetrieval", "path": "services/retrieval-orchestrator/cmd/server/query_planner.go", "text": "Select retrieval lanes and candidate budgets deterministically."},
+    {"id": "code.dense-query", "symbol": "QueryDense", "path": "services/code-intelligence/cmd/server/dense_store.go", "text": "Search code vectors within the active snapshot."},
+    {"id": "code.auth-handler", "symbol": "ControlPlaneHandler", "path": "packages/auth/middleware.go", "text": "Authenticate governed internal service traffic."}
+  ],
+  "queries": [
+    {"id": "code.q1", "query": "where are retrieval lanes and candidate budgets chosen", "relevant": ["code.retrieval-planner"]},
+    {"id": "code.q2", "query": "find the function that searches code vectors in the active snapshot", "relevant": ["code.dense-query"]},
+    {"id": "code.q3", "query": "auth.ControlPlaneHandler", "relevant": ["code.auth-handler"]}
+  ]
+}

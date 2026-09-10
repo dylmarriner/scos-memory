@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "domain": "impact",
+  "records": [
+    {"id": "impact.retrieval-contract", "kind": "code-impact", "text": "Retrieval ranking changes affect query planning and evidence presentation."},
+    {"id": "impact.memory-schema", "kind": "memory-impact", "text": "Memory schema changes affect journal durability and recall consumers."},
+    {"id": "impact.auth-boundary", "kind": "security-impact", "text": "Authentication changes affect governed service boundaries."}
+  ],
+  "queries": [
+    {"id": "impact.q1", "query": "what does changing retrieval ranking affect", "relevant": ["impact.retrieval-contract"]},
+    {"id": "impact.q2", "query": "what depends on memory schema changes", "relevant": ["impact.memory-schema"]}
+  ]
+}
