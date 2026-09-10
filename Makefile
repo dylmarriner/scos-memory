@@ -12,13 +12,14 @@ deployed-benchmark:
 
 fmt:
 	gofmt -w $$(find services -name '*.go' -type f)
-	python3 -m compileall -q workers/consolidation workers/index-maintenance workers/policy-evaluation
+	python3 -m compileall -q workers/consolidation workers/index-maintenance workers/policy-evaluation integrations/hermes/plugins/scos
 
 test:
 	go test ./...
 	python3 -m unittest discover -s workers/consolidation/tests -v
 	python3 -m unittest discover -s workers/index-maintenance -p "test_*.py" -v
 	python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
+	python3 -m unittest discover -s integrations/hermes/plugins/scos -p "test_*.py" -v
 	python3 tests/failure-injection/test_runner.py -v
 	python3 -m unittest discover -s tests -p 'test_compose_security.py' -v
 
