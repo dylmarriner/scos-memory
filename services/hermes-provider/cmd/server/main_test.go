@@ -117,6 +117,44 @@ func TestMemoryWriteRequestShape(t *testing.T) {
 	}
 }
 
+func TestMemoryWriteRequestCarriesStateTransition(t *testing.T) {
+	req := MemoryWriteRequest{
+		Action:        "replace",
+		Target:        "user",
+		PreviousValue: "old preference",
+		Value:         "new preference",
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["action"] != "replace" || decoded["target"] != "user" || decoded["previous_value"] != "old preference" {
+		t.Fatalf("memory state transition was not preserved: %#v", decoded)
+	}
+}
+
+func TestMemoryWriteLookupUsesPreviousValueForMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  MemoryWriteRequest
+		want string
+	}{
+		{name: "add", req: MemoryWriteRequest{Action: "add", Value: "new"}, want: "new"},
+		{name: "replace", req: MemoryWriteRequest{Action: "replace", Value: "new", PreviousValue: "old"}, want: "old"},
+		{name: "remove", req: MemoryWriteRequest{Action: "remove", PreviousValue: "old"}, want: "old"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := memoryWriteLookupValue(tc.req); got != tc.want {
+				t.Fatalf("memoryWriteLookupValue() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClassifyMemoryScope(t *testing.T) {
 	cases := map[string]struct {
 		memoryType string
