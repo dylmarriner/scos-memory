@@ -29,7 +29,7 @@ import (
 
 type server struct {
 	db                                                                                                                                    *sql.DB
-	issuerSecret, gatewayURL, publicGatewayURL, vaultURL, memIntelligenceURL, codeIntelligenceURL, okfURL, graphifyURL, controlPlaneToken string
+	issuerSecret, gatewayURL, memoryGatewayURL, agentRegistryURL, observabilityURL, publicGatewayURL, vaultURL, memIntelligenceURL, codeIntelligenceURL, okfURL, graphifyURL, controlPlaneToken string
 	client                                                                                                                                *http.Client
 }
 type credentials struct {
@@ -65,6 +65,9 @@ func main() {
 		db:                  db,
 		issuerSecret:        strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET")),
 		gatewayURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_MCP_GATEWAY_URL")), "/"),
+		memoryGatewayURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_MEMORY_GATEWAY_URL")), "/"),
+		agentRegistryURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_AGENT_REGISTRY_URL")), "/"),
+		observabilityURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_OBSERVABILITY_URL")), "/"),
 		publicGatewayURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_PUBLIC_GATEWAY_URL")), "/"),
 		vaultURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_CREDENTIAL_VAULT_URL")), "/"),
 		memIntelligenceURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_MEMORY_INTELLIGENCE_URL")), "/"),
@@ -137,6 +140,7 @@ func main() {
 	mux.HandleFunc("/api/vault/", s.vault)
 	mux.HandleFunc("/api/memory/graph", s.memoryGraph)
 	mux.HandleFunc("/api/memory/facts", s.memoryFacts)
+	mux.HandleFunc("/api/operations", s.operations)
 	mux.HandleFunc("/api/code/repos", s.codeRepos)
 	mux.HandleFunc("/api/code/index-status", s.codeIndexStatus)
 	mux.HandleFunc("/api/code/settings", s.codeSettings)

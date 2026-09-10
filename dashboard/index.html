@@ -108,6 +108,30 @@
     .tab-btn[aria-current="true"] { color: var(--cyan); background: rgba(0,240,255,.08); border-color: rgba(0,240,255,.3); border-bottom-color: var(--cyan); }
     .tab-panel { margin-top: 1.1rem; }
     .tab-panel[hidden] { display: none; }
+    .operator-overview { display: grid; gap: .85rem; margin-bottom: 1rem; }
+    .freshness-banner { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; padding: .7rem .85rem; border: 1px solid rgba(0,240,255,.22); border-radius: .6rem; background: rgba(0,240,255,.055); }
+    .freshness-banner.partial { border-color: rgba(246,173,85,.35); background: rgba(246,173,85,.06); }
+    .freshness-banner.error { border-color: rgba(255,77,109,.35); background: rgba(255,77,109,.06); }
+    .freshness-title { color: var(--cyan); font-family: 'Space Grotesk', sans-serif; font-weight: 600; }
+    .freshness-banner.partial .freshness-title { color: var(--amber); }
+    .freshness-banner.error .freshness-title { color: var(--red); }
+    .freshness-detail { color: var(--text-dim); font-size: .72rem; }
+    .operator-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(260px, .7fr); gap: .85rem; }
+    .operator-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+    .operator-card { display: flex; gap: .6rem; align-items: flex-start; padding: .7rem; border: 1px solid var(--border-soft); border-left: 2px solid var(--hud-accent, var(--cyan)); border-radius: .5rem; background: rgba(13,17,28,.55); }
+    .operator-card .operator-count { font: 700 1.4rem/1 'Space Grotesk', sans-serif; color: var(--hud-accent, var(--cyan)); }
+    .operator-card .operator-label { font-size: .7rem; color: var(--text); }
+    .operator-card .operator-detail { margin-top: .15rem; font-size: .64rem; color: var(--text-dim); }
+    .operator-list { display: grid; gap: .4rem; }
+    .operator-list-item { display: flex; justify-content: space-between; gap: .6rem; align-items: baseline; padding: .4rem 0; border-bottom: 1px solid var(--border-soft); font-size: .7rem; }
+    .operator-list-item:last-child { border-bottom: 0; }
+    .operator-list-item a { color: var(--cyan); white-space: nowrap; }
+    .operator-muted { color: var(--text-faint); font-size: .72rem; font-style: italic; }
+    .operator-health { display: grid; gap: .45rem; }
+    .operator-health-row { display: grid; grid-template-columns: 1fr auto; gap: .5rem; align-items: center; font-size: .7rem; }
+    .operator-health-row .health-state { text-transform: uppercase; letter-spacing: .04em; font-size: .62rem; }
+    .health-state.healthy { color: var(--green); } .health-state.degraded { color: var(--amber); } .health-state.unavailable { color: var(--red); } .health-state.unknown { color: var(--text-faint); }
+    @media (max-width: 760px) { .operator-grid, .operator-cards { grid-template-columns: 1fr; } }
 
     /* ── HUD panel (compact sidebar card) ────────────────────────────── */
     .hud-panel { position: relative; background: rgba(13,17,28,.55); backdrop-filter: blur(10px); border: 1px solid var(--border-soft); border-left: 2px solid var(--hud-accent, var(--cyan)); border-radius: .6rem; padding: .75rem .85rem .85rem; min-width: 0; animation: rise .3s ease both; }
@@ -222,6 +246,18 @@
     dialog textarea { min-height: 5rem; resize: vertical; }
     .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1.15rem; }
     .dialog-error { color: var(--red); font-size: .82rem; margin-top: .5rem; min-height: 1.1em; }
+    .memory-toolbar { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin:.8rem 0 0; }
+    .memory-toolbar input, .memory-toolbar select { background:#05070d; color:var(--text); border:1px solid rgba(255,255,255,.12); border-radius:.4rem; padding:.45rem .55rem; font:inherit; font-size:.74rem; }
+    .memory-toolbar input { flex:1; min-width:180px; }
+    .filter-count { color:var(--text-dim); font-size:.7rem; margin-left:auto; }
+    .detail-drawer { max-width:680px; width:min(680px,94vw); }
+    .detail-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:.6rem; margin:.8rem 0; }
+    .detail-block { background:rgba(255,255,255,.035); border:1px solid var(--border-soft); border-radius:.45rem; padding:.55rem .65rem; }
+    .detail-label { color:var(--text-faint); font-size:.62rem; letter-spacing:.1em; text-transform:uppercase; }
+    .detail-value { color:var(--text); font-size:.76rem; margin-top:.2rem; word-break:break-word; }
+    .evidence-list { margin:.45rem 0 0; padding-left:1.1rem; color:#c3cbdb; font-size:.74rem; }
+    .evidence-list li { padding:.18rem 0; }
+    .queue-badge { display:inline-block; min-width:1.4rem; text-align:center; border-radius:999px; padding:.05rem .3rem; margin-left:.3rem; background:rgba(255,255,255,.08); color:var(--text-dim); }
 
     /* ── bottom live-trace marquee ────────────────────────────────────── */
     .marquee-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2; background: rgba(5,7,12,.92); backdrop-filter: blur(10px); border-top: 1px solid rgba(0,240,255,.2); padding: .55rem 0; overflow: hidden; }
@@ -262,6 +298,34 @@
     <nav class="tabs" id="tabs" role="tablist"></nav>
 
     <section class="tab-panel" data-tab="overview" id="tab-overview">
+      <div class="operator-overview" aria-label="SCOS operator overview">
+        <div class="freshness-banner" id="operator-freshness" role="status" aria-live="polite">
+          <span class="freshness-title" id="operator-freshness-title">Waiting for snapshot</span>
+          <span class="freshness-detail" id="operator-freshness-detail">Authoritative projection has not arrived yet.</span>
+          <button type="button" class="small" id="operator-refresh">Refresh</button>
+        </div>
+        <div class="operator-grid">
+          <div class="glass-card plain">
+            <div class="card-head"><div class="card-title plain">Attention</div><div class="card-meta" id="operator-attention-meta"></div></div>
+            <div class="operator-cards" id="operator-attention-cards"></div>
+            <div class="operator-list" id="operator-attention-list" style="margin-top:.65rem"></div>
+          </div>
+          <div class="glass-card green">
+            <div class="card-head"><div class="card-title green">Measured health</div><div class="card-meta" id="operator-health-meta"></div></div>
+            <div class="operator-health" id="operator-health-summary"></div>
+          </div>
+        </div>
+        <div class="operator-grid">
+          <div class="glass-card cyan">
+            <div class="card-head"><div class="card-title cyan">Recent correlated activity</div><a class="small" href="#flow">open Flow</a></div>
+            <div class="operator-list" id="operator-activity"></div>
+          </div>
+          <div class="glass-card violet">
+            <div class="card-head"><div class="card-title violet">Memory signal</div><a class="small" href="#memory">open Memory</a></div>
+            <div id="operator-memory-signal"></div>
+          </div>
+        </div>
+      </div>
       <div class="overview-grid" style="display:grid;grid-template-columns:230px minmax(0,1fr) 230px;gap:1rem;align-items:start">
         <div>
           <div class="col-label" style="color:var(--violet)">Identity // System</div>
@@ -333,20 +397,26 @@
     <section class="tab-panel" data-tab="facts" id="tab-facts" hidden>
       <div class="stat-grid" id="facts-stats"></div>
       <div class="glass-card amber" style="margin-top:1rem">
-        <div class="card-title amber" style="margin-bottom:.65rem">All facts</div>
+        <div class="card-head"><div class="card-title amber">Memory review</div><div class="card-meta">filter the tenant-scoped projection before acting</div></div>
+        <div class="memory-toolbar" role="search" aria-label="Filter memory facts">
+          <input id="facts-filter" type="search" placeholder="search content, source, network…" autocomplete="off">
+          <select id="facts-network-filter" aria-label="Filter by network"><option value="">all networks</option></select>
+          <select id="facts-status-filter" aria-label="Filter by status"><option value="">all states</option><option value="active">active</option><option value="revoked">revoked</option><option value="merged">merged</option></select>
+          <button id="facts-filter-clear" class="small">clear</button><span id="facts-filter-count" class="filter-count"></span>
+        </div>
         <div class="panel-body" id="facts-table-mount" style="max-height:none"></div>
       </div>
       <div style="margin-top:1rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:.85rem">
         <div class="hud-panel" style="--hud-accent:var(--red)">
-          <div class="hud-panel-head"><span class="hud-tag">CTD</span><span class="hud-title">Contradictions</span></div>
+          <div class="hud-panel-head"><span class="hud-tag">CTD</span><span class="hud-title">Contradictions <span id="facts-contradictions-count" class="queue-badge"></span></span></div>
           <div class="panel-body" id="facts-contradictions"></div>
         </div>
         <div class="hud-panel" style="--hud-accent:var(--green)">
-          <div class="hud-panel-head"><span class="hud-tag">LRN</span><span class="hud-title">Learnings</span></div>
+          <div class="hud-panel-head"><span class="hud-tag">LRN</span><span class="hud-title">Learnings <span id="facts-learnings-count" class="queue-badge"></span></span></div>
           <div class="panel-body" id="facts-learnings"></div>
         </div>
         <div class="hud-panel" style="--hud-accent:var(--amber)">
-          <div class="hud-panel-head"><span class="hud-tag">OKF</span><span class="hud-title">OKF Documents</span></div>
+          <div class="hud-panel-head"><span class="hud-tag">OKF</span><span class="hud-title">OKF state <span id="facts-okf-count" class="queue-badge"></span></span></div>
           <div class="panel-body" id="facts-okf"></div>
         </div>
       </div>
@@ -675,9 +745,15 @@
       <button id="history-close">close</button>
     </div>
   </dialog>
+  <dialog id="node-detail-dialog" class="detail-drawer">
+    <h3>Memory node detail</h3>
+    <div id="node-detail-body"><p class="missing">Loading…</p></div>
+    <div class="dialog-actions"><button id="node-detail-close">close</button></div>
+  </dialog>
 
   <script>
     const snapshotEndpoint = window.SCOS_TRANSPARENCY_ENDPOINT || '/v1/transparency/snapshot';
+    const operationsEndpoint = window.SCOS_OPERATIONS_ENDPOINT || '/api/operations';
     const streamEndpoint = window.SCOS_TRANSPARENCY_STREAM_ENDPOINT || '/v1/transparency/stream';
     const loginEndpoint = '/v1/transparency/login';
     const factsEndpoint = (id) => `/v1/transparency/facts/${encodeURIComponent(id)}`;
@@ -804,6 +880,49 @@
       }
     }
     document.getElementById('history-close').addEventListener('click', () => document.getElementById('history-dialog').close());
+
+    function detailBlock(label, value) {
+      const block = document.createElement('div');
+      block.className = 'detail-block';
+      block.innerHTML = `<div class="detail-label">${escapeHtml(label)}</div><div class="detail-value">${escapeHtml(value || '—')}</div>`;
+      return block;
+    }
+    async function openNodeDetail(id, node) {
+      const body = document.getElementById('node-detail-body');
+      body.innerHTML = '<p class="missing">Loading authoritative fact…</p>';
+      document.getElementById('node-detail-dialog').showModal();
+      try {
+        const resp = await fetch(factsEndpoint(id), { credentials: 'same-origin' });
+        const fact = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(fact.error || `fact lookup failed (${resp.status})`);
+        body.innerHTML = '';
+        const content = document.createElement('div');
+        content.className = 'detail-block';
+        content.innerHTML = `<div class="detail-label">content</div><div class="detail-value">${escapeHtml(fact.content || fact.memory || node.label || '')}</div>`;
+        body.appendChild(content);
+        const grid = document.createElement('div');
+        grid.className = 'detail-grid';
+        [['network', fact.network], ['status', fact.status || 'active'], ['confidence', fact.confidence], ['authority', fact.authority_level], ['source', fact.source], ['scope', fact.scope], ['observed', fact.observed_at], ['recorded', fact.recorded_at], ['revision', fact.revision]].forEach(([label, value]) => grid.appendChild(detailBlock(label, value)));
+        body.appendChild(grid);
+        const evidence = document.createElement('div');
+        evidence.className = 'detail-block';
+        const evidenceIds = Array.isArray(fact.evidence) ? fact.evidence : [];
+        const codeIds = Array.isArray(fact.code_symbol_version_ids) ? fact.code_symbol_version_ids : [];
+        evidence.innerHTML = '<div class="detail-label">evidence & provenance</div>';
+        const list = document.createElement('ul');
+        list.className = 'evidence-list';
+        [...evidenceIds.map((v) => `fact evidence: ${v}`), ...codeIds.map((v) => `code symbol version: ${v}`), fact.derivation ? `derivation: ${fact.derivation}` : ''].filter(Boolean).forEach((line) => { const li = document.createElement('li'); li.textContent = line; list.appendChild(li); });
+        if (!list.children.length) { const li = document.createElement('li'); li.textContent = 'No linked evidence recorded.'; list.appendChild(li); }
+        evidence.appendChild(list); body.appendChild(evidence);
+        const actions = document.createElement('div');
+        actions.className = 'dialog-actions';
+        actions.appendChild(factActions(fact));
+        body.appendChild(actions);
+      } catch (error) {
+        body.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`;
+      }
+    }
+    document.getElementById('node-detail-close').addEventListener('click', () => document.getElementById('node-detail-dialog').close());
 
     // ── generic human-readable renderer ─────────────────────────────────
     // Every panel's data comes straight from a backend projection with no
@@ -1030,7 +1149,9 @@
         nodeEl.addEventListener('mouseleave', () => { clearHighlight(); hideTooltip(); });
         if (!isEntity) {
           nodeEl.style.cursor = 'pointer';
-          nodeEl.addEventListener('click', () => openHistory(n.id));
+          nodeEl.setAttribute('role', 'button');
+          nodeEl.setAttribute('aria-label', `Open memory node ${n.label || n.id}`);
+          nodeEl.addEventListener('click', () => openNodeDetail(n.id, n));
         }
         nodeGroup.appendChild(nodeEl);
         nodeEls.push(nodeEl);
@@ -1081,7 +1202,7 @@
         '<span><i class="graph-dot fact"></i>fact</span>' +
         '<span><i class="graph-dot entity"></i>entity</span>' +
         `<span>${nodes.length} node${nodes.length === 1 ? '' : 's'} &middot; ${edges.length} link${edges.length === 1 ? '' : 's'}</span>` +
-        '<span class="graph-hint">scroll to zoom &middot; drag to pan &middot; click a fact for history</span>';
+        '<span class="graph-hint">scroll to zoom &middot; drag to pan &middot; click a fact for evidence</span>';
       wrap.appendChild(legend);
 
       if (truncated) {
@@ -1483,6 +1604,15 @@
       btn.setAttribute('role', 'tab');
       if (tab.creatorOnly) btn.hidden = true;
       btn.addEventListener('click', () => setTab(tab.id));
+      btn.addEventListener('keydown', (event) => {
+        if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const visible = [...tabsEl.querySelectorAll('.tab-btn:not([hidden])')];
+        const index = visible.indexOf(btn);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? visible.length - 1 : (index + (event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1) + visible.length) % visible.length;
+        setTab(visible[next].dataset.tab);
+        visible[next].focus();
+      });
       tabsEl.appendChild(btn);
     }
     setTab('overview');
@@ -1612,23 +1742,54 @@
     // ── Facts tab: full table + honest stat tiles (total / distinct
     // networks / average confidence / forgotten — every one of these comes
     // straight off the fetched fact records, nothing invented). ─────────
-    mountPanel('facts', null, document.getElementById('facts-table-mount'), defaultPaint);
+    function factRows(value) {
+      return Array.isArray(value) ? value : (Array.isArray(value && value.entries) ? value.entries : []);
+    }
+    function paintFilteredFacts(bodyEl, value) {
+      const rows = factRows(value);
+      const networkSelect = document.getElementById('facts-network-filter');
+      const selectedNetwork = networkSelect.value;
+      const networks = [...new Set(rows.map((fact) => fact.network).filter(Boolean))].sort();
+      networkSelect.innerHTML = '<option value="">all networks</option>' + networks.map((item) => `<option value="${escapeHtml(item)}">${escapeHtml(item)}</option>`).join('');
+      networkSelect.value = networks.includes(selectedNetwork) ? selectedNetwork : '';
+      const query = (document.getElementById('facts-filter').value || '').trim().toLowerCase();
+      const network = document.getElementById('facts-network-filter').value;
+      const status = document.getElementById('facts-status-filter').value;
+      const filtered = rows.filter((fact) => {
+        const haystack = [fact.content, fact.source, fact.network, fact.scope, fact.derivation].filter(Boolean).join(' ').toLowerCase();
+        return (!query || haystack.includes(query)) && (!network || fact.network === network) && (!status || (fact.status || 'active') === status);
+      });
+      document.getElementById('facts-filter-count').textContent = `${filtered.length} of ${rows.length} facts`;
+      bodyEl.appendChild(render(filtered));
+    }
+    mountPanel('facts', null, document.getElementById('facts-table-mount'), paintFilteredFacts);
+    ['facts-filter', 'facts-network-filter', 'facts-status-filter'].forEach((id) => {
+      document.getElementById(id).addEventListener('input', () => paintAllMounts('facts'));
+      document.getElementById(id).addEventListener('change', () => paintAllMounts('facts'));
+    });
+    document.getElementById('facts-filter-clear').addEventListener('click', () => {
+      document.getElementById('facts-filter').value = '';
+      document.getElementById('facts-network-filter').value = '';
+      document.getElementById('facts-status-filter').value = '';
+      paintAllMounts('facts');
+    });
     mountPanel('facts', null, document.getElementById('facts-stats'), (bodyEl, value) => {
-      if (!Array.isArray(value)) { bodyEl.appendChild(render(value)); return; }
-      const networks = new Set(value.map((f) => f.network).filter(Boolean));
-      const confidences = value.map((f) => Number(f.confidence)).filter((n) => !isNaN(n));
+      const rows = factRows(value);
+      if (!rows.length && !Array.isArray(value) && !Array.isArray(value && value.entries)) { bodyEl.appendChild(render(value)); return; }
+      const networks = new Set(rows.map((f) => f.network).filter(Boolean));
+      const confidences = rows.map((f) => Number(f.confidence)).filter((n) => !isNaN(n));
       const avgConfidence = confidences.length ? (confidences.reduce((a, b) => a + b, 0) / confidences.length) : null;
-      const forgotten = value.filter((f) => f.status === 'revoked' || f.status === 'forgotten').length;
+      const forgotten = rows.filter((f) => f.status === 'revoked' || f.status === 'forgotten').length;
       bodyEl.append(
-        statTile('total facts', String(value.length), networks.size ? `across ${networks.size} network${networks.size === 1 ? '' : 's'}` : '', 'var(--amber)'),
+        statTile('total facts', String(rows.length), networks.size ? `across ${networks.size} network${networks.size === 1 ? '' : 's'}` : '', 'var(--amber)'),
         statTile('avg confidence', avgConfidence === null ? '—' : avgConfidence.toFixed(2), confidences.length ? `${confidences.length} scored` : 'no data', 'var(--amber)'),
         statTile('networks', String(networks.size), [...networks].slice(0, 3).join(', '), 'var(--amber)'),
         statTile('forgotten', String(forgotten), 'retained in history', 'var(--red)'),
       );
     });
-    mountPanel('contradictions', null, document.getElementById('facts-contradictions'), defaultPaint);
-    mountPanel('learnings', null, document.getElementById('facts-learnings'), defaultPaint);
-    mountPanel('okf_documents', null, document.getElementById('facts-okf'), defaultPaint);
+    mountPanel('contradictions', null, document.getElementById('facts-contradictions'), (bodyEl, value) => { document.getElementById('facts-contradictions-count').textContent = Array.isArray(value && value.entries) ? value.entries.length : (Array.isArray(value) ? value.length : ''); defaultPaint(bodyEl, value); });
+    mountPanel('learnings', null, document.getElementById('facts-learnings'), (bodyEl, value) => { document.getElementById('facts-learnings-count').textContent = Array.isArray(value && value.entries) ? value.entries.length : (Array.isArray(value) ? value.length : ''); defaultPaint(bodyEl, value); });
+    mountPanel('okf_documents', null, document.getElementById('facts-okf'), (bodyEl, value) => { document.getElementById('facts-okf-count').textContent = Array.isArray(value && value.entries) ? value.entries.length : (Array.isArray(value) ? value.length : ''); defaultPaint(bodyEl, value); });
     mountPanel('memory_summary', null, document.getElementById('mem-summary-mount'), defaultPaint);
 
     // Graphify is interactive (a caller-supplied question), not a passive
@@ -1801,6 +1962,105 @@
 
     function paintPanel(key) { paintAllMounts(key); }
 
+    function asEntries(value) {
+      if (Array.isArray(value)) return value;
+      if (value && Array.isArray(value.entries)) return value.entries;
+      if (value && Array.isArray(value.items)) return value.items;
+      if (value && Array.isArray(value.events)) return value.events;
+      return [];
+    }
+    function operatorText(value, fallback = '—') {
+      if (value === null || value === undefined || value === '') return fallback;
+      if (typeof value === 'object') return JSON.stringify(value);
+      return String(value);
+    }
+    function operatorLink(label, tab) {
+      const link = document.createElement('a');
+      link.href = `#${tab}`;
+      link.textContent = label;
+      return link;
+    }
+    function renderOperatorSummary(payload) {
+      const views = payload.views || {};
+      const unavailable = payload.unavailable || {};
+      const attention = Array.isArray(payload.attention) ? payload.attention : [];
+      const health = asEntries(views.system);
+      const unhealthy = health.filter((item) => ['degraded', 'unhealthy', 'unreachable', 'down', 'error'].includes(String(item.status || item.health || '').toLowerCase())).length;
+      const recovery = asEntries(views.recovery).filter((item) => !['complete', 'completed', 'healthy', 'idle', 'none'].includes(String(item.status || item.state || '').toLowerCase())).length;
+      const contradictions = asEntries(views.contradictions).length;
+      const review = [...asEntries(views.tool_operations), ...asEntries(views.facts), ...asEntries(views.learnings)].filter((item) => /pending|review|approval|queue/i.test(JSON.stringify(item))).length;
+      const queue = views.queue && typeof views.queue === 'object' ? Number(views.queue.pending || 0) + Number(views.queue.retryable || 0) : null;
+      const memorySummary = views.memory_summary && typeof views.memory_summary === 'object' ? views.memory_summary : {};
+      const cards = [
+        { label: 'Unhealthy services', count: unhealthy, detail: health.length ? `${health.length} measured` : 'service view unavailable', accent: 'var(--red)', tab: 'system' },
+        { label: 'Recovery', count: recovery, detail: recovery ? 'needs operator attention' : 'no active recovery', accent: 'var(--amber)', tab: 'system' },
+        { label: 'Contradictions', count: contradictions, detail: contradictions ? 'evidence needs review' : 'none reported', accent: 'var(--red)', tab: 'facts' },
+        { label: 'Pending review', count: review, detail: review ? 'queued records or operations' : 'none reported', accent: 'var(--violet)', tab: 'agents' },
+        { label: 'Queue depth', count: queue === null || Number.isNaN(queue) ? '—' : queue, detail: queue === null ? 'queue view unavailable' : `${Number(views.queue.pending || 0)} pending · ${Number(views.queue.retryable || 0)} retryable`, accent: 'var(--amber)', tab: 'flow' },
+        { label: 'Memory facts', count: memorySummary.fact_count ?? '—', detail: memorySummary.mode ? `summary mode: ${memorySummary.mode}` : 'memory view unavailable', accent: 'var(--cyan)', tab: 'facts' },
+      ];
+      const cardMount = document.getElementById('operator-attention-cards');
+      cardMount.innerHTML = '';
+      for (const card of cards) {
+        const el = document.createElement('div');
+        el.className = 'operator-card'; el.style.setProperty('--hud-accent', card.accent);
+        el.appendChild(Object.assign(document.createElement('span'), { className: 'operator-count', textContent: String(card.count) }));
+        const body = document.createElement('div');
+        body.appendChild(Object.assign(document.createElement('div'), { className: 'operator-label', textContent: card.label }));
+        body.appendChild(Object.assign(document.createElement('div'), { className: 'operator-detail', textContent: card.detail }));
+        body.appendChild(operatorLink('details', card.tab));
+        el.appendChild(body); cardMount.appendChild(el);
+      }
+      document.getElementById('operator-attention-meta').textContent = `${attention.length} evidence-backed item${attention.length === 1 ? '' : 's'}`;
+      const list = document.getElementById('operator-attention-list'); list.innerHTML = '';
+      for (const item of attention.slice(0, 5)) {
+        const row = document.createElement('div'); row.className = 'operator-list-item';
+        row.appendChild(Object.assign(document.createElement('span'), { textContent: `${item.title || item.id || 'Attention'} — ${item.detail || 'No detail supplied'}` }));
+        if (item.source) row.appendChild(Object.assign(document.createElement('span'), { className: 'card-meta', textContent: item.source }));
+        list.appendChild(row);
+      }
+      if (!list.children.length) list.innerHTML = '<span class="operator-muted">No attention items reported by the projection.</span>';
+
+      const healthMount = document.getElementById('operator-health-summary'); healthMount.innerHTML = '';
+      document.getElementById('operator-health-meta').textContent = health.length ? `${health.length} services measured` : 'no service data';
+      for (const item of health.slice(0, 8)) {
+        const row = document.createElement('div'); row.className = 'operator-health-row';
+        row.appendChild(Object.assign(document.createElement('span'), { textContent: operatorText(item.service || item.name, 'unnamed service') }));
+        const state = String(item.status || item.health || 'unknown').toLowerCase();
+        row.appendChild(Object.assign(document.createElement('span'), { className: `health-state ${['healthy','degraded','unavailable'].includes(state) ? state : 'unknown'}`, textContent: state }));
+        healthMount.appendChild(row);
+      }
+      if (!healthMount.children.length) healthMount.innerHTML = `<span class="operator-muted">${escapeHtml(unavailable.system || 'Measured service health is unavailable.')}</span>`;
+
+      const activity = document.getElementById('operator-activity'); activity.innerHTML = '';
+      const events = [...asEntries(views.timeline), ...asEntries(views.diary)].slice(-5).reverse();
+      for (const item of events) {
+        const row = document.createElement('div'); row.className = 'operator-list-item';
+        const text = item.message || item.summary || item.title || item.event || item.content || 'correlated activity';
+        const correlation = item.correlation_id || item.trace_id || item.request_id || item.operation_id || item.id;
+        row.appendChild(Object.assign(document.createElement('span'), { textContent: operatorText(text) }));
+        row.appendChild(Object.assign(document.createElement('span'), { className: 'card-meta mono', textContent: operatorText(correlation, '—') }));
+        activity.appendChild(row);
+      }
+      if (!activity.children.length) activity.innerHTML = `<span class="operator-muted">${escapeHtml(unavailable.timeline || unavailable.diary || 'No recent correlated activity reported.')}</span>`;
+
+      const memoryMount = document.getElementById('operator-memory-signal'); memoryMount.innerHTML = '';
+      const summary = views.memory_summary || views.memory;
+      if (summary) memoryMount.appendChild(render(summary));
+      else memoryMount.innerHTML = `<span class="operator-muted">${escapeHtml(unavailable.memory || 'Memory signal unavailable.')}</span>`;
+    }
+
+    async function refreshOperations() {
+      const response = await fetch(operationsEndpoint, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error(`operations returned ${response.status}`);
+      const payload = await response.json();
+      if (payload.schema_version !== 'scos-operations.v1') throw new Error(`unsupported operations schema: ${payload.schema_version || 'missing'}`);
+      renderOperatorSummary({ views: { system: payload.health, memory_summary: payload.memory, queue: payload.queue, agents: payload.agents, observability: payload.observability }, attention: Object.entries(payload.unavailable || {}).map(([source, detail]) => ({ title: `${source} unavailable`, detail, source })) });
+      const banner = document.getElementById('operator-freshness');
+      banner.className = `freshness-banner${payload.state === 'partial' ? ' partial' : payload.state === 'error' ? ' error' : ''}`;
+      document.getElementById('operator-freshness-title').textContent = payload.state === 'complete' ? 'Operations current' : `Operations ${payload.state}`;
+      document.getElementById('operator-freshness-detail').textContent = `Generated ${payload.generated_at} · tenant ${payload.scope?.tenant_id || 'unknown'}`;
+    }
     const snapshotFetchState = { status: 'idle', generated: null, state: null, scope: null, freshness: null, viewStatus: {} };
     async function refreshSnapshot() {
       snapshotFetchState.status = 'loading';
@@ -1829,6 +2089,7 @@
         detail,
         source,
       }));
+      renderOperatorSummary(payload);
       let anyUnavailable = false;
       for (const panel of PANELS) {
         const state = panelState.get(panel.key);
@@ -1852,13 +2113,23 @@
       const assembly = payload.freshness && Number.isFinite(payload.freshness.assembly_ms) ? ` · ${payload.freshness.assembly_ms}ms` : '';
       statusText.textContent = `refreshed ${generated} · ${snapshotState}${assembly}`;
       if (anyUnavailable || attention.length) statusText.textContent += ` · ${attention.length} attention item${attention.length === 1 ? '' : 's'}`;
+      const banner = document.getElementById('operator-freshness');
+      banner.className = `freshness-banner${snapshotState === 'partial' || anyUnavailable ? ' partial' : ''}`;
+      document.getElementById('operator-freshness-title').textContent = snapshotState === 'partial' || anyUnavailable ? 'Partial snapshot' : 'Snapshot fresh';
+      const available = payload.freshness && payload.freshness.views_available != null ? `${payload.freshness.views_available}/${payload.freshness.views_total} views` : 'view count unavailable';
+      document.getElementById('operator-freshness-detail').textContent = `Generated ${generated} · ${available}${assembly}${attention.length ? ` · ${attention.length} attention item${attention.length === 1 ? '' : 's'}` : ''}`;
     }
 
     function setStatusError(message) {
       snapshotFetchState.status = 'error';
       statusPill.classList.add('error');
       statusText.textContent = message;
+      const banner = document.getElementById('operator-freshness');
+      banner.className = 'freshness-banner error';
+      document.getElementById('operator-freshness-title').textContent = 'Snapshot unavailable';
+      document.getElementById('operator-freshness-detail').textContent = message;
     }
+    document.getElementById('operator-refresh').addEventListener('click', () => refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`)));
 
     // ── live trace (SSE) → both the Flow tab's full log and the sticky
     // bottom marquee, from the same real event stream. ──────────────────
@@ -2302,7 +2573,8 @@
 
     renderEditState();
     refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`));
-    setInterval(() => refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`)), 15000);
+    refreshOperations().catch((error) => setStatusError(`operations unavailable: ${error.message}`));
+    setInterval(() => { refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`)); refreshOperations().catch((error) => setStatusError(`operations unavailable: ${error.message}`)); }, 15000);
     connectTrace();
     checkSession();
   </script>

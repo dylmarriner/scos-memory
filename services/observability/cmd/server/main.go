@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -23,6 +24,13 @@ import (
 )
 
 const version = "0.1.0"
+
+func observabilityTenant(r *http.Request) string {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		return claims.TenantID
+	}
+	return strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID"))
+}
 
 // ── metric types (§32) ──────────────────────────────────────────────────
 
@@ -544,10 +552,14 @@ func (s *observabilityServer) handleMetricsQuery(w http.ResponseWriter, r *http.
 	name := r.URL.Query().Get("name")
 	service := r.URL.Query().Get("service")
 	since := r.URL.Query().Get("since")
+	tenant := observabilityTenant(r)
 
 	s.mu.RLock()
 	var results []*MetricPoint
 	for _, m := range s.metrics {
+		if tenant != "" && m.Tenant != tenant && (m.Labels == nil || m.Labels["tenant_id"] != tenant) {
+			continue
+		}
 		if name != "" && m.Name != name {
 			continue
 		}
@@ -657,11 +669,15 @@ func (s *observabilityServer) handleLogs(w http.ResponseWriter, r *http.Request)
 	limit := 100
 	level := r.URL.Query().Get("level")
 	service := r.URL.Query().Get("service")
+	tenant := observabilityTenant(r)
 
 	s.mu.RLock()
 	var entries []*LogEntry
 	for i := len(s.logs) - 1; i >= 0 && len(entries) < limit; i-- {
 		e := s.logs[i]
+		if tenant != "" && e.Tenant != tenant {
+			continue
+		}
 		if level != "" && e.Level != level {
 			continue
 		}

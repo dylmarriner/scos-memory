@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scos.dev/schemas/dashboard/scos-operations.v1.json",
+  "title": "SCOS Operations snapshot",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "scope", "state", "deployment"],
+  "properties": {
+    "schema_version": {"const": "scos-operations.v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "scope": {"type": "object", "required": ["tenant_id", "principal_id"], "properties": {"tenant_id": {"type": "string", "minLength": 1}, "principal_id": {"type": "string", "minLength": 1}}, "additionalProperties": false},
+    "state": {"enum": ["complete", "partial", "error"]},
+    "health": {}, "memory": {}, "queue": {}, "agents": {}, "observability": {},
+    "deployment": {"type": "object", "required": ["service", "source_sha", "build_time"]},
+    "unavailable": {"type": "object", "additionalProperties": {"type": "string"}}
+  },
+  "additionalProperties": false
+}
