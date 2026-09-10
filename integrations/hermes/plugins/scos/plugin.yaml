@@ -1,4 +1,4 @@
 name: scos
-version: "1.0.0"
-description: SCOS Nexus Memory Fabric — MemoryProvider for Hermes Agent (persistent cross-session recall + turn persistence).
+version: "1.1.0"
+description: SCOS Nexus Memory Fabric — Hermes MemoryProvider with automatic recall, ordered persistence, and checkpoint API v2 durability.
 author: SCOS Core Team
