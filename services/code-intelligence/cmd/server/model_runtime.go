@@ -60,6 +60,7 @@ type codeSymbolDocument struct {
 
 type codeHybridResult struct {
 	PGSymbolVersion
+	Range           string  `json:"range,omitempty"`
 	RawLexicalScore float64 `json:"raw_lexical_score,omitempty"`
 	RawDenseScore   float64 `json:"raw_dense_score,omitempty"`
 	RRFScore        float64 `json:"rrf_score,omitempty"`
@@ -143,6 +144,10 @@ func newCodeModelRuntimeClientFromEnvironment() (*codeModelRuntimeClient, error)
 		serviceToken:      cfg.Token,
 		controlPlaneToken: cfg.ControlPlaneToken,
 	}, nil
+}
+
+func codeModelRuntimeConfigured() bool {
+	return strings.TrimSpace(os.Getenv("SCOS_MODEL_RUNTIME_URL")) != ""
 }
 
 func codeRuntimeConfig() (*codeModelRuntimeClient, codeEmbeddingSpace, error) {

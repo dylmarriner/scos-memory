@@ -537,3 +537,188 @@ func TestHandlePGImpactRejectsCrossTenantRepository(t *testing.T) {
 		t.Fatalf("expected 404 for another tenant's repository, got %d: %s", impactResp.Code, impactResp.Body.String())
 	}
 }
+
+func TestHandlePGQueryExactBypassesCodeModelRuntime(t *testing.T) {
+	store, db := testPGStore(t)
+	tenant := testTenant(t, db)
+	repoID, err := store.EnsureRepository(t.Context(), tenant, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID, err := store.CreateSnapshot(t.Context(), repoID, tenant, "main", "commit-1", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "pkg/exact.go", Language: "go", ContentHash: hashContent("package pkg\nfunc Exact() {}\n"), Content: "package pkg\nfunc Exact() {}\n"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "exact queries must not reach the model runtime", http.StatusInternalServerError)
+	}))
+	defer runtime.Close()
+	t.Setenv("SCOS_MODEL_RUNTIME_URL", runtime.URL)
+	t.Setenv("SCOS_INTERNAL_SERVICE_TOKEN", "service-token")
+	t.Setenv("SCOS_CONTROL_PLANE_TOKEN", "control-token")
+
+	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/query", tenant, map[string]any{
+		"repository_id": repoID,
+		"branch":        "main",
+		"query":         "pkg/exact.go",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("query: %d: %s", resp.Code, resp.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("exact query made %d model-runtime calls", calls)
+	}
+	var out struct {
+		RetrievalMode string            `json:"retrieval_mode"`
+		Degraded      []string          `json:"degraded_models"`
+		Results       []PGSymbolVersion `json:"results"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.RetrievalMode != "exact" || len(out.Degraded) != 0 || len(out.Results) == 0 {
+		t.Fatalf("unexpected exact response: %+v", out)
+	}
+	for _, result := range out.Results {
+		if result.MatchType != "exact" || result.Path != "pkg/exact.go" {
+			t.Fatalf("exact path query returned non-exact result: %+v", result)
+		}
+	}
+}
+
+func TestHandlePGQueryDegradesToLexicalWhenCodeRuntimeFails(t *testing.T) {
+	store, db := testPGStore(t)
+	tenant := testTenant(t, db)
+	repoID, err := store.EnsureRepository(t.Context(), tenant, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID, err := store.CreateSnapshot(t.Context(), repoID, tenant, "main", "commit-1", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "package auth\nfunc Middleware() {}\n"
+	if err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "internal/auth/middleware.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "model unavailable", http.StatusServiceUnavailable)
+	}))
+	defer runtime.Close()
+	t.Setenv("SCOS_MODEL_RUNTIME_URL", runtime.URL)
+	t.Setenv("SCOS_INTERNAL_SERVICE_TOKEN", "service-token")
+	t.Setenv("SCOS_CONTROL_PLANE_TOKEN", "control-token")
+	t.Setenv("SCOS_MODEL_CODE_MODEL", "BAAI/bge-code-v1")
+	t.Setenv("SCOS_MODEL_CODE_REVISION", "rev-test")
+	t.Setenv("SCOS_MODEL_CODE_DIMENSIONS", "3")
+	t.Setenv("SCOS_MODEL_CODE_GENERATION", "1")
+
+	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/query", tenant, map[string]any{
+		"repository_id": repoID,
+		"branch":        "main",
+		"query":         "middleware",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("query: %d: %s", resp.Code, resp.Body.String())
+	}
+	var out struct {
+		RetrievalMode string             `json:"retrieval_mode"`
+		Degraded      []string           `json:"degraded_models"`
+		Results       []codeHybridResult `json:"results"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.RetrievalMode != "lexical" || len(out.Degraded) != 1 || out.Degraded[0] != "code_embedding" {
+		t.Fatalf("expected explicit lexical degradation, got %+v", out)
+	}
+	if len(out.Results) == 0 || out.Results[0].MatchType != "lexical" {
+		t.Fatalf("expected lexical results during model outage, got %+v", out.Results)
+	}
+}
+
+func TestHandlePGQueryUsesHybridBGECodeRetrieval(t *testing.T) {
+	store, db := testPGStore(t)
+	tenant := testTenant(t, db)
+	repoID, err := store.EnsureRepository(t.Context(), tenant, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID, err := store.CreateSnapshot(t.Context(), repoID, tenant, "main", "commit-1", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "package auth\n\n// Middleware validates a request.\nfunc Middleware() {}\n"
+	if err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "internal/auth/middleware.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/v1/embed/code" {
+			t.Fatalf("unexpected runtime path %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer service-token" || r.Header.Get("X-SCOS-Control-Plane-Token") != "control-token" {
+			t.Fatalf("missing governed model-runtime auth")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding":      []float64{1, 0, 0},
+			"model":          "BAAI/bge-code-v1",
+			"model_revision": "rev-test",
+			"dimensions":     3,
+			"role":           "code",
+		})
+	}))
+	defer runtime.Close()
+	t.Setenv("SCOS_MODEL_RUNTIME_URL", runtime.URL)
+	t.Setenv("SCOS_INTERNAL_SERVICE_TOKEN", "service-token")
+	t.Setenv("SCOS_CONTROL_PLANE_TOKEN", "control-token")
+	t.Setenv("SCOS_MODEL_CODE_MODEL", "BAAI/bge-code-v1")
+	t.Setenv("SCOS_MODEL_CODE_REVISION", "rev-test")
+	t.Setenv("SCOS_MODEL_CODE_DIMENSIONS", "3")
+	t.Setenv("SCOS_MODEL_CODE_GENERATION", "1")
+
+	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/query", tenant, map[string]any{
+		"repository_id": repoID,
+		"branch":        "main",
+		"query":         "middleware",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("query: %d: %s", resp.Code, resp.Body.String())
+	}
+	var out struct {
+		RetrievalMode string             `json:"retrieval_mode"`
+		Degraded      []string           `json:"degraded_models"`
+		Results       []codeHybridResult `json:"results"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.RetrievalMode != "hybrid" || len(out.Degraded) != 0 {
+		t.Fatalf("unexpected hybrid metadata: %+v", out)
+	}
+	if calls < 2 {
+		t.Fatalf("expected snapshot backfill plus query embedding calls, got %d", calls)
+	}
+	if len(out.Results) == 0 {
+		t.Fatal("expected hybrid results")
+	}
+	foundHybrid := false
+	for _, result := range out.Results {
+		if result.MatchType == "hybrid" && result.RawLexicalScore > 0 && result.RawDenseScore > 0 && result.RRFScore > 0 {
+			foundHybrid = true
+			break
+		}
+	}
+	if !foundHybrid {
+		t.Fatalf("expected a result with preserved lexical+dense+RRF scores: %+v", out.Results)
+	}
+}

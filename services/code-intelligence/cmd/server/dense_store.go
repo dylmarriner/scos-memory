@@ -107,19 +107,22 @@ func (s *pgCodeStore) EnsureSnapshotChunks(ctx context.Context, snapshotID strin
 	return nil
 }
 
-func (s *pgCodeStore) ActiveSnapshotID(ctx context.Context, repositoryID, branch string) (string, error) {
-	var snapshotID string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id::text FROM code_repository_snapshots
-		WHERE repository_id = $1 AND branch = $2 AND status = 'active'
-		ORDER BY indexed_at DESC LIMIT 1`, repositoryID, branch).Scan(&snapshotID)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
+func (s *pgCodeStore) CodeEmbeddingSnapshotComplete(ctx context.Context, tenantID, snapshotID, spaceID string) (bool, error) {
+	var total, embedded int
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT
+			  (SELECT count(*) FROM code_symbol_versions sv WHERE sv.snapshot_id = $1 AND sv.status = 'active'),
+			  (SELECT count(*) FROM code_embeddings ce
+			   JOIN code_symbol_versions sv ON sv.id = ce.symbol_version_id
+			   WHERE ce.tenant_id = $2 AND sv.snapshot_id = $1 AND sv.status = 'active'
+			     AND ce.embedding_space_id = $3::uuid AND ce.chunk_number = 0)`,
+			snapshotID, tenantID, spaceID).Scan(&total, &embedded)
+	})
 	if err != nil {
-		return "", fmt.Errorf("resolve active code snapshot: %w", err)
+		return false, err
 	}
-	return snapshotID, nil
+	return total > 0 && total == embedded, nil
 }
 
 func (s *pgCodeStore) CodeEmbeddingCurrent(ctx context.Context, tenantID, symbolVersionID, spaceID, contentHash string) (bool, error) {
@@ -189,13 +192,15 @@ func (s *pgCodeStore) QueryDense(ctx context.Context, tenantID, repositoryID, br
 		defer rows.Close()
 		for rows.Next() {
 			var item codeHybridResult
+			var rangeText sql.NullString
 			if err := rows.Scan(
 				&item.SymbolVersionID, &item.SymbolID, &item.FullyQualifiedName, &item.Path,
-				&item.Range, &item.SnapshotID, &item.CommitID, &item.Branch,
+				&rangeText, &item.SnapshotID, &item.CommitID, &item.Branch,
 				&item.ContentHash, &item.RawDenseScore,
 			); err != nil {
 				return fmt.Errorf("scan dense code symbol: %w", err)
 			}
+			item.Range = rangeText.String
 			item.MatchType = "dense"
 			out = append(out, item)
 		}
@@ -248,6 +253,21 @@ func (s *server) ensureActiveCodeEmbeddings(ctx context.Context, tenantID, repos
 	snapshotID, err := s.pgStore.ActiveSnapshotID(ctx, repositoryID, branch)
 	if err != nil || snapshotID == "" {
 		return err
+	}
+	_, space, err := codeRuntimeConfig()
+	if err != nil {
+		return err
+	}
+	spaceID, err := s.pgStore.EnsureCodeEmbeddingSpace(ctx, space)
+	if err != nil {
+		return err
+	}
+	complete, err := s.pgStore.CodeEmbeddingSnapshotComplete(ctx, tenantID, snapshotID, spaceID)
+	if err != nil {
+		return err
+	}
+	if complete {
+		return nil
 	}
 	return s.embedCodeSnapshot(ctx, tenantID, snapshotID)
 }

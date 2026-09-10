@@ -1229,3 +1229,199 @@ func TestPGChangeImpactReturnsErrSymbolNotFoundForUnknownQuery(t *testing.T) {
 		t.Fatalf("expected ErrSymbolNotFound, got %v", err)
 	}
 }
+
+func TestPGCodeEmbeddingRLSIsolatesTenants(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantA := testTenant(t, db)
+	tenantB := testTenant(t, db)
+
+	makeSymbol := func(tenant, repoPath, filePath string) string {
+		repoID, err := store.EnsureRepository(ctx, tenant, repoPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshotID, err := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-1", "test", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{{Path: filePath, Language: "unknown", ContentHash: hashContent(filePath)}}); err != nil {
+			t.Fatal(err)
+		}
+		results, err := store.QueryByPathOrFQN(ctx, repoID, "main", filePath)
+		if err != nil || len(results) != 1 {
+			t.Fatalf("resolve symbol: %v %+v", err, results)
+		}
+		return results[0].SymbolVersionID
+	}
+
+	symbolA := makeSymbol(tenantA, "/repo/rls-a-"+t.Name(), "a.txt")
+	symbolB := makeSymbol(tenantB, "/repo/rls-b-"+t.Name(), "b.txt")
+	spaceID, err := store.EnsureCodeEmbeddingSpace(ctx, codeEmbeddingSpace{Role: "code", Provider: "test", Model: "test-code", Revision: "r1", Dimensions: 3, Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCodeEmbedding(ctx, tenantA, symbolA, spaceID, hashContent("a"), []float64{1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCodeEmbedding(ctx, tenantB, symbolB, spaceID, hashContent("b"), []float64{0, 1, 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	role := "scos_p4_rls_" + hashContent(t.Name())[:12]
+	if _, err := db.ExecContext(ctx, `CREATE ROLE `+role+` NOLOGIN`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`REVOKE SELECT ON code_embeddings FROM ` + role)
+		_, _ = db.Exec(`DROP ROLE IF EXISTS ` + role)
+	})
+	if _, err := db.ExecContext(ctx, `GRANT SELECT ON code_embeddings TO `+role); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id', $1, true)`, tenantA); err != nil {
+		t.Fatal(err)
+	}
+	var visible, leaked int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM code_embeddings`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM code_embeddings WHERE tenant_id = $1`, tenantB).Scan(&leaked); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 || leaked != 0 {
+		t.Fatalf("RLS visible=%d leaked_other_tenant=%d", visible, leaked)
+	}
+}
+
+func TestPGDenseQueryFiltersExactEmbeddingSpace(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repoID, err := store.EnsureRepository(ctx, tenant, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID, err := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-1", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
+		{Path: "three.txt", Language: "unknown", ContentHash: hashContent("three")},
+		{Path: "two.txt", Language: "unknown", ContentHash: hashContent("two")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	three, _ := store.QueryByPathOrFQN(ctx, repoID, "main", "three.txt")
+	two, _ := store.QueryByPathOrFQN(ctx, repoID, "main", "two.txt")
+	space3, err := store.EnsureCodeEmbeddingSpace(ctx, codeEmbeddingSpace{Role: "code", Provider: "test", Model: "code-3", Revision: "r1", Dimensions: 3, Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	space2, err := store.EnsureCodeEmbeddingSpace(ctx, codeEmbeddingSpace{Role: "code", Provider: "test", Model: "code-2", Revision: "r1", Dimensions: 2, Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCodeEmbedding(ctx, tenant, three[0].SymbolVersionID, space3, hashContent("three"), []float64{1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCodeEmbedding(ctx, tenant, two[0].SymbolVersionID, space2, hashContent("two"), []float64{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	results, err := store.QueryDense(ctx, tenant, repoID, "main", []float64{1, 0, 0}, space3, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Path != "three.txt" {
+		t.Fatalf("cross-space dense result leaked: %+v", results)
+	}
+}
+
+func TestPGDenseQueryUsesActiveSnapshotOnly(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repoID, err := store.EnsureRepository(ctx, tenant, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spaceID, err := store.EnsureCodeEmbeddingSpace(ctx, codeEmbeddingSpace{Role: "code", Provider: "test", Model: "active-only", Revision: "r1", Dimensions: 3, Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snap1, _ := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-1", "test", "")
+	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "old.txt", Language: "unknown", ContentHash: hashContent("old")}}); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := store.QueryByPathOrFQN(ctx, repoID, "main", "old.txt")
+	if err := store.UpsertCodeEmbedding(ctx, tenant, old[0].SymbolVersionID, spaceID, hashContent("old"), []float64{1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	snap2, _ := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-2", "test", "")
+	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{{Path: "new.txt", Language: "unknown", ContentHash: hashContent("new")}}); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.QueryByPathOrFQN(ctx, repoID, "main", "new.txt")
+	if err := store.UpsertCodeEmbedding(ctx, tenant, current[0].SymbolVersionID, spaceID, hashContent("new"), []float64{0.9, 0.1, 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := store.QueryDense(ctx, tenant, repoID, "main", []float64{1, 0, 0}, spaceID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Path != "new.txt" || results[0].SnapshotID != snap2 {
+		t.Fatalf("superseded snapshot leaked into dense query: %+v", results)
+	}
+}
+
+func TestPGIndexPersistsSourceChunksAndCopiesThemForward(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repoID, err := store.EnsureRepository(ctx, tenant, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "package sample\n\n// Work does useful work.\nfunc Work() {\n\tprintln(\"useful\")\n}\n"
+	snap1, _ := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-1", "test", "")
+	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "work.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+		t.Fatal(err)
+	}
+	var declarationChunk string
+	if err := db.QueryRowContext(ctx, `
+		SELECT cc.content FROM code_chunks cc
+		JOIN code_symbol_versions sv ON sv.id = cc.symbol_version_id
+		WHERE sv.snapshot_id = $1 AND sv.fully_qualified_name = 'sample.Work'`, snap1).Scan(&declarationChunk); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(declarationChunk, `println("useful")`) {
+		t.Fatalf("declaration chunk did not retain source: %q", declarationChunk)
+	}
+
+	snap2, _ := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-2", "test", "")
+	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{{Path: "work.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+		t.Fatal(err)
+	}
+	var copied string
+	if err := db.QueryRowContext(ctx, `
+		SELECT cc.content FROM code_chunks cc
+		JOIN code_symbol_versions sv ON sv.id = cc.symbol_version_id
+		WHERE sv.snapshot_id = $1 AND sv.fully_qualified_name = 'sample.Work'`, snap2).Scan(&copied); err != nil {
+		t.Fatal(err)
+	}
+	if copied != declarationChunk {
+		t.Fatalf("unchanged declaration chunk was not copied forward: %q != %q", copied, declarationChunk)
+	}
+}
