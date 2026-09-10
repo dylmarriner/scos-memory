@@ -43,6 +43,29 @@ WHERE me.embedding_space_id IS NULL
 ALTER TABLE memory_embeddings
     ALTER COLUMN embedding_space_id SET NOT NULL;
 
+-- The legacy uniqueness key ignored embedding generation. Drop whichever
+-- generated constraint name PostgreSQL assigned to that exact four-column key,
+-- then make the explicit space ID part of persisted projection identity.
+DO $$
+DECLARE
+    legacy_constraint text;
+BEGIN
+    SELECT con.conname
+      INTO legacy_constraint
+      FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+     WHERE rel.relname = 'memory_embeddings'
+       AND con.contype = 'u'
+       AND pg_get_constraintdef(con.oid) ILIKE '%memory_version_id%model%model_revision%chunk_number%'
+     LIMIT 1;
+    IF legacy_constraint IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE memory_embeddings DROP CONSTRAINT %I', legacy_constraint);
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_embeddings_version_space_chunk_uidx
+    ON memory_embeddings (memory_version_id, embedding_space_id, chunk_number);
+
 CREATE INDEX IF NOT EXISTS memory_embeddings_space_version_idx
     ON memory_embeddings (embedding_space_id, memory_version_id, chunk_number);
 
