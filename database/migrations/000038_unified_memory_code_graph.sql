@@ -168,4 +168,17 @@ WITH RECURSIVE walk AS (
  SELECT n.id,n.node_type,n.node_key,w.depth+1,n.provenance,w.path_node_ids||n.id,w.path_edge_ids||e.id,w.edge_provenance||e.provenance FROM walk w JOIN unified_graph_edges e ON e.tenant_id=p_tenant_id AND e.source_node_id=w.id JOIN unified_graph_nodes n ON n.id=e.target_node_id AND n.tenant_id=p_tenant_id WHERE w.depth<GREATEST(0,LEAST(p_max_depth,8)) AND NOT n.id=ANY(w.path_node_ids)
 ) SELECT id,node_type,node_key,depth,provenance,path_node_ids,path_edge_ids,edge_provenance FROM walk;
 $$;
+
+-- Reverse traversal is the impact direction: incoming callers and memory
+-- links that point at the changed code symbol. Forward graph traversal remains
+-- the public graph API and keeps its original semantics.
+CREATE OR REPLACE FUNCTION traverse_unified_graph_reverse(p_tenant_id uuid,p_node_type text,p_node_key text,p_max_depth integer DEFAULT 3)
+RETURNS TABLE (node_id uuid,node_type text,node_key text,depth integer,node_provenance jsonb,path_node_ids uuid[],path_edge_ids uuid[],edge_provenance jsonb[])
+LANGUAGE sql STABLE AS $$
+WITH RECURSIVE walk AS (
+ SELECT n.id,n.node_type,n.node_key,0,n.provenance,ARRAY[n.id]::uuid[],ARRAY[]::uuid[],ARRAY[]::jsonb[] FROM unified_graph_nodes n WHERE n.tenant_id=p_tenant_id AND n.node_type=p_node_type AND n.node_key=p_node_key
+ UNION ALL
+ SELECT n.id,n.node_type,n.node_key,w.depth+1,n.provenance,w.path_node_ids||n.id,e.id||w.path_edge_ids,e.provenance||w.edge_provenance FROM walk w JOIN unified_graph_edges e ON e.tenant_id=p_tenant_id AND e.target_node_id=w.id JOIN unified_graph_nodes n ON n.id=e.source_node_id AND n.tenant_id=p_tenant_id WHERE w.depth<GREATEST(0,LEAST(p_max_depth,8)) AND NOT n.id=ANY(w.path_node_ids)
+) SELECT id,node_type,node_key,depth,provenance,path_node_ids,path_edge_ids,edge_provenance FROM walk;
+$$;
 COMMIT;

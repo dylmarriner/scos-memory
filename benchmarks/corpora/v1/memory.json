@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "domain": "memory",
+  "records": [
+    {"id": "memory.authoritative-journal", "text": "Memory turns become authoritative after the journal commit."},
+    {"id": "memory.current-deployment", "text": "The current production deployment runs behind the governed service mesh."},
+    {"id": "memory.stale-deployment", "text": "The historical local deployment used a retired host.", "stale": true}
+  ],
+  "queries": [
+    {"id": "memory.q1", "query": "when does a memory turn become authoritative", "relevant": ["memory.authoritative-journal"]},
+    {"id": "memory.q2", "query": "what is the current production deployment", "relevant": ["memory.current-deployment"], "forbidden": ["memory.stale-deployment"]}
+  ]
+}

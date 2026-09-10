@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "suite": "scos-frozen-evidence-baseline",
+  "version": "2026-09-11.v1",
+  "frozen_at": "2026-09-11",
+  "corpora": {
+    "memory": {"path": "memory.json", "records": 3, "queries": 2},
+    "code": {"path": "code.json", "records": 3, "queries": 3},
+    "impact": {"path": "impact.json", "records": 3, "queries": 2}
+  },
+  "baselines": [
+    {"name": "lexical", "version": "1.0.0", "deterministic": true},
+    {"name": "vector", "version": "declared-only", "deterministic": true, "runtime_required": true},
+    {"name": "rrf", "version": "declared-only", "deterministic": true, "runtime_required": true},
+    {"name": "code", "version": "1.0.0", "deterministic": true}
+  ],
+  "metrics": ["recall@1", "recall@5", "precision@1", "precision@5", "mrr", "ndcg@5", "latency_ms", "cost_usd"],
+  "claim_policy": {"p4_plus_ranking_claims_require": ["corpus_version", "git_commit", "model_space", "metrics", "latency_ms", "cost_usd"]}
+}

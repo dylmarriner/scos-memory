@@ -866,10 +866,16 @@ func (s *pgCodeStore) SetUserEnabled(ctx context.Context, tenantID, principalID 
 // within MaxDepth hops, excluding the matched symbols and their direct
 // dependents.
 type PGImpact struct {
-	MatchedSymbols       []PGSymbolVersion
-	DirectDependents     []PGSymbolVersion
-	TransitiveDependents []PGSymbolVersion
-	MaxDepth             int
+	MatchedSymbols        []PGSymbolVersion
+	DirectDependents      []PGSymbolVersion
+	TransitiveDependents  []PGSymbolVersion
+	MaxDepth              int
+	SnapshotID            string         `json:"snapshot_id,omitempty"`
+	CommitID              string         `json:"commit_id,omitempty"`
+	Branch                string         `json:"branch,omitempty"`
+	KnowledgeImpacts      []PGImpactPath `json:"knowledge_impacts,omitempty"`
+	EvidenceImpacts       []PGImpactPath `json:"evidence_impacts,omitempty"`
+	ReconciliationImpacts []PGImpactPath `json:"reconciliation_impacts,omitempty"`
 }
 
 // pageRankDamping and pageRankIterations are ChangeImpact's fixed
@@ -903,6 +909,7 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 	}
 
 	impact := &PGImpact{MatchedSymbols: matched, MaxDepth: maxDepth}
+	impact.SnapshotID, impact.CommitID, impact.Branch = matched[0].SnapshotID, matched[0].CommitID, matched[0].Branch
 	visited := make(map[string]bool, len(matched))
 	seeds := make([]string, 0, len(matched))
 	frontier := make([]string, 0, len(matched))
@@ -954,6 +961,11 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 		rankByCentrality(impact.DirectDependents, ranks, idOf, fqnOf)
 		rankByCentrality(impact.TransitiveDependents, ranks, idOf, fqnOf)
 	}
+	paths, err := s.loadCrossDomainImpact(ctx, repositoryID, matched, maxDepth)
+	if err != nil {
+		return nil, err
+	}
+	impact.KnowledgeImpacts, impact.EvidenceImpacts, impact.ReconciliationImpacts = splitImpactPaths(paths)
 
 	return impact, nil
 }
