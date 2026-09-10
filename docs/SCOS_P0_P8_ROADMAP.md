@@ -1,8 +1,8 @@
 # SCOS Memory Fabric — P0–P8 Engineering Roadmap
 
-> **Canonical roadmap as of 2026-09-10.** Re-baselined against `main` through `b4727fbb584a12bd5e45c1a2dd1b99cfcfc20bf7`, including the BGE model-runtime merge (`847dbc21b52101df16ab9adc718b0a74ac3b8cbb`) and the subsequent DeepSeek resilience work (`957ab1dd0bcf0b8d3ea56ca409ec75559ab5418c`).
+> **Canonical roadmap as of 2026-09-10.** Repository state is authoritative. This roadmap distinguishes source implementation, benchmark acceptance, merge state, and live-production activation instead of treating them as one checkbox.
 >
-> `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail for an older, narrower backlog. This file is the canonical P0–P8 roadmap.
+> `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 ## Goal
 
@@ -16,7 +16,7 @@ Build SCOS into a governed persistent-memory + code-intelligence substrate for A
 - what changed?
 - what becomes stale or affected if something changes?
 
-The target is one evidence system connecting durable memory, immutable code snapshots, retrieval, temporal history, graph structure, agent execution, and curated OKF knowledge without collapsing their authority boundaries.
+The target is one evidence system connecting durable memory, immutable code snapshots, retrieval, temporal history, graph structure, agent execution and curated OKF knowledge without collapsing their authority boundaries.
 
 ---
 
@@ -26,14 +26,11 @@ The live deployment remains the Linode host documented in `docs/runbooks/product
 
 ```text
 Internet / agent
-      │
       │ HTTPS + public SCOS API key
       ▼
     Nginx
-      │
       ▼
 cloud-control-plane
-      │
       │ validates customer key
       │ issues short-lived internal claims
       ▼
@@ -44,7 +41,6 @@ cloud-control-plane
       ├── workers
       ├── DeepSeek-backed reasoning/synthesis paths
       └── internal model-runtime
-               │
                ├── BGE-M3
                ├── BGE-reranker-v2-m3
                └── BGE-Code-v1
@@ -52,7 +48,7 @@ cloud-control-plane
 
 ## Model responsibilities
 
-DeepSeek is already part of SCOS and remains the generative/reasoning layer used by existing memory-intelligence and agent paths. BGE does not replace it.
+DeepSeek is already part of SCOS and remains the generative/reasoning layer. BGE is specialist retrieval infrastructure and does not replace DeepSeek.
 
 ```text
 DeepSeek
@@ -80,7 +76,7 @@ Operational rules:
 - Customer `scos_live_...` credentials terminate at `cloud-control-plane`.
 - Internal model services do not receive customer API keys.
 - `model-runtime` and raw inference backends do not receive public Nginx routes.
-- BGE activation remains explicit through deployment configuration so an ordinary deploy cannot unexpectedly cold-load large models.
+- BGE activation remains explicit so an ordinary deploy cannot unexpectedly cold-load large models.
 - DeepSeek remains independent from the BGE retrieval runtime.
 - PostgreSQL and OKF authority boundaries remain unchanged by model choice.
 
@@ -88,18 +84,18 @@ Operational rules:
 
 # Non-negotiable architecture rules
 
-1. **PostgreSQL is authoritative** for operational history, memory, code snapshots, evidence links, retrieval records, and governance state.
+1. **PostgreSQL is authoritative** for operational history, memory, code snapshots, evidence links, retrieval records and governance state.
 2. **OKF Git is authoritative** for reviewed curated knowledge. Model output never silently rewrites approved knowledge.
-3. **Derived indexes are rebuildable.** Embeddings, FTS projections, graph scores, standing answers, and caches are projections, not authority.
-4. **Embedding spaces are explicit.** Role, provider, model, revision, dimensions, and generation identify a vector space.
-5. **No cross-model vector comparisons.** BGE-small, BGE-M3, BGE-Code, BGE-VL, or any later model spaces must never be mixed in one distance operation.
-6. **Raw evidence survives learned ranking.** Reranking may reorder candidates but must preserve raw similarity, source rank, RRF contribution, timestamps, provenance, and governance scores.
-7. **Failure degrades honestly.** An unavailable embedder or reranker contributes zero signal; SCOS must never fabricate “semantic” candidates.
-8. **Tenant/RLS scope is mandatory.** Every new table and query path must preserve tenant/principal isolation.
+3. **Derived indexes are rebuildable.** Embeddings, FTS projections, graph scores, standing answers and caches are projections, not authority.
+4. **Embedding spaces are explicit.** Role, provider, model, revision, dimensions and generation identify a vector space.
+5. **No cross-model vector comparisons.** BGE-small, BGE-M3, BGE-Code, BGE-VL or later spaces never mix in one distance operation.
+6. **Raw evidence survives learned ranking.** Reranking may reorder candidates but cannot overwrite raw similarity, source rank, RRF contribution, provenance or governance scores.
+7. **Failure degrades honestly.** An unavailable embedder/reranker contributes zero semantic signal; SCOS never fabricates semantic candidates.
+8. **Tenant/RLS scope is mandatory.** Every new tenant-owned table and query path preserves tenant/principal isolation.
 9. **Code evidence is versioned.** Historical correctness is tied to immutable snapshot/symbol versions.
-10. **Time is first-class.** Real-world validity time and SCOS belief/system time are separate.
-11. **Benchmarks gate retrieval claims.** New models/rankers/planners must be measured against frozen baselines.
-12. **Branches are not completion.** Roadmap work is complete only when merged to `main` and verified there, or explicitly abandoned.
+10. **Time is first-class.** Real-world validity time and SCOS belief/system time remain separate.
+11. **Benchmarks gate superiority claims.** New models/rankers/planners are measured against frozen baselines.
+12. **Branches are not completion.** Work is complete only when merged to `main` and verified there, or explicitly abandoned.
 
 ---
 
@@ -107,11 +103,11 @@ Operational rules:
 
 | Phase | Objective | Current status |
 | --- | --- | --- |
-| **P0** | Benchmark and evidence baseline | **PARTIAL** |
+| **P0** | Benchmark and evidence baseline | **PARTIAL; P4 smoke corpus added** |
 | **P1** | Immutable snapshots + durable code store | **SUBSTANTIALLY COMPLETE** |
 | **P2** | SCIP + AST / Tree-sitter extraction | **SUBSTANTIALLY COMPLETE** |
 | **P3** | Incremental Git-aware indexing | **SUBSTANTIALLY COMPLETE; hardening remains** |
-| **P4** | Hybrid memory + code retrieval | **IN PROGRESS; CURRENT PRIORITY** |
+| **P4** | Hybrid memory + code retrieval | **SOURCE IMPLEMENTED ON PR #29; merge/P0/live gates pending** |
 | **P5** | Temporal evidence | **PARTIAL** |
 | **P6** | Unified memory + code graph | **PARTIAL** |
 | **P7** | Stale-memory revalidation | **EARLY / MOSTLY UNBUILT** |
@@ -129,33 +125,37 @@ Operational rules:
 - `docs/adr/0010-superiority-benchmark-methodology.md`
 - code-intelligence baseline fixtures and integration tests
 - audit artifacts separated from current implementation truth
+- `benchmarks/p4/retrieval_fixture.json`
+- `benchmarks/p4/test_fixture.py`
+- `benchmarks/p4/README.md`
+
+The P4 fixture is deliberately a deterministic smoke/regression corpus. It is not presented as proof that one model stack is superior.
 
 ## Remaining
 
-- [ ] Versioned memory-retrieval corpus covering exact recall, paraphrase, long-history noise, conflicts, supersession, temporal queries, and scope isolation.
-- [ ] Code-retrieval corpus covering exact symbol lookup, natural-language intent, cross-file relationships, rename continuity, and graph navigation.
-- [ ] Historical impact corpus from real commits.
-- [ ] Frozen baselines for FTS-only, vector-only, RRF, lexical code search, structural code search, and current `ChangeImpact`.
-- [ ] Record Recall@5/10/20, Precision@K, MRR, nDCG@K, p50/p95 latency, candidate counts, and inference cost where relevant.
-- [ ] Attach git SHA, schema version, model/revision/dimensions, corpus version, and deployment class to benchmark results.
-- [ ] Add deterministic CI regression gates plus separately-invoked full/live benchmark runs.
+- [ ] Expand the versioned memory-retrieval corpus for paraphrase, long-history noise, conflicts, supersession, temporal queries and scope isolation.
+- [ ] Expand code retrieval with real repositories, natural-language intent, cross-file relations, rename continuity and graph navigation.
+- [ ] Add historical impact cases from real commits.
+- [ ] Freeze FTS-only, vector-only, RRF, lexical-code, structural-code and current ChangeImpact baselines.
+- [ ] Record Recall@5/10/20, Precision@K, MRR, nDCG@K, p50/p95 latency, candidate counts and inference cost.
+- [ ] Attach git SHA, schema version, model/revision/dimensions/generation, corpus version and deployment class to results.
+- [ ] Run before/after P4 quality measurements with actual BGE backends.
+- [ ] Add deterministic CI regression thresholds plus separately invoked full/live benchmark runs.
 
 ## Completion gate
 
-No P4+ ranking/model claim is accepted without a reproducible before/after benchmark.
+No superiority/performance claim for P4+ is accepted without reproducible before/after evidence.
 
 ---
 
 # P1 — Immutable Snapshots and Durable Code Store
 
-**Objective:** make repository state durable, reproducible, and queryable at immutable snapshot boundaries.
+**Objective:** make repository state durable, reproducible and queryable at immutable snapshot boundaries.
 
 ## Already present
 
-Current `main` already includes:
-
 - `database/migrations/000025_code_intelligence_persistence.sql`
-- durable repositories, snapshots, files, symbols, symbol versions, and edges
+- durable repositories, snapshots, files, symbols, symbol versions and edges
 - `parent_snapshot_id` lineage
 - transactional snapshot activation
 - branch/commit/extractor/configuration snapshot identity
@@ -164,11 +164,10 @@ Current `main` already includes:
 
 ## Remaining hardening
 
-- [ ] Ensure snapshot identity/provenance is returned by every code query/impact response that needs historical reproducibility.
-- [ ] Add explicit snapshot selection where callers still implicitly use the active branch snapshot.
+- [ ] Return explicit snapshot identity/provenance from every historical code query/impact surface.
+- [ ] Add explicit snapshot selection where callers still imply the active branch snapshot.
 - [ ] Verify retention/GC cannot remove code evidence referenced by memory-code links or audit records.
-- [ ] Add interrupted-index/activation recovery tests around real Postgres transactions.
-- [ ] Require every new P4+ code-derived record to reference immutable symbol/file/snapshot versions.
+- [ ] Add interrupted-index/activation recovery tests around real PostgreSQL transactions.
 
 ---
 
@@ -184,15 +183,14 @@ Current `main` already includes:
 - symbol doc comments
 - extraction confidence classes
 - conservative called-name scope handling
-- call-edge generation after declarations are known
+- call/reference/implementation edge generation
 - ambiguity avoidance rather than invented edges
 
 ## Remaining
 
-- [ ] Publish language × extractor-tier capability matrix.
-- [ ] Preserve confidence/provenance on structural edges as well as symbols.
-- [ ] Improve type-resolved references where Tree-sitter can only provide syntax-level confidence.
-- [ ] Maintain deterministic fixture repos per supported language.
+- [ ] Publish a language × extractor-tier capability matrix.
+- [ ] Improve type-resolved references where syntax-only Tree-sitter confidence is insufficient.
+- [ ] Maintain deterministic fixture repositories per supported language.
 - [ ] Keep authoritative SCIP facts distinct from heuristic extraction.
 
 ---
@@ -208,7 +206,7 @@ Current `main` already includes:
 - records parent snapshots;
 - compares parent/target file content hashes;
 - skips re-parsing unchanged files;
-- copies unchanged declarations forward;
+- copies unchanged declarations and chunks forward;
 - activates snapshots transactionally;
 - preserves identity through unchanged-content renames.
 
@@ -217,138 +215,94 @@ Current `main` already includes:
 - [ ] Git-diff-aware ingestion driver for parent→target commit worklists.
 - [ ] Explicit add/modify/delete/rename/copy event metadata.
 - [ ] Verify deleted symbols cannot leak into active target snapshots.
-- [ ] Reduce unnecessary whole-snapshot structural recomputation where dependency boundaries make incremental recomputation safe.
-- [ ] Persist indexing telemetry: parsed/reused files, symbols changed/reused, elapsed time, extractor tier, cache hit ratio.
+- [ ] Reduce unnecessary whole-snapshot structural recomputation where dependency boundaries permit it.
+- [ ] Persist parsed/reused files, changed/reused symbols, elapsed time, extractor tier and cache-hit telemetry.
 - [ ] Benchmark incremental indexing against clean rebuild equivalence and changed-content scaling.
 
 ---
 
 # P4 — Hybrid Memory + Code Retrieval
 
-**Objective:** turn the already-merged model runtime and durable retrieval foundations into one correct, measurable hybrid retrieval system.
-
-**This is the current highest-leverage phase.**
-
-## P4 current reality
-
-Memory retrieval already has:
-
-1. namespace/RLS authorisation;
-2. standing-answer lookup;
-3. exact search;
-4. PostgreSQL FTS;
-5. vector search;
-6. relation expansion;
-7. recent-session retrieval;
-8. RRF fusion;
-9. deduplication;
-10. authority/confidence ranking;
-11. token allocation;
-12. retrieval-run persistence.
-
-Code intelligence already has:
-
-- exact path/FQN lookup;
-- lexical search;
-- SCIP/AST/Tree-sitter structural data;
-- graph traversal;
-- PageRank-ranked impact.
-
-The BGE runtime itself is **already merged to `main`** via PR #28 at `847dbc21b52101df16ab9adc718b0a74ac3b8cbb`. PR #26 is obsolete/superseded and must not be treated as active work.
-
-Current runtime contract:
-
-```text
-retrieval-orchestrator ─┐
-embeddings-worker ──────┼──> model-runtime
-code-intelligence ──────┘       │
-                                 ├── BAAI/bge-m3
-                                 │     text/memory embeddings, 1024d
-                                 ├── BAAI/bge-reranker-v2-m3
-                                 │     relevance reranking
-                                 └── BAAI/bge-code-v1
-                                       code embeddings, expected 1536d
-```
-
-DeepSeek remains the existing reasoning/synthesis layer above retrieval and is not replaced by this runtime.
+**Objective:** combine the merged model runtime and durable retrieval foundations into one correct, explainable hybrid retrieval system.
 
 ## P4.1 — Model-runtime integration
 
-**Status: MERGED; production activation/pinning remains operational work.**
+**Status: MERGED via PR #28. Production activation/pinning remains operational work.**
 
-- [x] Replay BGE model-runtime work onto the then-current `main` rather than merging stale PR #26.
-- [x] Preserve intervening embeddings-worker behavior.
-- [x] Keep model-runtime internal-only.
-- [x] Add hosted Compose model overlay.
-- [x] Add explicit `SCOS_MODEL_RUNTIME_ENABLED` activation gate.
-- [x] Add BGE-M3 text path.
-- [x] Add BGE reranker endpoint.
-- [x] Add BGE-Code endpoint.
-- [x] Add focused runtime/worker/Compose CI.
-- [x] Reject malformed required-backend flags.
-- [x] Propagate configured model/revision into TEI startup.
-- [ ] Pin validated production model revisions instead of mutable `main` revisions.
-- [ ] Measure live Linode memory/CPU headroom before enabling additional simultaneous BGE profiles.
-- [ ] Verify live deployment after explicit activation; source/CI proof is not live-infrastructure proof.
+- [x] BGE-M3 text endpoint.
+- [x] BGE reranker endpoint.
+- [x] BGE-Code endpoint.
+- [x] Internal TLS/auth boundary.
+- [x] Hosted Compose model overlay.
+- [x] Explicit `SCOS_MODEL_RUNTIME_ENABLED` activation gate.
+- [x] Focused runtime/worker/Compose CI definition.
+- [x] Strict required-backend flag parsing.
+- [x] TEI model/revision propagation.
+- [ ] Pin validated production model revisions instead of mutable `main`.
+- [ ] Measure live Linode memory/CPU headroom before enabling simultaneous profiles.
+- [ ] Verify live model activation on the Linode after explicit rollout.
 
 ## P4.2 — Formal embedding spaces
 
-**Status: PARTIAL. Worker migration safeguards exist; retrieval/store identity still needs completion.**
+**Status: IMPLEMENTED ON PR #29.**
 
-- [ ] Add explicit embedding-space identity: role + provider + model + revision + dimensions + generation.
-- [ ] Filter memory vector retrieval by the active text space.
-- [ ] Preserve BGE-small compatibility only as a separate legacy space.
-- [ ] Make mixed-space vector comparison structurally impossible on normal query paths.
-- [ ] Re-embed stale rows idempotently when the active model/revision changes.
-- [ ] Add indexes appropriate to fixed-dimensional active spaces.
-- [ ] Use the same space abstraction for code embeddings rather than inventing a second incompatible mechanism.
+- [x] Shared identity: role + provider + model + revision + dimensions + generation.
+- [x] `memory_embeddings.embedding_space_id` with legacy backfill.
+- [x] Generation-safe `(memory_version_id, embedding_space_id, chunk_number)` projection identity.
+- [x] Worker resolves/creates the active space and retains historical spaces.
+- [x] Memory vector SQL resolves and filters the exact active text space before pgvector distance operations.
+- [x] Durable `code_embeddings` use the same space registry.
+- [x] Code dense queries filter active snapshot + exact code space.
+- [x] Mixed-space and superseded-snapshot regression coverage on real PostgreSQL/pgvector.
 
 ## P4.3 — Honest semantic degradation
 
-**Status: NOT COMPLETE. Current retrieval still contains `vectorFallback`.**
+**Status: IMPLEMENTED ON PR #29.**
 
-- [ ] Remove `vectorFallback` as a semantic source.
-- [ ] If query embedding fails, semantic candidate count is zero.
-- [ ] If pgvector/vector search fails, semantic candidate count is zero.
-- [ ] Exact/FTS/relation/session retrieval continues normally.
-- [ ] Record semantic backend state in `retrieval_runs` so “zero matches” is distinguishable from “backend unavailable”.
-- [ ] Add tests proving high-confidence unrelated memories are never relabelled as semantic matches.
+- [x] Removed fake `vectorFallback` semantic behavior.
+- [x] Query-embedding failure yields zero semantic candidates.
+- [x] Vector-search failure yields zero semantic candidates.
+- [x] Exact/FTS/relation/session retrieval continues independently.
+- [x] Degraded model/source state is recorded rather than disguised as zero relevance.
+- [x] Tests protect against relabelling unrelated high-confidence memories as semantic matches.
 
 ## P4.4 — Query-aware BGE reranking
 
-**Status: RUNTIME ENDPOINT MERGED; RETRIEVAL CONSUMER NOT COMPLETE.**
+**Status: IMPLEMENTED ON PR #29.**
 
-- [ ] Add model-runtime client to retrieval-orchestrator.
-- [ ] RRF + dedup create a bounded candidate window.
-- [ ] Send query + candidate text to `/v1/rerank`.
-- [ ] Preserve raw lexical score.
-- [ ] Preserve raw cosine/semantic similarity.
-- [ ] Add separate RRF contribution/score field.
-- [ ] Add separate reranker score field.
-- [ ] Apply authority/confidence governance weighting after relevance reranking.
-- [ ] On reranker failure, fall back explicitly to RRF + governance weighting.
-- [ ] Record reranker model/revision/fallback state in retrieval-run metadata.
-- [ ] Fix the current bug where `SemanticScore` is overwritten with the semantic lane's RRF contribution.
+- [x] Retrieval-orchestrator calls governed `model-runtime /v1/rerank`.
+- [x] RRF + dedup create a bounded candidate window.
+- [x] Query + candidate text are sent to the reranker.
+- [x] Raw lexical score is preserved.
+- [x] Raw cosine similarity is preserved.
+- [x] RRF score is separate.
+- [x] Reranker score is separate.
+- [x] Authority/confidence governance weighting is applied after relevance reranking.
+- [x] Reranker failure explicitly falls back to RRF + governance.
+- [x] Model/revision/planner/degraded metadata is persisted with retrieval runs.
+- [x] The previous SemanticScore/RRF overwrite bug is removed.
 
 ## P4.5 — Dense code retrieval with BGE-Code
 
-**Status: RUNTIME ENDPOINT MERGED; DURABLE CONSUMER/STORAGE NOT COMPLETE.**
+**Status: IMPLEMENTED ON PR #29.**
 
-- [ ] Add durable code embedding storage keyed to immutable `code_symbol_versions` + embedding space.
-- [ ] Add RLS/FORCE RLS/policy from table creation.
-- [ ] Define deterministic code embedding document composition from FQN, symbol name/signature, doc comment, and useful source content.
-- [ ] Add deterministic chunk/content identity for re-embedding.
-- [ ] Embed changed/new symbol versions during or immediately after snapshot indexing.
-- [ ] Query BGE-Code for natural-language→code retrieval.
-- [ ] Fuse exact identifier + lexical FTS + dense BGE-Code + structural/SCIP + graph/centrality signals.
-- [ ] Keep exact path/FQN as a precision anchor rather than letting learned ranking bury an exact identifier.
-- [ ] Preserve per-signal provenance in returned code results.
+- [x] Durable code embeddings reference immutable `code_symbol_versions` and explicit embedding spaces.
+- [x] `code_embeddings` has tenant RLS + FORCE RLS from creation.
+- [x] Deterministic embedding documents contain FQN/path/kind/signature/docs/useful persisted source content.
+- [x] Content hashes support idempotent re-embedding.
+- [x] New/changed active snapshots can backfill BGE-Code embeddings without invalidating the durable lexical snapshot when the model is unavailable.
+- [x] Exact path/FQN remains a precision anchor and bypasses learned ranking.
+- [x] Non-exact queries combine lexical + BGE-Code dense retrieval.
+- [x] Persisted structural/SCIP edges participate as an independent retrieval signal.
+- [x] Bounded personalized PageRank contributes graph/centrality signal.
+- [x] Lexical, dense, structural/graph and fused score provenance remain distinct.
+- [x] Active-snapshot, mixed-space and tenant-isolation behavior is integration-tested with PostgreSQL/pgvector.
 
-## P4.6 — Query planning
+## P4.6 — Deterministic query planning
 
-**Status: NOT COMPLETE.**
+**Status: IMPLEMENTED ON PR #29.**
 
-Initial deterministic planner classes:
+Planner classes:
 
 ```text
 exact/navigation
@@ -358,28 +312,51 @@ mixed
 temporal
 ```
 
-- [ ] Planner controls eligible retrieval lanes and candidate budgets.
-- [ ] Planner never controls or widens tenant/security scope.
-- [ ] Exact/navigation requests avoid unnecessary model fanout.
-- [ ] Code queries activate code retrieval lanes when repository context exists.
-- [ ] Mixed queries may retrieve memory and code independently before cross-domain graph expansion in P6.
-- [ ] Temporal classification prepares the request for P5 temporal filters but does not fake temporal semantics before P5 is complete.
-- [ ] Benchmark planner decisions against an all-source baseline before making cost-saving decisions default.
+- [x] Planner controls lane eligibility and candidate budgets.
+- [x] Planner contains no tenant/principal/security scope and cannot widen authorization.
+- [x] Exact/navigation avoids speculative model fanout.
+- [x] Memory mode uses memory-oriented lexical/vector/relation/session lanes.
+- [x] Optional durable `repository_id` + `branch` enables the code lane for repo-aware code/mixed requests.
+- [x] Code evidence is returned separately from memory sections and selected immutable symbol-version IDs are recorded with the retrieval run.
+- [x] Code-intelligence failure degrades only the code lane.
+- [x] Standing-answer short-circuiting cannot suppress explicitly requested repo-aware code evidence.
+- [x] `scos_retrieve` exposes optional durable repository context.
+- [x] `scos_code_query` has a backward-compatible v1/v2 bridge; P4-aware callers use durable repository context while legacy clients remain functional.
+- [x] Temporal classification prepares future P5 work without inventing temporal semantics.
+- [ ] Compare planner cost/quality against an all-source live baseline under P0 before claiming efficiency gains.
 
-## P4 completion gate
+## P4 source verification performed
 
-P4 is complete only when all of the following are true:
+The implementation has been exercised locally with:
 
-- [ ] Normal memory vector retrieval cannot compare mixed model/revision/dimension spaces.
-- [ ] Embedding outages produce zero semantic candidates instead of fake semantic evidence.
-- [ ] Raw semantic similarity is preserved independently from RRF and reranker scores.
-- [ ] BGE-reranker is consumed by retrieval-orchestrator with explicit fallback behavior.
-- [ ] BGE-Code embeddings are durable and tied to immutable symbol versions.
-- [ ] Natural-language code retrieval fuses lexical, dense, structural, and graph signals.
-- [ ] Query planning exists and cannot affect authorisation boundaries.
-- [ ] P0 benchmarks demonstrate retrieval quality and record latency/cost trade-offs.
-- [ ] Focused CI passes on the merged implementation.
-- [ ] The final implementation is merged to `main` and verified there.
+- migration contract tests;
+- retrieval gofmt/vet/unit tests;
+- code-intelligence gofmt/vet/unit tests;
+- all migrations applied from zero to PostgreSQL 17 + pgvector;
+- real-PostgreSQL retrieval SQL tests;
+- real-PostgreSQL code-intelligence integration tests;
+- tenant RLS/FORCE-RLS tests using a non-superuser role;
+- active-snapshot and mixed-space dense retrieval tests;
+- exact-model-bypass and degraded-model handler tests;
+- embeddings-worker tests in an isolated Python environment;
+- P0/P4 frozen fixture structural tests;
+- merged Compose structural validation.
+
+GitHub Actions has also experienced runner-launch failures where jobs are created with no executed steps. Those are infrastructure failures and are not counted as product test failures or successful verification.
+
+## P4 completion/acceptance gate
+
+- [x] Normal memory vector retrieval cannot compare mixed embedding spaces.
+- [x] Embedding outages produce zero semantic candidates instead of fake evidence.
+- [x] Raw semantic similarity is preserved independently from RRF/reranker/final scores.
+- [x] BGE reranker is consumed with explicit fallback behavior.
+- [x] BGE-Code embeddings are durable and tied to immutable symbol versions.
+- [x] Natural-language code retrieval fuses lexical, dense, structural/SCIP and graph/PageRank signals.
+- [x] Query planning exists and cannot affect authorization boundaries.
+- [x] A deterministic P0/P4 smoke corpus exists.
+- [ ] Full P0 before/after quality, latency and cost evidence is recorded with actual model backends.
+- [ ] PR #29 is merged to `main` and `main` is re-read afterward.
+- [ ] Live Linode activation/capacity/model-pinning verification is complete before claiming BGE profiles are production-active.
 
 ---
 
@@ -390,7 +367,7 @@ P4 is complete only when all of the following are true:
 ## Already present
 
 - memory validity/observation/record-time fields
-- memory versions and append-only correction/supersession history
+- append-only memory versions and correction/supersession history
 - code snapshots tied to branch + commit
 - parent snapshot lineage
 - retrieval-run history
@@ -399,14 +376,10 @@ P4 is complete only when all of the following are true:
 
 - [ ] Formalize valid time vs SCOS belief/system time.
 - [ ] Add explicit system-time invalidation/supersession timestamps where missing.
-- [ ] Add `as_of_valid_time` and `as_of_system_time` retrieval filters.
-- [ ] Add explicit `as_of_commit` / snapshot selection to code-query paths that still assume active state.
-- [ ] Ensure memory↔code evidence always references concrete historical symbol versions.
-- [ ] Add temporal contradiction/supersession tests and P0 benchmark cases.
-
-## Completion gate
-
-SCOS correctly distinguishes “true now”, “true then”, “believed then”, and “implemented at commit X”.
+- [ ] Add `as_of_valid_time` and `as_of_system_time` memory filters.
+- [ ] Add explicit `as_of_commit` / snapshot selection to code paths still assuming active state.
+- [ ] Ensure memory↔code evidence references concrete historical symbol versions.
+- [ ] Add temporal contradiction/supersession tests and P0 cases.
 
 ---
 
@@ -416,37 +389,20 @@ SCOS correctly distinguishes “true now”, “true then”, “believed then�
 
 ## Already present
 
-`database/migrations/000033_memory_code_links.sql` provides the durable bridge:
+`database/migrations/000033_memory_code_links.sql` provides the durable bridge from `memory_items` to immutable `code_symbol_versions` with link type, source and confidence.
 
-```text
-memory_items
-    │
-    └── memory_code_links
-            ├── link_type
-            │   ├── evidences
-            │   ├── motivated_by
-            │   └── invalidated_by
-            ├── source
-            │   ├── explicit
-            │   ├── okf_promotion
-            │   └── inferred
-            ├── confidence
-            └── code_symbol_version_id
-                         │
-                         ▼
-                code_symbol_versions
-```
+P4 additionally allows repo-aware retrieval to return code evidence beside memory evidence without collapsing the two authority domains.
 
 ## Remaining
 
 - [ ] Complete governed API/MCP tooling for explicit memory↔symbol-version links.
 - [ ] Validate tenant/scope ownership at link creation.
 - [ ] Record actor/operation/turn evidence where schema metadata needs expansion.
-- [ ] Infer high-confidence links from deterministic signals before any model inference.
+- [ ] Infer high-confidence links from deterministic signals before model inference.
 - [ ] Add bounded memory→code and code→memory expansion.
-- [ ] Use graph proximity as a ranking feature, not an authority override.
+- [ ] Use graph proximity as a ranking feature, never an authority override.
 - [ ] Expose explainable provenance paths.
-- [ ] Allow OKF proposals to reference concrete memory/code evidence without auto-mutating approved OKF state.
+- [ ] Allow OKF proposals to reference concrete memory/code evidence without mutating approved OKF state automatically.
 
 ---
 
@@ -467,12 +423,12 @@ memory_items
 - [ ] Emit durable revalidation events when linked symbols change/delete.
 - [ ] Resolve continuity into unchanged / renamed / changed / deleted / ambiguous states.
 - [ ] Use deterministic classification first.
-- [ ] For changed/ambiguous cases, use existing SCOS reasoning models to create a proposal, not an authoritative mutation.
+- [ ] For changed/ambiguous cases, use existing reasoning models to create a proposal, not an authoritative mutation.
 - [ ] Outcomes: still-valid, needs-review, superseded, invalidated, unresolved.
-- [ ] For memory, create governed new versions/supersession relations when approved.
-- [ ] For OKF, create review proposals with old/new code evidence.
-- [ ] Invalidate standing answers that depend on stale/superseded evidence.
-- [ ] Measure false-positive/false-negative review outcomes.
+- [ ] Create governed memory versions/supersession relations only when approved.
+- [ ] Create OKF review proposals with old/new code evidence.
+- [ ] Invalidate standing answers depending on stale/superseded evidence.
+- [ ] Measure false-positive/false-negative outcomes.
 
 ---
 
@@ -482,24 +438,18 @@ memory_items
 
 ## Already present
 
-Code-side `ChangeImpact` already provides:
-
-- reverse `CALLS` traversal;
-- direct/transitive dependents;
-- bounded depth;
-- personalized PageRank ranking;
-- integration coverage.
+Code-side `ChangeImpact` already provides reverse call traversal, direct/transitive dependents, bounded depth and personalized PageRank. P4 code search now also consumes persisted structural/SCIP graph signal during retrieval.
 
 ## Remaining
 
-- [ ] Add high-confidence impact relationships beyond CALLS as extraction permits: imports, references/types, implementation/inheritance, tests, config ownership, generated links.
+- [ ] Expand impact relationships beyond CALLS where extraction confidence permits: references/types, implementation/inheritance, tests, configuration ownership and generated links.
 - [ ] Preserve relation confidence/provenance.
-- [ ] Include snapshot/commit provenance in every result.
-- [ ] Traverse from changed symbols through `memory_code_links` into affected facts, decisions, procedures, standing answers, and curated-knowledge references.
+- [ ] Include snapshot/commit provenance in every impact result.
+- [ ] Traverse changed symbols through `memory_code_links` into affected facts, decisions, procedures, standing answers and curated-knowledge references.
 - [ ] Keep code impact and knowledge impact categories distinct.
 - [ ] Return explainable paths for every affected object.
-- [ ] Add governed “what-if” impact planning before edits are made.
-- [ ] Compare predicted blast radius against actual later edits/test failures/commits and feed results back into P0 benchmarks.
+- [ ] Add governed what-if impact planning before edits.
+- [ ] Compare predicted blast radius with later edits/test failures/commits and feed results into P0.
 
 ---
 
@@ -507,8 +457,8 @@ Code-side `ChangeImpact` already provides:
 
 ## Safety and secret handling
 
-- Add write-time secret/PII scanning before conversational facts or broadly promoted OKF material persist sensitive values.
-- Keep credentials in security-gate/credential-vault boundaries rather than treating secrets as ordinary memory.
+- Add write-time secret/PII scanning before conversational facts or broadly promoted OKF material persists sensitive values.
+- Keep credentials in security-gate/credential-vault boundaries rather than ordinary memory.
 
 ## Standing-answer completion
 
@@ -522,44 +472,41 @@ The standing-answer table/read path exists. Remaining work:
 
 ## Agent execution-trace consolidation
 
-Capture lessons from real execution:
+Capture real execution lessons:
 
 ```text
-attempt → tool calls → errors → fix → verification → outcome
+attempt -> tool calls -> errors -> fix -> verification -> outcome
 ```
 
-Consolidate these into evidence-backed procedures/negative memories without turning every raw tool event into authoritative memory.
+Consolidate these into evidence-backed procedures/negative memories without treating every raw tool event as authoritative memory.
 
 ## Multimodal retrieval
 
-BGE-VL remains later work after P4 text/code retrieval is benchmarked and stable:
+BGE-VL remains later work after text/code retrieval is benchmarked and stable:
 
-- extracted document/PDF text → BGE-M3 space;
-- screenshots/page renders/diagrams → separate visual space;
+- extracted PDF/document text -> BGE-M3 text space;
+- screenshots/page renders/diagrams -> separate visual space;
 - preserve page/artifact provenance;
-- never compare visual/text/code vectors unless the model explicitly defines the same shared space and SCOS stores that identity explicitly.
+- never compare visual/text/code vectors unless a model explicitly defines one shared space and SCOS stores that identity.
 
 ## Cross-repository federation
 
-Do not build federation before single-repository P4–P8 quality is proven. Repository identity must remain an explicit graph/snapshot boundary.
+Do not build federation before single-repository P4–P8 quality is proven. Repository identity remains an explicit graph/snapshot boundary.
 
 ---
 
-# Current execution order from `main`
+# Current execution order
 
-Because P1–P3 are already substantially built and P4.1 is now merged, the practical order is:
+After PR #29 merges and `main` verification is complete, the practical sequence is:
 
-1. **P4.2:** formal embedding-space identity and retrieval filtering.
-2. **P4.3:** remove fake semantic fallback and add degraded-mode provenance.
-3. **P4.4:** consume BGE reranker in retrieval while preserving raw/RRF/reranker/governance scores separately.
-4. **P0 alongside P4:** freeze and expand retrieval benchmarks so the new ranking path is measurable.
-5. **P4.5:** durable BGE-Code embeddings and hybrid code retrieval.
-6. **P4.6:** deterministic query planning after the full-source baseline exists.
-7. **P6:** operationalize memory↔code graph traversal and provenance.
-8. **P5:** complete bitemporal/as-of semantics using connected evidence.
-9. **P7:** stale-memory/OKF/standing-answer revalidation.
-10. **P8:** extend existing code impact into cross-domain impact intelligence.
-11. **P1–P3 hardening:** execute remaining items when they block or materially improve later phases; do not rebuild foundations that already work.
+1. **P0:** run full before/after P4 model-quality, latency and cost benchmarks; pin production-ready model revisions.
+2. **P6:** operationalize memory↔code graph traversal and provenance.
+3. **P5:** complete bitemporal/as-of semantics using connected evidence.
+4. **P7:** stale-memory/OKF/standing-answer revalidation.
+5. **P8:** extend code impact into cross-domain impact intelligence.
+6. **P1–P3 hardening:** execute remaining items when they block or materially improve later phases.
+
+P0 remains active throughout P5–P8 as the measurement layer rather than a one-time preliminary phase.
 
 ---
 
@@ -570,17 +517,17 @@ No phase is complete because code exists on a branch.
 For each phase:
 
 - [ ] focused unit tests pass;
-- [ ] relevant Postgres integration tests pass;
-- [ ] RLS/tenant isolation is exercised for new tables/queries;
+- [ ] relevant PostgreSQL integration tests pass;
+- [ ] RLS/tenant isolation is exercised for new tenant-owned tables/queries;
 - [ ] migrations are append-only and operationally safe;
-- [ ] retrieval/model changes publish before/after P0 metrics;
+- [ ] retrieval/model performance claims publish P0 evidence;
 - [ ] production topology remains consistent with `docs/runbooks/production-access.md`;
-- [ ] source proof, CI proof, and live-deployment proof are labelled separately;
+- [ ] source proof, CI proof and live-deployment proof are labelled separately;
 - [ ] implementation is merged to `main`;
-- [ ] `main` is re-read after merge to verify the expected state actually landed.
+- [ ] `main` is re-read after merge to verify expected state actually landed.
 
 ## Immediate milestone
 
-**Finish P4 on current `main`:** formal embedding spaces → honest semantic degradation → BGE reranking → BGE-Code durable hybrid retrieval → deterministic query planning, with P0 benchmark evidence alongside the work.
+**Merge and verify P4, then run its full P0 acceptance programme and validate explicit model activation on the Linode.**
 
-DeepSeek remains SCOS's existing reasoning/synthesis layer. BGE remains the specialist retrieval layer beneath it. The two are complementary, not competing stacks.
+DeepSeek remains SCOS's reasoning/synthesis layer. BGE remains the specialist retrieval layer beneath it. They are complementary parts of the same stack.
