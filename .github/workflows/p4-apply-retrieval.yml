@@ -37,6 +37,10 @@ jobs:
           python3 .github/p4-patcher/apply_retrieval.py
       - name: Format retrieval package
         run: gofmt -w services/retrieval-orchestrator/cmd/server/*.go
+      - name: Inspect transformed retrieval contract
+        run: |
+          grep -n -A28 '^type RetrievalResult struct' services/retrieval-orchestrator/cmd/server/main.go
+          grep -n -A12 '^type server struct' services/retrieval-orchestrator/cmd/server/main.go
       - name: Vet retrieval package
         run: go vet ./services/retrieval-orchestrator/cmd/server
       - name: Test retrieval package
