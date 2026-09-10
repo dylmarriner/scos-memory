@@ -98,3 +98,27 @@ func TestFuseCodeResultsKeepsLexicalAndDenseScoresSeparate(t *testing.T) {
 		t.Fatalf("match type = %q", got[0].MatchType)
 	}
 }
+
+func TestFuseCodeSignalsKeepsStructuralAndCentralitySeparate(t *testing.T) {
+	lexical := []codeHybridResult{
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "a", FullyQualifiedName: "pkg.A", Path: "a.go", Centrality: 0.05}, RawLexicalScore: 0.9},
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "b", FullyQualifiedName: "pkg.B", Path: "b.go", Centrality: 0.90}, RawLexicalScore: 0.8},
+	}
+	dense := []codeHybridResult{
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "a", FullyQualifiedName: "pkg.A", Path: "a.go", Centrality: 0.05}, RawDenseScore: 0.9},
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "b", FullyQualifiedName: "pkg.B", Path: "b.go", Centrality: 0.90}, RawDenseScore: 0.8},
+	}
+	structural := []codeHybridResult{
+		{PGSymbolVersion: PGSymbolVersion{SymbolVersionID: "b", FullyQualifiedName: "pkg.B", Path: "b.go", Centrality: 0.90}, RawStructuralScore: 1.0},
+	}
+	got := fuseCodeSignals(lexical, dense, structural, 60)
+	if len(got) != 2 || got[0].SymbolVersionID != "b" {
+		t.Fatalf("structural agreement plus centrality should rank b first: %#v", got)
+	}
+	if got[0].RawLexicalScore != 0.8 || got[0].RawDenseScore != 0.8 || got[0].RawStructuralScore != 1.0 {
+		t.Fatalf("raw signal provenance corrupted: %#v", got[0])
+	}
+	if got[0].RRFScore <= 0 || got[0].FusedScore <= got[0].RRFScore {
+		t.Fatalf("expected separate graph-aware final score: %#v", got[0])
+	}
+}

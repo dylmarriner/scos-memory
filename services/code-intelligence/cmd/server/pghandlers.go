@@ -429,15 +429,51 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	results := fuseCodeResults(lexicalHybrid, dense, 60)
+	seedIDs := make([]string, 0, len(lexicalHybrid)+len(dense))
+	seenSeeds := make(map[string]bool, cap(seedIDs))
+	for _, item := range append(append([]codeHybridResult(nil), lexicalHybrid...), dense...) {
+		if item.SymbolVersionID != "" && !seenSeeds[item.SymbolVersionID] {
+			seenSeeds[item.SymbolVersionID] = true
+			seedIDs = append(seedIDs, item.SymbolVersionID)
+		}
+	}
+	structural := []codeHybridResult{}
+	degradedSources := []string{}
+	if len(seedIDs) > 0 {
+		var ranks map[string]float64
+		structural, ranks, err = s.pgStore.QueryStructuralCandidates(r.Context(), req.RepositoryID, req.Branch, seedIDs, 2, 20)
+		if err != nil {
+			log.Printf("structural code retrieval degraded: %v", err)
+			degradedSources = append(degradedSources, "structural_graph")
+			structural = []codeHybridResult{}
+		} else {
+			for i := range lexicalHybrid {
+				lexicalHybrid[i].Centrality = ranks[lexicalHybrid[i].SymbolVersionID]
+			}
+			for i := range dense {
+				dense[i].Centrality = ranks[dense[i].SymbolVersionID]
+			}
+		}
+	}
+
+	results := fuseCodeSignals(lexicalHybrid, dense, structural, 60)
 	if len(results) > 20 {
 		results = results[:20]
 	}
+	signals := []string{"lexical"}
+	if len(dense) > 0 {
+		signals = append(signals, "dense")
+	}
+	if len(structural) > 0 {
+		signals = append(signals, "structural", "pagerank")
+	}
 	writeJSON(w, map[string]any{
-		"results":         results,
-		"retrieval_mode":  mode,
-		"degraded_models": degradedModels,
-		"embedding_space": codeSpace,
+		"results":          results,
+		"retrieval_mode":   mode,
+		"signals":          signals,
+		"degraded_models":  degradedModels,
+		"degraded_sources": degradedSources,
+		"embedding_space":  codeSpace,
 	})
 }
 

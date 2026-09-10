@@ -60,10 +60,12 @@ type codeSymbolDocument struct {
 
 type codeHybridResult struct {
 	PGSymbolVersion
-	Range           string  `json:"range,omitempty"`
-	RawLexicalScore float64 `json:"raw_lexical_score,omitempty"`
-	RawDenseScore   float64 `json:"raw_dense_score,omitempty"`
-	RRFScore        float64 `json:"rrf_score,omitempty"`
+	Range              string  `json:"range,omitempty"`
+	RawLexicalScore    float64 `json:"raw_lexical_score,omitempty"`
+	RawDenseScore      float64 `json:"raw_dense_score,omitempty"`
+	RawStructuralScore float64 `json:"raw_structural_score,omitempty"`
+	RRFScore           float64 `json:"rrf_score,omitempty"`
+	FusedScore         float64 `json:"fused_score,omitempty"`
 }
 
 func codePositiveEnvInt(name string, fallback int) (int, error) {
@@ -241,51 +243,94 @@ func lexicalCodeResults(items []PGSymbolVersion) []codeHybridResult {
 }
 
 func fuseCodeResults(lexical, dense []codeHybridResult, rrfK int) []codeHybridResult {
+	return fuseCodeSignals(lexical, dense, nil, rrfK)
+}
+
+func fuseCodeSignals(lexical, dense, structural []codeHybridResult, rrfK int) []codeHybridResult {
 	if rrfK <= 0 {
 		rrfK = 60
 	}
 	type entry struct {
-		item         codeHybridResult
-		lexicalFound bool
-		denseFound   bool
+		item            codeHybridResult
+		lexicalFound    bool
+		denseFound      bool
+		structuralFound bool
 	}
-	byID := make(map[string]*entry, len(lexical)+len(dense))
-	for rank, item := range lexical {
+	byID := make(map[string]*entry, len(lexical)+len(dense)+len(structural))
+	merge := func(item codeHybridResult) *entry {
 		e := byID[item.SymbolVersionID]
 		if e == nil {
 			copyItem := item
 			e = &entry{item: copyItem}
 			byID[item.SymbolVersionID] = e
 		}
+		if item.Centrality > e.item.Centrality {
+			e.item.Centrality = item.Centrality
+		}
+		if item.Range != "" {
+			e.item.Range = item.Range
+		}
+		return e
+	}
+	for rank, item := range lexical {
+		e := merge(item)
 		e.lexicalFound = true
 		e.item.RawLexicalScore = item.RawLexicalScore
 		e.item.Relevance = item.RawLexicalScore
 		e.item.RRFScore += 1.0 / float64(rrfK+rank+1)
 	}
 	for rank, item := range dense {
-		e := byID[item.SymbolVersionID]
-		if e == nil {
-			copyItem := item
-			e = &entry{item: copyItem}
-			byID[item.SymbolVersionID] = e
-		}
+		e := merge(item)
 		e.denseFound = true
 		e.item.RawDenseScore = item.RawDenseScore
 		e.item.RRFScore += 1.0 / float64(rrfK+rank+1)
 	}
+	for rank, item := range structural {
+		e := merge(item)
+		e.structuralFound = true
+		if item.RawStructuralScore > e.item.RawStructuralScore {
+			e.item.RawStructuralScore = item.RawStructuralScore
+		}
+		e.item.RRFScore += 1.0 / float64(rrfK+rank+1)
+	}
 	out := make([]codeHybridResult, 0, len(byID))
 	for _, e := range byID {
+		signals := 0
+		if e.lexicalFound {
+			signals++
+		}
+		if e.denseFound {
+			signals++
+		}
+		if e.structuralFound {
+			signals++
+		}
 		switch {
-		case e.lexicalFound && e.denseFound:
+		case signals > 1:
 			e.item.MatchType = "hybrid"
 		case e.denseFound:
 			e.item.MatchType = "dense"
+		case e.structuralFound:
+			e.item.MatchType = "structural"
 		default:
 			e.item.MatchType = "lexical"
 		}
+		centrality := e.item.Centrality
+		if centrality < 0 {
+			centrality = 0
+		}
+		if centrality > 1 {
+			centrality = 1
+		}
+		// Centrality is a bounded refinement, never a replacement for retrieval
+		// evidence. At most a 15% boost keeps source agreement dominant.
+		e.item.FusedScore = e.item.RRFScore * (1 + 0.15*centrality)
 		out = append(out, e.item)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].FusedScore != out[j].FusedScore {
+			return out[i].FusedScore > out[j].FusedScore
+		}
 		if out[i].RRFScore != out[j].RRFScore {
 			return out[i].RRFScore > out[j].RRFScore
 		}

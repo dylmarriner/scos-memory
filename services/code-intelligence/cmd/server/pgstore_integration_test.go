@@ -1425,3 +1425,50 @@ func TestPGIndexPersistsSourceChunksAndCopiesThemForward(t *testing.T) {
 		t.Fatalf("unchanged declaration chunk was not copied forward: %q != %q", copied, declarationChunk)
 	}
 }
+
+func TestPGStructuralRetrievalUsesActiveSnapshotReferenceEdges(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
+		{Path: "a.go", Language: "go", ContentHash: hashContent("package p\nfunc A(){}\n"), Content: "package p\nfunc A(){}\n"},
+		{Path: "b.go", Language: "go", ContentHash: hashContent("package p\nfunc B(){}\n"), Content: "package p\nfunc B(){}\n"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var aID, bID string
+	if err := db.QueryRow(`SELECT id FROM code_symbol_versions WHERE snapshot_id=$1 AND fully_qualified_name='p.A'`, snapshotID).Scan(&aID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT id FROM code_symbol_versions WHERE snapshot_id=$1 AND fully_qualified_name='p.B'`, snapshotID).Scan(&bID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO code_edges (snapshot_id,source_symbol_version_id,target_symbol_version_id,relation,confidence_class,confidence_score,extractor) VALUES ($1,$2,$3,'REFERENCES','deterministic',1.0,'scip:go')`, snapshotID, bID, aID); err != nil {
+		t.Fatal(err)
+	}
+	neighbors, ranks, err := store.QueryStructuralCandidates(ctx, repoID, "main", []string{aID}, 2, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundB := false
+	for _, neighbor := range neighbors {
+		if neighbor.SymbolVersionID == bID && neighbor.RawStructuralScore > 0 {
+			foundB = true
+			break
+		}
+	}
+	if !foundB {
+		t.Fatalf("expected B as structural evidence for A, got %#v", neighbors)
+	}
+	if ranks[aID] <= 0 || ranks[bID] <= 0 {
+		t.Fatalf("expected PageRank for both visited nodes: %#v", ranks)
+	}
+}
