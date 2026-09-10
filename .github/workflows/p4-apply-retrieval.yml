@@ -32,7 +32,9 @@ jobs:
           marker = '# Give exact matches an explicit raw lexical precision anchor.'
           if marker not in text:
               raise SystemExit('optional exact-anchor marker not found')
-          path.write_text(text.split(marker, 1)[0])
+          # Drop only the brittle optional anchor transform while preserving
+          # the transformer's final write of the already-validated source.
+          path.write_text(text.split(marker, 1)[0] + 'path.write_text(text)\n')
           PY
           python3 .github/p4-patcher/apply_retrieval.py
       - name: Format retrieval package
