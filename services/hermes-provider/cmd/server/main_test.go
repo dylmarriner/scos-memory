@@ -125,7 +125,7 @@ func TestMirroredMemoryTransitionUsesPriorContentHash(t *testing.T) {
 	}{
 		{
 			name: "ordinary write",
-			req: MemoryWriteRequest{Key: "user.name", Source: "user_message"},
+			req:  MemoryWriteRequest{Key: "user.name", Source: "user_message"},
 		},
 		{
 			name:       "replace",
