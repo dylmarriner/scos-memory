@@ -1223,7 +1223,7 @@ func (s *server) lookupStandingAnswer(ctx context.Context, tenantID, principalID
 			SELECT sa.answer, sa.confidence, sa.namespace_id
 			FROM memory_standing_answers sa
 			JOIN namespaces n ON n.id = sa.namespace_id
-			WHERE sa.tenant_id = $1 AND sa.question_key = $2 AND n.canonical_name = ANY($3::text[])
+			WHERE sa.tenant_id = $1 AND sa.question_key = $2 AND sa.invalidated_at IS NULL AND n.canonical_name = ANY($3::text[])
 			ORDER BY sa.confidence DESC
 			LIMIT 1`, tenantID, questionKey, namespaces)
 		if err != nil {
