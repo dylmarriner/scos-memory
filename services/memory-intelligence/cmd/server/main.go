@@ -56,20 +56,21 @@ const (
 )
 
 type Fact struct {
-	ID           string        `json:"id"`
-	Network      MemoryNetwork `json:"network"`
-	Content      string        `json:"content"`
-	Source       string        `json:"source"` // explicit, observed, inferred, external
-	Authority    int           `json:"authority_level"`
-	Confidence   float64       `json:"confidence"`
-	Scope        string        `json:"scope"`
-	ObservedAt   string        `json:"observed_at"`
-	ValidFrom    string        `json:"valid_from,omitempty"`
-	ValidUntil   string        `json:"valid_until,omitempty"`
-	RecordedAt   string        `json:"recorded_at"`
-	SupersededBy string        `json:"superseded_by,omitempty"`
-	Status       string        `json:"status,omitempty"` // active, merged -- see loadFactsIncludingMerged
-	Evidence     []string      `json:"evidence,omitempty"`
+	ID              string        `json:"id"`
+	Network         MemoryNetwork `json:"network"`
+	Content         string        `json:"content"`
+	Source          string        `json:"source"` // explicit, observed, inferred, external
+	Authority       int           `json:"authority_level"`
+	Confidence      float64       `json:"confidence"`
+	Scope           string        `json:"scope"`
+	ObservedAt      string        `json:"observed_at"`
+	ValidFrom       string        `json:"valid_from,omitempty"`
+	ValidUntil      string        `json:"valid_until,omitempty"`
+	RecordedAt      string        `json:"recorded_at"`
+	BeliefExpiredAt string        `json:"belief_expired_at,omitempty"`
+	SupersededBy    string        `json:"superseded_by,omitempty"`
+	Status          string        `json:"status,omitempty"` // active, merged -- see loadFactsIncludingMerged
+	Evidence        []string      `json:"evidence,omitempty"`
 	// CodeSymbolVersionIDs are code_symbol_versions.id values the caller
 	// already knows this fact cites (e.g. an agent recording a decision
 	// right after scos_code_impact/scos_code_query returned a result). P1-C
@@ -155,10 +156,80 @@ type HierarchyNode struct {
 // ── Dashboard types (§25.9) ─────────────────────────────────────────────
 
 type DashboardView struct {
-	Type        string `json:"type"`
-	Entries     []any  `json:"entries"`
-	TotalCount  int    `json:"total_count"`
-	LastUpdated string `json:"last_updated"`
+	Type       string `json:"type"`
+	Entries    []any  `json:"entries"`
+	TotalCount int    `json:"total_count"`
+	// LastUpdated is when the underlying data last changed. It is omitted
+	// entirely when a view has no data timestamp of its own (the system map
+	// reports live reachability, not stored rows) rather than being filled
+	// with the current time.
+	LastUpdated string `json:"last_updated,omitempty"`
+}
+
+// newestTimestamp returns the newest RFC3339 timestamp among the candidates,
+// or "" when there is none.
+//
+// Dashboard views must report when their data last changed, never when the
+// request happened to be served. A last_updated that always equals now tells
+// a reader nothing, and because it changed on every request it also changed
+// the response bytes on every poll -- which left the transparency snapshot's
+// ETag unstable, so its 304 revalidation could never fire and every 15s poll
+// re-sent a megabyte to render identical data.
+func newestTimestamp(candidates ...string) string {
+	newest := ""
+	var newestAt time.Time
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339, candidate)
+		if err != nil {
+			continue
+		}
+		if newest == "" || at.After(newestAt) {
+			newest, newestAt = candidate, at
+		}
+	}
+	return newest
+}
+
+func factTimestamps(facts []*Fact) []string {
+	out := make([]string, 0, len(facts))
+	for _, f := range facts {
+		out = append(out, f.RecordedAt)
+	}
+	return out
+}
+
+func beliefTimestamps(beliefs []*Belief) []string {
+	out := make([]string, 0, len(beliefs))
+	for _, b := range beliefs {
+		out = append(out, b.CreatedAt)
+	}
+	return out
+}
+
+// timelineTimestamps pulls the "time" field out of timeline entries, which
+// are built as untyped maps rather than structs.
+func timelineTimestamps(entries []map[string]any) []string {
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if stamp, ok := entry["time"].(string); ok {
+			out = append(out, stamp)
+		}
+	}
+	return out
+}
+
+// coarseUptime renders an uptime at a resolution a dashboard can actually
+// use. Second- and nanosecond-level precision changes on every request, which
+// is churn no reader benefits from; below a minute the seconds are kept so a
+// freshly restarted service does not read as "0s".
+func coarseUptime(d time.Duration) string {
+	if d < time.Minute {
+		return d.Truncate(time.Second).String()
+	}
+	return d.Truncate(time.Minute).String()
 }
 
 type SystemMapEntry struct {
@@ -191,6 +262,11 @@ type engineServer struct {
 	okfAuthorityThresh   int
 	okfConfidenceThresh  float64
 	internalServiceToken string
+
+	// summaryCache memoises the model-generated dashboard summary. The
+	// dashboard polls every 15s; without this, every poll from every viewer
+	// drove a fresh ChatJSON call over up to 200 facts.
+	summaryCache *summaryCache
 }
 
 // peerDefault names an environment variable and its fallback base URL for a
@@ -275,7 +351,7 @@ func (s *engineServer) readinessCheck() error {
 }
 
 func newEngineServer() *engineServer {
-	return &engineServer{startTime: time.Now()}
+	return &engineServer{startTime: time.Now(), summaryCache: newSummaryCache()}
 }
 
 // ── identity resolution ──────────────────────────────────────────────────
@@ -380,6 +456,7 @@ func main() {
 	mux.HandleFunc("/v1/dashboard/timeline", srv.handleDashboardTimeline)
 	mux.HandleFunc("/v1/dashboard/user-model", srv.handleDashboardUserModel)
 	mux.HandleFunc("/v1/memory/graph", srv.handleDashboardMemoryGraph)
+	mux.HandleFunc("/v1/memory/unified-graph", srv.handleUnifiedGraph)
 	mux.HandleFunc("/v1/learnings", srv.handleDashboardLearnings)
 	mux.HandleFunc("/v1/evidence-links", srv.handleEvidenceLinks)
 	mux.HandleFunc("/v1/diary", srv.handleDiary)
@@ -478,6 +555,30 @@ func healthOK(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
+// temporalQueryTimes accepts only explicit instants. An absent constraint
+// means "currently valid" for the normal listing; it never guesses a date
+// from query text or observed_at.
+func temporalQueryTimes(r *http.Request) (validAt, recordedAt *time.Time, err error) {
+	parse := func(name string) (*time.Time, error) {
+		value := strings.TrimSpace(r.URL.Query().Get(name))
+		if value == "" {
+			return nil, nil
+		}
+		parsed, parseErr := time.Parse(time.RFC3339, value)
+		if parseErr != nil {
+			return nil, fmt.Errorf("%s must be RFC3339: %w", name, parseErr)
+		}
+		return &parsed, nil
+	}
+	if validAt, err = parse("valid_at"); err != nil {
+		return nil, nil, err
+	}
+	if recordedAt, err = parse("recorded_at"); err != nil {
+		return nil, nil, err
+	}
+	return validAt, recordedAt, nil
+}
+
 // ── facts ────────────────────────────────────────────────────────────────
 
 func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
@@ -492,8 +593,13 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("include_merged") == "true" {
 			loader = loadFactsIncludingMerged
 		}
+		validAt, recordedAt, err := temporalQueryTimes(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		facts, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*Fact, error) {
-			return loader(r.Context(), q, identity.TenantID, "")
+			return loadFactsAt(r.Context(), q, identity.TenantID, "", loader, validAt, recordedAt)
 		})
 		if err != nil {
 			http.Error(w, "load facts: "+err.Error(), http.StatusInternalServerError)
@@ -1380,8 +1486,16 @@ func (s *engineServer) handleDiary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, status)
 		return
 	}
+	// The newest occurred_at among the rows, captured inside the closure so
+	// it reflects the same read the entries came from.
+	var diaryLastUpdated string
 	entries, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]any, error) {
-		return loadDiary(r.Context(), q, identity.TenantID)
+		loaded, newest, err := loadDiary(r.Context(), q, identity.TenantID)
+		if err != nil {
+			return nil, err
+		}
+		diaryLastUpdated = newest
+		return loaded, nil
 	})
 	if err != nil {
 		http.Error(w, "load diary: "+err.Error(), http.StatusInternalServerError)
@@ -1389,7 +1503,7 @@ func (s *engineServer) handleDiary(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, DashboardView{
 		Type: "diary", Entries: entries, TotalCount: len(entries),
-		LastUpdated: time.Now().UTC().Format(time.RFC3339),
+		LastUpdated: diaryLastUpdated,
 	})
 }
 
@@ -1783,7 +1897,7 @@ func (s *engineServer) probePeer(ctx context.Context, name, base string) SystemM
 			if info.Version != "" {
 				entry.Version = info.Version
 			}
-			entry.Uptime = (time.Duration(info.UptimeSeconds) * time.Second).String()
+			entry.Uptime = coarseUptime(time.Duration(info.UptimeSeconds) * time.Second)
 		}
 	}
 	return entry
@@ -1804,7 +1918,7 @@ func (s *engineServer) handleDashboardSystem(w http.ResponseWriter, r *http.Requ
 		Service: "memory-intelligence",
 		Status:  selfStatus,
 		Version: version,
-		Uptime:  selfUptime.String(),
+		Uptime:  coarseUptime(selfUptime),
 	})
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -1833,12 +1947,81 @@ func (s *engineServer) handleDashboardSystem(w http.ResponseWriter, r *http.Requ
 		entries = append(entries, e)
 	}
 
+	// The system map describes live reachability, not stored rows: it has no
+	// data timestamp to report, so last_updated is left unset rather than
+	// stamped with the read time.
 	writeJSON(w, DashboardView{
-		Type:        "system_map",
-		Entries:     entries,
-		TotalCount:  len(entries),
-		LastUpdated: time.Now().UTC().Format(time.RFC3339),
+		Type:       "system_map",
+		Entries:    entries,
+		TotalCount: len(entries),
 	})
+}
+
+// handleUnifiedGraph traverses durable P6 graph. Database applies tenant
+// predicate before recursion. Response retains complete node and edge paths.
+func (s *engineServer) handleUnifiedGraph(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	var req struct {
+		NodeType string `json:"node_type"`
+		NodeKey  string `json:"node_key"`
+		MaxDepth int    `json:"max_depth,omitempty"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || strings.TrimSpace(req.NodeType) == "" || strings.TrimSpace(req.NodeKey) == "" {
+		http.Error(w, "node_type and node_key are required", http.StatusBadRequest)
+		return
+	}
+	if req.MaxDepth == 0 {
+		req.MaxDepth = 2
+	}
+	if req.MaxDepth < 0 || req.MaxDepth > 8 {
+		http.Error(w, "max_depth must be between 0 and 8", http.StatusBadRequest)
+		return
+	}
+	type graphResult struct {
+		NodeID         string            `json:"node_id"`
+		NodeType       string            `json:"node_type"`
+		NodeKey        string            `json:"node_key"`
+		Depth          int               `json:"depth"`
+		NodeProvenance json.RawMessage   `json:"node_provenance"`
+		PathNodeIDs    []string          `json:"path_node_ids"`
+		PathEdgeIDs    []string          `json:"path_edge_ids"`
+		EdgeProvenance []json.RawMessage `json:"edge_provenance"`
+	}
+	results, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]graphResult, error) {
+		rows, err := q.QueryContext(r.Context(), `SELECT node_id::text,node_type,node_key,depth,node_provenance,path_node_ids::text[],path_edge_ids::text[],edge_provenance FROM traverse_unified_graph($1::uuid,$2,$3,$4)`, identity.TenantID, req.NodeType, req.NodeKey, req.MaxDepth)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := make([]graphResult, 0)
+		for rows.Next() {
+			var item graphResult
+			var edgeRaw []byte
+			if err := rows.Scan(&item.NodeID, &item.NodeType, &item.NodeKey, &item.Depth, &item.NodeProvenance, &item.PathNodeIDs, &item.PathEdgeIDs, &edgeRaw); err != nil {
+				return nil, err
+			}
+			if len(edgeRaw) > 0 {
+				_ = json.Unmarshal(edgeRaw, &item.EdgeProvenance)
+			}
+			out = append(out, item)
+		}
+		return out, rows.Err()
+	})
+	if err != nil {
+		http.Error(w, "traverse unified graph: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"type": "unified_memory_code_graph", "results": results})
 }
 
 func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http.Request) {
@@ -1933,7 +2116,7 @@ func (s *engineServer) handleDashboardFacts(w http.ResponseWriter, r *http.Reque
 		Type:        "facts",
 		Entries:     toAnySlice(facts),
 		TotalCount:  len(facts),
-		LastUpdated: time.Now().UTC().Format(time.RFC3339),
+		LastUpdated: newestTimestamp(factTimestamps(facts)...),
 	})
 }
 
@@ -1974,16 +2157,47 @@ func (s *engineServer) handleDashboardSummary(w http.ResponseWriter, r *http.Req
 		writeJSON(w, map[string]any{
 			"type": "summary", "mode": "empty", "summary": "No active facts to summarize.",
 			"fact_count": 0, "last_updated": time.Now().UTC().Format(time.RFC3339),
+			"cached": false,
 		})
+		return
+	}
+
+	// The cache key carries the full input identity: a summary computed for
+	// one tenant, principal, network and fact cap must never be served to a
+	// request that differs in any of them. Note `cached` is added to the
+	// response copy, never to the stored payload, so a cache entry can never
+	// claim to be the one thing it is not.
+	cacheKey := strings.Join([]string{
+		identity.TenantID, identity.PrincipalID, network, strconv.Itoa(maxFacts),
+	}, "|")
+	if entry, ok := s.summaryCache.get(cacheKey); ok {
+		out := make(map[string]any, len(entry.payload)+2)
+		for key, value := range entry.payload {
+			out[key] = value
+		}
+		out["cached"] = true
+		// cached_at only -- no ticking age field. The age is derivable from
+		// this timestamp by the reader, and embedding a value that changes
+		// every second would change the snapshot's bytes on every poll and
+		// defeat its ETag.
+		out["cached_at"] = entry.createdAt.UTC().Format(time.RFC3339)
+		writeJSON(w, out)
 		return
 	}
 
 	summary, themes, err := summarizeFactsWithLLM(r.Context(), facts)
 	if err == nil {
-		writeJSON(w, map[string]any{
+		payload := map[string]any{
 			"type": "summary", "mode": "llm_generated", "summary": summary, "themes": themes,
 			"fact_count": len(facts), "last_updated": time.Now().UTC().Format(time.RFC3339),
-		})
+		}
+		s.summaryCache.put(cacheKey, payload)
+		out := make(map[string]any, len(payload)+1)
+		for key, value := range payload {
+			out[key] = value
+		}
+		out["cached"] = false
+		writeJSON(w, out)
 		return
 	}
 	// Degrading to the deterministic digest is honest (§42) but must never be
@@ -1991,12 +2205,24 @@ func (s *engineServer) handleDashboardSummary(w http.ResponseWriter, r *http.Req
 	// outage from a healthy no-LLM deployment.
 	log.Printf("dashboard summary: LLM call failed, serving deterministic fallback: %v", err)
 
-	writeJSON(w, map[string]any{
+	fallback := map[string]any{
 		"type": "summary", "mode": "deterministic_fallback",
 		"summary":      summarizeFactsDeterministic(facts),
 		"fact_count":   len(facts),
 		"last_updated": time.Now().UTC().Format(time.RFC3339),
-	})
+	}
+	// Cached for less than a model summary, but still cached: the digest
+	// carries "last_updated", so recomputing it on every poll would change
+	// the response bytes every 15s and make the snapshot's ETag useless.
+	// A minute keeps the panel stable while still retrying a recovered model
+	// quickly.
+	s.summaryCache.putFor(cacheKey, fallback, fallbackSummaryTTL)
+	out := make(map[string]any, len(fallback)+1)
+	for key, value := range fallback {
+		out[key] = value
+	}
+	out["cached"] = false
+	writeJSON(w, out)
 }
 
 // summarizeFactsWithLLM asks llmClient for a short prose summary plus a
@@ -2066,7 +2292,7 @@ func (s *engineServer) handleDashboardLearnings(w http.ResponseWriter, r *http.R
 		Type:        "learnings",
 		Entries:     toAnySlice(beliefs),
 		TotalCount:  len(beliefs),
-		LastUpdated: time.Now().UTC().Format(time.RFC3339),
+		LastUpdated: newestTimestamp(beliefTimestamps(beliefs)...),
 	})
 }
 
@@ -2100,6 +2326,9 @@ func (s *engineServer) handleDashboardContradictions(w http.ResponseWriter, r *h
 		byID[f.ID] = f
 	}
 	var contra []map[string]any
+	// Timestamps of the facts each contradiction is derived from, so the
+	// view can report when its data last changed rather than when it was read.
+	contraTimestamps := make([]string, 0, len(relations)*2)
 	for _, rel := range relations {
 		if rel.Type != "contradicts" {
 			continue
@@ -2115,13 +2344,16 @@ func (s *engineServer) handleDashboardContradictions(w http.ResponseWriter, r *h
 				"confidence_a": f1.Confidence,
 				"confidence_b": f2.Confidence,
 			})
+			// A contradiction is derived from its two facts, so the newest
+			// of their timestamps is when this entry last changed.
+			contraTimestamps = append(contraTimestamps, f1.RecordedAt, f2.RecordedAt)
 		}
 	}
 	writeJSON(w, DashboardView{
 		Type:        "contradictions",
 		Entries:     toAnySlice(contra),
 		TotalCount:  len(contra),
-		LastUpdated: time.Now().UTC().Format(time.RFC3339),
+		LastUpdated: newestTimestamp(contraTimestamps...),
 	})
 }
 
@@ -2156,7 +2388,7 @@ func (s *engineServer) handleDashboardTimeline(w http.ResponseWriter, r *http.Re
 		Type:        "timeline",
 		Entries:     toAnySlice(entries),
 		TotalCount:  len(entries),
-		LastUpdated: time.Now().UTC().Format(time.RFC3339),
+		LastUpdated: newestTimestamp(timelineTimestamps(entries)...),
 	})
 }
 
@@ -2196,7 +2428,7 @@ func (s *engineServer) handleDashboardUserModel(w http.ResponseWriter, r *http.R
 		"entities":     entityList,
 		"facts":        userFacts,
 		"fact_count":   len(userFacts),
-		"last_updated": time.Now().UTC().Format(time.RFC3339),
+		"last_updated": newestTimestamp(factTimestamps(userFacts)...),
 	})
 }
 
