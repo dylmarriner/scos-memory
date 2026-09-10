@@ -14,9 +14,6 @@ func codeDocumentHash(content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// withCodeTenantContext gives FORCE-RLS code_embeddings operations the same
-// authenticated tenant boundary as the HTTP request. The setting is local to
-// this transaction and cannot leak through the sql.DB connection pool.
 func (s *pgCodeStore) withCodeTenantContext(ctx context.Context, tenantID string, fn func(*sql.Tx) error) error {
 	if strings.TrimSpace(tenantID) == "" {
 		return fmt.Errorf("tenant id is required for code embedding access")
@@ -56,7 +53,7 @@ func (s *pgCodeStore) EnsureCodeEmbeddingSpace(ctx context.Context, space codeEm
 	return id, nil
 }
 
-func (s *pgCodeStore) SnapshotEmbeddingDocuments(ctx context.Context, snapshotID string) ([]PGSymbolVersion, error) {
+func (s *pgCodeStore) SnapshotEmbeddingDocuments(ctx context.Context, snapshotID string) ([]codeSymbolDocument, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT sv.id::text, sv.symbol_id::text, sv.fully_qualified_name, sv.path,
 		       sv.kind, COALESCE(sv.signature, ''), COALESCE(sv.doc_comment, ''),
@@ -71,9 +68,9 @@ func (s *pgCodeStore) SnapshotEmbeddingDocuments(ctx context.Context, snapshotID
 		return nil, fmt.Errorf("load snapshot embedding documents: %w", err)
 	}
 	defer rows.Close()
-	var out []PGSymbolVersion
+	var out []codeSymbolDocument
 	for rows.Next() {
-		var item PGSymbolVersion
+		var item codeSymbolDocument
 		if err := rows.Scan(
 			&item.SymbolVersionID, &item.SymbolID, &item.FullyQualifiedName, &item.Path,
 			&item.Kind, &item.Signature, &item.DocComment, &item.ContentHash,
@@ -89,9 +86,6 @@ func (s *pgCodeStore) SnapshotEmbeddingDocuments(ctx context.Context, snapshotID
 	return out, rows.Err()
 }
 
-// EnsureSnapshotChunks makes the deterministic text used by BGE-Code durable.
-// Older snapshots created before P4 may have no code_chunks rows; those rows
-// are filled without mutating symbol-version identity.
 func (s *pgCodeStore) EnsureSnapshotChunks(ctx context.Context, snapshotID string) error {
 	items, err := s.SnapshotEmbeddingDocuments(ctx, snapshotID)
 	if err != nil {
@@ -111,6 +105,21 @@ func (s *pgCodeStore) EnsureSnapshotChunks(ctx context.Context, snapshotID strin
 		}
 	}
 	return nil
+}
+
+func (s *pgCodeStore) ActiveSnapshotID(ctx context.Context, repositoryID, branch string) (string, error) {
+	var snapshotID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id::text FROM code_repository_snapshots
+		WHERE repository_id = $1 AND branch = $2 AND status = 'active'
+		ORDER BY indexed_at DESC LIMIT 1`, repositoryID, branch).Scan(&snapshotID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve active code snapshot: %w", err)
+	}
+	return snapshotID, nil
 }
 
 func (s *pgCodeStore) CodeEmbeddingCurrent(ctx context.Context, tenantID, symbolVersionID, spaceID, contentHash string) (bool, error) {
@@ -148,25 +157,22 @@ func (s *pgCodeStore) UpsertCodeEmbedding(ctx context.Context, tenantID, symbolV
 	})
 }
 
-func (s *pgCodeStore) QueryDense(ctx context.Context, tenantID, repositoryID, branch string, queryVector []float64, spaceID string, limit int) ([]PGSymbolVersion, error) {
+func (s *pgCodeStore) QueryDense(ctx context.Context, tenantID, repositoryID, branch string, queryVector []float64, spaceID string, limit int) ([]codeHybridResult, error) {
 	if len(queryVector) == 0 || strings.TrimSpace(spaceID) == "" {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 20
 	}
-	var out []PGSymbolVersion
+	var out []codeHybridResult
 	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT sv.id::text, sv.symbol_id::text, sv.fully_qualified_name, sv.path,
-			       sv.kind, COALESCE(sv.signature, ''), COALESCE(sv.doc_comment, ''),
-			       sv.content_hash, sv.snapshot_id::text, snap.commit_id, snap.branch,
-			       COALESCE(cc.content, ''),
-			       1 - (ce.embedding <=> $4::vector) AS dense_score
+			       sv.range::text, sv.snapshot_id::text, snap.commit_id, snap.branch,
+			       sv.content_hash, 1 - (ce.embedding <=> $4::vector) AS dense_score
 			FROM code_embeddings ce
 			JOIN code_symbol_versions sv ON sv.id = ce.symbol_version_id
 			JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
-			LEFT JOIN code_chunks cc ON cc.symbol_version_id = sv.id
 			WHERE ce.tenant_id = $1
 			  AND snap.repository_id = $2
 			  AND snap.branch = $3
@@ -182,12 +188,11 @@ func (s *pgCodeStore) QueryDense(ctx context.Context, tenantID, repositoryID, br
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var item PGSymbolVersion
+			var item codeHybridResult
 			if err := rows.Scan(
 				&item.SymbolVersionID, &item.SymbolID, &item.FullyQualifiedName, &item.Path,
-				&item.Kind, &item.Signature, &item.DocComment, &item.ContentHash,
-				&item.SnapshotID, &item.CommitID, &item.Branch, &item.ChunkContent,
-				&item.DenseScore,
+				&item.Range, &item.SnapshotID, &item.CommitID, &item.Branch,
+				&item.ContentHash, &item.RawDenseScore,
 			); err != nil {
 				return fmt.Errorf("scan dense code symbol: %w", err)
 			}
@@ -200,10 +205,14 @@ func (s *pgCodeStore) QueryDense(ctx context.Context, tenantID, repositoryID, br
 }
 
 func (s *server) embedCodeSnapshot(ctx context.Context, tenantID, snapshotID string) error {
-	if s.codeRuntime == nil {
+	client, space, err := codeRuntimeConfig()
+	if err != nil {
+		return err
+	}
+	if client == nil {
 		return fmt.Errorf("BGE-Code runtime is not configured")
 	}
-	spaceID, err := s.pgStore.EnsureCodeEmbeddingSpace(ctx, s.codeSpace)
+	spaceID, err := s.pgStore.EnsureCodeEmbeddingSpace(ctx, space)
 	if err != nil {
 		return err
 	}
@@ -224,7 +233,7 @@ func (s *server) embedCodeSnapshot(ctx context.Context, tenantID, snapshotID str
 		if current {
 			continue
 		}
-		result, err := s.codeRuntime.EmbedCode(ctx, document, s.codeSpace)
+		result, err := client.EmbedCode(ctx, document, space)
 		if err != nil {
 			return fmt.Errorf("embed %s: %w", item.FullyQualifiedName, err)
 		}
@@ -235,15 +244,27 @@ func (s *server) embedCodeSnapshot(ctx context.Context, tenantID, snapshotID str
 	return nil
 }
 
-func (s *server) queryDenseCode(ctx context.Context, tenantID, repositoryID, branch, query string, limit int) ([]PGSymbolVersion, error) {
-	if s.codeRuntime == nil {
-		return nil, fmt.Errorf("BGE-Code runtime is not configured")
+func (s *server) ensureActiveCodeEmbeddings(ctx context.Context, tenantID, repositoryID, branch string) error {
+	snapshotID, err := s.pgStore.ActiveSnapshotID(ctx, repositoryID, branch)
+	if err != nil || snapshotID == "" {
+		return err
 	}
-	spaceID, err := s.pgStore.EnsureCodeEmbeddingSpace(ctx, s.codeSpace)
+	return s.embedCodeSnapshot(ctx, tenantID, snapshotID)
+}
+
+func (s *server) queryDenseCode(ctx context.Context, tenantID, repositoryID, branch, query string, limit int) ([]codeHybridResult, error) {
+	client, space, err := codeRuntimeConfig()
 	if err != nil {
 		return nil, err
 	}
-	result, err := s.codeRuntime.EmbedCode(ctx, query, s.codeSpace)
+	if client == nil {
+		return nil, fmt.Errorf("BGE-Code runtime is not configured")
+	}
+	spaceID, err := s.pgStore.EnsureCodeEmbeddingSpace(ctx, space)
+	if err != nil {
+		return nil, err
+	}
+	result, err := client.EmbedCode(ctx, query, space)
 	if err != nil {
 		return nil, err
 	}
