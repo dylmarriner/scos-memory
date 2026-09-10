@@ -606,7 +606,7 @@ func resolveEntityMentions(ctx context.Context, content string) []string {
 	if !llmClient.Enabled() || strings.TrimSpace(content) == "" {
 		return extractEntityMentions(content)
 	}
-	llmCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	llmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var result struct {
 		Entities []string `json:"entities"`

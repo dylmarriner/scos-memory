@@ -961,7 +961,7 @@ tags:
 // Returns (nil, nil) -- not an error -- when the model judges the fact does
 // not belong in OKF; that is the expected, common outcome, not a failure.
 func classifyForOKF(ctx context.Context, fact *Fact) (*okfCandidate, error) {
-	llmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	llmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	var result struct {
@@ -1978,13 +1978,18 @@ func (s *engineServer) handleDashboardSummary(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if summary, themes, err := summarizeFactsWithLLM(r.Context(), facts); err == nil {
+	summary, themes, err := summarizeFactsWithLLM(r.Context(), facts)
+	if err == nil {
 		writeJSON(w, map[string]any{
 			"type": "summary", "mode": "llm_generated", "summary": summary, "themes": themes,
 			"fact_count": len(facts), "last_updated": time.Now().UTC().Format(time.RFC3339),
 		})
 		return
 	}
+	// Degrading to the deterministic digest is honest (§42) but must never be
+	// silent: an operator reading the logs has to be able to tell a real
+	// outage from a healthy no-LLM deployment.
+	log.Printf("dashboard summary: LLM call failed, serving deterministic fallback: %v", err)
 
 	writeJSON(w, map[string]any{
 		"type": "summary", "mode": "deterministic_fallback",
@@ -2006,7 +2011,7 @@ func summarizeFactsWithLLM(ctx context.Context, facts []*Fact) (string, []string
 	for i, f := range facts {
 		fmt.Fprintf(&b, "%d. [%s] %s\n", i+1, f.Network, truncateContent(f.Content, 300))
 	}
-	llmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	llmCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	var result struct {
 		Summary string   `json:"summary"`
@@ -2514,7 +2519,7 @@ func findMergeCandidate(ctx context.Context, fact *Fact, existing []*Fact) *merg
 	for i, c := range candidates {
 		fmt.Fprintf(&options, "%d. id=%s: %s\n", i, c.fact.ID, c.fact.Content)
 	}
-	llmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	llmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var result struct {
 		IsDuplicate    bool   `json:"is_duplicate"`
