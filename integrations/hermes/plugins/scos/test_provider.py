@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 import threading
@@ -100,6 +101,25 @@ class ScosMemoryProviderV2Tests(unittest.TestCase):
         self.assertEqual(payload["value"], "prefers concise answers")
         self.assertEqual(payload["source"], "hermes_memory:replace")
         self.assertIn("user", payload["key"])
+
+    def test_remove_keys_prior_content_and_does_not_rewrite_deleted_value(self):
+        provider = self.make_provider()
+        calls = []
+        provider._provider_post = lambda path, payload, timeout=8: calls.append((path, payload)) or {"mirrored": True}
+
+        provider.on_memory_write(
+            "remove",
+            "memory",
+            "",
+            metadata={"old_text": "obsolete fact", "session_id": "s-1"},
+        )
+        provider.shutdown()
+
+        payload = calls[0][1]
+        expected_hash = hashlib.sha256(b"obsolete fact\0").hexdigest()
+        self.assertEqual(payload["key"], f"hermes:memory:{expected_hash}")
+        self.assertEqual(payload["value"], "")
+        self.assertEqual(payload["source"], "hermes_memory:remove")
 
     def test_sync_turn_never_waits_for_previous_network_write(self):
         provider = self.make_provider()
