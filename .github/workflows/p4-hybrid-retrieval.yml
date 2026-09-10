@@ -6,6 +6,7 @@ on:
       - "database/migrations/**"
       - "services/retrieval-orchestrator/**"
       - "services/code-intelligence/**"
+      - "services/mcp-gateway/**"
       - "workers/embeddings/**"
       - "services/model-runtime/**"
       - "deploy/compose/docker-compose.models.yml"
@@ -23,6 +24,7 @@ on:
       - "database/migrations/**"
       - "services/retrieval-orchestrator/**"
       - "services/code-intelligence/**"
+      - "services/mcp-gateway/**"
       - "workers/embeddings/**"
       - "services/model-runtime/**"
       - "deploy/compose/docker-compose.models.yml"
@@ -88,6 +90,63 @@ jobs:
         run: go vet ./services/code-intelligence/cmd/server
       - name: Test
         run: go test -count=1 ./services/code-intelligence/cmd/server
+
+  mcp-gateway:
+    name: MCP gateway P4 exposure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Focused gofmt
+        run: |
+          diff=$(gofmt -l services/mcp-gateway)
+          if [ -n "$diff" ]; then echo "$diff"; exit 1; fi
+      - name: Vet
+        run: go vet ./services/mcp-gateway/cmd/server
+      - name: Test
+        run: go test -count=1 ./services/mcp-gateway/cmd/server
+
+  postgres-integration:
+    name: PostgreSQL + pgvector integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: scos
+          POSTGRES_PASSWORD: scos-ci
+          POSTGRES_DB: scos_memory
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U scos -d scos_memory"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      PGPASSWORD: scos-ci
+      SCOS_CODE_STORE_TEST_DSN: postgresql://scos:scos-ci@127.0.0.1:5432/scos_memory?sslmode=disable
+      SCOS_RETRIEVAL_TEST_DSN: postgresql://scos:scos-ci@127.0.0.1:5432/scos_memory?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
+      - name: Apply all migrations from zero
+        run: |
+          for migration in database/migrations/*.sql; do
+            psql -h 127.0.0.1 -U scos -d scos_memory -v ON_ERROR_STOP=1 -f "$migration"
+          done
+      - name: Run code-intelligence integration tests
+        run: go test -count=1 ./services/code-intelligence/cmd/server
+      - name: Run retrieval integration tests
+        run: go test -count=1 ./services/retrieval-orchestrator/cmd/server
 
   embeddings-worker:
     name: Embeddings worker
