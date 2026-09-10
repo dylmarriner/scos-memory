@@ -43,6 +43,28 @@ type codeModelRuntimeClient struct {
 	controlPlaneToken string
 }
 
+type codeSymbolDocument struct {
+	SymbolVersionID    string
+	SymbolID           string
+	FullyQualifiedName string
+	Path               string
+	Kind               string
+	Signature          string
+	DocComment         string
+	ChunkContent       string
+	ContentHash        string
+	SnapshotID         string
+	CommitID           string
+	Branch             string
+}
+
+type codeHybridResult struct {
+	PGSymbolVersion
+	RawLexicalScore float64 `json:"raw_lexical_score,omitempty"`
+	RawDenseScore   float64 `json:"raw_dense_score,omitempty"`
+	RRFScore        float64 `json:"rrf_score,omitempty"`
+}
+
 func codePositiveEnvInt(name string, fallback int) (int, error) {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -123,6 +145,18 @@ func newCodeModelRuntimeClientFromEnvironment() (*codeModelRuntimeClient, error)
 	}, nil
 }
 
+func codeRuntimeConfig() (*codeModelRuntimeClient, codeEmbeddingSpace, error) {
+	space, err := activeCodeEmbeddingSpaceFromEnvironment()
+	if err != nil {
+		return nil, codeEmbeddingSpace{}, err
+	}
+	client, err := newCodeModelRuntimeClientFromEnvironment()
+	if err != nil {
+		return nil, codeEmbeddingSpace{}, err
+	}
+	return client, space, nil
+}
+
 func (c *codeModelRuntimeClient) EmbedCode(ctx context.Context, input string, expected codeEmbeddingSpace) (codeEmbeddingResult, error) {
 	if c == nil || strings.TrimSpace(c.baseURL) == "" || c.httpClient == nil {
 		return codeEmbeddingResult{}, fmt.Errorf("model runtime is not configured")
@@ -173,7 +207,7 @@ func (c *codeModelRuntimeClient) EmbedCode(ctx context.Context, input string, ex
 	return codeEmbeddingResult{Embedding: out.Embedding, Space: expected}, nil
 }
 
-func codeEmbeddingDocument(symbol PGSymbolVersion) string {
+func codeEmbeddingDocument(symbol codeSymbolDocument) string {
 	parts := []string{
 		"fqn: " + strings.TrimSpace(symbol.FullyQualifiedName),
 		"path: " + strings.TrimSpace(symbol.Path),
@@ -193,12 +227,20 @@ func codeVectorLiteral(values []float64) string {
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-func fuseCodeResults(lexical, dense []PGSymbolVersion, rrfK int) []PGSymbolVersion {
+func lexicalCodeResults(items []PGSymbolVersion) []codeHybridResult {
+	out := make([]codeHybridResult, 0, len(items))
+	for _, item := range items {
+		out = append(out, codeHybridResult{PGSymbolVersion: item, RawLexicalScore: item.Relevance})
+	}
+	return out
+}
+
+func fuseCodeResults(lexical, dense []codeHybridResult, rrfK int) []codeHybridResult {
 	if rrfK <= 0 {
 		rrfK = 60
 	}
 	type entry struct {
-		item         PGSymbolVersion
+		item         codeHybridResult
 		lexicalFound bool
 		denseFound   bool
 	}
@@ -211,7 +253,8 @@ func fuseCodeResults(lexical, dense []PGSymbolVersion, rrfK int) []PGSymbolVersi
 			byID[item.SymbolVersionID] = e
 		}
 		e.lexicalFound = true
-		e.item.Relevance = item.Relevance
+		e.item.RawLexicalScore = item.RawLexicalScore
+		e.item.Relevance = item.RawLexicalScore
 		e.item.RRFScore += 1.0 / float64(rrfK+rank+1)
 	}
 	for rank, item := range dense {
@@ -222,10 +265,10 @@ func fuseCodeResults(lexical, dense []PGSymbolVersion, rrfK int) []PGSymbolVersi
 			byID[item.SymbolVersionID] = e
 		}
 		e.denseFound = true
-		e.item.DenseScore = item.DenseScore
+		e.item.RawDenseScore = item.RawDenseScore
 		e.item.RRFScore += 1.0 / float64(rrfK+rank+1)
 	}
-	out := make([]PGSymbolVersion, 0, len(byID))
+	out := make([]codeHybridResult, 0, len(byID))
 	for _, e := range byID {
 		switch {
 		case e.lexicalFound && e.denseFound:
