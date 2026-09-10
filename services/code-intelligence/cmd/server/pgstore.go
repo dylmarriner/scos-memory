@@ -265,6 +265,9 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1)`, snapshotID); err != nil {
 		return fmt.Errorf("activate snapshot: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `SELECT queue_stale_memory_revalidation($1)`, snapshotID); err != nil {
+		return fmt.Errorf("queue stale-memory revalidation: %w", err)
+	}
 	return tx.Commit()
 }
 
