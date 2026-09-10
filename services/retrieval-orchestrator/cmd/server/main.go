@@ -326,6 +326,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	plan := planRetrieval(req, maxResults)
 
 	// ── 1. Authorise / resolve namespaces ───────────────────────────
 	namespaces, err := s.resolveAuthorisedNamespaces(ctx, req)
@@ -380,20 +381,26 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── 4. Exact + metadata search ──────────────────────────────────
-	exactResults, err := s.exactSearch(ctx, req, namespaces, sensitivityFilter, maxResults)
-	if err != nil {
-		log.Printf("exact search error: %v", err)
+	var exactResults []RetrievalResult
+	if plan.ExactLimit > 0 {
+		exactResults, err = s.exactSearch(ctx, req, namespaces, sensitivityFilter, plan.ExactLimit)
+		if err != nil {
+			log.Printf("exact search error: %v", err)
+		}
 	}
 
 	// ── 5. Full-text search ─────────────────────────────────────────
-	ftsResults, err := s.fullTextSearch(ctx, req, namespaces, sensitivityFilter, tsQuery, maxResults)
-	if err != nil {
-		log.Printf("full-text search error: %v", err)
+	var ftsResults []RetrievalResult
+	if plan.FullTextLimit > 0 {
+		ftsResults, err = s.fullTextSearch(ctx, req, namespaces, sensitivityFilter, tsQuery, plan.FullTextLimit)
+		if err != nil {
+			log.Printf("full-text search error: %v", err)
+		}
 	}
 
 	// ── 6. Vector search ────────────────────────────────────────────
-	meta := retrievalExecutionMeta{TextSpace: s.textSpace}
-	if len(req.QueryEmbedding) > 0 {
+	meta := retrievalExecutionMeta{TextSpace: s.textSpace, PlannerMode: plan.Mode}
+	if plan.VectorLimit > 0 && len(req.QueryEmbedding) > 0 {
 		if req.QueryEmbeddingSpace == nil || *req.QueryEmbeddingSpace != s.textSpace {
 			http.Error(w, "query_embedding_space must exactly match the active text embedding space", http.StatusBadRequest)
 			return
@@ -402,7 +409,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "query_embedding dimensions do not match the active text embedding space", http.StatusBadRequest)
 			return
 		}
-	} else if s.modelRuntime != nil {
+	} else if plan.VectorLimit > 0 && s.modelRuntime != nil {
 		embedded, embedErr := s.modelRuntime.EmbedText(ctx, req.Query, s.textSpace)
 		if embedErr != nil {
 			log.Printf("query embedding unavailable (%v); semantic lane contributes zero candidates", embedErr)
@@ -412,23 +419,29 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 			req.QueryEmbeddingSpace = &embedded.Space
 		}
 	}
-	vectorResults, err := s.vectorSearch(ctx, req, namespaces, sensitivityFilter, maxResults)
-	if err != nil {
-		log.Printf("vector search error: %v; semantic lane contributes zero candidates", err)
-		meta.DegradedModels = append(meta.DegradedModels, "memory_vector")
-		vectorResults = nil
+	var vectorResults []RetrievalResult
+	if plan.VectorLimit > 0 {
+		vectorResults, err = s.vectorSearch(ctx, req, namespaces, sensitivityFilter, plan.VectorLimit)
+		if err != nil {
+			log.Printf("vector search error: %v; semantic lane contributes zero candidates", err)
+			meta.DegradedModels = append(meta.DegradedModels, "memory_vector")
+			vectorResults = nil
+		}
 	}
 
 	// ── 7. Relation expansion ───────────────────────────────────────
-	relationResults, err := s.relationExpansion(ctx, req, namespaces, sensitivityFilter, append(append(exactResults, ftsResults...), vectorResults...), maxResults)
-	if err != nil {
-		log.Printf("relation expansion error: %v", err)
+	var relationResults []RetrievalResult
+	if plan.RelationLimit > 0 {
+		relationResults, err = s.relationExpansion(ctx, req, namespaces, sensitivityFilter, append(append(exactResults, ftsResults...), vectorResults...), plan.RelationLimit)
+		if err != nil {
+			log.Printf("relation expansion error: %v", err)
+		}
 	}
 
 	// ── 8. Recent session state ─────────────────────────────────────
 	var sessionResults []RetrievalResult
-	if req.IncludeSession && req.SessionID != "" {
-		sessionResults, _ = s.recentSessionState(ctx, req, namespaces, maxResults)
+	if plan.SessionLimit > 0 {
+		sessionResults, _ = s.recentSessionState(ctx, req, namespaces, plan.SessionLimit)
 	}
 
 	// ── 9. Fusion via RRF ───────────────────────────────────────────
@@ -554,6 +567,7 @@ func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespace
 		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
+		       1.0::double precision AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
 		FROM memory_items mi
@@ -580,6 +594,7 @@ func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namesp
 		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
+		       ts_rank(to_tsvector('english', COALESCE(mi.title, '') || ' ' || COALESCE(mv.content, '')), to_tsquery('english', $4)) AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
 		FROM memory_items mi
@@ -839,14 +854,17 @@ func (s *server) queryResults(ctx context.Context, req RetrieveRequest, namespac
 		for pgRows.Next() {
 			var r RetrievalResult
 			var content, sensitivity string
+			var lexicalScore float64
 			var evidenceJSON, conflictsJSON []byte
 			if err := pgRows.Scan(&r.MemoryID, &r.Title, &r.Summary, &content,
 				&r.MemoryClass, &r.Authority, &r.Confidence, &sensitivity,
-				&r.NamespaceID, &evidenceJSON, &conflictsJSON); err != nil {
+				&r.NamespaceID, &lexicalScore, &evidenceJSON, &conflictsJSON); err != nil {
 				return err
 			}
 			r.Sensitivity = sensitivity
 			r.Content = truncate(content, 2000)
+			r.RawLexicalScore = lexicalScore
+			r.LexicalScore = lexicalScore
 			decodeResultJSON(&r, evidenceJSON, conflictsJSON)
 			r.Provenance = provenance
 			results = append(results, r)
