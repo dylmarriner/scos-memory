@@ -1,9 +1,101 @@
 {
   "id": "scos-memory",
   "name": "SCOS Memory Fabric",
-  "description": "OpenClaw-native SCOS memory guidance and governed read-only tools.",
+  "description": "Additive SCOS memory corpus/prompt supplement plus governed read and (opt-in) write tools, called directly against mcp-gateway.",
   "version": "1.1.0",
-  "activation": { "onStartup": true },
-  "contracts": { "tools": ["scos_memory_guidance", "scos_recall", "scos_status", "scos_explain"] },
-  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "gatewayUrl": {
+        "type": "string",
+        "description": "SCOS mcp-gateway MCP endpoint. Falls back to SCOS_GATEWAY_URL."
+      },
+      "bearerToken": {
+        "type": "string",
+        "description": "SCOS bearer token. Falls back to SCOS_BEARER_TOKEN in ~/.hermes/scos.env."
+      },
+      "tenantId": {
+        "type": "string",
+        "description": "SCOS tenant id. Falls back to SCOS_TENANT_ID."
+      },
+      "principalId": {
+        "type": "string",
+        "description": "SCOS principal id. Falls back to SCOS_PRINCIPAL_ID."
+      },
+      "agentName": {
+        "type": "string",
+        "description": "X-SCOS-Agent-Name sent to mcp-gateway.",
+        "default": "openclaw"
+      },
+      "tlsCaPath": {
+        "type": "string",
+        "description": "CA bundle for TLS verification."
+      },
+      "tlsInsecureSkipVerify": {
+        "type": "boolean",
+        "description": "Skip TLS verification (local dev only).",
+        "default": false
+      },
+      "requestTimeoutMs": {
+        "type": "number",
+        "description": "Per-attempt request timeout in ms.",
+        "default": 8000
+      },
+      "recallTimeoutMs": {
+        "type": "number",
+        "description": "Timeout for recall/supplement calls in ms.",
+        "default": 6000
+      },
+      "maxRetries": {
+        "type": "number",
+        "description": "Bounded retries for transient gateway failures.",
+        "default": 2
+      },
+      "enableCorpusSupplement": {
+        "type": "boolean",
+        "description": "Include SCOS in memory_search corpus results (additive; does not own the memory slot).",
+        "default": true
+      },
+      "enablePromptSupplement": {
+        "type": "boolean",
+        "description": "Add a short SCOS guidance line to the memory prompt section.",
+        "default": true
+      },
+      "promptSummary": {
+        "type": "boolean",
+        "description": "Inject a bounded cached SCOS fact summary pre-turn. Adds one cached gateway call.",
+        "default": false
+      },
+      "promptSummaryTtlMs": {
+        "type": "number",
+        "description": "TTL for the cached pre-turn SCOS summary.",
+        "default": 300000
+      },
+      "allowWrites": {
+        "type": "boolean",
+        "description": "Expose scos_correct/scos_forget. Off by default; these mutate stored memory.",
+        "default": false
+      }
+    }
+  },
+  "contracts": {
+    "tools": [
+      "scos_memory_guidance",
+      "scos_recall",
+      "scos_status",
+      "scos_health",
+      "scos_explain",
+      "scos_fact_history",
+      "scos_memory_summary",
+      "scos_user_model",
+      "scos_memory_graph",
+      "scos_context_compile",
+      "scos_fact_feedback",
+      "scos_correct",
+      "scos_forget"
+    ]
+  }
 }
