@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
+import os
 import sys
+import tempfile
 import threading
 import time
 import types
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -76,6 +80,15 @@ class ScosMemoryProviderV2Tests(unittest.TestCase):
         provider._provider_post = fail
         with self.assertRaisesRegex(RuntimeError, "durable store unreachable"):
             provider.on_pre_compress([{"role": "user", "content": "critical"}], require_checkpoint=True)
+
+    def test_required_checkpoint_cannot_succeed_when_writes_are_disabled(self):
+        provider = self.make_provider()
+        provider._write_enabled = False
+        with self.assertRaisesRegex(RuntimeError, "non-primary"):
+            provider.on_pre_compress(
+                [{"role": "user", "content": "critical delegated evidence"}],
+                require_checkpoint=True,
+            )
 
     def test_best_effort_checkpoint_failure_does_not_break_compression(self):
         provider = self.make_provider()
@@ -160,6 +173,39 @@ class ScosMemoryProviderV2Tests(unittest.TestCase):
         self.assertIn("/v1/provider/queue_prefetch", paths)
         self.assertIn("/v1/provider/session_end", paths)
         self.assertIn("/v1/provider/sync_turn", paths)
+
+    def test_save_config_is_profile_scoped_and_excludes_secret(self):
+        provider = self.make_provider()
+        values = {
+            "SCOS_GATEWAY_URL": "https://gateway.example",
+            "SCOS_BEARER_TOKEN": "must-not-be-written",
+            "SCOS_TENANT_ID": "tenant-1",
+            "SCOS_PRINCIPAL_ID": "principal-1",
+            "SCOS_HERMES_PROVIDER_URL": "https://provider.example",
+            "SCOS_NAMESPACE_ID": "namespace-1",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            provider.save_config(values, tmp)
+            path = Path(tmp) / "scos.json"
+            stored = json.loads(path.read_text())
+            self.assertNotIn("SCOS_BEARER_TOKEN", stored)
+            self.assertEqual(stored["SCOS_GATEWAY_URL"], "https://gateway.example")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_tool_discovery_falls_back_to_minimum_safe_catalogue(self):
+        provider = self.make_provider()
+        provider._gateway_rpc = lambda *_args, **_kwargs: {"error": {"message": "offline"}}
+        names = {tool["name"] for tool in provider.get_tool_schemas()}
+        self.assertEqual(names, {"scos_recall", "scos_status"})
+
+    def test_stable_session_ids_are_deterministic_and_preserve_uuid_input(self):
+        generated_a = module._stable_session_uuid("human-session", "tenant-1", "principal-1")
+        generated_b = module._stable_session_uuid("human-session", "tenant-1", "principal-1")
+        self.assertEqual(generated_a, generated_b)
+        uuid.UUID(generated_a)
+
+        supplied = "123e4567-e89b-12d3-a456-426614174000"
+        self.assertEqual(module._stable_session_uuid(supplied, "x", "y"), supplied)
 
 
 if __name__ == "__main__":
