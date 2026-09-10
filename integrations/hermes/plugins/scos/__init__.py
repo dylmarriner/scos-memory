@@ -16,7 +16,6 @@ import queue
 import ssl
 import tempfile
 import threading
-import time
 import urllib.error
 import urllib.request
 import uuid
@@ -335,28 +334,23 @@ class ScosMemoryProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Mirror committed built-in MEMORY/USER writes into SCOS asynchronously."""
+        """Mirror committed built-in MEMORY/USER state transitions into SCOS."""
         if not self._write_enabled or not self._persistence_configured():
             return
+        if action not in {"add", "replace", "remove"} or target not in {"memory", "user"}:
+            logger.debug("ignoring unsupported Hermes memory transition %s/%s", action, target)
+            return
+
         metadata = dict(metadata or {})
-        value = content or str(metadata.get("old_text") or "")
-        event_basis = json.dumps(
-            {
-                "action": action,
-                "target": target,
-                "content": value,
-                "session_id": metadata.get("session_id", self._session_id),
-                "tool_name": metadata.get("tool_name", "memory"),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        event_id = hashlib.sha256(event_basis.encode("utf-8")).hexdigest()
+        old_text = str(metadata.get("old_text") or "")
+        key_material = old_text if action in {"replace", "remove"} and old_text else content
+        # SCOS sha256Hex appends a NUL after each logical part. Match that
+        # exactly so the service can locate the current memory_versions row.
+        content_hash = hashlib.sha256(key_material.encode("utf-8") + b"\0").hexdigest()
         payload = {
             "namespace_id": self._env.get("SCOS_NAMESPACE_ID", ""),
-            "key": f"hermes:{target}:{event_id}",
-            "value": value,
+            "key": f"hermes:{target}:{content_hash}",
+            "value": content,
             "scope": "user" if target == "user" else "working",
             "source": f"hermes_memory:{action}",
             "profile_path": str(self._hermes_home or ""),
