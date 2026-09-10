@@ -4,7 +4,6 @@ import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -34,41 +33,46 @@ var serviceMetrics = telemetry.FromEnvironment("retrieval-orchestrator")
 // ── request / response types ─────────────────────────────────────────────
 
 type RetrieveRequest struct {
-	TenantID       string            `json:"tenant_id"`
-	PrincipalID    string            `json:"principal_id"`
-	Query          string            `json:"query"`
-	QueryEmbedding []float64         `json:"query_embedding,omitempty"`
-	AgentID        string            `json:"agent_id,omitempty"`
-	SessionID      string            `json:"session_id,omitempty"`
-	TurnID         string            `json:"turn_id,omitempty"`
-	Namespaces     []string          `json:"namespaces,omitempty"`
-	MemoryClasses  []string          `json:"memory_classes,omitempty"`
-	SensitivityMax string            `json:"sensitivity_max,omitempty"`
-	MaxResults     int               `json:"max_results,omitempty"`
-	TokenBudget    int               `json:"token_budget,omitempty"`
-	IncludeRecent  bool              `json:"include_recent,omitempty"`
-	IncludeSession bool              `json:"include_session,omitempty"`
-	IncludeState   bool              `json:"include_state,omitempty"`
-	Filters        map[string]string `json:"filters,omitempty"`
+	TenantID            string            `json:"tenant_id"`
+	PrincipalID         string            `json:"principal_id"`
+	Query               string            `json:"query"`
+	QueryEmbedding      []float64         `json:"query_embedding,omitempty"`
+	QueryEmbeddingSpace *embeddingSpace   `json:"query_embedding_space,omitempty"`
+	AgentID             string            `json:"agent_id,omitempty"`
+	SessionID           string            `json:"session_id,omitempty"`
+	TurnID              string            `json:"turn_id,omitempty"`
+	Namespaces          []string          `json:"namespaces,omitempty"`
+	MemoryClasses       []string          `json:"memory_classes,omitempty"`
+	SensitivityMax      string            `json:"sensitivity_max,omitempty"`
+	MaxResults          int               `json:"max_results,omitempty"`
+	TokenBudget         int               `json:"token_budget,omitempty"`
+	IncludeRecent       bool              `json:"include_recent,omitempty"`
+	IncludeSession      bool              `json:"include_session,omitempty"`
+	IncludeState        bool              `json:"include_state,omitempty"`
+	Filters             map[string]string `json:"filters,omitempty"`
 }
 
 type RetrievalResult struct {
-	MemoryID      string  `json:"memory_id"`
-	Title         string  `json:"title"`
-	Summary       string  `json:"summary"`
-	Content       string  `json:"content"`
-	MemoryClass   string  `json:"memory_class"`
-	Authority     int     `json:"authority_level"`
-	Confidence    float64 `json:"confidence_score"`
-	Sensitivity   string  `json:"sensitivity"`
-	LexicalScore  float64 `json:"lexical_score,omitempty"`
-	SemanticScore float64 `json:"semantic_score,omitempty"`
-	FusedScore    float64 `json:"fused_score"`
-	Rank          int     `json:"rank"`
-	Evidence      []any   `json:"evidence,omitempty"`
-	Conflicts     []any   `json:"conflicts,omitempty"`
-	Provenance    string  `json:"provenance"`
-	NamespaceID   string  `json:"namespace_id"`
+	MemoryID         string  `json:"memory_id"`
+	Title            string  `json:"title"`
+	Summary          string  `json:"summary"`
+	Content          string  `json:"content"`
+	MemoryClass      string  `json:"memory_class"`
+	Authority        int     `json:"authority_level"`
+	Confidence       float64 `json:"confidence_score"`
+	Sensitivity      string  `json:"sensitivity"`
+	LexicalScore     float64 `json:"lexical_score,omitempty"`
+	SemanticScore    float64 `json:"semantic_score,omitempty"`
+	RawLexicalScore  float64 `json:"raw_lexical_score,omitempty"`
+	RawSemanticScore float64 `json:"raw_semantic_score,omitempty"`
+	RRFScore         float64 `json:"rrf_score,omitempty"`
+	RerankerScore    float64 `json:"reranker_score,omitempty"`
+	FusedScore       float64 `json:"fused_score"`
+	Rank             int     `json:"rank"`
+	Evidence         []any   `json:"evidence,omitempty"`
+	Conflicts        []any   `json:"conflicts,omitempty"`
+	Provenance       string  `json:"provenance"`
+	NamespaceID      string  `json:"namespace_id"`
 }
 
 type ContextSection struct {
@@ -87,9 +91,12 @@ type RetrieveResponse struct {
 // ── server state ─────────────────────────────────────────────────────────
 
 type server struct {
-	db            *pgxpool.Pool
-	embeddingsURL string // optional: when set, query text is embedded for real vector search
-	embedClient   *http.Client
+	db             *pgxpool.Pool
+	modelRuntime   *modelRuntimeClient
+	textSpace      embeddingSpace
+	rerankModel    string
+	rerankRevision string
+	rerankLimit    int
 }
 
 // pgxQuerier is satisfied by both *pgxpool.Pool and pgx.Tx, letting the
@@ -177,13 +184,29 @@ func main() {
 	}
 	defer pool.Close()
 
+	runtimeClient, err := newModelRuntimeClientFromEnvironment()
+	if err != nil {
+		log.Fatalf("configure model runtime: %v", err)
+	}
+	textSpace, err := activeTextEmbeddingSpaceFromEnvironment()
+	if err != nil {
+		log.Fatalf("configure text embedding space: %v", err)
+	}
+	rerankLimit, err := positiveEnvInt("SCOS_MODEL_RERANK_CANDIDATES", 50)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if rerankLimit > 128 {
+		log.Fatal("SCOS_MODEL_RERANK_CANDIDATES must be <= 128")
+	}
+
 	srv := &server{
-		db:            pool,
-		embeddingsURL: strings.TrimSpace(os.Getenv("SCOS_EMBEDDINGS_URL")),
-		// The embeddings worker serves plain HTTP on the internal fabric network
-		// (SCOS_EMBEDDINGS_URL=http://embeddings-worker:8102) — no TLS, and the
-		// request never leaves the host/Tailscale boundary.
-		embedClient: &http.Client{Timeout: 10 * time.Second},
+		db:             pool,
+		modelRuntime:   runtimeClient,
+		textSpace:      textSpace,
+		rerankModel:    envOr("SCOS_MODEL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
+		rerankRevision: envOr("SCOS_MODEL_RERANK_REVISION", "main"),
+		rerankLimit:    rerankLimit,
 	}
 
 	mux := newRetrievalMux(srv)
@@ -369,18 +392,31 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── 6. Vector search ────────────────────────────────────────────
-	// Embed the query text when no embedding was supplied and an embedder is
-	// configured, so vector search runs instead of silently degrading to FTS.
-	if len(req.QueryEmbedding) == 0 && req.Query != "" && s.embeddingsURL != "" {
-		if emb, err := s.embedQuery(ctx, req.Query); err == nil && len(emb) > 0 {
-			req.QueryEmbedding = emb
-		} else if err != nil {
-			log.Printf("query embedding unavailable (%v); vector search will use fallback", err)
+	meta := retrievalExecutionMeta{TextSpace: s.textSpace}
+	if len(req.QueryEmbedding) > 0 {
+		if req.QueryEmbeddingSpace == nil || *req.QueryEmbeddingSpace != s.textSpace {
+			http.Error(w, "query_embedding_space must exactly match the active text embedding space", http.StatusBadRequest)
+			return
+		}
+		if len(req.QueryEmbedding) != s.textSpace.Dimensions {
+			http.Error(w, "query_embedding dimensions do not match the active text embedding space", http.StatusBadRequest)
+			return
+		}
+	} else if s.modelRuntime != nil {
+		embedded, embedErr := s.modelRuntime.EmbedText(ctx, req.Query, s.textSpace)
+		if embedErr != nil {
+			log.Printf("query embedding unavailable (%v); semantic lane contributes zero candidates", embedErr)
+			meta.DegradedModels = append(meta.DegradedModels, "text_embedding")
+		} else {
+			req.QueryEmbedding = embedded.Embedding
+			req.QueryEmbeddingSpace = &embedded.Space
 		}
 	}
 	vectorResults, err := s.vectorSearch(ctx, req, namespaces, sensitivityFilter, maxResults)
 	if err != nil {
-		log.Printf("vector search error: %v", err)
+		log.Printf("vector search error: %v; semantic lane contributes zero candidates", err)
+		meta.DegradedModels = append(meta.DegradedModels, "memory_vector")
+		vectorResults = nil
 	}
 
 	// ── 7. Relation expansion ───────────────────────────────────────
@@ -401,8 +437,18 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// ── 10. Dedup by memory_id ──────────────────────────────────────
 	deduped := deduplicateResults(fused)
 
-	// ── 10.5. Rerank ──────────────────────────────────────────────
-	reranked := rerankResults(deduped)
+	// ── 10.5. Query-aware rerank, then governance weighting ─────────
+	modelRanked := deduped
+	if s.modelRuntime != nil && len(deduped) > 0 {
+		var rerankErr error
+		modelRanked, meta.RerankerModel, meta.RerankerRevision, rerankErr = s.rerankWithModel(ctx, req.Query, deduped)
+		if rerankErr != nil {
+			log.Printf("reranker unavailable (%v); using RRF + governance", rerankErr)
+			meta.DegradedModels = append(meta.DegradedModels, "reranker")
+			modelRanked = deduped
+		}
+	}
+	reranked := applyGovernanceWeighting(modelRanked)
 
 	// ── 11. Apply token budget ──────────────────────────────────────
 	allocated := allocateByTokenBudget(reranked, tokenBudget)
@@ -414,7 +460,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, map[string]int{
 		"exact": len(exactResults), "fulltext": len(ftsResults), "vector": len(vectorResults), "session_state": len(sessionResults),
 		"relation": len(relationResults),
-	}, int(time.Since(start).Milliseconds()))
+	}, int(time.Since(start).Milliseconds()), meta)
 	if err != nil {
 		log.Printf("record retrieval run: %v", err)
 	}
@@ -556,43 +602,42 @@ func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namesp
 	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, tsQuery, "fulltext")
 }
 
-// embedQuery calls the embeddings worker to turn free-text into a query
-// embedding. Returns nil/error if the embedder is unreachable or produces no
-// vector, in which case the caller falls back to the deterministic FTS path.
-func (s *server) embedQuery(ctx context.Context, query string) ([]float64, error) {
-	body, err := json.Marshal(map[string]string{"input": query})
+// embeddingSpaceID resolves the exact persisted space used by this request.
+// It is deliberately a metadata lookup before any pgvector operator runs, so
+// rows from other dimensions/models are never candidates for a distance
+// operation.
+func (s *server) embeddingSpaceID(ctx context.Context, space embeddingSpace) (string, error) {
+	if !space.valid() {
+		return "", fmt.Errorf("invalid embedding space")
+	}
+	var id string
+	err := s.db.QueryRow(ctx, `
+		SELECT id::text FROM embedding_spaces
+		WHERE role=$1 AND provider=$2 AND model=$3 AND model_revision=$4
+		  AND dimensions=$5 AND generation=$6
+	`, space.Role, space.Provider, space.Model, space.Revision, space.Dimensions, space.Generation).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.embeddingsURL+"/v1/embed", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.embedClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embedder returned status %d", resp.StatusCode)
-	}
-	var out struct {
-		Embedding []float64 `json:"embedding"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	if len(out.Embedding) == 0 {
-		return nil, fmt.Errorf("embedder returned empty vector")
-	}
-	return out.Embedding, nil
+	return id, nil
 }
 
 func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {
-	// Without a query embedding, retain the deterministic semantic fallback.
 	if len(req.QueryEmbedding) == 0 {
-		return s.vectorFallback(ctx, req, namespaces, sensitivityMax, limit)
+		return nil, nil
+	}
+	if req.QueryEmbeddingSpace == nil || *req.QueryEmbeddingSpace != s.textSpace {
+		return nil, fmt.Errorf("query embedding does not identify the active text space")
+	}
+	spaceID, err := s.embeddingSpaceID(ctx, s.textSpace)
+	if err != nil {
+		return nil, fmt.Errorf("resolve active embedding space: %w", err)
+	}
+	if spaceID == "" {
+		return nil, nil
 	}
 
 	query := `
@@ -617,7 +662,9 @@ func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespac
 		JOIN LATERAL (
 			SELECT me.embedding
 			FROM memory_embeddings me
-			WHERE me.memory_version_id = mv.id AND me.embedding IS NOT NULL
+			WHERE me.memory_version_id = mv.id
+			  AND me.embedding_space_id = $5::uuid
+			  AND me.embedding IS NOT NULL
 			ORDER BY me.embedding <=> $4::vector
 			LIMIT 1
 		) embedding ON true
@@ -629,37 +676,9 @@ func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespac
 		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
 		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
 		ORDER BY embedding.embedding <=> $4::vector ASC, mi.authority_level DESC
-		LIMIT $5
+		LIMIT $6
 	`
-	results, err := s.queryVectorResults(ctx, req, namespaces, sensitivityMax, limit, query, vectorLiteral(req.QueryEmbedding))
-	if err == nil {
-		return results, nil
-	}
-	// pgvector is optional at runtime. A missing extension/index or invalid
-	// embedding must not make lexical and metadata retrieval unavailable.
-	return s.vectorFallback(ctx, req, namespaces, sensitivityMax, limit)
-}
-
-func (s *server) vectorFallback(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {
-	query := `
-		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
-		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
-		       mi.namespace_id,
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
-		FROM memory_items mi
-		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
-		WHERE mi.tenant_id = $1
-		  AND mi.status = 'active'
-		  AND mi.namespace_id = ANY($2::uuid[])
-		  AND mi.sensitivity <= $3
-		  AND (mi.valid_from IS NULL OR mi.valid_from <= now())
-		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
-		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
-		ORDER BY mi.confidence_score DESC, mi.authority_level DESC
-		LIMIT $5
-	`
-	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, "semantic_fallback", "semantic")
+	return s.queryVectorResults(ctx, req, namespaces, sensitivityMax, limit, query, vectorLiteral(req.QueryEmbedding), spaceID)
 }
 
 func vectorLiteral(values []float64) string {
@@ -837,7 +856,7 @@ func (s *server) queryResults(ctx context.Context, req RetrieveRequest, namespac
 	return results, err
 }
 
-func (s *server) queryVectorResults(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int, query, embedding string) ([]RetrievalResult, error) {
+func (s *server) queryVectorResults(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int, query, embedding, spaceID string) ([]RetrievalResult, error) {
 	var results []RetrievalResult
 	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
 		nsRows, err := q.Query(ctx, `SELECT id FROM namespaces WHERE tenant_id = $1 AND canonical_name = ANY($2)`, req.TenantID, namespaces)
@@ -854,14 +873,14 @@ func (s *server) queryVectorResults(ctx context.Context, req RetrieveRequest, na
 			nsUUIDs = append(nsUUIDs, id)
 		}
 		nsErr := nsRows.Err()
-		nsRows.Close() // must close before the next query on this connection
+		nsRows.Close()
 		if nsErr != nil {
 			return nsErr
 		}
 		if len(nsUUIDs) == 0 {
 			return nil
 		}
-		rows, err := q.Query(ctx, query, req.TenantID, nsUUIDs, sensitivityMax, embedding, limit)
+		rows, err := q.Query(ctx, query, req.TenantID, nsUUIDs, sensitivityMax, embedding, spaceID, limit)
 		if err != nil {
 			return err
 		}
@@ -878,6 +897,7 @@ func (s *server) queryVectorResults(ctx context.Context, req RetrieveRequest, na
 			}
 			r.Sensitivity = sensitivity
 			r.Content = truncate(content, 2000)
+			r.RawSemanticScore = semanticScore
 			r.SemanticScore = semanticScore
 			r.Provenance = "semantic"
 			decodeResultJSON(&r, evidenceJSON, conflictsJSON)
@@ -897,30 +917,11 @@ func decodeResultJSON(result *RetrievalResult, evidenceJSON, conflictsJSON []byt
 
 type scoredResult struct {
 	result     RetrievalResult
-	rankScores map[string]float64 // source -> RRF score
+	rankScores map[string]float64
 }
 
-// rerankResults applies a deterministic, non-LLM reranking pass on top of
-// RRF fusion. RRF's fused score captures cross-signal agreement (exact,
-// full-text, vector, relation, session) but says nothing about how
-// authoritative or well-evidenced a candidate actually is. This nudges the
-// order with a bounded multiplicative boost (up to +30%) from
-// authority_level and confidence_score, so it refines close calls without
-// letting a low-signal, high-authority result leapfrog a strong multi-signal
-// match — the boost scales the existing score rather than replacing it.
 func rerankResults(results []RetrievalResult) []RetrievalResult {
-	reranked := make([]RetrievalResult, len(results))
-	copy(reranked, results)
-	for i := range reranked {
-		authorityBoost := float64(reranked[i].Authority) / 100.0
-		confidenceBoost := reranked[i].Confidence
-		reranked[i].FusedScore *= 1 + 0.15*authorityBoost + 0.15*confidenceBoost
-	}
-	sort.SliceStable(reranked, func(i, j int) bool { return reranked[i].FusedScore > reranked[j].FusedScore })
-	for i := range reranked {
-		reranked[i].Rank = i + 1
-	}
-	return reranked
+	return applyGovernanceWeighting(results)
 }
 
 func fuseResults(k float64, sets ...[]RetrievalResult) []RetrievalResult {
@@ -928,47 +929,42 @@ func fuseResults(k float64, sets ...[]RetrievalResult) []RetrievalResult {
 	allSources := []string{"exact", "fulltext", "semantic", "relation", "session_state"}
 
 	for sourceIdx, results := range sets {
+		if sourceIdx >= len(allSources) {
+			break
+		}
 		sourceName := allSources[sourceIdx]
 		for rank, r := range results {
 			sr, exists := seen[r.MemoryID]
 			if !exists {
-				sr = &scoredResult{
-					result:     r,
-					rankScores: make(map[string]float64),
-				}
+				sr = &scoredResult{result: r, rankScores: make(map[string]float64)}
 				seen[r.MemoryID] = sr
 			}
-			// RRF: 1 / (k + rank)
+			if sourceName == "semantic" {
+				sr.result.RawSemanticScore = r.RawSemanticScore
+				sr.result.SemanticScore = r.SemanticScore
+			}
+			if sourceName == "exact" || sourceName == "fulltext" {
+				if r.RawLexicalScore > sr.result.RawLexicalScore {
+					sr.result.RawLexicalScore = r.RawLexicalScore
+					sr.result.LexicalScore = r.LexicalScore
+				}
+			}
 			sr.rankScores[sourceName] = 1.0 / (k + float64(rank))
 		}
 	}
 
-	// Compute fused score: sum of RRF scores across sources
 	var fused []RetrievalResult
 	for _, sr := range seen {
 		var total float64
 		for _, score := range sr.rankScores {
 			total += score
 		}
+		sr.result.RRFScore = total
 		sr.result.FusedScore = total
-
-		// Break down per-source scores
-		if src, ok := sr.rankScores["exact"]; ok {
-			sr.result.LexicalScore = src
-		}
-		if src, ok := sr.rankScores["semantic"]; ok {
-			sr.result.SemanticScore = src
-		} else if src, ok := sr.rankScores["fulltext"]; ok {
-			// Use fulltext as lexical score if no exact match
-			sr.result.LexicalScore = src
-		}
-
 		fused = append(fused, sr.result)
 	}
 
-	sort.Slice(fused, func(i, j int) bool {
-		return fused[i].FusedScore > fused[j].FusedScore
-	})
+	sort.Slice(fused, func(i, j int) bool { return fused[i].RRFScore > fused[j].RRFScore })
 	for i := range fused {
 		fused[i].Rank = i + 1
 	}
@@ -1059,8 +1055,7 @@ func assembleSections(results []RetrievalResult) []ContextSection {
 
 // ── persistence ──────────────────────────────────────────────────────────
 
-func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, queryHash string, namespaces []string, sections []ContextSection, candidateCounts map[string]int, latencyMs int) (string, error) {
-	// Persist exactly the results that survived fusion and token allocation.
+func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, queryHash string, namespaces []string, sections []ContextSection, candidateCounts map[string]int, latencyMs int, meta retrievalExecutionMeta) (string, error) {
 	var selectedIDs []string
 	var selected []RetrievalResult
 	for _, sec := range sections {
@@ -1070,6 +1065,16 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 		}
 	}
 	selectedJSON := toJSONB(selectedIDs)
+	rankingConfig := toJSONB(map[string]any{
+		"fusion": "rrf", "k": rrfK, "reranker": meta.RerankerModel,
+		"governance": "authority_confidence_v1", "planner": meta.PlannerMode,
+		"degraded_models": meta.DegradedModels,
+	})
+	modelVersions := toJSONB(map[string]any{
+		"embedding_space":   meta.TextSpace,
+		"reranker_model":    meta.RerankerModel,
+		"reranker_revision": meta.RerankerRevision,
+	})
 
 	var runID string
 	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
@@ -1081,22 +1086,25 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			RETURNING id
 		`, req.TenantID, req.PrincipalID, req.AgentID, req.SessionID, req.TurnID,
-			queryHash, toJSONB(namespaces), toJSONB(req.Filters),
-			`{"fusion":"rrf","k":60,"reranker":"authority_confidence_v1"}`, selectedJSON, latencyMs,
-			toJSONB(candidateCounts), estimateSectionsTokens(sections),
-			toJSONB(map[string]string{"embedding": "request-supplied-or-none", "reranker": "authority_confidence_v1"})).Scan(&runID); err != nil {
+			queryHash, toJSONB(namespaces), toJSONB(req.Filters), rankingConfig, selectedJSON, latencyMs,
+			toJSONB(candidateCounts), estimateSectionsTokens(sections), modelVersions).Scan(&runID); err != nil {
 			return err
 		}
 
-		// Record individual results
 		for rank, item := range selected {
-			provenance := toJSONB(map[string]any{"source": item.Provenance})
+			provenance := toJSONB(map[string]any{
+				"source":             item.Provenance,
+				"raw_lexical_score":  item.RawLexicalScore,
+				"raw_semantic_score": item.RawSemanticScore,
+				"rrf_score":          item.RRFScore,
+				"reranker_score":     item.RerankerScore,
+			})
 			if _, err := q.Exec(ctx, `
 				INSERT INTO retrieval_results
 					(retrieval_run_id, memory_id, rank, lexical_score, semantic_score, fused_score, provenance, conflicts)
 				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 				ON CONFLICT DO NOTHING
-			`, runID, item.MemoryID, rank+1, item.LexicalScore, item.SemanticScore, item.FusedScore, provenance, toJSONB(item.Conflicts)); err != nil {
+			`, runID, item.MemoryID, rank+1, item.RawLexicalScore, item.RawSemanticScore, item.FusedScore, provenance, toJSONB(item.Conflicts)); err != nil {
 				return err
 			}
 		}
