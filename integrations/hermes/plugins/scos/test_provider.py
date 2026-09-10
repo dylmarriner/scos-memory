@@ -92,6 +92,7 @@ class ScosMemoryProviderV2Tests(unittest.TestCase):
             "prefers concise answers",
             metadata={"session_id": "s-1", "tool_name": "memory"},
         )
+        provider.shutdown()
 
         self.assertEqual(calls[0][0], "/v1/provider/memory_write")
         payload = calls[0][1]
