@@ -46,13 +46,14 @@ jobs:
           pip install -e workers/consolidation
           pip install -e workers/embeddings
       - name: Compile check
-        run: python3 -m compileall -q workers/consolidation workers/embeddings workers/index-maintenance workers/policy-evaluation
+        run: python3 -m compileall -q workers/consolidation workers/embeddings workers/index-maintenance workers/policy-evaluation integrations/hermes/plugins/scos
       - name: Unit tests
         run: |
           python3 -m unittest discover -s workers/consolidation/tests -v
           python3 -m unittest discover -s workers/embeddings/tests -v
           python3 -m unittest discover -s workers/index-maintenance -p "test_*.py" -v
           python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
+          python3 -m unittest discover -s integrations/hermes/plugins/scos -p "test_*.py" -v
           python3 tests/failure-injection/test_runner.py -v
       - name: JSON Schema validation
         run: python3 scripts/validate_json.py
