@@ -36,7 +36,7 @@ jobs:
     name: Go runtime contract
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
@@ -58,7 +58,7 @@ jobs:
     name: Embedding model-space regression tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -73,7 +73,7 @@ jobs:
     name: Hosted deployment syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate auto-deploy shell syntax
         run: bash -n deploy/scripts/auto-deploy.sh
       - name: Validate merged Compose model overlay
