@@ -1,0 +1,44 @@
+name: P4 Apply Retrieval Integration
+
+on:
+  push:
+    branches:
+      - "feat/p4-hybrid-retrieval"
+    paths:
+      - ".github/p4-patcher/apply_retrieval.py"
+      - ".github/workflows/p4-apply-retrieval.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/p4-hybrid-retrieval
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Apply exact-source transformations
+        run: python3 .github/p4-patcher/apply_retrieval.py
+      - name: Format retrieval package
+        run: gofmt -w services/retrieval-orchestrator/cmd/server/*.go
+      - name: Vet retrieval package
+        run: go vet ./services/retrieval-orchestrator/cmd/server
+      - name: Test retrieval package
+        run: go test -count=1 ./services/retrieval-orchestrator/cmd/server
+      - name: Commit verified transformation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add services/retrieval-orchestrator/cmd/server
+          if git diff --cached --quiet; then
+            echo "No retrieval changes to commit"
+            exit 0
+          fi
+          git commit -m "feat(p4): integrate space-safe BGE retrieval and reranking"
+          git push origin HEAD:feat/p4-hybrid-retrieval
