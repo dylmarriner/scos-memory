@@ -78,7 +78,7 @@ jobs:
         run: bash -n deploy/scripts/auto-deploy.sh
       - name: Validate merged Compose model overlay
         env:
-          COMPOSE_PROFILES: text-model
+          COMPOSE_PROFILES: text-model,rerank-model,code-model
           SCOS_MODEL_RUNTIME_ENABLED: "true"
           SCOS_INTERNAL_SERVICE_TOKEN: ci-internal-token
           SCOS_CONTROL_PLANE_TOKEN: ci-control-token

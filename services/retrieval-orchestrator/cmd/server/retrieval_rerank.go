@@ -12,6 +12,7 @@ type retrievalExecutionMeta struct {
 	RerankerRevision string
 	PlannerMode      string
 	DegradedModels   []string
+	DegradedSources  []string
 }
 
 func (s *server) rerankWithModel(ctx context.Context, query string, results []RetrievalResult) ([]RetrievalResult, string, string, error) {

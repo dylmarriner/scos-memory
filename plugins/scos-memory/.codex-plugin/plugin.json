@@ -1,0 +1,18 @@
+{
+  "name": "scos-memory",
+  "version": "0.1.0",
+  "description": "Codex integration point for the SCOS memory fabric.",
+  "author": {
+    "name": "SCOS Core Team"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Scos Memory",
+    "shortDescription": "Work with the SCOS memory fabric.",
+    "longDescription": "Provides the Codex plugin boundary for SCOS memory workflows. Runtime tools and skills can be added when their contracts are ready.",
+    "developerName": "SCOS Core Team",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me inspect or work with the SCOS memory fabric using the repository's documented contracts."
+  }
+}

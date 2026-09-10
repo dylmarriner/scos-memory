@@ -97,4 +97,10 @@ CREATE POLICY code_embeddings_tenant_isolation ON code_embeddings
     USING (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id', true), '')::uuid);
 
+-- Retrieval runs keep code evidence separate from memory evidence. This lets a
+-- repo-aware mixed retrieval record exactly which immutable symbol versions
+-- were returned without pretending code symbols are memory_items.
+ALTER TABLE retrieval_runs
+    ADD COLUMN IF NOT EXISTS selected_code_symbol_version_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
+
 COMMIT;

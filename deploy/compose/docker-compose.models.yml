@@ -86,6 +86,43 @@ services:
       start_period: 10s
       retries: 10
 
+  retrieval-orchestrator:
+    environment:
+      SCOS_MODEL_RUNTIME_URL: ${SCOS_MODEL_RUNTIME_URL:-https://model-runtime:8103}
+      SCOS_MODEL_RUNTIME_CA_FILE: /etc/scos/model-runtime-tls/tls.crt
+      SCOS_INTERNAL_SERVICE_TOKEN: ${SCOS_INTERNAL_SERVICE_TOKEN:?SCOS_INTERNAL_SERVICE_TOKEN must be set}
+      SCOS_CONTROL_PLANE_TOKEN: ${SCOS_CONTROL_PLANE_TOKEN:?SCOS_CONTROL_PLANE_TOKEN must be set}
+      SCOS_MODEL_TEXT_PROVIDER: ${SCOS_MODEL_TEXT_PROVIDER:-scos-model-runtime}
+      SCOS_MODEL_TEXT_MODEL: ${SCOS_MODEL_TEXT_MODEL:-BAAI/bge-m3}
+      SCOS_MODEL_TEXT_REVISION: ${SCOS_MODEL_TEXT_REVISION:-main}
+      SCOS_MODEL_TEXT_DIMENSIONS: ${SCOS_MODEL_TEXT_DIMENSIONS:-1024}
+      SCOS_MODEL_TEXT_GENERATION: ${SCOS_MODEL_TEXT_GENERATION:-1}
+      SCOS_MODEL_RERANK_MODEL: ${SCOS_MODEL_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      SCOS_MODEL_RERANK_REVISION: ${SCOS_MODEL_RERANK_REVISION:-main}
+      SCOS_MODEL_RERANK_CANDIDATES: ${SCOS_MODEL_RERANK_CANDIDATES:-50}
+    volumes:
+      - model-runtime-tls:/etc/scos/model-runtime-tls:ro
+    depends_on:
+      model-runtime:
+        condition: service_healthy
+
+  code-intelligence:
+    environment:
+      SCOS_MODEL_RUNTIME_URL: ${SCOS_MODEL_RUNTIME_URL:-https://model-runtime:8103}
+      SCOS_MODEL_RUNTIME_CA_FILE: /etc/scos/model-runtime-tls/tls.crt
+      SCOS_INTERNAL_SERVICE_TOKEN: ${SCOS_INTERNAL_SERVICE_TOKEN:?SCOS_INTERNAL_SERVICE_TOKEN must be set}
+      SCOS_CONTROL_PLANE_TOKEN: ${SCOS_CONTROL_PLANE_TOKEN:?SCOS_CONTROL_PLANE_TOKEN must be set}
+      SCOS_MODEL_CODE_PROVIDER: ${SCOS_MODEL_CODE_PROVIDER:-scos-model-runtime}
+      SCOS_MODEL_CODE_MODEL: ${SCOS_MODEL_CODE_MODEL:-BAAI/bge-code-v1}
+      SCOS_MODEL_CODE_REVISION: ${SCOS_MODEL_CODE_REVISION:-main}
+      SCOS_MODEL_CODE_DIMENSIONS: ${SCOS_MODEL_CODE_DIMENSIONS:-1536}
+      SCOS_MODEL_CODE_GENERATION: ${SCOS_MODEL_CODE_GENERATION:-1}
+    volumes:
+      - model-runtime-tls:/etc/scos/model-runtime-tls:ro
+    depends_on:
+      model-runtime:
+        condition: service_healthy
+
   embeddings-worker:
     environment:
       SCOS_MODEL_RUNTIME_URL: ${SCOS_MODEL_RUNTIME_URL:-https://model-runtime:8103}
@@ -95,6 +132,7 @@ services:
       SCOS_EMBED_MODEL: ${SCOS_MODEL_TEXT_MODEL:-BAAI/bge-m3}
       SCOS_EMBED_MODEL_REVISION: ${SCOS_MODEL_TEXT_REVISION:-main}
       SCOS_EMBED_DIMENSIONS: ${SCOS_MODEL_TEXT_DIMENSIONS:-1024}
+      SCOS_EMBED_GENERATION: ${SCOS_MODEL_TEXT_GENERATION:-1}
       SCOS_EMBEDDINGS_BATCH_SIZE: ${SCOS_EMBEDDINGS_BATCH_SIZE:-8}
     volumes:
       - model-runtime-tls:/etc/scos/model-runtime-tls:ro

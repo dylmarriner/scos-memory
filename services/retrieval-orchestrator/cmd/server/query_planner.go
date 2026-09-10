@@ -9,6 +9,7 @@ type retrievalPlan struct {
 	VectorLimit   int    `json:"vector_limit"`
 	RelationLimit int    `json:"relation_limit"`
 	SessionLimit  int    `json:"session_limit"`
+	CodeLimit     int    `json:"code_limit"`
 }
 
 func planRetrieval(req RetrieveRequest, maxResults int) retrievalPlan {
@@ -30,17 +31,31 @@ func planRetrieval(req RetrieveRequest, maxResults int) retrievalPlan {
 		session = third
 	}
 
+	codeLimit := 0
+	hasRepo := strings.TrimSpace(req.RepositoryID) != "" && strings.TrimSpace(req.Branch) != ""
 	switch mode {
 	case "exact_navigation":
-		return retrievalPlan{Mode: mode, ExactLimit: maxResults, FullTextLimit: half}
+		if hasRepo {
+			codeLimit = maxResults
+		}
+		return retrievalPlan{Mode: mode, ExactLimit: maxResults, FullTextLimit: half, CodeLimit: codeLimit}
 	case "memory":
 		return retrievalPlan{Mode: mode, ExactLimit: maxResults, FullTextLimit: maxResults, VectorLimit: maxResults, RelationLimit: half, SessionLimit: session}
 	case "code":
-		return retrievalPlan{Mode: mode, ExactLimit: maxResults, FullTextLimit: maxResults, VectorLimit: maxResults, RelationLimit: half}
+		if hasRepo {
+			codeLimit = maxResults
+		}
+		return retrievalPlan{Mode: mode, ExactLimit: half, FullTextLimit: half, VectorLimit: half, RelationLimit: third, CodeLimit: codeLimit}
 	case "temporal":
-		return retrievalPlan{Mode: mode, ExactLimit: half, FullTextLimit: maxResults, VectorLimit: half, RelationLimit: half, SessionLimit: session}
+		if hasRepo {
+			codeLimit = half
+		}
+		return retrievalPlan{Mode: mode, ExactLimit: half, FullTextLimit: maxResults, VectorLimit: half, RelationLimit: half, SessionLimit: session, CodeLimit: codeLimit}
 	default:
-		return retrievalPlan{Mode: "mixed", ExactLimit: maxResults, FullTextLimit: maxResults, VectorLimit: maxResults, RelationLimit: half, SessionLimit: session}
+		if hasRepo {
+			codeLimit = maxResults
+		}
+		return retrievalPlan{Mode: "mixed", ExactLimit: maxResults, FullTextLimit: maxResults, VectorLimit: maxResults, RelationLimit: half, SessionLimit: session, CodeLimit: codeLimit}
 	}
 }
 

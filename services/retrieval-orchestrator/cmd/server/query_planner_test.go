@@ -63,3 +63,22 @@ func TestPlanRetrievalDoesNotContainSecurityScope(t *testing.T) {
 		t.Fatalf("invalid plan: %#v", plan)
 	}
 }
+
+func TestPlanRetrievalActivatesCodeLaneOnlyWithRepositoryContext(t *testing.T) {
+	withoutRepo := planRetrieval(RetrieveRequest{Query: "find the function that handles retrieval"}, 20)
+	if withoutRepo.CodeLimit != 0 {
+		t.Fatalf("code lane must stay off without repository context: %#v", withoutRepo)
+	}
+	withRepo := planRetrieval(RetrieveRequest{Query: "find the function that handles retrieval", RepositoryID: "repo-1", Branch: "main"}, 20)
+	if withRepo.Mode != "code" || withRepo.CodeLimit != 20 {
+		t.Fatalf("repo-aware code query should activate code lane: %#v", withRepo)
+	}
+	mixed := planRetrieval(RetrieveRequest{Query: "explain how this code relates to the stored decision", RepositoryID: "repo-1", Branch: "main"}, 20)
+	if mixed.CodeLimit != 20 {
+		t.Fatalf("repo-aware mixed query should activate code lane: %#v", mixed)
+	}
+	memory := planRetrieval(RetrieveRequest{Query: "remember what I said about storage", RepositoryID: "repo-1", Branch: "main"}, 20)
+	if memory.CodeLimit != 0 {
+		t.Fatalf("memory-only query should not pay for code retrieval: %#v", memory)
+	}
+}

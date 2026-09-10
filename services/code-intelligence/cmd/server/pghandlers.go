@@ -350,6 +350,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		RepositoryID string `json:"repository_id"`
 		Branch       string `json:"branch"`
 		Query        string `json:"query"`
+		MaxResults   int    `json:"max_results,omitempty"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
 	dec.DisallowUnknownFields()
@@ -360,6 +361,13 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	if req.RepositoryID == "" || req.Branch == "" || req.Query == "" {
 		http.Error(w, "repository_id, branch and query are required", http.StatusBadRequest)
 		return
+	}
+	limit := req.MaxResults
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
 	}
 
 	// The tenant scope always comes from the authenticated caller, never a
@@ -390,6 +398,9 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	// learned or lexical ranking just because a model happens to like another
 	// symbol more.
 	if len(exact) > 0 {
+		if len(exact) > limit {
+			exact = exact[:limit]
+		}
 		writeJSON(w, map[string]any{
 			"results":         exact,
 			"retrieval_mode":  "exact",
@@ -398,7 +409,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lexical, err := s.pgStore.QueryLexical(r.Context(), req.RepositoryID, req.Branch, req.Query, 20)
+	lexical, err := s.pgStore.QueryLexical(r.Context(), req.RepositoryID, req.Branch, req.Query, limit)
 	if err != nil {
 		http.Error(w, "lexical query: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -419,7 +430,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 			if err := s.ensureActiveCodeEmbeddings(r.Context(), tenant, req.RepositoryID, req.Branch); err != nil {
 				log.Printf("code embedding backfill degraded for %s/%s: %v", req.RepositoryID, req.Branch, err)
 				degradedModels = append(degradedModels, "code_embedding")
-			} else if dense, err = s.queryDenseCode(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query, 20); err != nil {
+			} else if dense, err = s.queryDenseCode(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query, limit); err != nil {
 				log.Printf("dense code query degraded: %v", err)
 				degradedModels = append(degradedModels, "code_embedding")
 				dense = []codeHybridResult{}
@@ -441,7 +452,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	degradedSources := []string{}
 	if len(seedIDs) > 0 {
 		var ranks map[string]float64
-		structural, ranks, err = s.pgStore.QueryStructuralCandidates(r.Context(), req.RepositoryID, req.Branch, seedIDs, 2, 20)
+		structural, ranks, err = s.pgStore.QueryStructuralCandidates(r.Context(), req.RepositoryID, req.Branch, seedIDs, 2, limit)
 		if err != nil {
 			log.Printf("structural code retrieval degraded: %v", err)
 			degradedSources = append(degradedSources, "structural_graph")
@@ -457,8 +468,8 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := fuseCodeSignals(lexicalHybrid, dense, structural, 60)
-	if len(results) > 20 {
-		results = results[:20]
+	if len(results) > limit {
+		results = results[:limit]
 	}
 	signals := []string{"lexical"}
 	if len(dense) > 0 {

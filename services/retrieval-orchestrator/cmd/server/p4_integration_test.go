@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -108,5 +112,67 @@ func TestP4RetrievalSQLPreservesRawScoresAndEmbeddingSpace(t *testing.T) {
 	resolvedSpaceID, err := srv.embeddingSpaceID(ctx, space)
 	if err != nil || resolvedSpaceID != wantedSpaceID {
 		t.Fatalf("space resolution = %q, %v; want %q", resolvedSpaceID, err, wantedSpaceID)
+	}
+}
+
+func TestP4RetrieveIncludesCodeAndPersistsSelectedSymbolVersions(t *testing.T) {
+	ctx := context.Background()
+	pool := testRetrievalPool(t)
+	var tenantID, principalID, namespaceID string
+	if err := pool.QueryRow(ctx, `INSERT INTO tenants(name) VALUES ($1) RETURNING id`, t.Name()).Scan(&tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES ($1,'human',$2,$2) RETURNING id`, tenantID, t.Name()).Scan(&principalID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO namespaces(tenant_id,owner_principal_id,canonical_name) VALUES ($1,$2,$3) RETURNING id`, tenantID, principalID, "p4-code").Scan(&namespaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO namespace_memberships(namespace_id,principal_id,can_read) VALUES ($1,$2,true)`, namespaceID, principalID); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-SCOS-Tenant-ID") != tenantID || r.Header.Get("X-SCOS-Principal-ID") != principalID {
+			t.Fatalf("wrong forwarded identity")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"retrieval_mode": "hybrid",
+			"signals":        []string{"lexical", "dense", "structural", "pagerank"},
+			"results":        []map[string]any{{"SymbolVersionID": "sv-p4-1", "FullyQualifiedName": "pkg.Store.QueryDense", "Path": "store.go", "rrf_score": 0.04, "fused_score": 0.041}},
+		})
+	}))
+	defer upstream.Close()
+	srv := &server{db: pool, codeIntelligence: &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}}
+	body, _ := json.Marshal(RetrieveRequest{TenantID: tenantID, PrincipalID: principalID, Query: "find the code function that performs dense retrieval", RepositoryID: "repo-1", Branch: "main", Namespaces: []string{"p4-code"}, MaxResults: 10})
+	req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleRetrieve(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retrieve = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out RetrieveResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Code == nil || len(out.Code.Results) != 1 || out.Code.Results[0].SymbolVersionID != "sv-p4-1" {
+		t.Fatalf("code evidence missing: %#v", out.Code)
+	}
+	if out.RetrievalRunID == "" {
+		t.Fatal("retrieval run was not recorded")
+	}
+	var selected []string
+	if err := pool.QueryRow(ctx, `SELECT selected_code_symbol_version_ids FROM retrieval_runs WHERE id=$1`, out.RetrievalRunID).Scan(&selected); err != nil {
+		// pgx does not decode jsonb directly into []string on every version; use raw bytes fallback below.
+		var raw []byte
+		if err2 := pool.QueryRow(ctx, `SELECT selected_code_symbol_version_ids FROM retrieval_runs WHERE id=$1`, out.RetrievalRunID).Scan(&raw); err2 != nil {
+			t.Fatal(err2)
+		}
+		if err2 := json.Unmarshal(raw, &selected); err2 != nil {
+			t.Fatal(err2)
+		}
+	}
+	if len(selected) != 1 || selected[0] != "sv-p4-1" {
+		t.Fatalf("persisted code evidence = %#v", selected)
 	}
 }

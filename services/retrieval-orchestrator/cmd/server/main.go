@@ -50,6 +50,8 @@ type RetrieveRequest struct {
 	IncludeSession      bool              `json:"include_session,omitempty"`
 	IncludeState        bool              `json:"include_state,omitempty"`
 	Filters             map[string]string `json:"filters,omitempty"`
+	RepositoryID        string            `json:"repository_id,omitempty"`
+	Branch              string            `json:"branch,omitempty"`
 }
 
 type RetrievalResult struct {
@@ -81,22 +83,24 @@ type ContextSection struct {
 }
 
 type RetrieveResponse struct {
-	RetrievalRunID string           `json:"retrieval_run_id"`
-	QueryHash      string           `json:"query_hash"`
-	Sections       []ContextSection `json:"sections"`
-	TotalTokens    int              `json:"total_tokens"`
-	LatencyMs      int              `json:"latency_ms"`
+	RetrievalRunID string             `json:"retrieval_run_id"`
+	QueryHash      string             `json:"query_hash"`
+	Sections       []ContextSection   `json:"sections"`
+	Code           *codeQueryResponse `json:"code,omitempty"`
+	TotalTokens    int                `json:"total_tokens"`
+	LatencyMs      int                `json:"latency_ms"`
 }
 
 // ── server state ─────────────────────────────────────────────────────────
 
 type server struct {
-	db             *pgxpool.Pool
-	modelRuntime   *modelRuntimeClient
-	textSpace      embeddingSpace
-	rerankModel    string
-	rerankRevision string
-	rerankLimit    int
+	db               *pgxpool.Pool
+	modelRuntime     *modelRuntimeClient
+	textSpace        embeddingSpace
+	rerankModel      string
+	rerankRevision   string
+	rerankLimit      int
+	codeIntelligence *codeIntelligenceClient
 }
 
 // pgxQuerier is satisfied by both *pgxpool.Pool and pgx.Tx, letting the
@@ -199,14 +203,19 @@ func main() {
 	if rerankLimit > 128 {
 		log.Fatal("SCOS_MODEL_RERANK_CANDIDATES must be <= 128")
 	}
+	codeClient, err := newCodeIntelligenceClientFromEnvironment()
+	if err != nil {
+		log.Fatalf("configure code-intelligence client: %v", err)
+	}
 
 	srv := &server{
-		db:             pool,
-		modelRuntime:   runtimeClient,
-		textSpace:      textSpace,
-		rerankModel:    envOr("SCOS_MODEL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
-		rerankRevision: envOr("SCOS_MODEL_RERANK_REVISION", "main"),
-		rerankLimit:    rerankLimit,
+		db:               pool,
+		modelRuntime:     runtimeClient,
+		textSpace:        textSpace,
+		rerankModel:      envOr("SCOS_MODEL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
+		rerankRevision:   envOr("SCOS_MODEL_RERANK_REVISION", "main"),
+		rerankLimit:      rerankLimit,
+		codeIntelligence: codeClient,
 	}
 
 	mux := newRetrievalMux(srv)
@@ -327,6 +336,26 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	plan := planRetrieval(req, maxResults)
+	meta := retrievalExecutionMeta{TextSpace: s.textSpace, PlannerMode: plan.Mode}
+
+	// Repo-aware P4 code retrieval is independent from memory namespace
+	// membership. The downstream code service independently enforces tenant
+	// ownership and durable-store policy. Failure degrades this lane only.
+	var codeResponse *codeQueryResponse
+	if plan.CodeLimit > 0 {
+		if s.codeIntelligence == nil {
+			meta.DegradedSources = append(meta.DegradedSources, "code_intelligence")
+			codeResponse = &codeQueryResponse{Results: []codeQueryResult{}, RetrievalMode: "unavailable", DegradedSources: []string{"code_intelligence"}}
+		} else {
+			var codeErr error
+			codeResponse, codeErr = s.codeIntelligence.Query(ctx, req.TenantID, req.PrincipalID, req.RepositoryID, req.Branch, req.Query, plan.CodeLimit)
+			if codeErr != nil {
+				log.Printf("code-intelligence retrieval degraded: %v", codeErr)
+				meta.DegradedSources = append(meta.DegradedSources, "code_intelligence")
+				codeResponse = &codeQueryResponse{Results: []codeQueryResult{}, RetrievalMode: "unavailable", DegradedSources: []string{"code_intelligence"}}
+			}
+		}
+	}
 
 	// ── 1. Authorise / resolve namespaces ───────────────────────────
 	namespaces, err := s.resolveAuthorisedNamespaces(ctx, req)
@@ -335,12 +364,14 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(namespaces) == 0 {
-		writeJSON(w, RetrieveResponse{
-			Sections:    []ContextSection{},
-			TotalTokens: 0,
-			LatencyMs:   int(time.Since(start).Milliseconds()),
-		})
-		return
+		// No readable memory namespace does not erase independently-authorized
+		// code evidence. Disable memory lanes and continue when code was asked for.
+		plan.ExactLimit, plan.FullTextLimit, plan.VectorLimit = 0, 0, 0
+		plan.RelationLimit, plan.SessionLimit = 0, 0
+		if codeResponse == nil {
+			writeJSON(w, RetrieveResponse{Sections: []ContextSection{}, TotalTokens: 0, LatencyMs: int(time.Since(start).Milliseconds())})
+			return
+		}
 	}
 
 	// ── 1.5. Standing-answer cache (P1-B) ────────────────────────────
@@ -349,25 +380,27 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// match on query text, not a classifier -- see the migration's comment
 	// for why (a fixed named-question set needs a classification step this
 	// doesn't have yet).
-	if answer, err := s.lookupStandingAnswer(ctx, req.TenantID, req.PrincipalID, namespaces, req.Query); err != nil {
-		log.Printf("standing answer lookup error: %v", err)
-	} else if answer != nil {
-		writeJSON(w, RetrieveResponse{
-			Sections: []ContextSection{{
-				Heading: "Standing Answer",
-				Items: []RetrievalResult{{
-					Summary:     answer.Answer,
-					Content:     answer.Answer,
-					Confidence:  answer.Confidence,
-					Provenance:  "standing_answer",
-					NamespaceID: answer.NamespaceID,
-					Rank:        1,
+	if plan.CodeLimit == 0 {
+		if answer, err := s.lookupStandingAnswer(ctx, req.TenantID, req.PrincipalID, namespaces, req.Query); err != nil {
+			log.Printf("standing answer lookup error: %v", err)
+		} else if answer != nil {
+			writeJSON(w, RetrieveResponse{
+				Sections: []ContextSection{{
+					Heading: "Standing Answer",
+					Items: []RetrievalResult{{
+						Summary:     answer.Answer,
+						Content:     answer.Answer,
+						Confidence:  answer.Confidence,
+						Provenance:  "standing_answer",
+						NamespaceID: answer.NamespaceID,
+						Rank:        1,
+					}},
 				}},
-			}},
-			TotalTokens: estimateTokens(answer.Answer),
-			LatencyMs:   int(time.Since(start).Milliseconds()),
-		})
-		return
+				TotalTokens: estimateTokens(answer.Answer),
+				LatencyMs:   int(time.Since(start).Milliseconds()),
+			})
+			return
+		}
 	}
 
 	// ── 2. Parse query ──────────────────────────────────────────────
@@ -399,7 +432,6 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── 6. Vector search ────────────────────────────────────────────
-	meta := retrievalExecutionMeta{TextSpace: s.textSpace, PlannerMode: plan.Mode}
 	if plan.VectorLimit > 0 && len(req.QueryEmbedding) > 0 {
 		if req.QueryEmbeddingSpace == nil || *req.QueryEmbeddingSpace != s.textSpace {
 			http.Error(w, "query_embedding_space must exactly match the active text embedding space", http.StatusBadRequest)
@@ -470,9 +502,13 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	sections := assembleSections(allocated)
 
 	// ── 13. Record retrieval run ────────────────────────────────────
-	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, map[string]int{
+	codeCount := 0
+	if codeResponse != nil {
+		codeCount = len(codeResponse.Results)
+	}
+	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, codeResponse, map[string]int{
 		"exact": len(exactResults), "fulltext": len(ftsResults), "vector": len(vectorResults), "session_state": len(sessionResults),
-		"relation": len(relationResults),
+		"relation": len(relationResults), "code": codeCount,
 	}, int(time.Since(start).Milliseconds()), meta)
 	if err != nil {
 		log.Printf("record retrieval run: %v", err)
@@ -489,6 +525,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		RetrievalRunID: retrievalRunID,
 		QueryHash:      queryHash,
 		Sections:       sections,
+		Code:           codeResponse,
 		TotalTokens:    totalTokens,
 		LatencyMs:      int(time.Since(start).Milliseconds()),
 	}
@@ -1073,7 +1110,7 @@ func assembleSections(results []RetrievalResult) []ContextSection {
 
 // ── persistence ──────────────────────────────────────────────────────────
 
-func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, queryHash string, namespaces []string, sections []ContextSection, candidateCounts map[string]int, latencyMs int, meta retrievalExecutionMeta) (string, error) {
+func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, queryHash string, namespaces []string, sections []ContextSection, code *codeQueryResponse, candidateCounts map[string]int, latencyMs int, meta retrievalExecutionMeta) (string, error) {
 	var selectedIDs []string
 	var selected []RetrievalResult
 	for _, sec := range sections {
@@ -1083,15 +1120,31 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 		}
 	}
 	selectedJSON := toJSONB(selectedIDs)
+	var selectedCodeIDs []string
+	if code != nil {
+		for _, item := range code.Results {
+			if item.SymbolVersionID != "" {
+				selectedCodeIDs = append(selectedCodeIDs, item.SymbolVersionID)
+			}
+		}
+	}
+	selectedCodeJSON := toJSONB(selectedCodeIDs)
 	rankingConfig := toJSONB(map[string]any{
 		"fusion": "rrf", "k": rrfK, "reranker": meta.RerankerModel,
 		"governance": "authority_confidence_v1", "planner": meta.PlannerMode,
-		"degraded_models": meta.DegradedModels,
+		"degraded_models":  meta.DegradedModels,
+		"degraded_sources": meta.DegradedSources,
 	})
 	modelVersions := toJSONB(map[string]any{
 		"embedding_space":   meta.TextSpace,
 		"reranker_model":    meta.RerankerModel,
 		"reranker_revision": meta.RerankerRevision,
+		"code_embedding_space": func() any {
+			if code != nil {
+				return code.EmbeddingSpace
+			}
+			return nil
+		}(),
 	})
 
 	var runID string
@@ -1099,12 +1152,12 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 		if err := q.QueryRow(ctx, `
 			INSERT INTO retrieval_runs
 				(tenant_id, principal_id, agent_id, session_id, turn_id,
-				 query_hash, namespaces, filters, ranking_config, selected_memory_ids,
+				 query_hash, namespaces, filters, ranking_config, selected_memory_ids, selected_code_symbol_version_ids,
 				 latency_ms, candidate_counts, token_estimate, model_versions)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 			RETURNING id
-		`, req.TenantID, req.PrincipalID, req.AgentID, req.SessionID, req.TurnID,
-			queryHash, toJSONB(namespaces), toJSONB(req.Filters), rankingConfig, selectedJSON, latencyMs,
+		`, req.TenantID, req.PrincipalID, nullIfBlank(req.AgentID), nullIfBlank(req.SessionID), nullIfBlank(req.TurnID),
+			queryHash, toJSONB(namespaces), toJSONB(req.Filters), rankingConfig, selectedJSON, selectedCodeJSON, latencyMs,
 			toJSONB(candidateCounts), estimateSectionsTokens(sections), modelVersions).Scan(&runID); err != nil {
 			return err
 		}
@@ -1217,6 +1270,13 @@ func truncate(text string, maxLen int) string {
 func truncateByTokens(text string, maxTokens int) string {
 	maxLen := maxTokens * 4
 	return truncate(text, maxLen)
+}
+
+func nullIfBlank(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 func toJSONB(v any) []byte {

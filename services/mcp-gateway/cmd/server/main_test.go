@@ -232,3 +232,96 @@ func isUUIDShape(s string) bool {
 	}
 	return true
 }
+
+func TestDispatchCodeRegisterReturnsLegacyAndDurableIDs(t *testing.T) {
+	var legacyCalled, durableCalled bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-SCOS-Tenant-ID") != "tenant-1" || r.Header.Get("X-SCOS-Principal-ID") != "principal-1" {
+			t.Fatalf("identity not forwarded")
+		}
+		switch r.URL.Path {
+		case "/v1/repos":
+			legacyCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"repository_id": "repo-7", "canonical_path": "/work/repo"})
+		case "/v2/code/repos":
+			durableCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"repository_id": "11111111-1111-1111-1111-111111111111"})
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{codeIntelligenceURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	got, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}, "scos_code_repo_register", map[string]any{"canonical_path": "/work/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("result type %T", got)
+	}
+	if m["repository_id"] != "repo-7" || m["durable_repository_id"] != "11111111-1111-1111-1111-111111111111" || !legacyCalled || !durableCalled {
+		t.Fatalf("unexpected result %#v", m)
+	}
+}
+
+func TestDispatchCodeQueryUsesDurableV2WhenDurableIDProvided(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/code/query" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["repository_id"] != "11111111-1111-1111-1111-111111111111" || body["branch"] != "main" || body["query"] != "auth middleware" {
+			t.Fatalf("body %#v", body)
+		}
+		if _, ok := body["intent"]; ok {
+			t.Fatalf("v1-only field leaked into v2 body: %#v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"retrieval_mode": "hybrid", "results": []any{}})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{codeIntelligenceURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	_, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}, "scos_code_query", map[string]any{"intent": "search", "query": "auth middleware", "durable_repository_id": "11111111-1111-1111-1111-111111111111", "branch": "main", "max_results": 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatchCodeQueryKeepsLegacyV1Fallback(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/query" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{codeIntelligenceURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	_, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}, "scos_code_query", map[string]any{"intent": "search", "query": "auth middleware", "repository_id": "repo-7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSCOSRetrieveSchemaExposesDurableRepositoryContext(t *testing.T) {
+	for _, tool := range governedTools() {
+		if tool["name"] != "scos_retrieve" {
+			continue
+		}
+		schema := tool["inputSchema"].(map[string]any)
+		props := schema["properties"].(map[string]any)
+		if _, ok := props["repository_id"]; !ok {
+			t.Fatal("scos_retrieve missing repository_id")
+		}
+		if _, ok := props["branch"]; !ok {
+			t.Fatal("scos_retrieve missing branch")
+		}
+		return
+	}
+	t.Fatal("scos_retrieve not found")
+}

@@ -26,6 +26,7 @@ func TestP4EmbeddingSchemaMigration(t *testing.T) {
 		"ALTER TABLE code_embeddings ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE code_embeddings FORCE ROW LEVEL SECURITY",
 		"CREATE POLICY code_embeddings_tenant_isolation",
+		"selected_code_symbol_version_ids",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("P4 migration missing %q", want)

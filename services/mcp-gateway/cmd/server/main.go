@@ -277,7 +277,27 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_graphify_explain":
 		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/explain", args)
 	case "scos_code_repo_register":
-		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/repos", args)
+		legacy, err := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/repos", args)
+		if err != nil {
+			return nil, err
+		}
+		result, ok := legacy.(map[string]any)
+		if !ok {
+			return legacy, nil
+		}
+		durable, derr := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/repos", map[string]any{
+			"canonical_path": stringArg(args, "canonical_path"),
+		})
+		if derr != nil {
+			result["durable_available"] = false
+			result["durable_error"] = derr.Error()
+			return result, nil
+		}
+		if dm, ok := durable.(map[string]any); ok {
+			result["durable_repository_id"] = dm["repository_id"]
+			result["durable_available"] = true
+		}
+		return result, nil
 	case "scos_code_repo_list":
 		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v1/repos")
 	case "scos_code_repo_get":
@@ -287,8 +307,40 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		}
 		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v1/repos/"+repoID)
 	case "scos_code_index":
+		if durableID := stringArg(args, "durable_repository_id"); durableID != "" {
+			branch := stringArg(args, "branch")
+			commitID := stringArg(args, "commit_id")
+			files, ok := args["files"].([]any)
+			if branch == "" || commitID == "" || !ok || len(files) == 0 {
+				return nil, fmt.Errorf("durable code index requires branch, commit_id, and structured files")
+			}
+			for _, file := range files {
+				if _, ok := file.(map[string]any); !ok {
+					return nil, fmt.Errorf("durable code index files must be objects with path and content_hash")
+				}
+			}
+			payload := map[string]any{"repository_id": durableID, "branch": branch, "commit_id": commitID, "files": files}
+			if value := stringArg(args, "extractor_version"); value != "" {
+				payload["extractor_version"] = value
+			}
+			if value := stringArg(args, "configuration_hash"); value != "" {
+				payload["configuration_hash"] = value
+			}
+			return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/index", payload)
+		}
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/index", args)
 	case "scos_code_query":
+		if durableID := stringArg(args, "durable_repository_id"); durableID != "" {
+			branch := stringArg(args, "branch")
+			if branch == "" {
+				return nil, fmt.Errorf("branch is required with durable_repository_id")
+			}
+			payload := map[string]any{"repository_id": durableID, "branch": branch, "query": stringArg(args, "query")}
+			if maxResults, ok := args["max_results"]; ok {
+				payload["max_results"] = maxResults
+			}
+			return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/query", payload)
+		}
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/query", args)
 	case "scos_code_impact":
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/impact", args)
@@ -1100,7 +1152,7 @@ func governedTools() []map[string]any {
 		},
 		{
 			"name":        "scos_code_repo_register",
-			"description": "Register a repository with code intelligence so it can be indexed and queried. Returns the assigned repository_id -- pass that to scos_code_index",
+			"description": "Register a repository with code intelligence. Returns legacy repository_id plus durable_repository_id for P4 snapshot/hybrid retrieval when available.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1137,9 +1189,19 @@ func governedTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"repository_id": map[string]any{"type": "string", "description": "Repository identifier"},
-					"commit_id":     map[string]any{"type": "string", "description": "Commit SHA being indexed"},
-					"files":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "File paths to index"},
+					"repository_id":         map[string]any{"type": "string", "description": "Legacy repository identifier"},
+					"durable_repository_id": map[string]any{"type": "string", "description": "Durable repository UUID returned by scos_code_repo_register; supplying it activates P4 snapshot indexing"},
+					"branch":                map[string]any{"type": "string", "description": "Branch for durable snapshot indexing"},
+					"commit_id":             map[string]any{"type": "string", "description": "Commit SHA being indexed"},
+					"extractor_version":     map[string]any{"type": "string", "description": "Extractor version for durable snapshot identity"},
+					"configuration_hash":    map[string]any{"type": "string", "description": "Indexer configuration hash"},
+					"files": map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{
+						map[string]any{"type": "string"},
+						map[string]any{"type": "object", "properties": map[string]any{
+							"path": map[string]any{"type": "string"}, "language": map[string]any{"type": "string"},
+							"content_hash": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"},
+						}, "required": []string{"path", "content_hash"}},
+					}}, "description": "Legacy path strings, or structured files for durable P4 indexing"},
 				},
 				"required": []string{"repository_id", "files"},
 			},
@@ -1150,15 +1212,16 @@ func governedTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"intent":        map[string]any{"type": "string", "description": "Query intent, e.g. \"definition\", \"references\", \"search\""},
-					"query":         map[string]any{"type": "string", "description": "Search text"},
-					"repository_id": map[string]any{"type": "string", "description": "Repository identifier"},
-					"path":          map[string]any{"type": "string", "description": "File path filter"},
-					"symbol_name":   map[string]any{"type": "string", "description": "Symbol name filter"},
-					"language":      map[string]any{"type": "string", "description": "Language filter"},
-					"branch":        map[string]any{"type": "string", "description": "Branch filter"},
-					"max_results":   map[string]any{"type": "integer", "description": "Max results"},
-					"include_docs":  map[string]any{"type": "boolean", "description": "Include doc comments in results"},
+					"intent":                map[string]any{"type": "string", "description": "Query intent, e.g. \"definition\", \"references\", \"search\""},
+					"query":                 map[string]any{"type": "string", "description": "Search text"},
+					"repository_id":         map[string]any{"type": "string", "description": "Legacy repository identifier"},
+					"durable_repository_id": map[string]any{"type": "string", "description": "Durable repository UUID; with branch, activates P4 lexical+dense+structural+PageRank retrieval"},
+					"path":                  map[string]any{"type": "string", "description": "File path filter"},
+					"symbol_name":           map[string]any{"type": "string", "description": "Symbol name filter"},
+					"language":              map[string]any{"type": "string", "description": "Language filter"},
+					"branch":                map[string]any{"type": "string", "description": "Branch filter"},
+					"max_results":           map[string]any{"type": "integer", "description": "Max results"},
+					"include_docs":          map[string]any{"type": "boolean", "description": "Include doc comments in results"},
 				},
 				"required": []string{"intent", "query"},
 			},
@@ -1691,6 +1754,8 @@ func governedTools() []map[string]any {
 			"include_session": boolField("Include session context"),
 			"include_state":   boolField("Include task state"),
 			"filters":         objField("Additional filters"),
+			"repository_id":   strField("Durable code repository UUID; with branch, enables P4 code retrieval alongside memory"),
+			"branch":          strField("Branch for durable code retrieval"),
 		}, "tenant_id", "principal_id", "query"),
 	)
 
