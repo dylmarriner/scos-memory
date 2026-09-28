@@ -73,7 +73,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       go build -trimpath -ldflags="$ldflags" -o "/out/$svc" "./services/$svc/cmd/server"; \
     done
 
-FROM alpine:3.21
+FROM alpine:3.24
 # graphify-provider execs the `graphify` CLI (PyPI `graphifyy`) as a
 # subprocess -- python3/pipx are added here, once, for the whole shared
 # image, rather than giving that one service its own base image.
