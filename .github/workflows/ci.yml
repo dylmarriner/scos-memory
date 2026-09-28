@@ -143,7 +143,7 @@ jobs:
       - name: Build image
         run: docker build -f deploy/Dockerfile -t scos-fabric:ci .
       - name: Scan image (Trivy)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: scos-fabric:ci
           format: sarif
