@@ -1,10 +1,10 @@
 # ARIS System Map: What Goes Where
 
-**Status:** Canonical placement guide for the continuous ARIS runtime
-**Canonical copy:** `dylmarriner/ARIS/docs/ARIS_SYSTEM_MAP.md`
-**Mirrored in:** `ARIS-harness`, `ARIS-intelligence`, `scos-memory` (each at `docs/ARIS_SYSTEM_MAP.md`)
-**Parent document:** [`ARIS_MASTER_TECHNICAL_BLUEPRINT.md`](https://github.com/dylmarriner/ARIS/blob/main/docs/ARIS_MASTER_TECHNICAL_BLUEPRINT.md)
-**Last decided:** 2026-09-28
+- **Status:** Canonical placement guide for the continuous ARIS runtime
+- **Canonical copy:** `dylmarriner/ARIS/docs/ARIS_SYSTEM_MAP.md`
+- **Mirrored in:** `ARIS-harness`, `ARIS-intelligence`, `scos-memory` (each at `docs/ARIS_SYSTEM_MAP.md`)
+- **Parent document:** [`ARIS_MASTER_TECHNICAL_BLUEPRINT.md`](https://github.com/dylmarriner/ARIS/blob/main/docs/ARIS_MASTER_TECHNICAL_BLUEPRINT.md)
+- **Last decided:** 2026-09-28
 
 This page answers one question: **which repository does a piece of ARIS belong in?** It does not replace the master blueprint. Where the two disagree, the master blueprint wins until it is updated. Edit the canonical copy first, then copy it unchanged into the three mirrors in the same change set. The ARIS-harness mirror additionally carries that repository's language switcher and Chinese sibling file.
 
