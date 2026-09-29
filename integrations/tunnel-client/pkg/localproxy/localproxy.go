@@ -1161,7 +1161,10 @@ func (s *localServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "tunnel-client local proxy only accepts POST streamable HTTP at this endpoint", http.StatusNotImplemented)
+		// MCP streamable HTTP: a server that offers no standalone GET event
+		// stream and no client-initiated session DELETE answers 405.
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "tunnel-client local proxy accepts only POST streamable HTTP at this endpoint", http.StatusMethodNotAllowed)
 		return
 	}
 	payload, err := io.ReadAll(r.Body)

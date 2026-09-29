@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -22,6 +23,11 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_EXPIRY_TTL = {
+    MemoryClass.WORKING: timedelta(days=7),
+    MemoryClass.EPISODIC: timedelta(days=30),
+}
 
 # ── extraction triggers match §16 ──────────────────────────────────────────
 EXTRACTION_TRIGGERS = frozenset({
@@ -87,6 +93,11 @@ def extract_candidates(
         if not content:
             return []
 
+        namespace_id = _resolve_namespace(event, session_messages)
+        if namespace_id is None:
+            logger.warning("event %s: no resolvable namespace; skipping extraction", event_id)
+            return []
+
         evidence = _build_evidence(event, session_messages)
         authority = _infer_authority(event, memory_class)
         confidence = _infer_confidence(event, memory_class, evidence)
@@ -97,7 +108,7 @@ def extract_candidates(
         candidate = MemoryCandidate(
             candidate_id=uuid4(),
             tenant_id=tenant_id,
-            namespace_id=_resolve_namespace(event, session_messages),
+            namespace_id=namespace_id,
             source_event_id=event_id,
             memory_class=memory_class,
             title=title,
@@ -188,6 +199,9 @@ def _extract_content(
             data = {}
 
     title = data.get("title", "") or data.get("subject", "") or event.get("subject", "")
+    if _AGGREGATE_REF.match(title or ""):
+        # "turn/<uuid>" names the event stream, not what the memory is about.
+        title = ""
     if not title:
         title_prefix = {
             MemoryClass.SEMANTIC: "Knowledge: ",
@@ -198,7 +212,8 @@ def _extract_content(
             MemoryClass.WORKING: "Working note: ",
             MemoryClass.ARTIFACT_REFERENCE: "Artifact: ",
         }.get(memory_class, "Note: ")
-        title = title_prefix + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        summary = _first_line(messages)
+        title = title_prefix + (summary or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
 
     # Content: use the last assistant message + user message context
     content_parts: list[str] = []
@@ -210,6 +225,21 @@ def _extract_content(
 
     content = "\n\n".join(content_parts) if content_parts else json.dumps(data, indent=2)
     return title[:240], content
+
+
+_AGGREGATE_REF = re.compile(r"^[a-z][a-z0-9_.-]*/[0-9a-fA-F-]{32,36}$")
+_TITLE_SUMMARY_CHARS = 120
+
+
+def _first_line(messages: list[dict[str, Any]]) -> str:
+    """First non-empty line of the first user message (else any message), trimmed."""
+    ordered = [m for m in messages if m.get("role") == "user"] + [m for m in messages if m.get("role") != "user"]
+    for m in ordered:
+        for line in (m.get("content") or "").splitlines():
+            line = " ".join(line.split())
+            if line:
+                return line if len(line) <= _TITLE_SUMMARY_CHARS else line[: _TITLE_SUMMARY_CHARS - 1].rstrip() + "…"
+    return ""
 
 
 def _build_evidence(
@@ -308,36 +338,45 @@ def _infer_sensitivity(
 def _resolve_namespace(
     event: dict[str, Any],
     messages: list[dict[str, Any]],
-) -> UUID:
-    """Pull namespace from event data or fallback to a sentinel."""
+) -> UUID | None:
+    """Resolve the namespace the candidate belongs to.
+
+    The worker joins each turn event to its session, so ``namespace_id`` on
+    the event row is authoritative; an explicit namespace in the event data
+    is accepted for events that carry one. Returns None when neither is
+    present -- memory_candidates.namespace_id is a foreign key, so there is
+    no safe default to invent.
+    """
+    ns = _uuid(event, "namespace_id")
+    if ns is not None:
+        return ns
     data = event.get("data", {})
     if isinstance(data, str):
         try:
             data = json.loads(data)
         except (json.JSONDecodeError, TypeError):
             data = {}
-    ns = data.get("namespace_id") or data.get("namespace")
-    if ns:
-        if isinstance(ns, UUID):
-            return ns
-        try:
-            return UUID(str(ns))
-        except (ValueError, AttributeError):
-            pass
-    # Return a nil UUID; the caller should resolve before insert
-    return UUID("00000000-0000-0000-0000-000000000000")
+    if isinstance(data, dict):
+        return _uuid(data, "namespace_id") or _uuid(data, "namespace")
+    return None
 
 
 def _infer_expiry(
     event: dict[str, Any],
     memory_class: MemoryClass,
 ) -> datetime | None:
-    """Expiry: working notes expire in 7 days, episodic in 30, rest are indefinite."""
-    if memory_class == MemoryClass.WORKING:
-        return datetime.now(timezone.utc).replace(microsecond=0)
-    if memory_class == MemoryClass.EPISODIC:
-        return datetime.now(timezone.utc).replace(microsecond=0)
-    return None  # indefinite for durable classes
+    """Expiry: working notes expire in 7 days, episodic in 30, rest are indefinite.
+
+    Measured from when the event occurred (the candidate's valid_from), so
+    replaying an old event does not extend its lifetime.
+    """
+    ttl = _EXPIRY_TTL.get(memory_class)
+    if ttl is None:
+        return None  # indefinite for durable classes
+    anchor = _dt(event, "occurred_at") or datetime.now(timezone.utc)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    return anchor + ttl
 
 
 def _uuid(obj: dict[str, Any], key: str) -> UUID | None:

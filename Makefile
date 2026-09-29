@@ -17,10 +17,16 @@ fmt:
 test:
 	go test ./...
 	python3 -m unittest discover -s workers/consolidation/tests -v
+	python3 -m unittest discover -s workers/embeddings/tests -v
 	python3 -m unittest discover -s workers/index-maintenance -p "test_*.py" -v
 	python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
 	python3 tests/failure-injection/test_runner.py -v
 	python3 -m unittest discover -s tests -p 'test_compose_security.py' -v
+	python3 -m unittest discover -s tests -p 'test_auto_persist_hooks.py' -v
+	python3 -m unittest discover -s tests -p 'test_auto_recall_hooks.py' -v
+	python3 -m unittest discover -s tests -p 'test_mcp_bridge.py' -v
+	python3 -m unittest discover -s tests -p 'test_hermes_scos_memory_plugin.py' -v
+	cd packages/language-adapters/python && python3 -m unittest discover -s tests -v
 
 integration-test:
 	COMPOSE_PROJECT_NAME=scos-memory-integration docker compose -f deploy/compose/docker-compose.yml up -d postgres

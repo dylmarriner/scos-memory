@@ -20,7 +20,7 @@ class PythonASTAdapter:
         try:
             tree = ast.parse(source)
             for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     symbols.append(SymbolDef(node.name, "function", node.lineno, getattr(node, "end_lineno", node.lineno)))
                 elif isinstance(node, ast.ClassDef):
                     symbols.append(SymbolDef(node.name, "class", node.lineno, getattr(node, "end_lineno", node.lineno)))

@@ -7,6 +7,7 @@ paraphrases."
 from __future__ import annotations
 
 import logging
+import re
 from hashlib import sha256
 from typing import Sequence
 
@@ -79,24 +80,28 @@ class DedupResult:
 
 
 def _fingerprint(candidate: MemoryCandidate) -> str:
-    """A content-based fingerprint for similarity matching."""
-    normalised = candidate.title.lower().strip()[:100] + "|" + _normalise(candidate.content)[:300]
-    return sha256(normalised.encode()).hexdigest()
+    """A content-based fingerprint for similarity matching.
+
+    Titles are excluded: for turn events they are derived from the event
+    subject (unique per turn), so including them would make every repeat of
+    the same fact look new.
+    """
+    return _content_fingerprint(candidate.content)
+
+
+def _content_fingerprint(content: str) -> str:
+    return sha256(_normalise(content).encode()).hexdigest()
 
 
 def _normalise(text: str) -> str:
     """Strip whitespace, lower-case, collapse runs of spaces."""
-    import re
     return re.sub(r"\s+", " ", text.lower().strip())
 
 
 def _find_match(fp: str, existing: Sequence[dict]) -> dict | None:
     """Find an existing record whose fingerprint overlaps."""
     for row in existing:
-        existing_content = _normalise(row.get("content", ""))
-        existing_title = row.get("title", "").lower().strip()[:100]
-        combined = sha256((existing_title + "|" + existing_content[:300]).encode()).hexdigest()
-        if combined == fp:
+        if _content_fingerprint(row.get("content") or "") == fp:
             return row
     return None
 

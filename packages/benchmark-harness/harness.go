@@ -4,46 +4,60 @@ import (
 	"math"
 )
 
-// ComputeRecallAtK calculates Recall@K (§33 Quality evaluation).
-func ComputeRecallAtK(expected []string, retrieved []string, k int) float64 {
-	if len(expected) == 0 {
-		return 0.0
-	}
-	if k > len(retrieved) {
-		k = len(retrieved)
-	}
-	expectedMap := make(map[string]bool)
+// relevance marks, for the first k retrieved results, which ones are hits:
+// an expected ID counts only at its first occurrence, so a retriever that
+// repeats a relevant result is not credited twice (which would push recall
+// and nDCG above 1).
+func relevance(expected, retrieved []string, k int) (hits []bool, relevant int) {
+	want := make(map[string]bool, len(expected))
 	for _, id := range expected {
-		expectedMap[id] = true
+		want[id] = true
 	}
-	hits := 0
+	k = max(0, min(k, len(retrieved)))
+	hits = make([]bool, k)
 	for i := 0; i < k; i++ {
-		if expectedMap[retrieved[i]] {
-			hits++
+		if want[retrieved[i]] {
+			hits[i] = true
+			delete(want, retrieved[i])
 		}
 	}
-	return float64(hits) / float64(len(expected))
+	relevant = len(want)
+	for _, h := range hits {
+		if h {
+			relevant++
+		}
+	}
+	return hits, relevant
 }
 
-// ComputePrecisionAtK calculates Precision@K.
-func ComputePrecisionAtK(expected []string, retrieved []string, k int) float64 {
-	if k <= 0 || len(retrieved) == 0 {
-		return 0.0
-	}
-	if k > len(retrieved) {
-		k = len(retrieved)
-	}
-	expectedMap := make(map[string]bool)
-	for _, id := range expected {
-		expectedMap[id] = true
-	}
-	hits := 0
-	for i := 0; i < k; i++ {
-		if expectedMap[retrieved[i]] {
-			hits++
+func countHits(hits []bool) int {
+	n := 0
+	for _, h := range hits {
+		if h {
+			n++
 		}
 	}
-	return float64(hits) / float64(k)
+	return n
+}
+
+// ComputeRecallAtK calculates Recall@K (§33 Quality evaluation): the
+// fraction of distinct expected IDs found in the top k.
+func ComputeRecallAtK(expected []string, retrieved []string, k int) float64 {
+	hits, relevant := relevance(expected, retrieved, k)
+	if relevant == 0 {
+		return 0.0
+	}
+	return float64(countHits(hits)) / float64(relevant)
+}
+
+// ComputePrecisionAtK calculates Precision@K over the results actually
+// returned in the top k; repeated results count as misses.
+func ComputePrecisionAtK(expected []string, retrieved []string, k int) float64 {
+	hits, _ := relevance(expected, retrieved, k)
+	if len(hits) == 0 {
+		return 0.0
+	}
+	return float64(countHits(hits)) / float64(len(hits))
 }
 
 // ComputeMRR calculates Mean Reciprocal Rank (MRR).
@@ -60,40 +74,22 @@ func ComputeMRR(expected []string, retrieved []string) float64 {
 	return 0.0
 }
 
-// ComputeNDCGAtK calculates Normalized Discounted Cumulative Gain (nDCG@K).
+// ComputeNDCGAtK calculates Normalized Discounted Cumulative Gain (nDCG@K)
+// with binary relevance. The ideal ranking places min(k, distinct expected)
+// hits first; it uses k itself, not the number of results returned, so a
+// short result list is not scored against a shorter ideal.
 func ComputeNDCGAtK(expected []string, retrieved []string, k int) float64 {
-	if k > len(retrieved) {
-		k = len(retrieved)
-	}
-	expectedMap := make(map[string]bool)
-	for _, id := range expected {
-		expectedMap[id] = true
-	}
-
+	hits, relevant := relevance(expected, retrieved, k)
 	dcg := 0.0
-	for i := 0; i < k; i++ {
-		if expectedMap[retrieved[i]] {
-			if i == 0 {
-				dcg += 1.0
-			} else {
-				dcg += 1.0 / math.Log2(float64(i+2))
-			}
+	for i, h := range hits {
+		if h {
+			dcg += 1.0 / math.Log2(float64(i+2))
 		}
 	}
-
 	idcg := 0.0
-	maxHits := k
-	if len(expected) < maxHits {
-		maxHits = len(expected)
+	for i := 0; i < min(max(k, 0), relevant); i++ {
+		idcg += 1.0 / math.Log2(float64(i+2))
 	}
-	for i := 0; i < maxHits; i++ {
-		if i == 0 {
-			idcg += 1.0
-		} else {
-			idcg += 1.0 / math.Log2(float64(i+2))
-		}
-	}
-
 	if idcg == 0.0 {
 		return 0.0
 	}

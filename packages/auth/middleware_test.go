@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func testJWT(secret, payload string) string {
@@ -61,7 +62,7 @@ func TestAuthenticatedHandlerLeavesHealthRoutesPublic(t *testing.T) {
 }
 
 func TestAuthenticatedHandlerUsesSignedCanonicalClaims(t *testing.T) {
-	token := testJWT("issuer", `{"tenant_id":"tenant-a","principal_id":"principal-a"}`)
+	token := testJWT("issuer", `{"tenant_id":"tenant-a","principal_id":"principal-a","exp":4102444800}`)
 	handler := AuthenticatedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := CanonicalClaims(r.Context())
 		if !ok || claims.TenantID != "tenant-a" || claims.PrincipalID != "principal-a" {
@@ -187,7 +188,7 @@ func TestRequireScopeAcceptsAdminEscapeHatch(t *testing.T) {
 
 func TestValidateClaimsCarriesScopesAndJTI(t *testing.T) {
 	secret := "test-issuer-secret"
-	payload := `{"tenant_id":"t","principal_id":"p","scopes":["backups:admin"],"jti":"token-1"}`
+	payload := `{"tenant_id":"t","principal_id":"p","scopes":["backups:admin"],"jti":"token-1","exp":4102444800}`
 	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 	body := base64.RawURLEncoding.EncodeToString([]byte(payload))
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -203,5 +204,28 @@ func TestValidateClaimsCarriesScopesAndJTI(t *testing.T) {
 	}
 	if !HasScope(claims, "backups:admin") {
 		t.Fatalf("expected parsed scopes to satisfy the gate, got %v", claims.Scopes)
+	}
+}
+
+func TestValidateClaimsRequiresExp(t *testing.T) {
+	if _, err := validateClaims(testJWT("s", `{"tenant_id":"t","principal_id":"p"}`), "s"); err == nil {
+		t.Fatal("a claims token without exp must be rejected")
+	}
+	if _, err := validateClaims(testJWT("s", `{"tenant_id":"t","principal_id":"p","exp":1}`), "s"); err == nil {
+		t.Fatal("an expired claims token must be rejected")
+	}
+}
+
+func TestSignClaimsRequiresFutureExpiry(t *testing.T) {
+	if _, err := SignClaims(Claims{TenantID: "t", PrincipalID: "p"}, "s"); err == nil {
+		t.Fatal("SignClaims must refuse a zero ExpiresAt")
+	}
+	token, err := SignClaims(Claims{TenantID: "t", PrincipalID: "p", ExpiresAt: time.Now().Add(time.Minute)}, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := validateClaims(token, "s")
+	if err != nil || time.Until(claims.ExpiresAt) > time.Minute {
+		t.Fatalf("round trip: claims=%+v err=%v", claims, err)
 	}
 }

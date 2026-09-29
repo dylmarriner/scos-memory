@@ -1,7 +1,7 @@
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 # The worker talks to PostgreSQL through psycopg, but every unit under test
 # takes an injected connection. Stub the driver so the suite runs without it.
@@ -105,6 +105,25 @@ class VacuumAnalyzeTests(unittest.TestCase):
         )
 
 
+    def test_skipped_tables_are_not_reported_as_vacuumed(self):
+        # PostgreSQL skips (with a notice, not an error) tables the role may
+        # not maintain; those must not be reported as vacuumed.
+        conn = MagicMock()
+        handlers = []
+        conn.add_notice_handler.side_effect = handlers.append
+
+        def execute(sql):
+            if sql.endswith("memory_versions"):
+                for h in handlers:
+                    h(MagicMock(message_primary='permission denied to vacuum "memory_versions", skipping it'))
+            return fake_cursor()
+
+        conn.execute.side_effect = execute
+        result = vacuum_analyze(conn, ("memory_embeddings", "memory_versions"))
+        self.assertEqual(result, ["memory_embeddings"])
+        conn.remove_notice_handler.assert_called_once_with(handlers[0])
+
+
 class RunMaintenanceCycleTests(unittest.TestCase):
     def test_cycle_aggregates_real_counts(self):
         conn = MagicMock()
@@ -123,7 +142,21 @@ class RunMaintenanceCycleTests(unittest.TestCase):
         self.assertEqual(
             result["tables_vacuumed"], ["memory_embeddings", "memory_versions", "memory_items"]
         )
+        self.assertEqual(result["tables_skipped"], [])
         self.assertIn("timestamp", result)
+
+
+class BacklogEmissionTests(unittest.TestCase):
+    def test_cycle_emits_embedding_backlog(self):
+        import main as im
+        conn = MagicMock()
+        conn.execute.side_effect = [fake_cursor(rows=[]), fake_cursor(rows=[]), fake_cursor(one=(5,)),
+                                    fake_cursor(), fake_cursor(), fake_cursor()]
+        with patch.object(im.telemetry, "emit") as emit:
+            im.run_maintenance_cycle(conn)
+        service, points = emit.call_args.args
+        self.assertEqual(service, "index-maintenance")
+        self.assertEqual((points[0].name, points[0].value, points[0].unit), ("scos.embedding.backlog", 5, "count"))
 
 
 if __name__ == "__main__":

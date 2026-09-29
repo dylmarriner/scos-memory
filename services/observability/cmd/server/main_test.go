@@ -457,3 +457,37 @@ func TestSignalIngestRejectsUnknownFields(t *testing.T) {
 		})
 	}
 }
+
+func TestMetricsListHonoursFamilyNameAndServiceFilters(t *testing.T) {
+	s := &observabilityServer{metrics: []*MetricPoint{
+		{Name: "scos.context.token_reduction", Value: 0.4, Labels: map[string]string{"service": "context-optimisation"}},
+		{Name: "scos.cost.per_successful_task", Value: 0.02, Labels: map[string]string{"service": "autonomous-control-plane"}},
+		{Name: "scos.code.context_tokens_per_task", Value: 900, Labels: map[string]string{"service": "code-intelligence"}},
+	}}
+	list := func(query string) []string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		s.handleMetrics(w, httptest.NewRequest(http.MethodGet, "/v1/metrics"+query, nil))
+		var got []MetricPoint
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(got))
+		for _, m := range got {
+			names = append(names, m.Name)
+		}
+		return names
+	}
+	if got := list("?metric=token"); len(got) != 2 {
+		t.Fatalf("token family: %v", got)
+	}
+	if got := list("?metric=cost"); len(got) != 1 || got[0] != "scos.cost.per_successful_task" {
+		t.Fatalf("cost family must differ from token family: %v", got)
+	}
+	if got := list("?service=code-intelligence"); len(got) != 1 {
+		t.Fatalf("service filter: %v", got)
+	}
+	if got := list(""); len(got) != 3 {
+		t.Fatalf("unfiltered: %v", got)
+	}
+}

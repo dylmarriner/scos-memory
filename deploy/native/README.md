@@ -101,6 +101,8 @@ journalctl -u 'scos-fabric@memory-gateway' -o json | jq .
 ```bash
 git pull
 deploy/native/build.sh
+# the migrations unit is a RemainAfterExit oneshot: re-run it explicitly
+sudo systemctl restart scos-fabric-migrations.service
 sudo systemctl restart scos-fabric.target
 ```
 

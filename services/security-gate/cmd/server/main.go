@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -290,6 +291,10 @@ func (s *securityServer) handleAuthIssue(w http.ResponseWriter, r *http.Request)
 	if req.DataClass == "" {
 		req.DataClass = ClassInternal
 	}
+	if classRank(req.DataClass) < 0 {
+		http.Error(w, "max_data_class must be one of public, internal, confidential, restricted, secret", http.StatusBadRequest)
+		return
+	}
 	if req.ExpiresIn <= 0 {
 		req.ExpiresIn = 3600
 	}
@@ -499,7 +504,7 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 		writeJSON(w, PermissionResult{Allowed: false, Reason: "requested data class exceeds token authorisation", AuditID: auditID})
 		return
 	}
-	allowed := evaluatePermission(&check)
+	allowed, reason := evaluatePermission(&check, authToken, time.Now().UTC())
 	if !allowed {
 		// §32 tracks permission denial; the target is zero unauthorised
 		// retrieval, so every denial must be countable.
@@ -524,7 +529,7 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 
 	writeJSON(w, PermissionResult{
 		Allowed: allowed,
-		Reason:  map[bool]string{true: "permitted by policy", false: "data class exceeds authorisation"}[allowed],
+		Reason:  reason,
 		AuditID: auditID,
 	})
 }
@@ -544,11 +549,32 @@ func (s *securityServer) auditAction(r *http.Request, identity requestIdentity, 
 	return err
 }
 
-func evaluatePermission(check *PermissionCheck) bool {
-	if check.DataClass == ClassSecret {
-		return false // requires specific elevated grant
+// evaluatePermission applies the data-class policy after identity has been
+// bound to the token. Unknown classes are denied (they would otherwise rank
+// below public); secret requires a token the issuer minted with
+// max_data_class=secret, the only elevated grant; a check carrying an
+// expires_at is denied once that time has passed.
+func evaluatePermission(check *PermissionCheck, token *AuthToken, now time.Time) (bool, string) {
+	rank := classRank(check.DataClass)
+	if rank < 0 {
+		return false, "unknown data class"
 	}
-	return true // basic policy: allow up to restricted
+	if rank > classRank(token.DataClass) {
+		return false, "requested data class exceeds token authorisation"
+	}
+	if check.DataClass == ClassSecret && token.DataClass != ClassSecret {
+		return false, "secret data requires a token issued with max_data_class=secret"
+	}
+	if check.ExpiresAt != "" {
+		expires, err := time.Parse(time.RFC3339, check.ExpiresAt)
+		if err != nil {
+			return false, "expires_at is not RFC 3339"
+		}
+		if !now.Before(expires) {
+			return false, "authorisation window has expired"
+		}
+	}
+	return true, "permitted by policy"
 }
 
 func classRank(class DataClass) int {

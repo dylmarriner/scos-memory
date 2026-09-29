@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -15,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -103,6 +105,10 @@ func canTransition(from, to ToolState) bool {
 
 type toolGovernanceServer struct {
 	db *sql.DB
+	// hooks dispatches on_policy_change (GOVERNANCE.md §22.6) to
+	// extension-manager; nil when none is configured, which dispatches
+	// nothing.
+	hooks *hooksdk.Client
 }
 
 func (s *toolGovernanceServer) readinessCheck() error {
@@ -178,7 +184,11 @@ func main() {
 	database.TuneSQLDB(db)
 	defer db.Close()
 
-	s := &toolGovernanceServer{db: db}
+	hooks, err := hooksdk.ClientFromEnvironment("tool-governance")
+	if err != nil {
+		log.Fatalf("configure lifecycle hooks: %v", err)
+	}
+	s := &toolGovernanceServer{db: db, hooks: hooks}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -332,7 +342,7 @@ func (s *toolGovernanceServer) handleToolRegister(w http.ResponseWriter, r *http
 		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, tool)
+	writeJSON(w, governedToolResponse{ToolDefinition: tool, LifecycleHooks: s.dispatchPolicyChange(ctx, identity, tool, policyCreated, "")})
 }
 
 func (s *toolGovernanceServer) handleToolTransition(w http.ResponseWriter, r *http.Request) {
@@ -406,6 +416,7 @@ func (s *toolGovernanceServer) handleToolTransition(w http.ResponseWriter, r *ht
 		http.Error(w, "transition tool: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	previousState := tool.State
 	tool.State, tool.CurrentState = req.NewState, req.NewState
 	if err := recordIdempotent(ctx, tx, identity, idemKey, "tool-transition", fingerprint, tool); err != nil {
 		http.Error(w, "record idempotency: "+err.Error(), http.StatusInternalServerError)
@@ -415,7 +426,7 @@ func (s *toolGovernanceServer) handleToolTransition(w http.ResponseWriter, r *ht
 		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, tool)
+	writeJSON(w, governedToolResponse{ToolDefinition: tool, LifecycleHooks: s.dispatchPolicyChange(ctx, identity, tool, policyUpdated, previousState)})
 }
 
 // ── operations ───────────────────────────────────────────────────────────

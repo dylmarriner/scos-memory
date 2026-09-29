@@ -12,6 +12,7 @@
 // its own database tables, rather than folded into security-gate's wider
 // audit/policy responsibilities.
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -284,9 +285,7 @@ func (s *credentialVaultServer) getCredential(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if !allowed {
-		_ = insertAuditEntry(ctx, tx, identity, "credential_read", id, "denied", "principal lacks read permission")
-		_ = tx.Commit()
-		http.Error(w, "forbidden", http.StatusForbidden)
+		denyAudited(ctx, w, tx, identity, "credential_read", id, "principal lacks read permission")
 		return
 	}
 
@@ -364,9 +363,7 @@ func (s *credentialVaultServer) updateCredential(w http.ResponseWriter, r *http.
 		return
 	}
 	if !allowed {
-		_ = insertAuditEntry(ctx, tx, identity, "credential_updated", id, "denied", "principal lacks write permission")
-		_ = tx.Commit()
-		http.Error(w, "forbidden", http.StatusForbidden)
+		denyAudited(ctx, w, tx, identity, "credential_updated", id, "principal lacks write permission")
 		return
 	}
 
@@ -413,9 +410,7 @@ func (s *credentialVaultServer) deleteCredential(w http.ResponseWriter, r *http.
 		return
 	}
 	if !allowed {
-		_ = insertAuditEntry(ctx, tx, identity, "credential_deleted", id, "denied", "principal lacks write permission")
-		_ = tx.Commit()
-		http.Error(w, "forbidden", http.StatusForbidden)
+		denyAudited(ctx, w, tx, identity, "credential_deleted", id, "principal lacks write permission")
 		return
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM credentials WHERE id = $1 AND tenant_id = $2`, id, identity.TenantID)
@@ -469,9 +464,7 @@ func (s *credentialVaultServer) grantACL(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if !allowed {
-		_ = insertAuditEntry(ctx, tx, identity, "credential_acl_granted", id, "denied", "principal lacks write permission")
-		_ = tx.Commit()
-		http.Error(w, "forbidden", http.StatusForbidden)
+		denyAudited(ctx, w, tx, identity, "credential_acl_granted", id, "principal lacks write permission")
 		return
 	}
 	res, err := tx.ExecContext(ctx, `
@@ -532,9 +525,7 @@ func (s *credentialVaultServer) revokeACL(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !allowed {
-		_ = insertAuditEntry(ctx, tx, identity, "credential_acl_revoked", id, "denied", "principal lacks write permission")
-		_ = tx.Commit()
-		http.Error(w, "forbidden", http.StatusForbidden)
+		denyAudited(ctx, w, tx, identity, "credential_acl_revoked", id, "principal lacks write permission")
 		return
 	}
 	if permissionParam == string(permWrite) {
@@ -624,4 +615,19 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		logger.Error("encode response", "error", err)
 	}
+}
+
+// denyAudited refuses a request after durably recording the denial. If the
+// audit entry cannot be written or committed the request is still refused,
+// but with 500 so the missing audit record is never silent.
+func denyAudited(ctx context.Context, w http.ResponseWriter, tx *sql.Tx, identity requestIdentity, action, resourceID, reason string) {
+	if err := insertAuditEntry(ctx, tx, identity, action, resourceID, "denied", reason); err != nil {
+		http.Error(w, "forbidden; unable to persist audit record: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "forbidden; unable to commit audit record: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Error(w, "forbidden", http.StatusForbidden)
 }

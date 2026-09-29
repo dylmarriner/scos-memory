@@ -223,7 +223,7 @@ func TestOKFProposalRequiresValidationAndIndependentReview(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# old\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := &okfServer{okfRoot: root, proposals: map[string]*OKFProposal{}}
+	s := &okfServer{okfRoot: root, proposals: map[string]*OKFProposal{}, roleLookup: grantAllRoles}
 	p, err := s.createProposal(okfProposalRequest{Path: "policy.md", Content: "# new\n", Proposer: "alice"})
 	if err != nil {
 		t.Fatal(err)
@@ -308,4 +308,12 @@ func runGit(t *testing.T, root string, args ...string) []byte {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
 	return output
+}
+
+func TestFindOKFRootHonoursEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SCOS_OKF_ROOT", dir)
+	if got := findOKFRoot(); got != dir {
+		t.Fatalf("findOKFRoot() = %q, want %q", got, dir)
+	}
 }

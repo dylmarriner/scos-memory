@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 	scip "github.com/scip-code/scip/bindings/go/scip"
 	"google.golang.org/protobuf/proto"
 )
@@ -266,26 +267,49 @@ func insertCodeEdge(ctx context.Context, tx *sql.Tx, snapshotID, sourceVersionID
 // activated only after every symbol has been ingested, so a failure
 // partway through a large SCIP index never leaves a partially-built
 // snapshot active.
-func (s *pgCodeStore) IndexSnapshotFromSCIP(ctx context.Context, snapshotID, repositoryID string, index *scip.Index) (int, error) {
+//
+// Like IndexSnapshot, a retried delivery for a snapshot that is already
+// active or superseded commits nothing and reports activated=false (with
+// the snapshot's recorded symbol count). Re-running activation there would
+// also roll the branch back onto a superseded snapshot.
+func (s *pgCodeStore) IndexSnapshotFromSCIP(ctx context.Context, snapshotID, repositoryID string, index *scip.Index) (count int, activated bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin SCIP index transaction: %w", err)
+		return 0, false, fmt.Errorf("begin SCIP index transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	count, err := s.IndexSCIP(ctx, tx, snapshotID, repositoryID, index)
+	var snapshotStatus, snapshotRepositoryID string
+	var recordedSymbols int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status::text, repository_id::text, COALESCE(symbol_count, 0)
+		FROM code_repository_snapshots WHERE id = $1 FOR UPDATE`, snapshotID).
+		Scan(&snapshotStatus, &snapshotRepositoryID, &recordedSymbols); err != nil {
+		return 0, false, fmt.Errorf("load snapshot: %w", err)
+	}
+	if snapshotRepositoryID != repositoryID {
+		return 0, false, fmt.Errorf("snapshot %s belongs to repository %s, not %s", snapshotID, snapshotRepositoryID, repositoryID)
+	}
+	if snapshotStatus == "active" || snapshotStatus == "superseded" {
+		return recordedSymbols, false, tx.Commit()
+	}
+
+	count, err = s.IndexSCIP(ctx, tx, snapshotID, repositoryID, index)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE code_repository_snapshots SET file_count = $2, symbol_count = $3, status = 'ready'
 		WHERE id = $1`, snapshotID, len(index.Documents), count); err != nil {
-		return 0, fmt.Errorf("mark snapshot ready: %w", err)
+		return 0, false, fmt.Errorf("mark snapshot ready: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1)`, snapshotID); err != nil {
-		return 0, fmt.Errorf("activate snapshot: %w", err)
+		return 0, false, fmt.Errorf("activate snapshot: %w", err)
 	}
-	return count, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return count, true, nil
 }
 
 func (s *pgCodeStore) indexSCIPSymbolLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, doc *scip.Document, sym *scip.SymbolInformation) (string, error) {
@@ -410,9 +434,9 @@ func (s *server) handlePGIndexSCIP(w http.ResponseWriter, r *http.Request) {
 	// Same tenant-ownership rule as handlePGIndex: a repository_id
 	// supplied by one tenant that happens to belong to another is
 	// rejected here rather than silently indexing into it.
-	var owningTenant string
+	var owningTenant, repositoryPath string
 	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+		`SELECT tenant_id::text, canonical_path FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant, &repositoryPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
@@ -430,11 +454,16 @@ func (s *server) handlePGIndexSCIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	symbolCount, err := s.pgStore.IndexSnapshotFromSCIP(r.Context(), snapshotID, req.RepositoryID, index)
+	symbolCount, activated, err := s.pgStore.IndexSnapshotFromSCIP(r.Context(), snapshotID, req.RepositoryID, index)
 	if err != nil {
 		http.Error(w, "index SCIP snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if activated {
+		s.hooks.Notify(r.Context(), hooksdk.OnIndexChange, tenant, principal,
+			indexChangePayload(req.RepositoryID, repositoryPath, req.Branch, req.CommitID, snapshotID, len(index.Documents)))
+	}
+	s.emitIndexHealth(r.Context(), tenant, req.RepositoryID, req.Branch, true)
 	writeJSON(w, map[string]any{
 		"snapshot_id":    snapshotID,
 		"document_count": len(index.Documents),

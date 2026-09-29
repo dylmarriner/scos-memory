@@ -252,6 +252,25 @@ func TestContainsAllNamespacesAcceptsAuthorizedRequest(t *testing.T) {
 	}
 }
 
+func TestTemporalPredicateKeepsValidAndRecordedTimeIndependent(t *testing.T) {
+	predicate, err := temporalPredicate(RetrieveRequest{ValidAt: "2025-01-02T00:00:00Z", RecordedAt: "2025-02-02T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(predicate, "valid_from") || !strings.Contains(predicate, "mv.created_at") || !strings.Contains(predicate, "belief_expired_at") {
+		t.Fatalf("predicate omitted a temporal dimension: %s", predicate)
+	}
+	if strings.Contains(predicate, "now()") {
+		t.Fatalf("as-of predicate must not silently use now(): %s", predicate)
+	}
+}
+
+func TestTemporalPredicateRejectsUnparseableInstant(t *testing.T) {
+	if _, err := temporalPredicate(RetrieveRequest{RecordedAt: "yesterday"}); err == nil {
+		t.Fatal("expected invalid recorded_at to be rejected")
+	}
+}
+
 // TestRetrieveRejectsCrossTenantBodyOverride proves the fix for the tenant
 // isolation gap in resolveIdentity: RetrieveRequest.TenantID/PrincipalID are
 // ordinary JSON fields that reach this service as mcp-gateway's scos_retrieve

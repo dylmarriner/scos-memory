@@ -1,6 +1,6 @@
 import sys
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import patch, MagicMock
 
 # The worker talks to PostgreSQL through psycopg, but every unit under test
 # takes an injected connection. Stub the driver so the suite runs without it.
@@ -141,6 +141,24 @@ class RunEvaluationCycleTests(unittest.TestCase):
         ]
         results = run_evaluation_cycle(conn)
         self.assertEqual(results, [])
+
+
+class RegressionRateEmissionTests(unittest.TestCase):
+    def test_rate_counts_only_evaluations_with_a_verdict(self):
+        import main as pe
+        results = [{"eval_status": s} for s in ("regression_detected", "stable", "insufficient_data", "improved")]
+        with patch.object(pe.telemetry, "emit") as emit:
+            pe._emit_regression_rate(results)
+        service, points = emit.call_args.args
+        self.assertEqual(service, "policy-evaluation")
+        self.assertEqual(points[0].name, "scos.learning.policy_regression_rate")
+        self.assertAlmostEqual(points[0].value, 1 / 3)
+
+    def test_no_verdicts_emits_nothing(self):
+        import main as pe
+        with patch.object(pe.telemetry, "emit") as emit:
+            pe._emit_regression_rate([{"eval_status": "insufficient_data"}])
+        emit.assert_not_called()
 
 
 if __name__ == "__main__":

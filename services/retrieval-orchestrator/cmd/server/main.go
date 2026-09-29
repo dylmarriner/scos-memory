@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,8 +51,12 @@ type RetrieveRequest struct {
 	IncludeSession      bool              `json:"include_session,omitempty"`
 	IncludeState        bool              `json:"include_state,omitempty"`
 	Filters             map[string]string `json:"filters,omitempty"`
-	RepositoryID        string            `json:"repository_id,omitempty"`
-	Branch              string            `json:"branch,omitempty"`
+	// ValidAt is world time; RecordedAt is the system-time as-of instant.
+	// They are independent and never inferred from query text.
+	ValidAt      string `json:"valid_at,omitempty"`
+	RecordedAt   string `json:"recorded_at,omitempty"`
+	RepositoryID string `json:"repository_id,omitempty"`
+	Branch       string `json:"branch,omitempty"`
 }
 
 type RetrievalResult struct {
@@ -295,6 +300,130 @@ func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (tenantI
 	return bodyTenant, bodyPrincipal, 0, ""
 }
 
+// temporalPredicate validates explicit bitemporal constraints and returns a
+// SQL predicate using typed literals. The values are parsed before being
+// embedded, so query text cannot smuggle SQL into this controlled fragment.
+var (
+	activeStatusRe = regexp.MustCompile(`mi\.status\s*=\s*'active'`)
+	liveValidityRe = regexp.MustCompile(`AND\s+\(mi\.(valid_from IS NULL OR mi\.valid_from <= now\(\)|valid_until IS NULL OR mi\.valid_until > now\(\)|expires_at IS NULL OR mi\.expires_at > now\(\))\)`)
+	tenantAnchorRe = regexp.MustCompile(`WHERE\s+mi\.tenant_id\s*=\s*\$1`)
+)
+
+// applyTemporal rewrites a lane's "valid now" SQL into an as-of query when
+// the request asks for a point in time (valid_at / recorded_at): superseded
+// and merged memories become eligible, the now()-relative validity clauses
+// are dropped, and the temporal predicate is added at the tenant anchor
+// every lane shares. A lane without that anchor is an error, so no lane can
+// silently return present-day results for a historical question.
+func applyTemporal(query string, req RetrieveRequest, temporal string) (string, error) {
+	if req.ValidAt == "" && req.RecordedAt == "" {
+		return query, nil
+	}
+	anchor := tenantAnchorRe.FindStringIndex(query)
+	if anchor == nil {
+		return "", fmt.Errorf("retrieval query has no tenant anchor for the temporal predicate")
+	}
+	query = query[:anchor[1]] + " AND " + temporal + query[anchor[1]:]
+	query = activeStatusRe.ReplaceAllString(query, "mi.status IN ('active','superseded','merged')")
+	return liveValidityRe.ReplaceAllString(query, ""), nil
+}
+
+// memoryClasses is the memory_type enum; requested classes are checked
+// against it before they reach SQL.
+var memoryClasses = map[string]bool{
+	"working": true, "episodic": true, "semantic": true, "procedural": true,
+	"governing": true, "artifact_reference": true, "revocation": true,
+}
+
+// sqlLiteral quotes s as a standard-conforming SQL string literal.
+func sqlLiteral(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// applyScope narrows a lane to the request's memory_classes and metadata
+// filters (§17 "exact and metadata search"): classes are validated against
+// the enum and filters become a jsonb containment match on metadata.
+func applyScope(query string, req RetrieveRequest) (string, error) {
+	var clauses []string
+	if len(req.MemoryClasses) > 0 {
+		quoted := make([]string, 0, len(req.MemoryClasses))
+		for _, c := range req.MemoryClasses {
+			if !memoryClasses[c] {
+				return "", fmt.Errorf("unknown memory class %q", c)
+			}
+			quoted = append(quoted, sqlLiteral(c))
+		}
+		clauses = append(clauses, "mi.type IN ("+strings.Join(quoted, ",")+")")
+	}
+	if len(req.Filters) > 0 {
+		raw, err := json.Marshal(req.Filters)
+		if err != nil {
+			return "", err
+		}
+		if strings.ContainsRune(string(raw), 0) {
+			return "", fmt.Errorf("filters must not contain NUL")
+		}
+		clauses = append(clauses, "mi.metadata @> "+sqlLiteral(string(raw))+"::jsonb")
+	}
+	if len(clauses) == 0 {
+		return query, nil
+	}
+	anchor := tenantAnchorRe.FindStringIndex(query)
+	if anchor == nil {
+		return "", fmt.Errorf("retrieval query has no tenant anchor for scope filters")
+	}
+	return query[:anchor[1]] + " AND " + strings.Join(clauses, " AND ") + query[anchor[1]:], nil
+}
+
+// appliedFilters is what the retrieval record states was enforced: every
+// constraint the lanes actually applied, not merely what was requested.
+func appliedFilters(req RetrieveRequest, sensitivity string) map[string]any {
+	out := map[string]any{"sensitivity_max": sensitivity}
+	if len(req.Filters) > 0 {
+		out["metadata"] = req.Filters
+	}
+	if len(req.MemoryClasses) > 0 {
+		out["memory_classes"] = req.MemoryClasses
+	}
+	if req.ValidAt != "" {
+		out["valid_at"] = req.ValidAt
+	}
+	if req.RecordedAt != "" {
+		out["recorded_at"] = req.RecordedAt
+	}
+	return out
+}
+
+func temporalPredicate(req RetrieveRequest) (string, error) {
+	parse := func(name, value string) (string, error) {
+		if strings.TrimSpace(value) == "" {
+			return "", nil
+		}
+		t, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			return "", fmt.Errorf("%s must be RFC3339: %w", name, err)
+		}
+		return t.UTC().Format("2006-01-02T15:04:05Z07:00"), nil
+	}
+	valid, err := parse("valid_at", req.ValidAt)
+	if err != nil {
+		return "", err
+	}
+	recorded, err := parse("recorded_at", req.RecordedAt)
+	if err != nil {
+		return "", err
+	}
+	if valid == "" && recorded == "" {
+		return "mi.status = 'active' AND (mi.valid_from IS NULL OR mi.valid_from <= now()) AND (mi.valid_until IS NULL OR mi.valid_until > now()) AND (mi.expires_at IS NULL OR mi.expires_at > now())", nil
+	}
+	parts := []string{}
+	if valid != "" {
+		parts = append(parts, "(mi.valid_from IS NULL OR mi.valid_from <= TIMESTAMPTZ '"+valid+"') AND (mi.valid_until IS NULL OR mi.valid_until > TIMESTAMPTZ '"+valid+"')")
+	}
+	if recorded != "" {
+		parts = append(parts, "mv.created_at <= TIMESTAMPTZ '"+recorded+"' AND (mi.belief_expired_at IS NULL OR mi.belief_expired_at > TIMESTAMPTZ '"+recorded+"')")
+	}
+	return strings.Join(parts, " AND "), nil
+}
+
 // ── handler ──────────────────────────────────────────────────────────────
 
 func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +453,10 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query is required", http.StatusBadRequest)
 		return
 	}
+	if _, err := temporalPredicate(req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	maxResults := req.MaxResults
 	if maxResults <= 0 {
@@ -336,6 +469,11 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	plan := planRetrieval(req, maxResults)
+	// The relation, vector, and session SQL lanes currently project only the
+	// present. Do not let them contaminate an explicit historical answer.
+	if req.ValidAt != "" || req.RecordedAt != "" {
+		plan.VectorLimit, plan.RelationLimit, plan.SessionLimit = 0, 0, 0
+	}
 	meta := retrievalExecutionMeta{TextSpace: s.textSpace, PlannerMode: plan.Mode}
 
 	// Repo-aware P4 code retrieval is independent from memory namespace
@@ -374,14 +512,28 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sensitivityFilter, err := s.effectiveSensitivity(ctx, req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	meta.Sensitivity = sensitivityFilter
+	// Lane errors only degrade a lane, so a malformed scope is rejected here
+	// rather than silently returning nothing.
+	if _, err := applyScope("WHERE mi.tenant_id = $1", req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// ── 1.5. Standing-answer cache (P1-B) ────────────────────────────
 	// A normalized-exact-match repeat of a prior question skips the whole
 	// 5-source fan-out below. question_key is a lowercased/trimmed exact
 	// match on query text, not a classifier -- see the migration's comment
 	// for why (a fixed named-question set needs a classification step this
 	// doesn't have yet).
-	if plan.CodeLimit == 0 {
-		if answer, err := s.lookupStandingAnswer(ctx, req.TenantID, req.PrincipalID, namespaces, req.Query); err != nil {
+	// A cached answer reflects the present, so as-of questions bypass it.
+	if plan.CodeLimit == 0 && req.ValidAt == "" && req.RecordedAt == "" {
+		if answer, err := s.lookupStandingAnswer(ctx, req.TenantID, req.PrincipalID, namespaces, sensitivityFilter, req.Query); err != nil {
 			log.Printf("standing answer lookup error: %v", err)
 		} else if answer != nil {
 			writeJSON(w, RetrieveResponse{
@@ -407,11 +559,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	queryHash := hashQuery(req.Query)
 	tsQuery := toTSQuery(req.Query)
 
-	// ── 3. Apply validity and sensitivity filters ────────────────────
-	sensitivityFilter := req.SensitivityMax
-	if sensitivityFilter == "" {
-		sensitivityFilter = "internal"
-	}
+	// ── 3. Validity and sensitivity filters (ceiling resolved above) ─
 
 	// ── 4. Exact + metadata search ──────────────────────────────────
 	var exactResults []RetrievalResult
@@ -473,7 +621,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// ── 8. Recent session state ─────────────────────────────────────
 	var sessionResults []RetrievalResult
 	if plan.SessionLimit > 0 {
-		sessionResults, _ = s.recentSessionState(ctx, req, namespaces, plan.SessionLimit)
+		sessionResults, _ = s.recentSessionState(ctx, req, namespaces, sensitivityFilter, plan.SessionLimit)
 	}
 
 	// ── 9. Fusion via RRF ───────────────────────────────────────────
@@ -530,10 +678,11 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		LatencyMs:      int(time.Since(start).Milliseconds()),
 	}
 
-	// §32 retrieval latency. Staleness is not emitted here: nothing in the
-	// result set carries a freshness timestamp, and a hardcoded zero would be
-	// a fabricated metric (§42). Index freshness is owned and emitted by the
-	// index-maintenance worker, which actually measures it.
+	// §32 retrieval latency and stale retrieval. Staleness comes from the P7
+	// revalidation ledger for the items actually returned (stale_retrieval.go);
+	// if that lookup fails nothing is emitted rather than a guessed zero (§42).
+	// Index freshness is owned and emitted by code-intelligence, which reads
+	// the active snapshot's persisted activation time.
 	corr := telemetry.Correlation{
 		SessionID: req.SessionID,
 		AgentID:   req.AgentID,
@@ -541,6 +690,21 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 	serviceMetrics.Observe(telemetry.MetricRetrievalLatency, time.Since(start),
 		map[string]string{"sections": strconv.Itoa(len(sections))}, corr)
+	// Historical (valid_at/recorded_at) queries intentionally return facts as
+	// they stood then, so staleness against today's ledger does not apply.
+	if req.ValidAt == "" && req.RecordedAt == "" {
+		var returnedIDs []string
+		for _, sec := range sections {
+			for _, item := range sec.Items {
+				returnedIDs = append(returnedIDs, item.MemoryID)
+			}
+		}
+		if stale, staleErr := s.staleMemoryIDs(ctx, req.TenantID, req.PrincipalID, returnedIDs); staleErr != nil {
+			log.Printf("stale retrieval lookup: %v", staleErr)
+		} else {
+			recordStaleRetrieval(sections, stale, corr)
+		}
+	}
 
 	writeJSON(w, resp)
 }
@@ -599,6 +763,35 @@ func containsAllNamespaces(requested, authorized []string) bool {
 	return true
 }
 
+// effectiveSensitivity is the most sensitive class this retrieval may
+// return: the caller's request (default internal), capped by the acting
+// agent's registered maximum_sensitivity. An agent that is named but not
+// registered gets the schema's default ceiling rather than whatever it asks
+// for.
+func (s *server) effectiveSensitivity(ctx context.Context, req RetrieveRequest) (string, error) {
+	requested := req.SensitivityMax
+	if requested == "" {
+		requested = "internal"
+	}
+	var effective string
+	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		return q.QueryRow(ctx, `
+			SELECT LEAST($1::sensitivity_class, COALESCE(
+			    (SELECT a.maximum_sensitivity FROM agents a JOIN principals p ON p.id = a.id
+			      WHERE a.id::text = $2 AND p.tenant_id = $3),
+			    CASE WHEN $2 = '' THEN $1::sensitivity_class ELSE 'internal'::sensitivity_class END))::text`,
+			requested, req.AgentID, req.TenantID).Scan(&effective)
+	})
+	if err != nil {
+		return "", fmt.Errorf("resolve sensitivity ceiling: %w", err)
+	}
+	return effective, nil
+}
+
+// likeEscaper makes a user's query match literally inside LIKE: '%' and '_'
+// typed by the user are text, not wildcards.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {
 	query := `
 		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
@@ -616,11 +809,11 @@ func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespace
 		AND (mi.valid_from IS NULL OR mi.valid_from <= now())
 		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
 		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
-		  AND (LOWER(mi.title) LIKE LOWER($4) OR LOWER(mv.content) LIKE LOWER($4))
+		  AND (LOWER(mi.title) LIKE LOWER($4) ESCAPE '\' OR LOWER(mv.content) LIKE LOWER($4) ESCAPE '\')
 		ORDER BY mi.authority_level DESC, mi.confidence_score DESC
 		LIMIT $5
 	`
-	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, "%"+req.Query+"%", "exact")
+	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, "%"+likeEscaper.Replace(req.Query)+"%", "exact")
 }
 
 func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, tsQuery string, limit int) ([]RetrievalResult, error) {
@@ -741,7 +934,7 @@ func vectorLiteral(values []float64) string {
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, namespaces []string, limit int) ([]RetrievalResult, error) {
+func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {
 	if req.SessionID == "" {
 		return nil, nil
 	}
@@ -771,13 +964,18 @@ func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, na
 		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
 		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
 		  AND mi.type IN ('working', 'episodic')
+		  AND mi.sensitivity <= $6
 		  AND (mi.metadata->>'session_id' = $4 OR mi.metadata->>'session_id' IS NULL)
 		ORDER BY mi.created_at DESC
 		LIMIT $5
 	`
+	query, err := applyScope(query, req)
+	if err != nil {
+		return nil, err
+	}
 	var results []RetrievalResult
-	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
-		rows, err := q.Query(ctx, query, req.TenantID, req.PrincipalID, namespaces, req.SessionID, limit)
+	err = s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		rows, err := q.Query(ctx, query, req.TenantID, req.PrincipalID, namespaces, req.SessionID, limit, sensitivityMax)
 		if err != nil {
 			return err
 		}
@@ -818,8 +1016,7 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 		return nil, nil
 	}
 	var results []RetrievalResult
-	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
-		rows, err := q.Query(ctx, `
+	query := `
 			SELECT DISTINCT mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
 			       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
 			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb),
@@ -832,7 +1029,27 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 			WHERE mi.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
 			  AND mi.sensitivity <= $4 AND (mi.valid_from IS NULL OR mi.valid_from <= now())
 			  AND (mi.valid_until IS NULL OR mi.valid_until > now()) AND (mi.expires_at IS NULL OR mi.expires_at > now())
-			  AND n.canonical_name=ANY($5::text[]) LIMIT $6`, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit)
+			  AND (rel.valid_from IS NULL OR rel.valid_from <= $7) AND (rel.valid_until IS NULL OR rel.valid_until > $7)
+			  AND n.canonical_name=ANY($5::text[]) LIMIT $6`
+	temporal, err := temporalPredicate(req)
+	if err != nil {
+		return nil, err
+	}
+	if query, err = applyTemporal(query, req, temporal); err != nil {
+		return nil, err
+	}
+	if query, err = applyScope(query, req); err != nil {
+		return nil, err
+	}
+	// The traversed relation must itself hold at the moment asked about.
+	relationAt := time.Now().UTC()
+	if req.ValidAt != "" {
+		if relationAt, err = time.Parse(time.RFC3339, req.ValidAt); err != nil {
+			return nil, fmt.Errorf("valid_at must be RFC3339: %w", err)
+		}
+	}
+	err = s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+		rows, err := q.Query(ctx, query, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit, relationAt)
 		if err != nil {
 			return err
 		}
@@ -859,7 +1076,17 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 
 func (s *server) queryResults(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int, query string, queryParam string, provenance string) ([]RetrievalResult, error) {
 	var results []RetrievalResult
-	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+	temporal, err := temporalPredicate(req)
+	if err != nil {
+		return nil, err
+	}
+	if query, err = applyTemporal(query, req, temporal); err != nil {
+		return nil, err
+	}
+	if query, err = applyScope(query, req); err != nil {
+		return nil, err
+	}
+	err = s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
 		// Convert namespaces to UUIDs
 		nsRows, err := q.Query(ctx, `SELECT id FROM namespaces WHERE tenant_id = $1 AND canonical_name = ANY($2)`, req.TenantID, namespaces)
 		if err != nil {
@@ -913,7 +1140,17 @@ func (s *server) queryResults(ctx context.Context, req RetrieveRequest, namespac
 
 func (s *server) queryVectorResults(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int, query, embedding, spaceID string) ([]RetrievalResult, error) {
 	var results []RetrievalResult
-	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
+	temporal, err := temporalPredicate(req)
+	if err != nil {
+		return nil, err
+	}
+	if query, err = applyTemporal(query, req, temporal); err != nil {
+		return nil, err
+	}
+	if query, err = applyScope(query, req); err != nil {
+		return nil, err
+	}
+	err = s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
 		nsRows, err := q.Query(ctx, `SELECT id FROM namespaces WHERE tenant_id = $1 AND canonical_name = ANY($2)`, req.TenantID, namespaces)
 		if err != nil {
 			return err
@@ -1157,7 +1394,7 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 			RETURNING id
 		`, req.TenantID, req.PrincipalID, nullIfBlank(req.AgentID), nullIfBlank(req.SessionID), nullIfBlank(req.TurnID),
-			queryHash, toJSONB(namespaces), toJSONB(req.Filters), rankingConfig, selectedJSON, selectedCodeJSON, latencyMs,
+			queryHash, toJSONB(namespaces), toJSONB(appliedFilters(req, meta.Sensitivity)), rankingConfig, selectedJSON, selectedCodeJSON, latencyMs,
 			toJSONB(candidateCounts), estimateSectionsTokens(sections), modelVersions).Scan(&runID); err != nil {
 			return err
 		}
@@ -1215,7 +1452,12 @@ type standingAnswer struct {
 // multiple matching namespaces (rare -- a caller with more than one
 // authorised namespace that both happen to have cached the same normalized
 // question), the highest-confidence row wins.
-func (s *server) lookupStandingAnswer(ctx context.Context, tenantID, principalID string, namespaces []string, query string) (*standingAnswer, error) {
+//
+// An answer is only as releasable as the facts it was derived from: it is
+// served only when it cites evidence and every cited fact is still active
+// and within the caller's sensitivity ceiling. Otherwise the full retrieval
+// path runs and applies its own filters.
+func (s *server) lookupStandingAnswer(ctx context.Context, tenantID, principalID string, namespaces []string, sensitivityMax, query string) (*standingAnswer, error) {
 	questionKey := hashQuery(query)
 	var answer *standingAnswer
 	err := s.withPrincipalContext(ctx, tenantID, principalID, func(q pgxQuerier) error {
@@ -1224,8 +1466,15 @@ func (s *server) lookupStandingAnswer(ctx context.Context, tenantID, principalID
 			FROM memory_standing_answers sa
 			JOIN namespaces n ON n.id = sa.namespace_id
 			WHERE sa.tenant_id = $1 AND sa.question_key = $2 AND sa.invalidated_at IS NULL AND n.canonical_name = ANY($3::text[])
+			  AND sa.evidence_fact_ids LIKE '[%'
+			  AND jsonb_array_length(sa.evidence_fact_ids::jsonb) > 0
+			  AND NOT EXISTS (
+			      SELECT 1
+			        FROM jsonb_array_elements_text(sa.evidence_fact_ids::jsonb) AS cited(fact_id)
+			        LEFT JOIN memory_items ev ON ev.id::text = cited.fact_id AND ev.tenant_id = sa.tenant_id
+			       WHERE ev.id IS NULL OR ev.status <> 'active' OR ev.sensitivity > $4::sensitivity_class)
 			ORDER BY sa.confidence DESC
-			LIMIT 1`, tenantID, questionKey, namespaces)
+			LIMIT 1`, tenantID, questionKey, namespaces, sensitivityMax)
 		if err != nil {
 			return err
 		}

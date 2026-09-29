@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 	"github.com/dylmarriner/scos-memory/packages/httpmid"
 	"github.com/dylmarriner/scos-memory/packages/release"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
@@ -33,6 +34,8 @@ type server struct {
 	// metrics emits this service's §32 measures. It is nil-safe and a no-op
 	// when no collector is configured.
 	metrics *telemetry.Emitter
+	// hooks raises §22.6 lifecycle events. A nil client is a no-op.
+	hooks *hooksdk.Client
 }
 
 type statusResponse struct {
@@ -77,6 +80,10 @@ func main() {
 		logger.Error("startup failed", "error", err)
 		os.Exit(1)
 	}
+	if s.hooks, err = hooksdk.ClientFromEnvironment("memory-gateway"); err != nil {
+		logger.Error("startup failed", "error", err)
+		os.Exit(1)
+	}
 
 	httpServer := &http.Server{
 		Addr:              addr,
@@ -103,6 +110,7 @@ func (s server) routes() http.Handler {
 	mux.HandleFunc("GET /health/version", release.Handler("memory-gateway"))
 	mux.HandleFunc("GET /v1/version", s.handleVersion)
 	mux.HandleFunc("POST /v1/sessions", s.handleCreateSession)
+	mux.HandleFunc("POST /v1/sessions/{sessionID}/end", s.handleEndSession)
 	mux.HandleFunc("POST /v1/sessions/{sessionID}/messages", s.handleAppendMessage)
 	mux.HandleFunc("POST /v1/turns/{turnID}/chunks", s.handleAppendChunk)
 	mux.HandleFunc("POST /v1/turns/{turnID}/response", s.handleStartResponse)
@@ -154,7 +162,7 @@ func parseTurnLimit(value string) (int, error) {
 
 func (s server) journalContext(r *http.Request) (requestContext, error) {
 	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
-		return requestContext{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, nil
+		return requestContext{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID, AgentID: claims.AgentID}, nil
 	}
 	if auth.Identity(r.Context()) != "" {
 		return requestContext{}, errors.New("authenticated token has no tenant and principal claims")
@@ -187,7 +195,39 @@ func (s server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// Raised only after the durable commit, and asynchronously, so an
+	// extension can never block or fail the journal write.
+	if !result.Replayed {
+		s.hooks.Notify(r.Context(), hooksdk.OnSessionStart, rc.TenantID, rc.PrincipalID,
+			map[string]any{"session_id": result.ID, "agent_id": rc.AgentID, "namespace_id": req.NamespaceID})
+	}
 	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s server) handleEndSession(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "not_ready"})
+		return
+	}
+	rc, err := s.journalContext(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := s.journal().endSession(r.Context(), rc, r.PathValue("sessionID"))
+	if errors.Is(err, errSessionNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if !result.Replayed {
+		s.hooks.Notify(r.Context(), hooksdk.OnSessionEnd, rc.TenantID, rc.PrincipalID,
+			map[string]any{"session_id": result.ID, "agent_id": rc.AgentID})
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s server) handleAppendMessage(w http.ResponseWriter, r *http.Request) {
@@ -216,6 +256,13 @@ func (s server) handleAppendMessage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	// Metadata only: the message content never leaves the journal.
+	if !result.Replayed {
+		s.hooks.Notify(r.Context(), hooksdk.OnTurnReceived, rc.TenantID, rc.PrincipalID, map[string]any{
+			"session_id": r.PathValue("sessionID"), "turn_id": result.TurnID, "message_id": result.MessageID,
+			"agent_id": rc.AgentID, "role": req.Role, "sequence": result.Sequence,
+		})
 	}
 	writeJSON(w, http.StatusCreated, result)
 }

@@ -81,7 +81,10 @@ FROM alpine:3.21
 # binaries land below) makes the installed `graphify` script reachable by
 # every user in the image, not just whichever account ran the build.
 ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
-RUN apk add --no-cache ca-certificates python3 py3-pip pipx \
+# postgresql17-client provides pg_dump/pg_restore/createdb for backup-manager
+# (matching the pg17 server in deploy/compose).
+# git: okf-synchroniser keeps approved OKF content in a Git repository (§26).
+RUN apk add --no-cache ca-certificates git python3 py3-pip pipx postgresql17-client \
     && pipx install graphifyy \
     && addgroup -S scos && adduser -S -G scos scos \
     # State directories for the services that keep local state. compose mounts

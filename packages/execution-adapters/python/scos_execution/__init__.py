@@ -1,3 +1,3 @@
-from .reducer import CommandRewrite, OutputReducer
+from .reducer import CommandBlockedError, CommandRewrite, OutputReducer, destructive_reason
 
-__all__ = ["CommandRewrite", "OutputReducer"]
+__all__ = ["CommandBlockedError", "CommandRewrite", "OutputReducer", "destructive_reason"]

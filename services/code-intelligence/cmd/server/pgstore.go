@@ -229,12 +229,36 @@ func (s *pgCodeStore) CreateSnapshot(ctx context.Context, repositoryID, tenantID
 // happens in the same transaction as the last file write, so a failure
 // partway through never leaves activate_code_snapshot to promote an
 // incomplete generation.
-func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryID string, files []PGFileInput) error {
+//
+// activated reports whether this call activated the snapshot. A retried
+// delivery for a snapshot that is already active (or since superseded)
+// commits nothing and returns false, so callers raise on_index_change only
+// for the call that actually changed the served index.
+func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryID string, files []PGFileInput) (activated bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin index transaction: %w", err)
+		return false, fmt.Errorf("begin index transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// A retried delivery may arrive after the snapshot was already activated.
+	// Treat completed generations as idempotent; attempting to insert their
+	// symbol versions again would hit uniqueness constraints, but that is a
+	// poor retry contract. Lock the row so concurrent retries cannot both
+	// proceed into the indexing transaction.
+	var snapshotStatus, snapshotRepositoryID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status::text, repository_id::text
+		FROM code_repository_snapshots WHERE id = $1 FOR UPDATE`, snapshotID).
+		Scan(&snapshotStatus, &snapshotRepositoryID); err != nil {
+		return false, fmt.Errorf("load snapshot: %w", err)
+	}
+	if snapshotRepositoryID != repositoryID {
+		return false, fmt.Errorf("snapshot %s belongs to repository %s, not %s", snapshotID, snapshotRepositoryID, repositoryID)
+	}
+	if snapshotStatus == "active" || snapshotStatus == "superseded" {
+		return false, tx.Commit()
+	}
 
 	// P1-D: resolved once per snapshot, not per file -- a file whose
 	// content_hash matches its parent snapshot's row for the same path
@@ -242,33 +266,41 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	// forward instead). Empty for a repository's first-ever snapshot.
 	var parentSnapshotID string
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(parent_snapshot_id::text, '') FROM code_repository_snapshots WHERE id = $1`, snapshotID).Scan(&parentSnapshotID); err != nil {
-		return fmt.Errorf("resolve parent snapshot: %w", err)
+		return false, fmt.Errorf("resolve parent snapshot: %w", err)
 	}
 
 	var allDecls []indexedDecl
 	for _, f := range files {
 		decls, err := s.indexFileLocked(ctx, tx, snapshotID, repositoryID, parentSnapshotID, f)
 		if err != nil {
-			return fmt.Errorf("index %s: %w", f.Path, err)
+			return false, fmt.Errorf("index %s: %w", f.Path, err)
 		}
 		allDecls = append(allDecls, decls...)
 	}
 	if err := insertCallEdgesLocked(ctx, tx, snapshotID, allDecls); err != nil {
-		return fmt.Errorf("index call edges: %w", err)
+		return false, fmt.Errorf("index call edges: %w", err)
 	}
 
+	var symbolCount int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM code_symbol_versions WHERE snapshot_id = $1`, snapshotID).Scan(&symbolCount); err != nil {
+		return false, fmt.Errorf("count indexed symbols: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE code_repository_snapshots SET file_count = $2, symbol_count = $2, status = 'ready'
-		WHERE id = $1`, snapshotID, len(files)); err != nil {
-		return fmt.Errorf("mark snapshot ready: %w", err)
+		UPDATE code_repository_snapshots SET file_count = $2, symbol_count = $3, status = 'ready'
+		WHERE id = $1`, snapshotID, len(files), symbolCount); err != nil {
+		return false, fmt.Errorf("mark snapshot ready: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1)`, snapshotID); err != nil {
-		return fmt.Errorf("activate snapshot: %w", err)
+		return false, fmt.Errorf("activate snapshot: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `SELECT queue_stale_memory_revalidation($1)`, snapshotID); err != nil {
-		return fmt.Errorf("queue stale-memory revalidation: %w", err)
+		return false, fmt.Errorf("queue stale-memory revalidation: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // indexedDecl is what indexFileLocked reports back about each declaration
@@ -725,7 +757,12 @@ type snapshotSymbolRow struct {
 
 func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT symbol_id, path, content_hash FROM code_symbol_versions WHERE snapshot_id = $1`, snapshotID)
+		-- Diff is a file-level contract. Declaration versions share a path
+		-- and would otherwise create duplicate/conflicting entries for one file.
+		-- The tier-0 file symbol is the canonical row.
+		SELECT symbol_id, path, content_hash
+		FROM code_symbol_versions
+		WHERE snapshot_id = $1 AND kind = 'file'`, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("load snapshot symbols: %w", err)
 	}

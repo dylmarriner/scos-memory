@@ -31,6 +31,17 @@ func newID() (string, error) {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hex.EncodeToString(b[0:4]), hex.EncodeToString(b[4:6]), hex.EncodeToString(b[6:8]), hex.EncodeToString(b[8:10]), hex.EncodeToString(b[10:16])), nil
 }
 
+// derivedTurnID maps a non-UUID Hermes turn id to a stable UUID (RFC 4122
+// version-5 layout over SHA-256) scoped to its session.
+func derivedTurnID(sessionID, clientTurnID string) string {
+	sum := sha256.Sum256([]byte("hermes-turn:" + sessionID + ":" + clientTurnID))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x50
+	b[8] = (b[8] & 0x3f) | 0x80
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
 func sha256Hex(parts ...string) string {
 	h := sha256.New()
 	for _, p := range parts {
@@ -51,23 +62,34 @@ func setPrincipalContext(ctx context.Context, tx *sql.Tx, id requestIdentity) er
 // namespaces is out of scope for this provider (it is a separate
 // administrative flow shared by every service that writes into the data
 // plane, per docs/adr/0001-postgresql-authority.md).
-func (s *hermesServer) ensureSession(ctx context.Context, tx *sql.Tx, id requestIdentity, sessionID, namespaceID string) error {
+// errSessionUnavailable reports a session id that cannot be used by this
+// caller (it is already taken).
+var errSessionUnavailable = errors.New("session_id is unavailable; choose a new session id")
+
+// It reports whether this call created the session.
+func (s *hermesServer) ensureSession(ctx context.Context, tx *sql.Tx, id requestIdentity, sessionID, namespaceID string) (bool, error) {
 	if namespaceID == "" {
-		return errors.New("namespace_id is required")
+		return false, errors.New("namespace_id is required")
 	}
 	var exists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sessions WHERE id=$1 AND tenant_id=$2)`, sessionID, id.TenantID).Scan(&exists); err != nil {
-		return fmt.Errorf("check session: %w", err)
+		return false, fmt.Errorf("check session: %w", err)
 	}
 	if exists {
-		return nil
+		return false, nil
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, tenant_id, namespace_id, created_by) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING`,
+	res, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, tenant_id, namespace_id, created_by) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING`,
 		sessionID, id.TenantID, namespaceID, id.PrincipalID)
 	if err != nil {
-		return fmt.Errorf("create session: %w", err)
+		return false, fmt.Errorf("create session: %w", err)
 	}
-	return nil
+	// The id exists but not in this tenant (the check above is tenant
+	// scoped): refuse it plainly rather than carry on with a session this
+	// caller cannot see, and say nothing about whose it is.
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return false, errSessionUnavailable
+	}
+	return true, nil
 }
 
 // idempotentReplay looks up a previously recorded response for key. found is
@@ -134,6 +156,32 @@ func appendEvent(ctx context.Context, tx *sql.Tx, tenantID, aggregateID, eventTy
 		VALUES ($1,$2,$3,$4,'scos.hermes-provider',$5,$6,$7,'https://schemas.scos.local/events/event-envelope.schema.json',$8,$9,$10,$11)
 	`, id, tenantID, aggregateID, sequence, eventType, subject, time.Now().UTC(), aggregateID, causationID, actorID, payload)
 	return err
+}
+
+// enqueueConsolidation announces a completed turn exactly as memory-gateway
+// does: a turn.completed event on the turn's aggregate and a turn.completed
+// outbox job, in the caller's transaction. Without them the consolidation
+// worker never learns of the turn, and nothing journalled through this
+// provider would ever become memory.
+func enqueueConsolidation(ctx context.Context, tx *sql.Tx, id requestIdentity, sessionID, turnID string, attributes map[string]string) error {
+	data := map[string]string{"session_id": sessionID, "source": "hermes-provider"}
+	for k, v := range attributes {
+		if v != "" {
+			data[k] = v
+		}
+	}
+	if err := appendEvent(ctx, tx, id.TenantID, turnID, "turn.completed", "turn/"+turnID, id.PrincipalID, data); err != nil {
+		return fmt.Errorf("record turn.completed: %w", err)
+	}
+	payload, err := json.Marshal(map[string]string{"turn_id": turnID})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_jobs (tenant_id, operation_id, job_type, payload) VALUES ($1,$2,'turn.completed',$3::jsonb) ON CONFLICT (tenant_id, operation_id) DO NOTHING`,
+		id.TenantID, turnID+":completed", string(payload)); err != nil {
+		return fmt.Errorf("enqueue consolidation: %w", err)
+	}
+	return nil
 }
 
 // resolvedMessage is the (role, content) pair extracted from an arbitrary

@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -13,9 +14,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -23,6 +26,25 @@ import (
 const version = "0.1.0"
 const providerName = "scos-nexus"
 const recallLimit = 20
+
+// sessionSwitchReasons are the lineage cases session_switch distinguishes.
+var sessionSwitchReasons = map[string]bool{"resume": true, "branch": true, "reset": true, "compression": true, "switch": true}
+
+// hermesContexts are the §24.6 execution contexts a turn is attributed to.
+var hermesContexts = map[string]bool{"primary": true, "subagent": true, "cron": true, "flush": true}
+
+func resolveHermesContext(v string) (string, error) {
+	if v == "" {
+		return "primary", nil
+	}
+	if !hermesContexts[v] {
+		return "", fmt.Errorf("context must be one of primary, subagent, cron, flush")
+	}
+	return v, nil
+}
+
+// shutdownFlushTimeout bounds how long shutdown spends flushing queued work.
+const shutdownFlushTimeout = 5 * time.Second
 
 // ── Hermes MemoryProvider lifecycle types ───────────────────────────────
 
@@ -53,6 +75,8 @@ type SyncTurnRequest struct {
 	Messages    []any  `json:"messages"`
 	ToolCalls   []any  `json:"tool_calls,omitempty"`
 	ProfilePath string `json:"profile_path"`
+	// Context distinguishes §24.6 primary, subagent, cron and flush turns.
+	Context string `json:"context,omitempty"`
 }
 
 type MemoryWriteRequest struct {
@@ -88,8 +112,25 @@ type StoredTurn struct {
 type hermesServer struct {
 	startTime time.Time
 	db        *sql.DB
-	// prefetchQueue holds bounded pre-warm work for queue_prefetch (§24.3).
-	prefetchQueue prefetchQueue
+	// prefetchQueue holds bounded pre-warm work for queue_prefetch (§24.3);
+	// runPrefetchWorker processes it into warmCache.
+	prefetchQueue  prefetchQueue
+	prefetchSignal chan struct{}
+	warmCache      warmCache
+	prefetchWarmed atomic.Int64
+	prefetchFailed atomic.Int64
+	// memoryIntelligenceURL and upstreamClient serve the §24.5 tools that
+	// memory-intelligence owns.
+	memoryIntelligenceURL string
+	upstreamClient        *http.Client
+	// hooks raises §22.6 lifecycle events; nil when no extension manager is
+	// configured (Notify is then a no-op).
+	hooks *hooksdk.Client
+}
+
+// notify raises a lifecycle hook after the triggering work has committed.
+func (s *hermesServer) notify(ctx context.Context, event string, id requestIdentity, payload map[string]any) {
+	s.hooks.Notify(ctx, event, id.TenantID, id.PrincipalID, payload)
 }
 
 func (s *hermesServer) readinessCheck() error {
@@ -103,7 +144,7 @@ func (s *hermesServer) readinessCheck() error {
 }
 
 func newHermesServer() *hermesServer {
-	return &hermesServer{startTime: time.Now()}
+	return &hermesServer{startTime: time.Now(), prefetchSignal: make(chan struct{}, 1)}
 }
 
 // ── identity resolution ──────────────────────────────────────────────────
@@ -157,6 +198,19 @@ func main() {
 
 	srv := newHermesServer()
 	srv.db = db
+	srv.memoryIntelligenceURL = strings.TrimRight(strings.TrimSpace(os.Getenv("SCOS_MEMORY_INTELLIGENCE_URL")), "/")
+	if srv.memoryIntelligenceURL == "" {
+		srv.memoryIntelligenceURL = "https://memory-intelligence:8089"
+	}
+	if srv.upstreamClient, err = tlsserve.TrustedClient(15 * time.Second); err != nil {
+		log.Fatalf("memory-intelligence client: %v", err)
+	}
+	if srv.hooks, err = hooksdk.ClientFromEnvironment("hermes-provider"); err != nil {
+		log.Fatalf("lifecycle hook client: %v", err)
+	}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	defer stopWorker()
+	go srv.runPrefetchWorker(workerCtx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -283,13 +337,17 @@ func (s *hermesServer) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
+	created, err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID)
+	if err != nil {
 		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if created {
+		s.notify(ctx, hooksdk.OnSessionStart, identity, map[string]any{"session_id": req.SessionID, "namespace_id": req.NamespaceID, "source": "prefetch"})
 	}
 
 	// A fresh transaction: the one above already committed, so its
@@ -308,6 +366,20 @@ func (s *hermesServer) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Pre-warmed recall is served only when it is fresh and was computed
+	// for this same tenant, principal and session; cache_hit says which
+	// path answered rather than echoing what the client sent.
+	if entry, ok := s.warmCache.fresh(warmKey(identity.TenantID, identity.PrincipalID, req.ProfilePath, req.SessionID), time.Now()); ok {
+		writeJSON(w, map[string]any{
+			"prefetched": true,
+			"session_id": req.SessionID,
+			"recall":     entry.Recall,
+			"memories":   entry.Memories,
+			"cache_hit":  true,
+			"warmed_at":  entry.WarmedAt.UTC().Format(time.RFC3339),
+		})
+		return
+	}
 	recall, err := recentTurns(ctx, readTx, identity.TenantID, req.SessionID, recallLimit)
 	if err != nil {
 		http.Error(w, "load recall: "+err.Error(), http.StatusInternalServerError)
@@ -318,7 +390,7 @@ func (s *hermesServer) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		"prefetched": true,
 		"session_id": req.SessionID,
 		"recall":     recall,
-		"cache_hit":  req.LastCapsule != "",
+		"cache_hit":  false,
 	})
 }
 
@@ -334,6 +406,11 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SessionID == "" || req.TurnID == "" {
 		http.Error(w, "session_id and turn_id are required", http.StatusBadRequest)
+		return
+	}
+	turnContext, err := resolveHermesContext(req.Context)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if !isUUID(req.SessionID) {
@@ -376,26 +453,49 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
+	sessionCreated, err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID)
+	if err != nil {
 		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	generatedTurnID, err := newID()
-	if err != nil {
-		http.Error(w, "generate turn id: "+err.Error(), http.StatusInternalServerError)
+	// The stored turn is the client's turn: its own id when that is a UUID,
+	// otherwise a stable id derived from (session, client turn id), so the
+	// same Hermes turn always maps to the same journal turn.
+	storedTurnID := req.TurnID
+	if !isUUID(storedTurnID) {
+		storedTurnID = derivedTurnID(req.SessionID, req.TurnID)
+	}
+	// Tool calls are part of the turn (§24.2 sync_turn ingests the complete
+	// turn); they are journalled as tool messages after the conversation.
+	messages := append([]any{}, req.Messages...)
+	for _, call := range req.ToolCalls {
+		encoded, err := json.Marshal(call)
+		if err != nil {
+			http.Error(w, "encode tool call: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		messages = append(messages, map[string]any{"role": "tool", "content": string(encoded)})
+	}
+	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, storedTurnID, messages); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages); err != nil {
+	if err := enqueueConsolidation(ctx, tx, identity, req.SessionID, storedTurnID, map[string]string{"context": turnContext, "profile_path": req.ProfilePath}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	result := map[string]any{
-		"synced":     true,
-		"session_id": req.SessionID,
-		"turn_id":    req.TurnID,
-		"async":      false,
-		"duplicate":  false,
+		"synced":         true,
+		"session_id":     req.SessionID,
+		"turn_id":        storedTurnID,
+		"client_turn_id": req.TurnID,
+		"context":        turnContext,
+		"tool_calls":     len(req.ToolCalls),
+		// Durable before the response: the turn is committed in this
+		// request, so an acknowledged sync can never be lost.
+		"async":     false,
+		"duplicate": false,
 	}
 	if err := recordIdempotent(ctx, tx, identity, idemKey, "hermes_sync_turn", requestHash, result); err != nil {
 		http.Error(w, "record idempotency: "+err.Error(), http.StatusInternalServerError)
@@ -404,6 +504,11 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Pre-warmed recall for this session predates the new turn.
+	s.warmCache.evictSession(identity.TenantID, req.SessionID)
+	if sessionCreated {
+		s.notify(ctx, hooksdk.OnSessionStart, identity, map[string]any{"session_id": req.SessionID, "namespace_id": req.NamespaceID, "source": "sync_turn"})
 	}
 	writeJSON(w, result)
 }
@@ -496,6 +601,9 @@ func (s *hermesServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reques
 		FromSessionID string `json:"from_session_id"`
 		ToSessionID   string `json:"to_session_id"`
 		ProfilePath   string `json:"profile_path"`
+		// Reason distinguishes the §24.2 lineage cases: resume, branch,
+		// reset or compression (or a plain switch).
+		Reason string `json:"reason,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
@@ -503,6 +611,17 @@ func (s *hermesServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reques
 	}
 	if req.ToSessionID == "" {
 		http.Error(w, "to_session_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.Reason == "" {
+		req.Reason = "switch"
+	}
+	if !sessionSwitchReasons[req.Reason] {
+		http.Error(w, "reason must be one of resume, branch, reset, compression, switch", http.StatusBadRequest)
+		return
+	}
+	if req.FromSessionID != "" && !isUUID(req.FromSessionID) {
+		http.Error(w, "from_session_id must be a UUID", http.StatusBadRequest)
 		return
 	}
 	if !isUUID(req.ToSessionID) {
@@ -526,13 +645,14 @@ func (s *hermesServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.ensureSession(ctx, tx, identity, req.ToSessionID, req.NamespaceID); err != nil {
+	toCreated, err := s.ensureSession(ctx, tx, identity, req.ToSessionID, req.NamespaceID)
+	if err != nil {
 		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if req.FromSessionID != "" {
 		if err := appendEvent(ctx, tx, identity.TenantID, req.ToSessionID, "session.switched", "session/"+req.ToSessionID, identity.PrincipalID,
-			map[string]string{"from_session_id": req.FromSessionID, "to_session_id": req.ToSessionID}); err != nil {
+			map[string]string{"from_session_id": req.FromSessionID, "to_session_id": req.ToSessionID, "reason": req.Reason}); err != nil {
 			http.Error(w, "record switch event: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -542,10 +662,20 @@ func (s *hermesServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if toCreated {
+		s.notify(ctx, hooksdk.OnSessionStart, identity, map[string]any{"session_id": req.ToSessionID, "namespace_id": req.NamespaceID, "source": "session_switch"})
+	}
+	s.notify(ctx, hooksdk.OnSessionSwitch, identity, map[string]any{"from_session_id": req.FromSessionID, "to_session_id": req.ToSessionID, "reason": req.Reason})
+	// Lineage is preserved only when there was a prior session to link.
+	lineage := ""
+	if req.FromSessionID != "" {
+		lineage = req.FromSessionID + " -> " + req.ToSessionID
+	}
 	writeJSON(w, map[string]any{
 		"switched":  true,
-		"lineage":   req.FromSessionID + " -> " + req.ToSessionID,
-		"preserved": true,
+		"reason":    req.Reason,
+		"lineage":   lineage,
+		"preserved": req.FromSessionID != "",
 	})
 }
 
@@ -590,16 +720,23 @@ func (s *hermesServer) handlePreCompress(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
+	if _, err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
 		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.notify(ctx, hooksdk.OnPreCompress, identity, map[string]any{"session_id": req.SessionID, "messages": len(req.Messages)})
 	generatedTurnID, err := newID()
 	if err != nil {
 		http.Error(w, "generate turn id: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The messages about to be compressed away go through consolidation
+	// like any turn, so durable facts in them become candidate memories.
+	if err := enqueueConsolidation(ctx, tx, identity, req.SessionID, generatedTurnID, map[string]string{"context": "primary", "trigger": "pre_compress"}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -614,6 +751,7 @@ func (s *hermesServer) handlePreCompress(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	s.notify(ctx, hooksdk.OnPostCompress, identity, map[string]any{"session_id": req.SessionID, "preserved_turn_id": insightID})
 	writeJSON(w, map[string]any{
 		"preserved":        true,
 		"durable_insights": []string{insightID},
@@ -722,6 +860,13 @@ func (s *hermesServer) handleDelegation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// A delegation without a result is its start; one carrying the result
+	// is its end.
+	event := hooksdk.OnDelegationStart
+	if req.Result != "" {
+		event = hooksdk.OnDelegationEnd
+	}
+	s.notify(ctx, event, identity, map[string]any{"parent_session_id": req.ParentSessionID, "sub_agent_id": req.SubAgentID, "task": req.Task})
 	writeJSON(w, map[string]any{
 		"captured":       true,
 		"parent_session": req.ParentSessionID,
@@ -735,12 +880,34 @@ func (s *hermesServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	flushed := s.readinessCheck() == nil
+	// Flush: process queued pre-warm work now, bounded so shutdown cannot
+	// hang on a slow backend. Whatever does not complete is handed back to
+	// the caller, which can replay it through queue_prefetch after restart.
+	ctx, cancel := context.WithTimeout(r.Context(), shutdownFlushTimeout)
+	defer cancel()
+	var pending []queuedPrefetch
+	processed := 0
+	for _, item := range s.prefetchQueue.drain() {
+		if ctx.Err() != nil {
+			pending = append(pending, item)
+			continue
+		}
+		if err := s.warm(ctx, item); err != nil {
+			pending = append(pending, item)
+			continue
+		}
+		processed++
+	}
+	if pending == nil {
+		pending = []queuedPrefetch{}
+	}
 	writeJSON(w, map[string]any{
-		"status":     "shutting_down",
-		"provider":   providerName,
-		"flushed":    flushed,
-		"replayable": true,
+		"status":           "shutting_down",
+		"provider":         providerName,
+		"flushed":          len(pending) == 0,
+		"processed":        processed,
+		"replayable":       pending,
+		"replayable_count": len(pending),
 	})
 }
 

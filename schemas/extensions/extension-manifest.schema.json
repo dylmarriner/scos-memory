@@ -2,29 +2,166 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ExtensionManifest",
   "type": "object",
-  "required": ["schema_version", "package_id", "name", "version", "publisher", "license", "extension_types", "required_core_version", "content_hash", "signature", "isolation", "rollback_plan"],
+  "required": [
+    "schema_version",
+    "package_id",
+    "name",
+    "version",
+    "publisher",
+    "license",
+    "extension_types",
+    "required_core_version",
+    "content_hash",
+    "signature",
+    "isolation",
+    "rollback_plan"
+  ],
   "properties": {
-    "package_id": { "type": "string" },
-    "name": { "type": "string" },
-    "version": { "type": "string" },
-    "schema_version": { "type": "string", "minLength": 1 },
-    "type": { "type": "string", "enum": ["plugin", "skill", "hook"] },
-    "extension_types": { "type": "array", "minItems": 1, "items": { "type": "string" } },
-    "publisher": { "type": "string", "minLength": 1 },
-    "license": { "type": "string", "minLength": 1 },
-    "required_core_version": { "type": "string", "minLength": 1 },
-    "content_hash": { "type": "string", "minLength": 1 },
-    "signature": { "type": "string", "minLength": 1 },
-    "isolation": { "type": "string", "enum": ["in_process_trusted", "separate_process", "container", "wasm_sandbox", "remote_endpoint"] },
-    "hooks_subscribed": { "type": "array", "items": { "type": "string" } },
-    "hook_endpoints": { "type": "object", "additionalProperties": { "type": "string", "format": "uri" } },
-    "hook_fallback_policies": { "type": "object", "additionalProperties": { "type": "string", "enum": ["continue", "fail_closed"] } },
-    "migration_plan": { "type": "string" },
-    "rollback_plan": { "type": "string", "minLength": 1 },
-    "dependencies": { "type": "array", "items": { "type": "object", "required": ["package_id", "version"], "properties": { "package_id": { "type": "string" }, "version": { "type": "string" } } } },
+    "package_id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "plugin",
+        "skill",
+        "hook"
+      ]
+    },
+    "extension_types": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "publisher": {
+      "type": "string",
+      "minLength": 1
+    },
+    "license": {
+      "type": "string",
+      "minLength": 1
+    },
+    "required_core_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content_hash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 1
+    },
+    "isolation": {
+      "type": "string",
+      "enum": [
+        "in_process_trusted",
+        "separate_process",
+        "container",
+        "wasm_sandbox",
+        "remote_endpoint"
+      ]
+    },
+    "hooks_subscribed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hook_endpoints": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "format": "uri"
+      }
+    },
+    "migration_plan": {
+      "type": "string"
+    },
+    "rollback_plan": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "package_id",
+          "version"
+        ],
+        "properties": {
+          "package_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "required_permissions": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
+    },
+    "hook_declarations": {
+      "type": "object",
+      "description": "Execution declaration for every subscribed lifecycle event (GOVERNANCE.md \u00a722.6)",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "retryable",
+          "idempotent",
+          "timeout_ms",
+          "fallback_policy"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "synchronous",
+              "asynchronous",
+              "blocking",
+              "mutating"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "idempotent": {
+            "type": "boolean"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000
+          },
+          "fallback_policy": {
+            "type": "string",
+            "enum": [
+              "continue",
+              "fail_closed"
+            ]
+          }
+        }
+      }
     }
   }
 }

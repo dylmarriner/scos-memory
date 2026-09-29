@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/dylmarriner/scos-memory/services/readiness"
 )
@@ -195,20 +196,39 @@ func TestPermissionCheckPublic(t *testing.T) {
 		Principal: "user-1", Action: "read",
 		Resource: "doc.md", DataClass: ClassPublic, Tenant: "t-1",
 	}
-	allowed := evaluatePermission(check)
+	allowed, _ := evaluatePermission(check, &AuthToken{DataClass: ClassInternal}, time.Now().UTC())
 	if !allowed {
 		t.Fatal("public data should be allowed")
 	}
 }
 
 func TestPermissionCheckSecret(t *testing.T) {
-	check := &PermissionCheck{
-		Principal: "user-1", Action: "read",
-		Resource: "secret.doc", DataClass: ClassSecret, Tenant: "t-1",
+	check := &PermissionCheck{Principal: "user-1", Action: "read", Resource: "secret.doc", DataClass: ClassSecret, Tenant: "t-1"}
+	now := time.Now().UTC()
+	if ok, _ := evaluatePermission(check, &AuthToken{DataClass: ClassRestricted}, now); ok {
+		t.Fatal("secret allowed for a restricted token")
 	}
-	allowed := evaluatePermission(check)
-	if allowed {
-		t.Fatal("secret should be denied by default")
+	if ok, reason := evaluatePermission(check, &AuthToken{DataClass: ClassSecret}, now); !ok {
+		t.Fatalf("secret denied for a secret-granted token: %s", reason)
+	}
+}
+
+func TestPermissionCheckDeniesUnknownClassAndExpiredWindow(t *testing.T) {
+	now := time.Now().UTC()
+	token := &AuthToken{DataClass: ClassSecret}
+	if ok, reason := evaluatePermission(&PermissionCheck{DataClass: "top-secret-ish"}, token, now); ok || reason != "unknown data class" {
+		t.Fatalf("unknown class = %v %q", ok, reason)
+	}
+	past := now.Add(-time.Minute).Format(time.RFC3339)
+	if ok, _ := evaluatePermission(&PermissionCheck{DataClass: ClassPublic, ExpiresAt: past}, token, now); ok {
+		t.Fatal("expired authorisation window allowed")
+	}
+	if ok, _ := evaluatePermission(&PermissionCheck{DataClass: ClassPublic, ExpiresAt: "tomorrow"}, token, now); ok {
+		t.Fatal("unparseable expires_at allowed")
+	}
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	if ok, _ := evaluatePermission(&PermissionCheck{DataClass: ClassPublic, ExpiresAt: future}, token, now); !ok {
+		t.Fatal("unexpired window denied")
 	}
 }
 

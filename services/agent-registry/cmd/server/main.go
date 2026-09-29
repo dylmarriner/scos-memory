@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -71,6 +73,8 @@ type HandoffPacket struct {
 
 type agentRegistryServer struct {
 	db *sql.DB
+	// hooks raises §22.6 lifecycle events. A nil client is a no-op.
+	hooks *hooksdk.Client
 }
 
 func newAgentRegistryServer() *agentRegistryServer {
@@ -126,6 +130,42 @@ func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (request
 	return requestIdentity{TenantID: tenantID, PrincipalID: principalID}, 0, ""
 }
 
+// agentAdminScope lets an operator heartbeat or deregister any agent in the
+// tenant, following the "<service>:admin" convention of recovery-orchestrator
+// and backup-manager. auth.HasScope also accepts the global "admin" scope.
+const agentAdminScope = "agents:admin"
+
+func callerIsAgentAdmin(r *http.Request) bool {
+	claims, ok := auth.CanonicalClaims(r.Context())
+	return ok && auth.HasScope(claims, agentAdminScope)
+}
+
+// agentOperableBy restricts a row to callers allowed to act on it, given
+// $3 = caller holds agentAdminScope and $4 = caller principal: the principal
+// that registered the agent, or an admin.
+//
+// Legacy rows (registered_by_principal_id IS NULL, created before ownership
+// was recorded) stay operable by any principal of the tenant. Making them
+// admin-only would stop every pre-existing agent from heartbeating, so all
+// of them would go stale and be swept inactive within a day -- an outage
+// caused by a schema change, not by anything the agents did. Allowing any
+// tenant principal is exactly the access those rows had before, so it
+// grants nothing new, and the rows shrink away as agents re-register.
+const agentOperableBy = `($3 OR registered_by_principal_id IS NULL OR registered_by_principal_id::text = $4)`
+
+// agentAccessDenied distinguishes, after an ownership-filtered write matched
+// nothing, an agent registered to someone else (403) from a missing one (404).
+func agentAccessDenied(ctx context.Context, tx *sql.Tx, agentID, tenantID string) (int, string, error) {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM agent_registrations WHERE id=$1 AND tenant_id=$2)`, agentID, tenantID).Scan(&exists); err != nil {
+		return 0, "", err
+	}
+	if exists {
+		return http.StatusForbidden, "agent is registered to another principal", nil
+	}
+	return http.StatusNotFound, "agent not found", nil
+}
+
 func setTenantContext(ctx context.Context, tx *sql.Tx, tenantID string) error {
 	_, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true)`, tenantID)
 	return err
@@ -167,7 +207,18 @@ func main() {
 	database.TuneSQLDB(db)
 	defer db.Close()
 
-	s := &agentRegistryServer{db: db}
+	hooks, err := hooksdk.ClientFromEnvironment("agent-registry")
+	if err != nil {
+		log.Fatalf("lifecycle hooks: %v", err)
+	}
+	s := &agentRegistryServer{db: db, hooks: hooks}
+	sweepInterval := 15 * time.Minute
+	if v := os.Getenv("SCOS_AGENT_STALE_SWEEP_INTERVAL"); v != "" {
+		if sweepInterval, err = time.ParseDuration(v); err != nil || sweepInterval <= 0 {
+			log.Fatalf("SCOS_AGENT_STALE_SWEEP_INTERVAL must be a positive duration, got %q", v)
+		}
+	}
+	go s.runStaleSweep(context.Background(), sweepInterval)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -179,6 +230,7 @@ func main() {
 	mux.HandleFunc("/v1/agents/", s.handleAgentByID)
 	mux.HandleFunc("/v1/agents/register", s.handleAgentRegister)
 	mux.HandleFunc("/v1/agents/heartbeat", s.handleAgentHeartbeat)
+	mux.HandleFunc("/v1/agents/deregister", s.handleAgentDeregister)
 
 	// Handoffs
 	mux.HandleFunc("/v1/handoffs", s.handleHandoffs)
@@ -289,6 +341,12 @@ func (s *agentRegistryServer) handleAgentRegister(w http.ResponseWriter, r *http
 		http.Error(w, msg, status)
 		return
 	}
+	// The registering principal becomes the agent's owner, recorded against
+	// principals(id), so it must be a principal id.
+	if !isUUID(identity.PrincipalID) {
+		http.Error(w, "principal_id must be a UUID", http.StatusBadRequest)
+		return
+	}
 	if reg.MaxClassification == "" {
 		reg.MaxClassification = "confidential"
 	}
@@ -310,13 +368,13 @@ func (s *agentRegistryServer) handleAgentRegister(w http.ResponseWriter, r *http
 		INSERT INTO agent_registrations
 			(tenant_id, name, version, maintainer, capabilities, inputs, outputs,
 			 tool_permissions, memory_permissions, max_classification, model_provider,
-			 cost_policy, health_endpoint, status)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'active')
+			 cost_policy, health_endpoint, status, registered_by_principal_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'active',$14)
 		RETURNING id, registered_at
 	`, identity.TenantID, reg.Name, reg.Version, reg.Maintainer,
 		jsonList(reg.Capabilities), jsonList(reg.Inputs), jsonList(reg.Outputs),
 		jsonList(reg.ToolPermissions), jsonList(reg.MemoryPermissions), reg.MaxClassification,
-		reg.ModelProvider, reg.CostPolicy, reg.HealthEndpoint).Scan(&id, &registeredAt)
+		reg.ModelProvider, reg.CostPolicy, reg.HealthEndpoint, identity.PrincipalID).Scan(&id, &registeredAt)
 	if err != nil {
 		http.Error(w, "persist agent registration: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -325,6 +383,11 @@ func (s *agentRegistryServer) handleAgentRegister(w http.ResponseWriter, r *http
 		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Raised after the commit, asynchronously, so an extension can neither
+	// block nor fail the registration.
+	s.hooks.Notify(ctx, hooksdk.OnAgentStart, identity.TenantID, identity.PrincipalID,
+		map[string]any{"agent_id": id, "reason": "registered"})
 
 	reg.ID = id
 	reg.TenantID = identity.TenantID
@@ -410,14 +473,23 @@ func (s *agentRegistryServer) handleAgentHeartbeat(w http.ResponseWriter, r *htt
 		http.Error(w, "set tenant context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var lastSeen string
+	var lastSeen, priorStatus, priorSeen string
 	err = tx.QueryRowContext(ctx, `
-		UPDATE agent_registrations SET status='active', last_seen_at=now()
-		WHERE id=$1 AND tenant_id=$2
-		RETURNING last_seen_at
-	`, req.AgentID, identity.TenantID).Scan(&lastSeen)
+		WITH prior AS (
+			SELECT id, status, last_seen_at FROM agent_registrations
+			WHERE id=$1 AND tenant_id=$2 AND `+agentOperableBy+` FOR UPDATE
+		)
+		UPDATE agent_registrations a SET status='active', last_seen_at=now()
+		FROM prior WHERE a.id=prior.id
+		RETURNING a.last_seen_at, prior.status, prior.last_seen_at
+	`, req.AgentID, identity.TenantID, callerIsAgentAdmin(r), identity.PrincipalID).Scan(&lastSeen, &priorStatus, &priorSeen)
 	if err == sql.ErrNoRows {
-		http.Error(w, "agent not found", http.StatusNotFound)
+		code, msg, err := agentAccessDenied(ctx, tx, req.AgentID, identity.TenantID)
+		if err != nil {
+			http.Error(w, "query agent: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, msg, code)
 		return
 	}
 	if err != nil {
@@ -428,7 +500,142 @@ func (s *agentRegistryServer) handleAgentHeartbeat(w http.ResponseWriter, r *htt
 		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// A heartbeat from an agent that was not effectively active (explicitly
+	// deactivated, degraded, or stale past the window) reactivates it.
+	if agentEffectiveStatus(priorStatus, priorSeen, time.Now()) != "active" {
+		s.hooks.Notify(ctx, hooksdk.OnAgentStart, identity.TenantID, identity.PrincipalID,
+			map[string]any{"agent_id": req.AgentID, "reason": "reactivated"})
+	}
 	writeJSON(w, map[string]any{"status": "acknowledged", "last_seen": lastSeen})
+}
+
+// handleAgentDeregister marks an agent inactive. Deregistering an agent that
+// is already inactive succeeds without raising a second on_agent_stop.
+func (s *agentRegistryServer) handleAgentDeregister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		AgentID     string `json:"agent_id"`
+		TenantID    string `json:"tenant_id,omitempty"`
+		PrincipalID string `json:"principal_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !isUUID(req.AgentID) {
+		http.Error(w, "agent_id must be a UUID", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setTenantContext(ctx, tx, identity.TenantID); err != nil {
+		http.Error(w, "set tenant context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var priorStatus string
+	err = tx.QueryRowContext(ctx, `
+		WITH prior AS (
+			SELECT id, status FROM agent_registrations
+			WHERE id=$1 AND tenant_id=$2 AND `+agentOperableBy+` FOR UPDATE
+		)
+		UPDATE agent_registrations a SET status='inactive'
+		FROM prior WHERE a.id=prior.id
+		RETURNING prior.status
+	`, req.AgentID, identity.TenantID, callerIsAgentAdmin(r), identity.PrincipalID).Scan(&priorStatus)
+	if err == sql.ErrNoRows {
+		code, msg, err := agentAccessDenied(ctx, tx, req.AgentID, identity.TenantID)
+		if err != nil {
+			http.Error(w, "query agent: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, msg, code)
+		return
+	}
+	if err != nil {
+		http.Error(w, "persist deregistration: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if priorStatus != "inactive" {
+		s.hooks.Notify(ctx, hooksdk.OnAgentStop, identity.TenantID, identity.PrincipalID,
+			map[string]any{"agent_id": req.AgentID, "reason": "deregistered"})
+	}
+	writeJSON(w, map[string]any{"id": req.AgentID, "status": "inactive"})
+}
+
+// runStaleSweep persists the staleness that agentEffectiveStatus otherwise
+// only derives at read time, once per interval, for as long as ctx lives.
+func (s *agentRegistryServer) runStaleSweep(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if n, err := s.sweepStaleAgents(ctx); err != nil {
+			log.Printf("stale agent sweep: %v", err)
+		} else if n > 0 {
+			log.Printf("stale agent sweep: marked %d agent(s) inactive", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// sweepStaleAgents marks every agent past the staleness window inactive,
+// across tenants, and raises on_agent_stop for each transition under the
+// agent's own tenant and registering principal. The transition happens in
+// agent_registrations_expire_stale() (migration 000043) as a single
+// UPDATE ... RETURNING, so each agent is returned -- and its event raised --
+// by exactly one sweep even when several replicas sweep at once. There is no
+// caller here, so the hook client mints claims for that tenant/principal.
+func (s *agentRegistryServer) sweepStaleAgents(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT agent_id, tenant_id, registered_by_principal_id FROM agent_registrations_expire_stale()`)
+	if err != nil {
+		return 0, err
+	}
+	type staleAgent struct {
+		id, tenantID string
+		principalID  sql.NullString
+	}
+	var stale []staleAgent
+	for rows.Next() {
+		var a staleAgent
+		if err := rows.Scan(&a.id, &a.tenantID, &a.principalID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		stale = append(stale, a)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, a := range stale {
+		if !a.principalID.Valid {
+			log.Printf("stale agent sweep: agent %s marked inactive; on_agent_stop skipped: legacy registration has no principal", a.id)
+			continue
+		}
+		s.hooks.Notify(ctx, hooksdk.OnAgentStop, a.tenantID, a.principalID.String,
+			map[string]any{"agent_id": a.id, "reason": "stale"})
+	}
+	return len(stale), nil
 }
 
 // queryAgents runs a SELECT over agent_registrations with the given WHERE
@@ -441,6 +648,8 @@ func (s *agentRegistryServer) handleAgentHeartbeat(w http.ResponseWriter, r *htt
 // years ago -- an unconditional, unverified claim of health, which is the
 // same ss42 fabrication class already fixed for compatibility-gateway's
 // adapter HealthStatus.
+// The persisted sweep (agent_registrations_expire_stale, migration 000043)
+// hard-codes the same 24 hours; change both together.
 const agentStalenessWindow = 24 * time.Hour
 
 // agentEffectiveStatus derives the status actually reported to callers from

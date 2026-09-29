@@ -1,0 +1,18 @@
+[Unit]
+Description=SCOS Memory Fabric (shared-host resource budget)
+Before=slices.target
+
+# Every SCOS unit (Go fleet, consolidation worker, migrations, and the
+# PostgreSQL instance dedicated to SCOS) runs in this slice so the whole stack
+# yields to the other applications on a shared Raspberry Pi. Weights, not
+# quotas: SCOS still uses idle CPU/IO, but loses every contended tick to
+# default-weight (100) services such as Home Assistant.
+[Slice]
+CPUWeight=40
+IOWeight=40
+# Enforced only when the kernel's memory controller is enabled
+# (cgroup_enable=memory in /boot/firmware/cmdline.txt; Raspberry Pi OS ships
+# cgroup_disable=memory). Without it, GOMEMLIMIT and the PostgreSQL tuning in
+# pi-setup.sh are the memory budget.
+MemoryHigh=1536M
+MemoryMax=2G

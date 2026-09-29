@@ -212,16 +212,17 @@ class RunCycleTests(unittest.TestCase):
             self.rollbacks += 1
 
     def test_cycle_resolves_space_once_and_does_not_globally_purge_history(self):
+        # FakeConn has no execute(): any purge statement issued by the cycle
+        # itself (rather than the patched helpers) would raise here.
         conn = self.FakeConn()
         with patch.object(worker, "_ensure_embedding_space", return_value="space-1") as ensure:
             with patch.object(worker, "_unembedded_batch", return_value=[]) as batch:
-                with patch.object(worker, "_purge_stale_spaces", return_value=99) as purge:
-                    written = worker.run_cycle(conn)
+                written = worker.run_cycle(conn)
         self.assertEqual(written, 0)
         ensure.assert_called_once()
         batch.assert_called_once_with(conn, worker.BATCH_SIZE, "space-1")
-        purge.assert_not_called()
         self.assertEqual(conn.commits, 1)
+        self.assertEqual(conn.rollbacks, 0)
 
 
 class RerankCandidatesTests(unittest.TestCase):

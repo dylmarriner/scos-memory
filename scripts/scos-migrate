@@ -7,12 +7,18 @@ set -eu
 # SCOS_APP_PASSWORD fails loudly here rather than silently creating (or
 # leaving unchanged) a role with a guessable/empty password.
 app_password=${SCOS_APP_PASSWORD:?SCOS_APP_PASSWORD must be provided (used by database/policies/000011_app_role.sql to provision the scos_app runtime role)}
+# database/policies/000015_worker_role.sql provisions scos_worker, the role the
+# background workers connect as; same required-not-defaulted contract.
+worker_password=${SCOS_WORKER_PASSWORD:?SCOS_WORKER_PASSWORD must be provided (used by database/policies/000015_worker_role.sql to provision the scos_worker background-worker role)}
+# database/policies/000016_backup_role.sql provisions scos_backup, the
+# read-only role backup-manager dumps the database as.
+backup_password=${SCOS_BACKUP_PASSWORD:?SCOS_BACKUP_PASSWORD must be provided (used by database/policies/000016_backup_role.sql to provision the scos_backup read-only backup role)}
 
 database_url=${SCOS_DATABASE_URL:-}
 if [ -n "$database_url" ]; then
-  psql_cmd() { psql "$database_url" -v ON_ERROR_STOP=1 -v app_password="$app_password" "$@"; }
+  psql_cmd() { psql "$database_url" -v ON_ERROR_STOP=1 -v app_password="$app_password" -v worker_password="$worker_password" -v backup_password="$backup_password" "$@"; }
 else
-  psql_cmd() { psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -v app_password="$app_password" "$@"; }
+  psql_cmd() { psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -v app_password="$app_password" -v worker_password="$worker_password" -v backup_password="$backup_password" "$@"; }
 fi
 psql_cmd <<'SQL'
 CREATE TABLE IF NOT EXISTS scos_schema_migrations (
@@ -51,3 +57,7 @@ for file in /scos-database/migrations/*.sql /scos-database/policies/*.sql; do
     psql_cmd -c "INSERT INTO scos_schema_migrations(version) VALUES ('$version')"
   fi
 done
+
+# Tables created by migrations applied after 000016 need the backup role's
+# SELECT grant and read policy too; reconcile on every run.
+psql_cmd -c "SELECT scos_reconcile_backup_role()"

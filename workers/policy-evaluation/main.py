@@ -20,6 +20,8 @@ from typing import Any, Optional
 
 import psycopg
 
+import telemetry
+
 logger = logging.getLogger("policy_evaluation")
 
 DATABASE_URL = os.environ.get("SCOS_DATABASE_URL", os.environ.get("DATABASE_URL", ""))
@@ -104,15 +106,22 @@ def list_policy_versions(conn: psycopg.Connection, tenant_id: Any) -> list[str]:
 def fetch_policy_outcomes(
     conn: psycopg.Connection, tenant_id: Any, policy_version: str, limit: int = SAMPLE_LIMIT
 ) -> list[dict[str, Any]]:
+    """Terminal run outcomes for one policy version, newest first.
+
+    The autonomous control plane marks each orchestration run 'completed'
+    when every lifecycle stage succeeded and 'degraded' when any failed
+    (persistLifecycleDB), stamping completed_at either way. That terminal
+    status is the per-run success signal; routing_decisions.actual_outcome
+    is written at routing time and never records how the run went.
+    """
     rows = conn.execute(
         """
-        SELECT rd.outcome
-          FROM routing_decisions rd
-          JOIN orchestration_runs orr ON orr.id = rd.orchestration_run_id
+        SELECT jsonb_build_object('success', orr.status = 'completed')
+          FROM orchestration_runs orr
          WHERE orr.tenant_id = %s
            AND orr.policy_version = %s
-           AND rd.outcome IS NOT NULL
-         ORDER BY rd.created_at DESC
+           AND orr.status IN ('completed', 'degraded')
+         ORDER BY COALESCE(orr.completed_at, orr.started_at) DESC
          LIMIT %s
         """,
         (tenant_id, policy_version, limit),
@@ -186,7 +195,23 @@ def run_evaluation_cycle(conn: psycopg.Connection) -> list[dict[str, Any]]:
         results.append(
             evaluate_policy_candidate(conn, tenant_id, candidate_version, baseline_version)
         )
+    _emit_regression_rate(results)
     return results
+
+
+def _emit_regression_rate(results: list[dict[str, Any]]) -> None:
+    """§32 policy regression rate over the evaluations that reached a verdict.
+
+    insufficient_data is not a verdict, so it is excluded from both terms;
+    a cycle with no verdicts emits nothing rather than a fabricated 0%.
+    """
+    judged = [r for r in results if r["eval_status"] != "insufficient_data"]
+    if not judged:
+        return
+    regressions = sum(1 for r in judged if r["eval_status"] == "regression_detected")
+    telemetry.emit("policy-evaluation", [
+        telemetry.Point(telemetry.POLICY_REGRESSION_RATE, regressions / len(judged), "ratio"),
+    ])
 
 
 def main() -> None:

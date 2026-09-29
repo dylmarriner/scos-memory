@@ -14,11 +14,11 @@ import (
 // supplied, validated only by requireRole (role membership, not identity
 // against the proposer). A proposer who also held a governance role could
 // therefore call the "approve" action naming themself as reviewer and
-// self-approve their own OKF document change. s.db is left nil so
-// requireRole short-circuits (see requireRole's `if s.db == nil { return
-// nil }`), isolating this test to the identity check under test.
+// self-approve their own OKF document change. roleLookup grants every role,
+// isolating this test to the identity check under test.
 func TestDecideProposalRejectsSelfApproval(t *testing.T) {
 	s := &okfServer{
+		roleLookup: grantAllRoles,
 		proposals: map[string]*OKFProposal{
 			"p1": {
 				ID:       "p1",
@@ -53,6 +53,7 @@ func TestDecideProposalRejectsSelfApproval(t *testing.T) {
 // themself, the fallback must not silently approve.
 func TestDecideProposalDefaultsToRecordedReviewerAndStillRejectsProposer(t *testing.T) {
 	s := &okfServer{
+		roleLookup: grantAllRoles,
 		proposals: map[string]*OKFProposal{
 			"p2": {
 				ID:       "p2",

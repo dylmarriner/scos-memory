@@ -52,6 +52,9 @@ func (m *Manager) Register(def SkillDefinition, exec SkillExecutor) error {
 	if def.ID == "" {
 		return errors.New("skill ID is required")
 	}
+	if exec == nil {
+		return errors.New("skill executor is required")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.skills[def.ID] = &RegisteredSkill{

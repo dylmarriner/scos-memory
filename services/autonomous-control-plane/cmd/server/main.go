@@ -69,7 +69,8 @@ type agentRequest struct {
 	Context       string `json:"context,omitempty"`
 }
 type agentReply struct {
-	Content string `json:"content"`
+	Content string      `json:"content"`
+	Usage   *agentUsage `json:"usage,omitempty"`
 }
 type agentDispatcher interface {
 	Dispatch(context.Context, agentRequest) (agentReply, error)
@@ -80,6 +81,9 @@ type turnCommitter interface {
 type turnCommitReceipt struct {
 	MessageID    string
 	CheckpointID string
+	// OutboxOperationID identifies the turn.completed outbox job memory-gateway
+	// commits in the same transaction as the checkpoint; consolidation claims it.
+	OutboxOperationID string
 }
 type httpAgentDispatcher struct {
 	endpoint string
@@ -99,11 +103,15 @@ func (d deepseekAgentDispatcher) Dispatch(ctx context.Context, input agentReques
 	if strings.TrimSpace(input.Context) != "" {
 		userPrompt += "\n\nAuthoritative SCOS context:\n" + input.Context
 	}
-	content, err := d.client.Chat(ctx, systemPrompt, userPrompt)
+	content, usage, err := d.client.ChatWithUsage(ctx, systemPrompt, userPrompt)
 	if err != nil {
 		return agentReply{}, err
 	}
-	return agentReply{Content: content}, nil
+	reply := agentReply{Content: content}
+	if usage != nil {
+		reply.Usage = &agentUsage{PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens}
+	}
+	return reply, nil
 }
 
 func (d httpAgentDispatcher) Dispatch(ctx context.Context, input agentRequest) (agentReply, error) {
@@ -116,7 +124,7 @@ func (d httpAgentDispatcher) Dispatch(ctx context.Context, input agentRequest) (
 		return agentReply{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if token := auth.BearerToken(ctx); token != "" {
+	if token := outboundBearer(ctx); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if token := strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")); token != "" {
@@ -184,7 +192,7 @@ func (c memoryGatewayCommitter) Commit(ctx context.Context, req RouteRequest, re
 	httpReq.Header.Set("Idempotency-Key", "scos-"+req.InteractionID+"-complete")
 	httpReq.Header.Set("X-SCOS-Tenant-ID", req.TenantID)
 	httpReq.Header.Set("X-SCOS-Principal-ID", req.ActorID)
-	if token := auth.BearerToken(ctx); token != "" {
+	if token := outboundBearer(ctx); token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
 	if token := strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")); token != "" {
@@ -204,6 +212,7 @@ func (c memoryGatewayCommitter) Commit(ctx context.Context, req RouteRequest, re
 		return turnCommitReceipt{}, errors.New("memory-gateway completion failed: " + strings.TrimSpace(string(body)))
 	}
 	var result struct {
+		TurnID       string `json:"turn_id"`
 		MessageID    string `json:"message_id"`
 		CheckpointID string `json:"checkpoint_id"`
 	}
@@ -213,7 +222,12 @@ func (c memoryGatewayCommitter) Commit(ctx context.Context, req RouteRequest, re
 	if strings.TrimSpace(result.MessageID) == "" || strings.TrimSpace(result.CheckpointID) == "" {
 		return turnCommitReceipt{}, errors.New("memory-gateway completion returned an incomplete receipt")
 	}
-	return turnCommitReceipt{MessageID: result.MessageID, CheckpointID: result.CheckpointID}, nil
+	if result.TurnID != req.TurnID {
+		return turnCommitReceipt{}, errors.New("memory-gateway completion receipt is for a different turn")
+	}
+	// memory-gateway inserts the turn.completed outbox job with this operation
+	// ID in the transaction that produced the receipt.
+	return turnCommitReceipt{MessageID: result.MessageID, CheckpointID: result.CheckpointID, OutboxOperationID: req.TurnID + ":completed"}, nil
 }
 
 func (c *controlPlane) commitReply(ctx context.Context, req RouteRequest, reply agentReply) (turnCommitReceipt, error) {
@@ -223,7 +237,7 @@ func (c *controlPlane) commitReply(ctx context.Context, req RouteRequest, reply 
 	// A local store plus an injected dispatcher is intentionally a test seam,
 	// not a production persistence fallback.
 	if c.db == nil && c.store != nil && c.dispatcher != nil {
-		return turnCommitReceipt{MessageID: "test-message-" + req.InteractionID, CheckpointID: "test-checkpoint-" + req.InteractionID}, nil
+		return turnCommitReceipt{MessageID: "test-message-" + req.InteractionID, CheckpointID: "test-checkpoint-" + req.InteractionID, OutboxOperationID: "test-outbox-" + req.InteractionID}, nil
 	}
 	return turnCommitReceipt{}, errors.New("authoritative turn commit is not configured")
 }
@@ -265,11 +279,13 @@ type controlRequest struct {
 }
 
 type controlStatus struct {
-	Status        string         `json:"status"`
-	Performed     bool           `json:"performed"`
-	InteractionID string         `json:"interaction_id,omitempty"`
-	DecisionID    string         `json:"decision_id,omitempty"`
-	Decision      *RouteDecision `json:"decision,omitempty"`
+	Status        string             `json:"status"`
+	Performed     bool               `json:"performed"`
+	InteractionID string             `json:"interaction_id,omitempty"`
+	DecisionID    string             `json:"decision_id,omitempty"`
+	Decision      *RouteDecision     `json:"decision,omitempty"`
+	Lifecycle     *lifecycleResponse `json:"lifecycle,omitempty"`
+	Error         string             `json:"error,omitempty"`
 }
 
 func writeControlJSON(w http.ResponseWriter, status int, value any) {
@@ -366,7 +382,7 @@ func (c *controlPlane) callService(ctx context.Context, system, path string, pay
 		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if token := auth.BearerToken(ctx); token != "" {
+	if token := outboundBearer(ctx); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	if token := strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")); token != "" {
@@ -389,13 +405,19 @@ func (c *controlPlane) callService(ctx context.Context, system, path string, pay
 		return nil, readErr
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, errors.New(strings.TrimSpace(string(responseBody)))
+		// The status is kept in the error so recovery can tell a transient
+		// outage (5xx, 408, 429) from a denial or invalid request (4xx).
+		return nil, errors.New(system + " returned " + strconv.Itoa(response.StatusCode) + ": " + strings.TrimSpace(string(responseBody)))
 	}
 	return responseBody, nil
 }
 
+func hooksConfigured() bool {
+	return strings.TrimSpace(os.Getenv("SCOS_EXTENSION_MANAGER_URL")) != ""
+}
+
 func (c *controlPlane) dispatchHook(ctx context.Context, event string, payload map[string]any, req RouteRequest) error {
-	if strings.TrimSpace(os.Getenv("SCOS_EXTENSION_MANAGER_URL")) == "" {
+	if !hooksConfigured() {
 		return nil
 	}
 	_, err := c.callService(ctx, "extension-manager", "/v1/hooks/dispatch", map[string]any{
@@ -410,155 +432,6 @@ func errorText(err error) string {
 		return ""
 	}
 	return err.Error()
-}
-
-func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decision RouteDecision) (string, lifecycleResponse) {
-	status := "completed"
-	lifecycle := lifecycleResponse{
-		Status: "completed", InteractionID: req.InteractionID, DecisionID: decision.DecisionID,
-		Reply: replyState{Status: "pending"}, Checkpoint: checkpointState{Status: "pending"},
-		Outbox: outboxState{Status: "pending"}, Stages: make([]stageState, len(decision.SelectedPlan)),
-	}
-	for i, step := range decision.SelectedPlan {
-		lifecycle.Stages[i] = stageState{Order: step.Order, System: step.System, Action: step.Action, Required: step.Required, Status: "pending"}
-	}
-	var memory, code []byte
-	var reply agentReply
-	if err := c.dispatchHook(ctx, "pre_turn", map[string]any{"interaction_id": req.InteractionID, "input": req.Input}, req); err != nil {
-		return "degraded", lifecycle
-	}
-	if err := c.dispatchHook(ctx, "on_turn_start", map[string]any{"interaction_id": req.InteractionID}, req); err != nil {
-		return "degraded", lifecycle
-	}
-	for _, step := range decision.SelectedPlan {
-		stage := stageState{Order: step.Order, System: step.System, Action: step.Action, Required: step.Required, Status: "running", StartedAt: time.Now().UTC()}
-		lifecycle.Stages[step.Order-1] = stage
-		if c.store != nil {
-			_ = c.store.updateLifecycle(req.TenantID, req.ActorID, req.InteractionID, func(state *lifecycleState) {
-				if step.Order <= len(state.Stages) {
-					state.Stages[step.Order-1] = stage
-				}
-				state.State = "running"
-			})
-		}
-		var err error
-		if step.System == "agent-router" {
-			err = c.dispatchHook(ctx, "on_before_model", map[string]any{"interaction_id": req.InteractionID, "input": req.Input}, req)
-		}
-		if step.System == "tool-governance" || step.System == "adaptive-execution-proxy" {
-			err = c.dispatchHook(ctx, "on_before_tool", map[string]any{"interaction_id": req.InteractionID, "tool": req.ProposedTool}, req)
-		}
-		if err != nil {
-			stage.Status = "degraded"
-		}
-		if err == nil {
-			switch step.System {
-			case "journal", "autonomous-control-plane", "capability-router", "consolidation":
-				// These stages are owned by this transaction; their completion is
-				// recorded with the lifecycle rather than delegated over HTTP.
-			case "memory-gateway":
-				memory, err = c.callService(ctx, step.System, "/v1/retrieve", map[string]any{
-					"tenant_id": req.TenantID, "principal_id": req.ActorID, "query": req.Input,
-					"agent_id": req.AgentID, "session_id": req.SessionID, "include_recent": true, "include_session": true,
-				}, req)
-			case "code-intelligence":
-				code, err = c.callService(ctx, step.System, "/v1/code/query", map[string]any{
-					"intent": "implementation_search", "query": req.Input, "path": req.RepositoryPath, "max_results": 10,
-				}, req)
-			case "context-optimisation":
-				parts := []string{req.Input, string(memory), string(code)}
-				// Sensitivity and risk travel with the request so the optimiser can
-				// apply its §18 profile floor; a hardcoded "balanced" here would
-				// silently compress high-impact work.
-				_, err = c.callService(ctx, step.System, "/v1/context/compile", map[string]any{
-					"input": strings.Join(parts, "\n\n"), "task_type": contextTaskType(decision),
-					"profile": "", "token_budget": 8000,
-					"risk_class": decision.RiskClass, "sensitivity": req.DataClassification,
-				}, req)
-			case "tool-governance":
-				if strings.TrimSpace(req.ProposedTool) == "" {
-					err = errors.New("proposed_tool is required for governance")
-				} else {
-					_, err = c.callService(ctx, step.System, "/v1/operations/start", map[string]any{
-						"tool_id": req.ProposedTool, "input": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
-					}, req)
-				}
-			case "adaptive-execution-proxy":
-				_, err = c.callService(ctx, step.System, "/v1/proxy/execute", map[string]any{
-					"tenant_id": req.TenantID, "principal_id": req.ActorID, "agent_id": req.AgentID,
-					"operation_id": req.InteractionID, "command": req.ProposedTool, "working_directory": req.RepositoryPath,
-					"confirmed": !decision.ConfirmationRequired,
-				}, req)
-			case "agent-router":
-				reply, err = c.dispatchAgent(ctx, agentRequest{InteractionID: req.InteractionID, TenantID: req.TenantID, PrincipalID: req.ActorID, AgentID: req.AgentID, Input: req.Input, Context: strings.Join([]string{string(memory), string(code)}, "\n\n")})
-			case "turn-coordinator":
-				if strings.TrimSpace(reply.Content) == "" {
-					err = errors.New("agent reply was not captured")
-				}
-				if err == nil {
-					var receipt turnCommitReceipt
-					receipt, err = c.commitReply(ctx, req, reply)
-					if err == nil {
-						lifecycle.Checkpoint = checkpointState{Status: "completed", ID: receipt.CheckpointID}
-						lifecycle.Outbox = outboxState{Status: "completed"}
-					}
-				}
-				if err == nil {
-					lifecycle.Reply = replyState{Status: "completed", Content: reply.Content}
-				}
-			default:
-				err = errors.New("service URL is not configured")
-			}
-		}
-		if step.System == "agent-router" && err == nil {
-			err = c.dispatchHook(ctx, "on_after_model", map[string]any{"interaction_id": req.InteractionID, "reply": reply.Content}, req)
-		}
-		if step.System == "tool-governance" || step.System == "adaptive-execution-proxy" {
-			hookEvent := "on_after_tool"
-			if err != nil {
-				hookEvent = "on_tool_error"
-			}
-			hookErr := c.dispatchHook(ctx, hookEvent, map[string]any{"interaction_id": req.InteractionID, "tool": req.ProposedTool, "error": errorText(err)}, req)
-			if err == nil {
-				err = hookErr
-			}
-		}
-		if step.System == "turn-coordinator" && err == nil {
-			err = c.dispatchHook(ctx, "on_checkpoint", map[string]any{"interaction_id": req.InteractionID, "checkpoint_id": lifecycle.Checkpoint.ID}, req)
-		}
-		stage.Status, stage.EndedAt = "completed", time.Now().UTC()
-		if err != nil {
-			stage.Status, stage.Detail = "degraded", err.Error()
-			if status == "completed" {
-				status = "degraded"
-			}
-		}
-		lifecycle.Stages[step.Order-1] = stage
-		lifecycle.Status = status
-		if c.store != nil {
-			if updateErr := c.store.updateLifecycle(req.TenantID, req.ActorID, req.InteractionID, func(state *lifecycleState) {
-				if step.Order <= len(state.Stages) {
-					state.Stages[step.Order-1] = stage
-				}
-				state.State = status
-				if err == nil && step.System == "turn-coordinator" {
-					state.Reply, state.Checkpoint, state.Outbox = lifecycle.Reply, lifecycle.Checkpoint, lifecycle.Outbox
-				}
-			}); updateErr != nil {
-				status = "degraded"
-				lifecycle.Status = status
-				lifecycle.Reply, lifecycle.Checkpoint, lifecycle.Outbox = replyState{Status: "pending"}, checkpointState{Status: "pending"}, outboxState{Status: "pending"}
-			}
-		}
-	}
-	if err := c.dispatchHook(ctx, "post_turn", map[string]any{"interaction_id": req.InteractionID, "reply": reply.Content}, req); err != nil && status == "completed" {
-		status = "degraded"
-		lifecycle.Status = status
-	}
-	if c.store != nil {
-		return status, c.lifecycle(ctx, req.TenantID, req.ActorID, req.InteractionID, decision)
-	}
-	return status, lifecycle
 }
 
 func (c *controlPlane) lifecycle(_ context.Context, tenantID, actorID, interactionID string, decision RouteDecision) lifecycleResponse {
@@ -606,6 +479,7 @@ func (c *controlPlane) lifecycleDB(ctx context.Context, tenantID, actorID, inter
 		return result, err
 	}
 	defer rows.Close()
+	stageIndex := map[string]int{}
 	for rows.Next() {
 		var name, stageStatus, detail string
 		var started, ended time.Time
@@ -617,6 +491,13 @@ func (c *controlPlane) lifecycleDB(ctx context.Context, tenantID, actorID, inter
 		if len(parts) == 2 {
 			stage.Action = parts[1]
 		}
+		// A recovered run appends a new row per stage; the latest one wins.
+		if at, seen := stageIndex[name]; seen {
+			stage.Order = at + 1
+			result.Stages[at] = stage
+			continue
+		}
+		stageIndex[name] = len(result.Stages)
 		stage.Order = len(result.Stages) + 1
 		result.Stages = append(result.Stages, stage)
 	}
@@ -629,7 +510,10 @@ func (c *controlPlane) lifecycleDB(ctx context.Context, tenantID, actorID, inter
 	return result, nil
 }
 
-func (c *controlPlane) persistLifecycleDB(ctx context.Context, req RouteRequest, decision RouteDecision, lifecycle lifecycleResponse) error {
+// persistLifecycleDB records a finished execution: the run's final status and
+// one lifecycle_stages row per stage. owner is the recovery lease holder, or
+// "" for a first execution; a write that has lost the lease is refused.
+func (c *controlPlane) persistLifecycleDB(ctx context.Context, req RouteRequest, decision RouteDecision, lifecycle lifecycleResponse, owner string) error {
 	if c.db == nil {
 		return nil
 	}
@@ -640,30 +524,29 @@ func (c *controlPlane) persistLifecycleDB(ctx context.Context, req RouteRequest,
 	if err != nil {
 		return err
 	}
-	tx, err := c.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT set_config('scos.tenant_id',$1,true)`, req.TenantID); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `SELECT set_config('scos.principal_id',$1,true)`, req.ActorID); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `UPDATE orchestration_runs SET status=$1,current_stage=$2,checkpoint=$3,completed_at=CASE WHEN $1 IN ('completed','degraded') THEN now() ELSE completed_at END WHERE tenant_id=$4 AND interaction_id=$5`, lifecycle.Status, lastStage(decision), checkpoint, req.TenantID, req.InteractionID); err != nil {
-		return err
-	}
-	for _, stage := range lifecycle.Stages {
-		dbStatus := stage.Status
-		if dbStatus == "degraded" {
-			dbStatus = "failed"
-		}
-		if _, err = tx.Exec(ctx, `INSERT INTO lifecycle_stages (tenant_id,stage_name,status,input_reference,policy_version,started_at,completed_at,error_detail) SELECT tenant_id,$1,$2,$3,$4,$5,$6,$7 FROM orchestration_runs WHERE tenant_id=$8 AND interaction_id=$9`, stage.System+":"+stage.Action, dbStatus, req.InteractionID, decision.PolicyVersion, stage.StartedAt, stage.EndedAt, stage.Detail, req.TenantID, req.InteractionID); err != nil {
+	return c.inTenantTx(ctx, req.TenantID, req.ActorID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE orchestration_runs SET status=@status, current_stage=@stage, checkpoint=checkpoint || @checkpoint::jsonb,
+				completed_at=CASE WHEN @status IN ('completed','degraded','failed') THEN now() ELSE completed_at END
+			WHERE tenant_id=@tenant AND interaction_id=@interaction AND `+leaseFence,
+			pgx.NamedArgs{"status": lifecycle.Status, "stage": lastStage(decision), "checkpoint": checkpoint, "owner": owner,
+				"tenant": req.TenantID, "interaction": req.InteractionID})
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit(ctx)
+		if tag.RowsAffected() == 0 {
+			return errLeaseLost
+		}
+		for _, stage := range lifecycle.Stages {
+			dbStatus := stage.Status
+			if dbStatus == "degraded" {
+				dbStatus = "failed"
+			}
+			if _, err = tx.Exec(ctx, `INSERT INTO lifecycle_stages (tenant_id,stage_name,status,input_reference,policy_version,started_at,completed_at,error_detail) SELECT tenant_id,$1,$2,$3,$4,$5,$6,$7 FROM orchestration_runs WHERE tenant_id=$8 AND interaction_id=$9`, stage.System+":"+stage.Action, dbStatus, req.InteractionID, decision.PolicyVersion, stage.StartedAt, stage.EndedAt, stage.Detail, req.TenantID, req.InteractionID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func lastStage(decision RouteDecision) string {
@@ -690,6 +573,12 @@ func (c *controlPlane) persistRouteDB(ctx context.Context, req RouteRequest, dec
 	if err != nil {
 		return err
 	}
+	// The request is saved with the run before execution so recovery can
+	// resume it after a crash.
+	runCheckpoint, err := json.Marshal(lifecycleState{State: "planned", IngressStatus: "committed", Request: &req, UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
 	tx, err := c.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -701,14 +590,14 @@ func (c *controlPlane) persistRouteDB(ctx context.Context, req RouteRequest, dec
 	if _, err = tx.Exec(ctx, `SELECT set_config('scos.principal_id',$1,true)`, req.ActorID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO orchestration_runs (tenant_id,interaction_id,status,current_stage,policy_version,registry_generation,checkpoint) VALUES ($1,$2,'planned','routed',$3,$4,'{}'::jsonb) ON CONFLICT (tenant_id,interaction_id) DO UPDATE SET status='planned', current_stage='routed'`, req.TenantID, req.InteractionID, decision.PolicyVersion, decision.RegistryGeneration); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO orchestration_runs (tenant_id,interaction_id,status,current_stage,policy_version,registry_generation,checkpoint) VALUES ($1,$2,'planned','routed',$3,$4,$5) ON CONFLICT (tenant_id,interaction_id) DO UPDATE SET status='planned', current_stage='routed', checkpoint=EXCLUDED.checkpoint`, req.TenantID, req.InteractionID, decision.PolicyVersion, decision.RegistryGeneration, runCheckpoint); err != nil {
 		return err
 	}
 	var runID string
 	if err = tx.QueryRow(ctx, `SELECT id FROM orchestration_runs WHERE tenant_id=$1 AND interaction_id=$2`, req.TenantID, req.InteractionID).Scan(&runID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO routing_decisions (tenant_id,actor_id,orchestration_run_id,decision_id,intent_labels,resolved_scope,risk_class,freshness_requirement,candidate_capabilities,selected_plan,reason_codes,confidence,policy_version,registry_generation,actual_outcome) VALUES ($1,$2,$3,$4,$5,'{}'::jsonb,$6,$7,'[]'::jsonb,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING`, req.TenantID, req.ActorID, runID, decision.DecisionID, intentLabels, decision.RiskClass, decision.FreshnessRequirement, plan, reasonCodes, decision.Confidence, decision.PolicyVersion, decision.RegistryGeneration, outcome); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO routing_decisions (tenant_id,actor_id,orchestration_run_id,decision_id,intent_labels,resolved_scope,risk_class,freshness_requirement,candidate_capabilities,selected_plan,reason_codes,confidence,policy_version,registry_generation,actual_outcome) VALUES ($1,$2,$3,$4,$5,'{}'::jsonb,$6,$7,'[]'::jsonb,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING`, req.TenantID, req.ActorID, runID, decision.DecisionID, intentLabels, decision.RiskClass, decision.FreshnessRequirement, plan, reasonCodes, decision.Confidence, decision.PolicyVersion, strconv.FormatInt(decision.RegistryGeneration, 10), outcome); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -799,62 +688,6 @@ func (c *controlPlane) decisionForInteraction(ctx context.Context, tenantID, act
 	return decision, nil
 }
 
-func (c *controlPlane) beginRecovery(ctx context.Context, tenantID, actorID, interactionID string) (string, error) {
-	if c == nil || (c.db == nil && c.store == nil) {
-		return "", errors.New("control-plane persistence is unavailable")
-	}
-	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(actorID) == "" || strings.TrimSpace(interactionID) == "" {
-		return "", errors.New("tenant_id, actor_id and interaction_id are required")
-	}
-	if c.db == nil {
-		return c.store.beginRecovery(tenantID, actorID, interactionID)
-	}
-	tx, err := c.db.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT set_config('scos.tenant_id',$1,true)`, tenantID); err != nil {
-		return "", err
-	}
-	if _, err = tx.Exec(ctx, `SELECT set_config('scos.principal_id',$1,true)`, actorID); err != nil {
-		return "", err
-	}
-	var runID, state string
-	err = tx.QueryRow(ctx, `SELECT id::text, status FROM orchestration_runs WHERE tenant_id=$1 AND interaction_id=$2 FOR UPDATE`, tenantID, interactionID).Scan(&runID, &state)
-	if err != nil {
-		return "", err
-	}
-	if state != "running" && state != "interrupted" {
-		if err = tx.Commit(ctx); err != nil {
-			return "", err
-		}
-		return state, nil
-	}
-	if _, err = tx.Exec(ctx, `UPDATE orchestration_runs SET status='recovering', current_stage='recovery' WHERE id=$1`, runID); err != nil {
-		return "", err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", err
-	}
-	if c.store != nil {
-		key := stateKey(tenantID, actorID, interactionID)
-		c.store.mu.Lock()
-		if lifecycle, ok := c.store.data.Lifecycles[key]; ok {
-			lifecycle.State = "recovering"
-			lifecycle.RecoveryStatus = "started"
-			lifecycle.UpdatedAt = time.Now().UTC()
-			c.store.data.Lifecycles[key] = lifecycle
-			if err := c.store.writeLocked(); err != nil {
-				c.store.mu.Unlock()
-				return "", err
-			}
-		}
-		c.store.mu.Unlock()
-	}
-	return "recovering", nil
-}
-
 type RouteStep struct {
 	Order    int    `json:"order"`
 	System   string `json:"system"`
@@ -927,7 +760,7 @@ func (c *controlPlane) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status, lifecycle := c.executeRoute(r.Context(), req, decision)
-	if err := c.persistLifecycleDB(r.Context(), req, decision, lifecycle); err != nil {
+	if err := c.persistLifecycleDB(r.Context(), req, decision, lifecycle, ""); err != nil {
 		writeControlError(w, http.StatusServiceUnavailable, "persist lifecycle: "+err.Error())
 		return
 	}
@@ -1037,7 +870,12 @@ func (c *controlPlane) handleRecover(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusBadRequest, "interaction_id is required")
 		return
 	}
-	state, err := c.beginRecovery(r.Context(), tenantID, actorID, req.InteractionID)
+	owner, err := newID()
+	if err != nil {
+		writeControlError(w, http.StatusServiceUnavailable, "start recovery: "+err.Error())
+		return
+	}
+	claim, err := c.beginRecovery(r.Context(), tenantID, actorID, req.InteractionID, "api:"+owner)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errLocalStateNotFound) {
 			writeControlJSON(w, http.StatusNotFound, controlStatus{Status: "not_found", Performed: false, InteractionID: req.InteractionID})
@@ -1046,11 +884,17 @@ func (c *controlPlane) handleRecover(w http.ResponseWriter, r *http.Request) {
 		writeControlError(w, http.StatusServiceUnavailable, "start recovery: "+err.Error())
 		return
 	}
-	if state != "recovering" {
-		writeControlJSON(w, http.StatusConflict, controlStatus{Status: state, Performed: false, InteractionID: req.InteractionID})
+	if !claim.Claimed {
+		writeControlJSON(w, http.StatusConflict, controlStatus{Status: claim.State, Performed: false, InteractionID: req.InteractionID})
 		return
 	}
-	writeControlJSON(w, http.StatusAccepted, controlStatus{Status: "recovering", Performed: true, InteractionID: req.InteractionID})
+	final, lifecycle, err := c.recoverRun(r.Context(), tenantID, actorID, req.InteractionID, claim)
+	result := controlStatus{Status: final, Performed: true, InteractionID: req.InteractionID, DecisionID: lifecycle.DecisionID, Lifecycle: &lifecycle, Error: errorText(err)}
+	if final != "completed" {
+		writeControlJSON(w, http.StatusBadGateway, result)
+		return
+	}
+	writeControlJSON(w, http.StatusOK, result)
 }
 
 func containsAny(value string, terms ...string) bool {
@@ -1115,9 +959,6 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 	}
 	if class.has("fresh_external_information") {
 		steps = append(steps, RouteStep{System: "capability-router", Action: "select_current_authoritative_source", Required: true})
-	}
-	if class.has("recovery") {
-		steps = append(steps, RouteStep{System: "recovery-orchestrator", Action: "rehydrate_checkpoint_and_reconcile", Required: true})
 	}
 	if class.has("monitoring") {
 		steps = append(steps, RouteStep{System: "observability", Action: "collect_operational_status", Required: false})
@@ -1275,6 +1116,14 @@ func main() {
 	mux.HandleFunc("/v1/control/status", plane.handleStatus)
 	mux.HandleFunc("/v1/control/status/", plane.handleStatus)
 	mux.HandleFunc("/v1/triggers", plane.handleIngest)
+
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	defer stopSweep()
+	if sweeper, reason := newRecoverySweeperFromEnvironment(sweepCtx, plane); sweeper != nil {
+		go sweeper.run(sweepCtx)
+	} else {
+		logger.Warn("automatic recovery disabled", "reason", reason)
+	}
 
 	addr := os.Getenv("SCOS_CONTROL_HTTP_ADDR")
 	if addr == "" {

@@ -33,6 +33,60 @@ jobs:
       - name: go test
         run: go test ./...
 
+  sql-schema:
+    name: SQL statements prepare against migrated schema
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: scos
+          POSTGRES_PASSWORD: scos-ci
+          POSTGRES_DB: scos_memory
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U scos -d scos_memory"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      PGPASSWORD: scos-ci
+      DATABASE_URL: postgresql://scos:scos-ci@127.0.0.1:5432/scos_memory?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
+      - name: Apply all migrations and policies from zero
+        run: |
+          for file in database/migrations/*.sql database/policies/*.sql; do
+            psql -h 127.0.0.1 -U scos -d scos_memory -v ON_ERROR_STOP=1 \
+              -v app_password=ci-app -v worker_password=ci-worker -v backup_password=ci-backup -f "$file"
+          done
+          psql -h 127.0.0.1 -U scos -d scos_memory -v ON_ERROR_STOP=1 -c "SELECT scos_reconcile_backup_role()"
+      - name: Every static SQL statement prepares
+        run: go test -tags=integration -count=1 -run TestAllSQLStatementsPrepare -v ./database/integration
+      - name: Store integration tests against the migrated schema
+        env:
+          SCOS_MEMORY_STORE_TEST_DSN: ${{ env.DATABASE_URL }}
+          SCOS_OKF_STORE_TEST_DSN: ${{ env.DATABASE_URL }}
+          SCOS_CODE_STORE_TEST_DSN: ${{ env.DATABASE_URL }}
+          SCOS_TOOL_GOVERNANCE_TEST_DSN: ${{ env.DATABASE_URL }}
+          SCOS_AGENT_REGISTRY_TEST_DSN: ${{ env.DATABASE_URL }}
+          SCOS_RETRIEVAL_TEST_DSN: ${{ env.DATABASE_URL }}
+          SCOS_HERMES_STORE_TEST_DSN: ${{ env.DATABASE_URL }}
+          # hermes-provider handlers run as the restricted runtime role, so its
+          # RLS policies are exercised, not bypassed by the owner.
+          SCOS_HERMES_APP_TEST_DSN: postgresql://scos_app:ci-app@127.0.0.1:5432/scos_memory?sslmode=disable
+        run: |
+          go test -count=1 -run 'TestPG' -v ./services/memory-intelligence/cmd/server ./services/okf-synchroniser/cmd/server ./services/code-intelligence/cmd/server
+          go test -count=1 -run 'TestPG|TestP4' -v ./services/retrieval-orchestrator/cmd/server ./services/hermes-provider/cmd/server
+          go test -count=1 -v ./services/tool-governance/cmd/server ./services/agent-registry/cmd/server
+
   python:
     name: Python compile, unit tests, schema validation
     runs-on: ubuntu-latest
@@ -53,7 +107,13 @@ jobs:
           python3 -m unittest discover -s workers/embeddings/tests -v
           python3 -m unittest discover -s workers/index-maintenance -p "test_*.py" -v
           python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
+          python3 -m unittest discover -s tests -p "test_benchmark*.py" -v
           python3 tests/failure-injection/test_runner.py -v
+          for t in test_compose_security test_auto_persist_hooks test_auto_recall_hooks test_mcp_bridge test_hermes_scos_memory_plugin; do
+            python3 -m unittest discover -s tests -p "$t.py" -v
+          done
+      - name: Verify frozen benchmark evidence baseline
+        run: python3 benchmarks/verify_frozen.py
       - name: JSON Schema validation
         run: python3 scripts/validate_json.py
       - name: Governance structural audit

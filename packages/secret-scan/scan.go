@@ -8,6 +8,7 @@ package secretscan
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -21,6 +22,7 @@ const (
 	KindSSN           Kind = "ssn"
 	KindCreditCard    Kind = "credit_card"
 	KindHighEntropy   Kind = "high_entropy_token"
+	KindGenericSecret Kind = "generic_secret"
 )
 
 // Finding is one pattern match within scanned content.
@@ -33,19 +35,27 @@ type Finding struct {
 type pattern struct {
 	kind Kind
 	re   *regexp.Regexp
+	// group, when non-zero, selects the capture group that is the secret
+	// itself (the keyword before it is context, not sensitive).
+	group int
 }
 
 var patterns = []pattern{
-	{KindAWSAccessKey, regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`)},
-	{KindJWT, regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)},
-	{KindPrivateKeyPEM, regexp.MustCompile(`-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----`)},
-	{KindSSN, regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
-	{KindCreditCard, regexp.MustCompile(`\b(?:\d[ -]?){13,16}\b`)},
+	{kind: KindAWSAccessKey, re: regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`)},
+	{kind: KindJWT, re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)},
+	{kind: KindPrivateKeyPEM, re: regexp.MustCompile(`-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----`)},
+	{kind: KindSSN, re: regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
+	{kind: KindCreditCard, re: regexp.MustCompile(`\b(?:\d[ -]?){13,16}\b`)},
+	// Keyword-anchored secret (gitleaks' generic-api-key shape): a value
+	// assigned to a credential-named key, e.g. api_key="3f9a...". This is
+	// what catches single-case hex keys; bare hex runs are left alone
+	// because git SHAs and content hashes are ordinary memory content.
+	{kind: KindGenericSecret, group: 1, re: regexp.MustCompile(`(?i)\b(?:api[_-]?key|access[_-]?key|secret(?:[_-]?key)?|client[_-]?secret|auth[_-]?token|access[_-]?token|token|passw(?:or)?d|pwd|bearer)\b["']?\s*(?:[:=]|\s)\s*["']?([A-Za-z0-9+/_.=~-]{16,})`)},
 	// Generic high-entropy token: a long run of base64/hex-alphabet
 	// characters mixing case and digits, the shape gitleaks' generic-api-key
 	// rule targets. Deliberately conservative (32+ chars, must mix letter
 	// case and digits) to keep false positives on ordinary prose low.
-	{KindHighEntropy, regexp.MustCompile(`\b(?:[A-Za-z0-9+/_-]{32,})\b`)},
+	{kind: KindHighEntropy, re: regexp.MustCompile(`\b(?:[A-Za-z0-9+/_-]{32,})\b`)},
 }
 
 // Scan returns every pattern match in content. Findings are ordered by
@@ -56,9 +66,12 @@ func Scan(content string) []Finding {
 	var findings []Finding
 	var claimed [][2]int
 	for _, p := range patterns {
-		for _, l := range p.re.FindAllStringIndex(content, -1) {
-			loc := [2]int{l[0], l[1]}
-			if p.kind == KindHighEntropy && overlapsAny(loc, claimed) {
+		for _, l := range p.re.FindAllStringSubmatchIndex(content, -1) {
+			loc := [2]int{l[2*p.group], l[2*p.group+1]}
+			if loc[0] < 0 {
+				continue
+			}
+			if (p.kind == KindHighEntropy || p.kind == KindGenericSecret) && overlapsAny(loc, claimed) {
 				continue
 			}
 			if p.kind == KindHighEntropy && !mixedCaseAndDigits(content[loc[0]:loc[1]]) {
@@ -72,6 +85,12 @@ func Scan(content string) []Finding {
 			claimed = append(claimed, loc)
 		}
 	}
+	sort.SliceStable(findings, func(i, j int) bool {
+		if findings[i].Span[0] != findings[j].Span[0] {
+			return findings[i].Span[0] < findings[j].Span[0]
+		}
+		return findings[i].Span[1] > findings[j].Span[1] // longer span first
+	})
 	return findings
 }
 
@@ -83,17 +102,28 @@ func Redact(content string, findings []Finding) string {
 	if len(findings) == 0 {
 		return content
 	}
+	sorted := append([]Finding(nil), findings...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Span[0] < sorted[j].Span[0] })
 	var b strings.Builder
 	last := 0
-	for _, f := range findings {
-		if f.Span[0] < last {
-			continue // overlapping/out-of-order span, skip rather than corrupt output
+	for i := 0; i < len(sorted); {
+		// Merge every span overlapping this one into a single redaction so
+		// no secret byte survives, whatever order the findings came in.
+		start, end, kind := sorted[i].Span[0], sorted[i].Span[1], sorted[i].Kind
+		for i++; i < len(sorted) && sorted[i].Span[0] < end; i++ {
+			end = max(end, sorted[i].Span[1])
 		}
-		b.WriteString(content[last:f.Span[0]])
+		if start < last { // fully nested in an already-redacted span
+			start = last
+		}
+		if end <= start {
+			continue
+		}
+		b.WriteString(content[last:start])
 		b.WriteString("[REDACTED:")
-		b.WriteString(string(f.Kind))
+		b.WriteString(string(kind))
 		b.WriteString("]")
-		last = f.Span[1]
+		last = end
 	}
 	b.WriteString(content[last:])
 	return b.String()

@@ -24,6 +24,7 @@ Config comes from ~/.hermes/scos.env:
                            to the legacy SCOS_HERMES_BEARER_TOKEN name)
   SCOS_TENANT_ID / SCOS_PRINCIPAL_ID  identity
   SCOS_TLS_CA_PATH         CA for TLS verification (optional)
+  SCOS_TLS_INSECURE_SKIP_VERIFY=1  disable TLS verification (development only)
 
 Route logs to stderr so stdout stays protocol-clean.
 """
@@ -39,6 +40,7 @@ ENV_PATH = os.path.expanduser("~/.hermes/scos.env")
 DEFAULTS = {
     "SCOS_GATEWAY_URL": "https://127.0.0.1:8098/mcp",
     "SCOS_TLS_CA_PATH": "",
+    "SCOS_TLS_INSECURE_SKIP_VERIFY": "",
 }
 
 
@@ -51,10 +53,12 @@ def load_env():
                 if line and "=" in line and not line.startswith("#"):
                     k, v = line.split("=", 1)
                     env[k] = v
-    # Process environment wins
-    for k in list(env.keys()):
-        if os.getenv(k):
-            env[k] = os.getenv(k)
+    # Process environment wins -- including SCOS_* keys absent from both the
+    # defaults and scos.env, so credentials passed through an MCP client's
+    # "env" block are honoured rather than silently dropped.
+    for k, v in os.environ.items():
+        if v and (k in env or k.startswith("SCOS_")):
+            env[k] = v
     return env
 
 
@@ -79,7 +83,7 @@ def ssl_ctx():
     if CA_PATH and not os.path.exists(CA_PATH):
         raise RuntimeError(f"SCOS_TLS_CA_PATH does not exist: {CA_PATH}")
     ctx = ssl.create_default_context(cafile=CA_PATH or None)
-    if os.environ.get("SCOS_TLS_INSECURE_SKIP_VERIFY") == "1":
+    if ENV.get("SCOS_TLS_INSECURE_SKIP_VERIFY") == "1":
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     return ctx

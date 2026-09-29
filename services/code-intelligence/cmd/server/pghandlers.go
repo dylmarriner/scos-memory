@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 )
 
 // v2 handlers expose pgCodeStore over HTTP, additive alongside every
@@ -208,9 +210,9 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 	// canonical_path), not on repository_id, so a repository_id supplied by
 	// one tenant that happens to belong to another is rejected here rather
 	// than silently indexing into it.
-	var owningTenant string
+	var owningTenant, repositoryPath string
 	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+		`SELECT tenant_id::text, canonical_path FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant, &repositoryPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
@@ -233,10 +235,16 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.pgStore.IndexSnapshot(r.Context(), snapshotID, req.RepositoryID, files); err != nil {
+	activated, err := s.pgStore.IndexSnapshot(r.Context(), snapshotID, req.RepositoryID, files)
+	if err != nil {
 		http.Error(w, "index snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if activated {
+		s.hooks.Notify(r.Context(), hooksdk.OnIndexChange, tenant, principal,
+			indexChangePayload(req.RepositoryID, repositoryPath, req.Branch, req.CommitID, snapshotID, len(files)))
+	}
+	s.emitIndexHealth(r.Context(), tenant, req.RepositoryID, req.Branch, true)
 	degradedModels := []string{}
 	if codeModelRuntimeConfigured() {
 		if err := s.embedCodeSnapshot(r.Context(), tenant, snapshotID); err != nil {
@@ -388,6 +396,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"results": []PGSymbolVersion{}})
 		return
 	}
+	s.emitIndexHealth(r.Context(), tenant, req.RepositoryID, req.Branch, false)
 
 	exact, err := s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, req.Query)
 	if err != nil {

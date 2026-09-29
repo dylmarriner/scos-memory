@@ -225,7 +225,7 @@ def _insert_pattern_fact(
         cur.execute(
             """
             INSERT INTO memory_versions (id, memory_id, version_number, content, structured_content, content_hash, change_reason, created_by)
-            VALUES (%s,%s,1,%s,%s,encode(sha256(%s::bytea),'hex'),'synthesis',%s)
+            VALUES (%s,%s,1,%s,%s,encode(sha256(convert_to(%s,'UTF8')),'hex'),'synthesis',%s)
             """,
             (version_id, memory_id, content, structured, content, owner_principal_id),
         )

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,8 +97,8 @@ func TestSessionEndDrainsOnlyThatSession(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if result["drained"].(float64) != 1 {
-		t.Fatalf("expected 1 drained item, got %v", result["drained"])
+	if result["discarded_prefetches"].(float64) != 1 {
+		t.Fatalf("expected the ended session's 1 queued pre-warm to be discarded, got %v", result["discarded_prefetches"])
 	}
 	// The other session's pre-warm work must survive as replayable pending work.
 	if result["pending"].(float64) != 1 {
@@ -131,11 +132,16 @@ func TestConfigSchemaMatchesGovernedContract(t *testing.T) {
 func TestSaveConfigValidation(t *testing.T) {
 	srv := newHermesServer()
 	valid := map[string]any{
-		"base_url": "https://scos.internal", "tenant_id": "t-1", "principal_id": "u-1",
+		"base_url": "https://scos.internal", "tenant_id": testTenantID, "principal_id": testPrincipalID,
 	}
 
-	if w := post(t, srv.handleSaveConfig, "/v1/provider/save_config", valid); w.Code != http.StatusOK {
-		t.Fatalf("valid config rejected: %d %s", w.Code, w.Body.String())
+	// A configuration naming someone else is refused before anything is
+	// written (the successful save is exercised against PostgreSQL in
+	// TestPGSaveConfigPersistsForTheCaller).
+	if w := post(t, srv.handleSaveConfig, "/v1/provider/save_config", map[string]any{
+		"base_url": "https://scos.internal", "tenant_id": testTenantID, "principal_id": "someone-else",
+	}); w.Code != http.StatusForbidden && w.Code != http.StatusBadRequest {
+		t.Fatalf("config for another principal must be refused, got %d", w.Code)
 	}
 
 	// §24.4: secrets must never be accepted inline.
@@ -199,28 +205,58 @@ func TestToolCallRejectsUnknownTool(t *testing.T) {
 	}
 }
 
-func TestToolCallServesStatusAndDelegatesOthers(t *testing.T) {
+func TestToolCallServesStatusAndProxiesMemoryIntelligenceTools(t *testing.T) {
 	srv := newHermesServer()
-
-	w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_status"})
-	if w.Code != http.StatusOK {
+	if w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_status"}); w.Code != http.StatusOK {
 		t.Fatalf("scos_status failed: %d %s", w.Code, w.Body.String())
 	}
 
-	// Tools owned by memory-intelligence report the boundary rather than
-	// fabricating a local answer.
-	for _, tool := range []string{"scos_user_model", "scos_memory_graph", "scos_explain", "scos_correct", "scos_forget"} {
-		w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": tool})
+	type seen struct{ method, path, tenant, principal, body string }
+	var got []seen
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, seen{r.Method, r.URL.RequestURI(), r.Header.Get("X-SCOS-Tenant-ID"), r.Header.Get("X-SCOS-Principal-ID"), string(b)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"served_by": "memory-intelligence", "path": r.URL.Path})
+	}))
+	defer upstream.Close()
+	srv.memoryIntelligenceURL = upstream.URL
+	srv.upstreamClient = upstream.Client()
+
+	fact := "0f0e0d0c-0b0a-4908-8706-050403020100"
+	calls := []struct {
+		tool       string
+		args       map[string]any
+		wantMethod string
+		wantPath   string
+		wantBody   string
+	}{
+		{"scos_user_model", nil, "GET", "/v1/dashboard/user-model", ""},
+		{"scos_memory_graph", nil, "GET", "/v1/memory/graph", ""},
+		{"scos_explain", map[string]any{"memory_id": fact}, "GET", "/v1/facts/" + fact, ""},
+		{"scos_correct", map[string]any{"memory_id": fact, "value": "uses Postgres 17", "reason": "upgrade"}, "PATCH", "/v1/facts/" + fact, `"content":"uses Postgres 17"`},
+		{"scos_forget", map[string]any{"memory_id": fact, "cascade": true}, "DELETE", "/v1/facts/" + fact + "?cascade=true", ""},
+	}
+	for i, c := range calls {
+		w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": c.tool, "arguments": c.args})
 		if w.Code != http.StatusOK {
-			t.Fatalf("%s failed: %d", tool, w.Code)
+			t.Fatalf("%s: %d %s", c.tool, w.Code, w.Body.String())
 		}
-		var result map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-			t.Fatalf("decode %s: %v", tool, err)
+		if !strings.Contains(w.Body.String(), `"served_by":"memory-intelligence"`) {
+			t.Fatalf("%s did not return memory-intelligence's answer: %s", c.tool, w.Body.String())
 		}
-		if result["delegated_to"] != "memory-intelligence" {
-			t.Errorf("%s did not report its owning service: %v", tool, result)
+		call := got[i]
+		if call.method != c.wantMethod || call.path != c.wantPath || !strings.Contains(call.body, c.wantBody) {
+			t.Fatalf("%s sent %s %s %q", c.tool, call.method, call.path, call.body)
 		}
+		if call.tenant != testTenantID || call.principal != testPrincipalID {
+			t.Fatalf("%s must act as the caller, forwarded %s/%s", c.tool, call.tenant, call.principal)
+		}
+	}
+	if w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_explain", "arguments": map[string]any{"memory_id": "../admin"}}); w.Code != http.StatusBadRequest {
+		t.Fatalf("a non-UUID memory_id must be rejected before any upstream call, got %d", w.Code)
+	}
+	if len(got) != len(calls) {
+		t.Fatalf("unexpected upstream calls: %d", len(got))
 	}
 }
 

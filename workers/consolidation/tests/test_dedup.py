@@ -47,8 +47,28 @@ class DedupTests(unittest.TestCase):
             }
         ]
         results = deduplicate([c], existing)
-        # Should find match and merge
-        self.assertIn(results[0].action, ("merged", "new"))
+        self.assertEqual(results[0].action, "merged")
+        self.assertEqual(results[0].merged_into, existing[0])
+
+    def test_merged_regardless_of_title(self):
+        # Turn-event titles are unique per turn ("turn/<id>"); the same fact
+        # arriving in a later turn must still be recognised as a duplicate.
+        c = _candidate(title="turn/" + str(uuid4()), content="The   project uses\nPostgreSQL.")
+        existing = [
+            {
+                "id": str(uuid4()),
+                "title": "turn/" + str(uuid4()),
+                "content": "The project uses PostgreSQL.",
+                "authority_level": 60,
+            }
+        ]
+        self.assertEqual(deduplicate([c], existing)[0].action, "merged")
+
+    def test_shared_long_prefix_is_not_a_duplicate(self):
+        prefix = "x" * 400
+        c = _candidate(content=prefix + " first")
+        existing = [{"id": str(uuid4()), "title": "t", "content": prefix + " second", "authority_level": 60}]
+        self.assertEqual(deduplicate([c], existing)[0].action, "new")
 
     def test_superseded_when_authority_gap_large(self):
         c = _candidate(authority_level=95)

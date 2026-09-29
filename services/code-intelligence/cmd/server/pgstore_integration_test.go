@@ -79,7 +79,7 @@ func TestPGExactSymbolResolution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
 		{Path: "pkg/handler.go", Language: "go", ContentHash: hashContent("package pkg\nfunc Handler() {}\n")},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -117,7 +117,7 @@ func TestPGRenamePreservesSymbolIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 1: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
 		{Path: "pkg/old_name.go", Language: "go", ContentHash: content},
 	}); err != nil {
 		t.Fatalf("index snapshot 1: %v", err)
@@ -132,7 +132,7 @@ func TestPGRenamePreservesSymbolIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 2: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
 		{Path: "pkg/new_name.go", Language: "go", ContentHash: content},
 	}); err != nil {
 		t.Fatalf("index snapshot 2: %v", err)
@@ -175,7 +175,7 @@ func TestPGBranchesCoexistIndependently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create main snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, mainSnap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, mainSnap, repoID, []PGFileInput{
 		{Path: "pkg/only_in_main.go", Language: "go", ContentHash: hashContent("main")},
 	}); err != nil {
 		t.Fatalf("index main: %v", err)
@@ -185,7 +185,7 @@ func TestPGBranchesCoexistIndependently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create feature snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, featureSnap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, featureSnap, repoID, []PGFileInput{
 		{Path: "pkg/only_in_feature.go", Language: "go", ContentHash: hashContent("feature")},
 	}); err != nil {
 		t.Fatalf("index feature: %v", err)
@@ -227,7 +227,7 @@ func TestPGSameBranchReindexSupersedesPriorCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot a: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snapA, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snapA, repoID, []PGFileInput{
 		{Path: "pkg/a.go", Language: "go", ContentHash: hashContent("a")},
 	}); err != nil {
 		t.Fatalf("index a: %v", err)
@@ -236,7 +236,7 @@ func TestPGSameBranchReindexSupersedesPriorCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot b: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snapB, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snapB, repoID, []PGFileInput{
 		{Path: "pkg/b.go", Language: "go", ContentHash: hashContent("b")},
 	}); err != nil {
 		t.Fatalf("index b: %v", err)
@@ -287,6 +287,75 @@ func TestPGCreateSnapshotIsIdempotentForSameIdentity(t *testing.T) {
 	}
 }
 
+// Retrying the same completed generation must not create duplicate rows or
+// fail on (snapshot_id, symbol_id) uniqueness constraints.
+func TestPGIndexSnapshotIsIdempotentAfterActivation(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snapshotID, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	source := "package pkg\nfunc Sample() {}\n"
+	files := []PGFileInput{{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(source), Content: source}}
+	if _, err := store.IndexSnapshot(ctx, snapshotID, repoID, files); err != nil {
+		t.Fatalf("index snapshot: %v", err)
+	}
+	if _, err := store.IndexSnapshot(ctx, snapshotID, repoID, files); err != nil {
+		t.Fatalf("retry index snapshot: %v", err)
+	}
+	var fileVersions, symbolVersions int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM code_file_versions WHERE snapshot_id = $1`, snapshotID).Scan(&fileVersions); err != nil {
+		t.Fatalf("count file versions: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM code_symbol_versions WHERE snapshot_id = $1`, snapshotID).Scan(&symbolVersions); err != nil {
+		t.Fatalf("count symbol versions: %v", err)
+	}
+	if fileVersions != 1 || symbolVersions != 2 {
+		t.Fatalf("retry duplicated indexed rows: file_versions=%d symbol_versions=%d", fileVersions, symbolVersions)
+	}
+}
+
+// Diff remains one entry per changed file even when declaration extraction
+// adds multiple symbol versions for that file.
+func TestPGDiffSnapshotWithDeclarationsIsFileGranular(t *testing.T) {
+	store, _ := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, store.db)
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	source := "package pkg\nfunc A() {}\nfunc B() {}\n"
+	snap1, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 1: %v", err)
+	}
+	if _, err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(source), Content: source}}); err != nil {
+		t.Fatalf("index snapshot 1: %v", err)
+	}
+	snap2, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-2", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 2: %v", err)
+	}
+	changed := "package pkg\nfunc A() { _ = 1 }\nfunc B() {}\n"
+	if _, err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(changed), Content: changed}}); err != nil {
+		t.Fatalf("index snapshot 2: %v", err)
+	}
+	diff, err := store.DiffSnapshot(ctx, snap2)
+	if err != nil {
+		t.Fatalf("diff snapshot: %v", err)
+	}
+	if len(diff.Modified) != 1 || diff.Modified[0].Path != "pkg/sample.go" || len(diff.Added) != 0 || len(diff.Removed) != 0 || len(diff.Renamed) != 0 {
+		t.Fatalf("expected one file-granular Modified entry, got %+v", diff)
+	}
+}
+
 // TestPGLexicalSearchFindsSubstringMatches proves migration
 // 000026_code_lexical_search.sql's FTS column and index actually work end
 // to end: a query that is not an exact path/FQN (so QueryByPathOrFQN would
@@ -305,7 +374,7 @@ func TestPGLexicalSearchFindsSubstringMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
 		{Path: "internal/auth/middleware.go", Language: "go", ContentHash: hashContent("auth")},
 		{Path: "internal/billing/invoice.go", Language: "go", ContentHash: hashContent("billing")},
 	}); err != nil {
@@ -367,7 +436,7 @@ func TestPGDiffSnapshotClassifiesEveryChangeKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 1: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
 		{Path: "pkg/unchanged.go", ContentHash: hashContent("unchanged")},
 		{Path: "pkg/to_modify.go", ContentHash: hashContent("v1")},
 		{Path: "pkg/old_name.go", ContentHash: hashContent("rename-me")},
@@ -380,7 +449,7 @@ func TestPGDiffSnapshotClassifiesEveryChangeKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 2: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
 		{Path: "pkg/unchanged.go", ContentHash: hashContent("unchanged")},
 		{Path: "pkg/to_modify.go", ContentHash: hashContent("v2")},
 		{Path: "pkg/new_name.go", ContentHash: hashContent("rename-me")},
@@ -451,7 +520,7 @@ func TestPGDiffSnapshotWithNoParentReportsEverythingAdded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/a.go", ContentHash: hashContent("a")},
 		{Path: "pkg/b.go", ContentHash: hashContent("b")},
 	}); err != nil {
@@ -487,7 +556,7 @@ func TestPGCreateSnapshotLinksParent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 1: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "a.go", ContentHash: hashContent("a")}}); err != nil {
+	if _, err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "a.go", ContentHash: hashContent("a")}}); err != nil {
 		t.Fatalf("index snapshot 1: %v", err)
 	}
 
@@ -610,7 +679,7 @@ func TestPGIndexSnapshotExtractsRealGoDeclarations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(pgTestGoSource), Content: pgTestGoSource},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -680,7 +749,7 @@ func TestPGIndexSnapshotIsolatesGoFunctionEditToThatSymbol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 1: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(pgTestGoSource), Content: pgTestGoSource},
 	}); err != nil {
 		t.Fatalf("index snapshot 1: %v", err)
@@ -703,7 +772,7 @@ func TestPGIndexSnapshotIsolatesGoFunctionEditToThatSymbol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 2: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(editedSource), Content: editedSource},
 	}); err != nil {
 		t.Fatalf("index snapshot 2: %v", err)
@@ -767,7 +836,7 @@ func TestPGIndexSnapshotCreatesUnambiguousCallEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(callEdgeSource), Content: callEdgeSource},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -821,7 +890,7 @@ func TestPGIndexSnapshotSkipsAmbiguousCallNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(ambiguousCallSource), Content: ambiguousCallSource},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -857,7 +926,7 @@ func TestPGIndexSnapshotUsesTreeSitterForPython(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{{
 		Path: "models.py", Language: "python", ContentHash: hashContent(treeSitterPythonSource), Content: treeSitterPythonSource,
 	}}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -895,7 +964,7 @@ func TestPGIndexSnapshotCreatesTreeSitterCallEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/sample.py", Language: "python", ContentHash: hashContent(treeSitterCallEdgeSource), Content: treeSitterCallEdgeSource},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -963,7 +1032,7 @@ func TestPGChangeImpactFindsDirectAndTransitiveDependents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(impactChainSource), Content: impactChainSource},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -1002,7 +1071,7 @@ func TestPGChangeImpactRespectsMaxDepth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(impactChainSource), Content: impactChainSource},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -1035,7 +1104,7 @@ func TestPGChangeImpactReturnsEmptyForUncalledSymbol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(impactChainSource), Content: impactChainSource},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -1092,7 +1161,7 @@ func TestPGChangeImpactRanksDependentsByCentrality(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
 		{Path: "pkg/sample.go", Language: "go", ContentHash: hashContent(fanInSource), Content: fanInSource},
 	}); err != nil {
 		t.Fatalf("index snapshot: %v", err)
@@ -1154,7 +1223,7 @@ func target() { _ = 1 }
 	if err != nil {
 		t.Fatalf("create snapshot 1: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
 		{Path: "pkg/caller.go", Language: "go", ContentHash: hashContent(callerSource), Content: callerSource},
 		{Path: "pkg/helper.go", Language: "go", ContentHash: hashContent(helperSourceV1), Content: helperSourceV1},
 	}); err != nil {
@@ -1177,7 +1246,7 @@ func target() { _ = 1 }
 	if err != nil {
 		t.Fatalf("create snapshot 2: %v", err)
 	}
-	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
 		{Path: "pkg/caller.go", Language: "go", ContentHash: hashContent(callerSource), Content: callerSource},
 		{Path: "pkg/helper.go", Language: "go", ContentHash: hashContent(helperSourceV2), Content: helperSourceV2},
 	}); err != nil {
@@ -1245,7 +1314,7 @@ func TestPGCodeEmbeddingRLSIsolatesTenants(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{{Path: filePath, Language: "unknown", ContentHash: hashContent(filePath)}}); err != nil {
+		if _, err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{{Path: filePath, Language: "unknown", ContentHash: hashContent(filePath)}}); err != nil {
 			t.Fatal(err)
 		}
 		results, err := store.QueryByPathOrFQN(ctx, repoID, "main", filePath)
@@ -1315,7 +1384,7 @@ func TestPGDenseQueryFiltersExactEmbeddingSpace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
 		{Path: "three.txt", Language: "unknown", ContentHash: hashContent("three")},
 		{Path: "two.txt", Language: "unknown", ContentHash: hashContent("two")},
 	}); err != nil {
@@ -1360,7 +1429,7 @@ func TestPGDenseQueryUsesActiveSnapshotOnly(t *testing.T) {
 	}
 
 	snap1, _ := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-1", "test", "")
-	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "old.txt", Language: "unknown", ContentHash: hashContent("old")}}); err != nil {
+	if _, err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "old.txt", Language: "unknown", ContentHash: hashContent("old")}}); err != nil {
 		t.Fatal(err)
 	}
 	old, _ := store.QueryByPathOrFQN(ctx, repoID, "main", "old.txt")
@@ -1369,7 +1438,7 @@ func TestPGDenseQueryUsesActiveSnapshotOnly(t *testing.T) {
 	}
 
 	snap2, _ := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-2", "test", "")
-	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{{Path: "new.txt", Language: "unknown", ContentHash: hashContent("new")}}); err != nil {
+	if _, err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{{Path: "new.txt", Language: "unknown", ContentHash: hashContent("new")}}); err != nil {
 		t.Fatal(err)
 	}
 	current, _ := store.QueryByPathOrFQN(ctx, repoID, "main", "new.txt")
@@ -1396,7 +1465,7 @@ func TestPGIndexPersistsSourceChunksAndCopiesThemForward(t *testing.T) {
 	}
 	content := "package sample\n\n// Work does useful work.\nfunc Work() {\n\tprintln(\"useful\")\n}\n"
 	snap1, _ := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-1", "test", "")
-	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "work.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+	if _, err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{{Path: "work.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
 		t.Fatal(err)
 	}
 	var declarationChunk string
@@ -1411,7 +1480,7 @@ func TestPGIndexPersistsSourceChunksAndCopiesThemForward(t *testing.T) {
 	}
 
 	snap2, _ := store.CreateSnapshot(ctx, repoID, tenant, "main", "commit-2", "test", "")
-	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{{Path: "work.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+	if _, err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{{Path: "work.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
 		t.Fatal(err)
 	}
 	var copied string
@@ -1438,7 +1507,7 @@ func TestPGStructuralRetrievalUsesActiveSnapshotReferenceEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
+	if _, err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{
 		{Path: "a.go", Language: "go", ContentHash: hashContent("package p\nfunc A(){}\n"), Content: "package p\nfunc A(){}\n"},
 		{Path: "b.go", Language: "go", ContentHash: hashContent("package p\nfunc B(){}\n"), Content: "package p\nfunc B(){}\n"},
 	}); err != nil {

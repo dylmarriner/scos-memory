@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew the SCOS mcp-gateway Tailscale certificate
+After=tailscaled.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/scos/scos-fabric.env
+ExecStart=/opt/scos-fabric/src/deploy/native/renew-mcp-gateway-cert.sh

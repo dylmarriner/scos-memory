@@ -26,7 +26,7 @@ if [ "$BEFORE" = "$AFTER" ]; then
 fi
 
 install -m 644 -o root -g root "$tmpdir/tls.crt" "$CERT_DIR/tls.crt"
-install -m 644 -o root -g root "$tmpdir/tls.key" "$CERT_DIR/tls.key"
+install -m 640 -o root -g scos "$tmpdir/tls.key" "$CERT_DIR/tls.key"
 
 systemctl restart scos-fabric@mcp-gateway.service
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,8 +15,50 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dylmarriner/scos-memory/packages/auth"
 	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 )
+
+// authenticatedPrincipal is the principal proven by the caller's signed
+// claims token. Governance decisions are attributed to it -- never to a
+// name supplied in the request body, which any token holder could set.
+func authenticatedPrincipal(r *http.Request) (string, bool) {
+	claims, ok := auth.CanonicalClaims(r.Context())
+	if !ok || strings.TrimSpace(claims.PrincipalID) == "" {
+		return "", false
+	}
+	return claims.PrincipalID, true
+}
+
+// actingPrincipal requires a claims-bearing caller and rejects a body-named
+// actor that differs from it.
+func actingPrincipal(r *http.Request, named string) (string, error) {
+	principal, ok := authenticatedPrincipal(r)
+	if !ok {
+		return "", errors.New("this governance action requires an authenticated principal (claims token)")
+	}
+	if named != "" && named != principal {
+		return "", errors.New("the acting principal must be the authenticated caller")
+	}
+	return principal, nil
+}
+
+// proposerFor attributes a new proposal. A person proposes as themself; a
+// service credential carries no principal and may only propose under a
+// "system:" identity (e.g. memory-intelligence's §26.1 auto-promotion), so
+// it can never impersonate a human proposer or reviewer.
+func proposerFor(r *http.Request, named string) (string, error) {
+	if principal, ok := authenticatedPrincipal(r); ok {
+		if named != "" && named != principal {
+			return "", errors.New("the proposer must be the authenticated caller")
+		}
+		return principal, nil
+	}
+	if !strings.HasPrefix(named, "system:") {
+		return "", errors.New("a service credential may only propose under a system: identity")
+	}
+	return named, nil
+}
 
 var proposalStatuses = map[string]bool{
 	"proposed": true, "validated": true, "diffed": true, "under_review": true,
@@ -51,6 +94,12 @@ func (s *okfServer) handleProposals(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid proposal", 400)
 			return
 		}
+		proposer, err := proposerFor(r, req.Proposer)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		req.Proposer = proposer
 		s.mu.Lock()
 		p, err := s.createProposal(req)
 		s.mu.Unlock()
@@ -82,8 +131,13 @@ func (s *okfServer) handleProposalAction(w http.ResponseWriter, r *http.Request)
 	}
 	id, action := parts[0], parts[1]
 	if action == "merge" {
+		merger, err := actingPrincipal(r, "")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		s.mu.Lock()
-		p, err := s.mergeProposal(r.Context(), id)
+		p, err := s.mergeProposal(r.Context(), id, merger)
 		s.mu.Unlock()
 		if err != nil {
 			http.Error(w, err.Error(), 422)
@@ -117,15 +171,21 @@ func (s *okfServer) handleProposalAction(w http.ResponseWriter, r *http.Request)
 		p, err = s.diffProposal(r.Context(), id)
 	case "review", "approve", "reject":
 		var req struct{ Reviewer, Role, Reason string }
+		var reviewer string
 		if e := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); e != nil {
 			err = e
+		} else if reviewer, err = actingPrincipal(r, req.Reviewer); err != nil {
+			// attributed to the authenticated caller only
 		} else if action == "review" {
-			p, err = s.reviewProposalAuthorized(r.Context(), id, req.Reviewer, req.Role, req.Reason)
+			p, err = s.reviewProposalAuthorized(r.Context(), id, reviewer, req.Role, req.Reason)
 		} else {
-			p, err = s.decideProposal(r.Context(), id, action == "approve", req.Reviewer, req.Role, req.Reason)
+			p, err = s.decideProposal(r.Context(), id, action == "approve", reviewer, req.Role, req.Reason)
 		}
-	case "merge":
-		p, err = s.mergeProposal(r.Context(), id)
+	case "rebase":
+		var actor string
+		if actor, err = actingPrincipal(r, ""); err == nil {
+			p, err = s.rebaseProposal(r.Context(), id, actor)
+		}
 	default:
 		err = errors.New("unknown proposal action")
 	}
@@ -291,52 +351,150 @@ func (s *okfServer) decideProposal(ctx context.Context, id string, approved bool
 	}
 	return p, nil
 }
-func (s *okfServer) mergeProposal(ctx context.Context, id string) (*OKFProposal, error) {
+
+// mergeProposal commits an approved proposal to the protected branch as
+// merger, who must be an authorised curator or owner other than the
+// proposer (separation of duties: nobody merges their own change).
+func (s *okfServer) mergeProposal(ctx context.Context, id, merger string) (*OKFProposal, error) {
 	p, err := s.proposal(id, "approved")
 	if err != nil {
 		return nil, err
 	}
-	if os.Getenv("SCOS_OKF_PROTECTED_BRANCH") != "main" {
-		return nil, errors.New("protected branch is not configured")
+	if strings.TrimSpace(merger) == "" || merger == p.Proposer {
+		return nil, errors.New("an authorised merger other than the proposer is required")
+	}
+	if err := s.requireAnyRole(ctx, merger, "system_owner", "knowledge_curator"); err != nil {
+		return nil, err
+	}
+	protected := strings.TrimSpace(os.Getenv("SCOS_OKF_PROTECTED_BRANCH"))
+	if protected == "" {
+		return nil, errors.New("protected branch is not configured (SCOS_OKF_PROTECTED_BRANCH)")
+	}
+	// The configured name is only a claim; the merge lands on whatever is
+	// checked out, so that is what must match.
+	branch, err := s.git(ctx, "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("resolve checked-out branch: %w", err)
+	}
+	if branch != protected {
+		return nil, fmt.Errorf("OKF checkout is on %q, not the protected branch %q", branch, protected)
+	}
+	// Uncommitted edits would be swept into, or shadow, the governed commit.
+	if dirty, err := s.git(ctx, "status", "--porcelain"); err != nil {
+		return nil, fmt.Errorf("check working tree: %w", err)
+	} else if dirty != "" {
+		return nil, errors.New("OKF working tree has uncommitted changes; the protected branch must be clean to merge")
 	}
 	path, err := s.proposalPath(p.Path)
 	if err != nil {
 		return nil, err
 	}
 	if gitCommit(s.okfRoot) != p.BaseCommit {
-		p.Diverged = true
-		_ = s.persistProposal(ctx, p, p.Status, p.Proposer, p.ReviewRole, "authoritative commit diverged; explicit re-review required")
-		return nil, errors.New("authoritative branch changed; divergence requires review")
+		return nil, s.markProposalDiverged(ctx, p, "authoritative commit diverged; rebase and re-review required")
 	}
-	current, _ := os.ReadFile(path)
+	current, readErr := os.ReadFile(path)
 	if sha256Hex(current) != p.BaseHash {
-		p.Diverged = true
 		if doc := s.documentForPath(p.Path); doc != nil {
 			doc.Status = "diverged"
 		}
 		if proj := s.projections[p.Path]; proj != nil {
 			proj.ImportStatus = "diverged"
 		}
-		_ = s.persistProposal(ctx, p, p.Status, p.Proposer, p.ReviewRole, "working tree diverged; explicit re-review required")
-		return nil, errors.New("working tree diverged; explicit re-review required")
+		return nil, s.markProposalDiverged(ctx, p, "working tree diverged; rebase and re-review required")
 	}
+	existed := readErr == nil
 	if err = os.WriteFile(path, []byte(p.Content), 0600); err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", s.okfRoot, "add", p.Path)
-	if out, e := cmd.CombinedOutput(); e != nil {
-		return nil, fmt.Errorf("stage proposal: %s", strings.TrimSpace(string(out)))
+	// Any failure from here restores the file, so a failed merge never
+	// leaves ungoverned content for the next sync to import.
+	restore := func(cause error) error {
+		_, _ = s.git(ctx, "reset", "-q", "--", p.Path)
+		var rerr error
+		if existed {
+			rerr = os.WriteFile(path, current, 0600)
+		} else {
+			rerr = os.Remove(path)
+		}
+		if rerr != nil {
+			return fmt.Errorf("%w (restoring %s also failed: %v)", cause, p.Path, rerr)
+		}
+		return cause
 	}
-	cmd = exec.CommandContext(ctx, "git", "-C", s.okfRoot, "-c", "user.name=SCOS OKF", "-c", "user.email=scos-okf@localhost", "commit", "-m", "OKF proposal "+p.ID)
-	if out, e := cmd.CombinedOutput(); e != nil {
-		return nil, fmt.Errorf("protected merge: %s", strings.TrimSpace(string(out)))
+	if _, err := s.git(ctx, "add", "--", p.Path); err != nil {
+		return nil, restore(fmt.Errorf("stage proposal: %w", err))
+	}
+	author := fmt.Sprintf("--author=%s <%s@okf.scos.invalid>", merger, merger)
+	if _, err := s.git(ctx, "-c", "user.name=SCOS OKF", "-c", "user.email=scos-okf@okf.scos.invalid",
+		"commit", author, "-m", "OKF proposal "+p.ID, "-m", "Proposed-by: "+p.Proposer+"\nReviewed-by: "+p.Reviewer+"\nMerged-by: "+merger); err != nil {
+		return nil, restore(fmt.Errorf("protected merge: %w", err))
 	}
 	p.Status = "merged"
 	p.MergedCommit = gitCommit(s.okfRoot)
-	if err = s.persistProposal(ctx, p, "merged", p.Reviewer, p.ReviewRole, p.Reason); err != nil {
+	if err = s.persistProposal(ctx, p, "merged", merger, p.ReviewRole, p.Reason); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// markProposalDiverged records that the proposal's base moved and returns
+// the error the caller reports; the proposal leaves the approved state only
+// through rebaseProposal, which forces a fresh review.
+func (s *okfServer) markProposalDiverged(ctx context.Context, p *OKFProposal, reason string) error {
+	p.Diverged = true
+	if err := s.persistProposal(ctx, p, p.Status, p.Proposer, p.ReviewRole, reason); err != nil {
+		return fmt.Errorf("%s; recording divergence failed: %w", reason, err)
+	}
+	return errors.New(reason)
+}
+
+// rebaseProposal re-bases a diverged proposal on the current authoritative
+// content and returns it to "diffed": the earlier review approved a diff
+// against content that no longer exists, so it is discarded and the change
+// needs an independent review again (§26: divergence is marked and reviewed,
+// never silently resolved).
+func (s *okfServer) rebaseProposal(ctx context.Context, id, actor string) (*OKFProposal, error) {
+	p := s.proposals[id]
+	if p == nil {
+		return nil, errors.New("proposal not found")
+	}
+	if !p.Diverged {
+		return nil, errors.New("proposal has not diverged; nothing to rebase")
+	}
+	if p.Status == "merged" || p.Status == "indexed" || p.Status == "rejected" {
+		return nil, fmt.Errorf("a %s proposal cannot be rebased", p.Status)
+	}
+	path, err := s.proposalPath(p.Path)
+	if err != nil {
+		return nil, err
+	}
+	base, _ := os.ReadFile(path)
+	diff := makeProposalDiff(string(base), p.Content)
+	if diff == "" {
+		return nil, errors.New("the authoritative content already matches this proposal; nothing to re-review")
+	}
+	p.BaseCommit = gitCommit(s.okfRoot)
+	p.BaseHash = sha256Hex(base)
+	p.Diff = diff
+	p.Diverged = false
+	p.Status = "diffed"
+	p.Reviewer, p.ReviewRole, p.Decision, p.ReviewedAt = "", "", "", ""
+	if err := s.persistProposal(ctx, p, "diffed", actor, "", "rebased onto "+p.BaseCommit+"; independent re-review required"); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (s *okfServer) git(ctx context.Context, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", s.okfRoot}, args...)...).CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if err != nil {
+		if text == "" {
+			text = err.Error()
+		}
+		return "", errors.New(text)
+	}
+	return text, nil
 }
 
 func (s *okfServer) proposal(id, status string) (*OKFProposal, error) {
@@ -353,11 +511,17 @@ func (s *okfServer) requireRole(ctx context.Context, principal, role string) err
 	if role != "system_owner" && role != "knowledge_curator" && role != "auditor" && role != "memory_steward" {
 		return errors.New("unsupported governance role")
 	}
-	if s.db == nil {
-		return nil
-	}
 	var ok bool
-	err := s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM okf_governance_roles WHERE principal_id=$1 AND role=$2 AND active)`, principal, role).Scan(&ok)
+	var err error
+	switch {
+	case s.roleLookup != nil:
+		ok, err = s.roleLookup(ctx, principal, role)
+	case s.db != nil:
+		err = s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM okf_governance_roles WHERE principal_id=$1 AND role=$2 AND active)`, principal, role).Scan(&ok)
+	default:
+		// No role source means no authorisation evidence: fail closed.
+		return errors.New("governance roles are unavailable; refusing unverified authorisation")
+	}
 	if err != nil {
 		return fmt.Errorf("check governance role: %w", err)
 	}
@@ -366,13 +530,26 @@ func (s *okfServer) requireRole(ctx context.Context, principal, role string) err
 	}
 	return nil
 }
+
+func (s *okfServer) requireAnyRole(ctx context.Context, principal string, roles ...string) error {
+	var last error
+	for _, role := range roles {
+		if last = s.requireRole(ctx, principal, role); last == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("one of the %s roles is required: %w", strings.Join(roles, "/"), last)
+}
+
 func (s *okfServer) persistProposal(ctx context.Context, p *OKFProposal, status, actor, role, reason string) error {
 	if s.db == nil {
 		return nil
 	}
 	var previous string
-	_ = s.db.QueryRow(ctx, `SELECT status FROM okf_proposals WHERE id=$1`, p.ID).Scan(&previous)
-	if _, err := s.db.Exec(ctx, `INSERT INTO okf_proposals (id,path,base_commit,base_hash,content,diff,status,proposer,reviewer,review_role,decision,reason,created_at,reviewed_at,merged_commit,indexed_at,diverged) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),$12,$13,NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),$17) ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,reviewer=EXCLUDED.reviewer,review_role=EXCLUDED.review_role,decision=EXCLUDED.decision,reason=EXCLUDED.reason,reviewed_at=EXCLUDED.reviewed_at,merged_commit=EXCLUDED.merged_commit,indexed_at=EXCLUDED.indexed_at,diverged=EXCLUDED.diverged`, p.ID, p.Path, p.BaseCommit, p.BaseHash, p.Content, p.Diff, status, p.Proposer, p.Reviewer, p.ReviewRole, p.Decision, reason, p.CreatedAt, p.ReviewedAt, p.MergedCommit, p.IndexedAt, p.Diverged); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT status FROM okf_proposals WHERE id=$1`, p.ID).Scan(&previous); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("read previous proposal status: %w", err)
+	}
+	if _, err := s.db.Exec(ctx, `INSERT INTO okf_proposals (id,path,base_commit,base_hash,content,diff,status,proposer,reviewer,review_role,decision,reason,created_at,reviewed_at,merged_commit,indexed_at,diverged) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),$12,$13,NULLIF($14,'')::timestamptz,NULLIF($15,''),NULLIF($16,'')::timestamptz,$17) ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,reviewer=EXCLUDED.reviewer,review_role=EXCLUDED.review_role,decision=EXCLUDED.decision,reason=EXCLUDED.reason,reviewed_at=EXCLUDED.reviewed_at,merged_commit=EXCLUDED.merged_commit,indexed_at=EXCLUDED.indexed_at,diverged=EXCLUDED.diverged`, p.ID, p.Path, p.BaseCommit, p.BaseHash, p.Content, p.Diff, status, p.Proposer, p.Reviewer, p.ReviewRole, p.Decision, reason, p.CreatedAt, p.ReviewedAt, p.MergedCommit, p.IndexedAt, p.Diverged); err != nil {
 		return err
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO okf_proposal_transitions(proposal_id,from_status,to_status,actor,governance_role,reason) VALUES($1,NULLIF($2,''),$3,$4,NULLIF($5,''),$6)`, p.ID, previous, status, actor, role, reason)

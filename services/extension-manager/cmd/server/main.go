@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5"
@@ -64,14 +66,16 @@ type ExtensionManifest struct {
 	CapabilitiesConsumed []string              `json:"capabilities_consumed"`
 	HooksSubscribed      []string              `json:"hooks_subscribed"`
 	HookEndpoints        map[string]string     `json:"hook_endpoints,omitempty"`
-	HookFallbackPolicies map[string]string     `json:"hook_fallback_policies,omitempty"`
-	SkillsExported       []string              `json:"skills_exported"`
-	Permissions          []string              `json:"permissions"`
-	ConfigurationSchema  string                `json:"configuration_schema,omitempty"`
-	MigrationPlan        string                `json:"migration_plan,omitempty"`
-	RollbackPlan         string                `json:"rollback_plan"`
-	ContentHash          string                `json:"content_hash"`
-	Signature            string                `json:"signature,omitempty"`
+	// HookDeclarations states, per subscribed event, how the hook executes
+	// (§22.6). Every subscribed event must have one.
+	HookDeclarations    map[string]HookDeclaration `json:"hook_declarations,omitempty"`
+	SkillsExported      []string                   `json:"skills_exported"`
+	Permissions         []string                   `json:"permissions"`
+	ConfigurationSchema string                     `json:"configuration_schema,omitempty"`
+	MigrationPlan       string                     `json:"migration_plan,omitempty"`
+	RollbackPlan        string                     `json:"rollback_plan"`
+	ContentHash         string                     `json:"content_hash"`
+	Signature           string                     `json:"signature,omitempty"`
 }
 
 type ExtensionDependency struct {
@@ -136,10 +140,12 @@ type extServer struct {
 	receipts   []*InstallationReceipt
 	history    map[string][]ExtensionManifest
 	// canaries holds side-by-side candidate versions, one per package (§22.3).
-	canaries  map[string]*CanaryDeployment
-	nextID    int
-	db        *pgxpool.Pool
-	storePath string
+	canaries map[string]*CanaryDeployment
+	nextID   int
+	// asyncHooks tracks detached asynchronous hook calls still in flight.
+	asyncHooks sync.WaitGroup
+	db         *pgxpool.Pool
+	storePath  string
 }
 
 func (s *extServer) readinessCheck() error {
@@ -277,6 +283,11 @@ func (s *extServer) applyState(state persistedExtensionState) {
 	}
 	if state.Hooks != nil {
 		s.hooks = state.Hooks
+		// State persisted before ordering was enforced is normalised here, so
+		// dispatch order never depends on install history (§22.6).
+		for _, hooks := range s.hooks {
+			sortHooks(hooks)
+		}
 	}
 	if state.Receipts != nil {
 		s.receipts = state.Receipts
@@ -306,27 +317,7 @@ func (s *extServer) loadState(ctx context.Context) error {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return fmt.Errorf("decode persisted extension state: %w", err)
 	}
-	s.mu.Lock()
-	if state.Extensions != nil {
-		s.extensions = state.Extensions
-	}
-	if state.Skills != nil {
-		s.skills = state.Skills
-	}
-	if state.Hooks != nil {
-		s.hooks = state.Hooks
-	}
-	if state.Receipts != nil {
-		s.receipts = state.Receipts
-	}
-	if state.History != nil {
-		s.history = state.History
-		if state.Canaries != nil {
-			s.canaries = state.Canaries
-		}
-	}
-	s.nextID = state.NextID
-	s.mu.Unlock()
+	s.applyState(state)
 	return nil
 }
 
@@ -451,6 +442,8 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		snap := s.snapshotPackageLocked(id)
+		statusChanged := update.Status != "" && update.Status != ext.Status
 		if update.Status != "" {
 			ext.Status = update.Status
 		}
@@ -461,12 +454,32 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			ext.AgentScope = update.AgentIDs
 		}
 		ext.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		updated := *ext
 		s.mu.Unlock()
 		if err := s.persist(r.Context()); err != nil {
 			http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		writeJSON(w, ext)
+		response := struct {
+			Extension
+			LifecycleHooks []lifecycleReport `json:"lifecycle_hooks,omitempty"`
+		}{Extension: updated}
+		if statusChanged && (updated.Status == "enabled" || updated.Status == "disabled") {
+			event := hooksdk.OnDisable
+			if updated.Status == "enabled" {
+				event = hooksdk.OnEnable
+			}
+			report, err := s.raiseLifecycle(r, event, updated, nil, id)
+			if err != nil && event == hooksdk.OnEnable {
+				s.rejectLifecycleChange(w, r, snap, report, "status_enabled", nil)
+				return
+			}
+			response.LifecycleHooks = []lifecycleReport{report}
+		}
+		if statusChanged {
+			emitPermissions(updated.Manifest, "status_"+updated.Status, updated.Status == "enabled", requestCorrelation(r))
+		}
+		writeJSON(w, response)
 
 	case http.MethodDelete:
 		s.mu.Lock()
@@ -476,17 +489,26 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		// Uninstall: remove hooks and ext
-		for _, hook := range ext.Manifest.HooksSubscribed {
-			delete(s.hooks, hook)
-		}
+		// Uninstall removes only this package's hooks and skills; other
+		// extensions subscribed to the same events keep theirs (§22.7).
+		snap := s.snapshotPackageLocked(id)
+		s.removeExtensionRegistrationsLocked(id)
 		delete(s.extensions, id)
+		removed := *ext
 		s.mu.Unlock()
 		if err := s.persist(r.Context()); err != nil {
+			s.mu.Lock()
+			s.restorePackageLocked(snap)
+			s.mu.Unlock()
 			http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "uninstalled", "package_id": id})
+		emitPermissions(removed.Manifest, "uninstall", false, requestCorrelation(r))
+		// The departing extension still receives its own on_uninstall. A
+		// failure is reported, never allowed to block removal (§22.7).
+		removed.Status = "uninstalled"
+		report, _ := s.raiseLifecycle(r, hooksdk.OnUninstall, removed, snap.hooks[hooksdk.OnUninstall], id)
+		writeJSON(w, map[string]any{"status": "uninstalled", "package_id": id, "lifecycle_hooks": []lifecycleReport{report}})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -505,6 +527,8 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	snap := s.snapshotPackageLocked(id)
+	previousStatus := ext.Status
 	switch action {
 	case "enable":
 		ext.Status = "enabled"
@@ -535,11 +559,31 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "persist extension state: " + err.Error()})
 		return
 	}
+	// Only an effective transition is announced: re-enabling an enabled
+	// extension is a no-op, while a rollback always activates a different
+	// manifest.
+	event := ""
+	switch {
+	case action == "rollback" || (action == "enable" && previousStatus != "enabled"):
+		event = hooksdk.OnEnable
+	case action == "disable" && previousStatus != "disabled":
+		event = hooksdk.OnDisable
+	}
+	reports := []lifecycleReport{}
+	if event != "" {
+		report, err := s.raiseLifecycle(r, event, result, nil, id)
+		if err != nil && event == hooksdk.OnEnable {
+			s.rejectLifecycleChange(w, r, snap, report, action, nil)
+			return
+		}
+		reports = append(reports, report)
+	}
+	emitPermissions(result.Manifest, action, result.Status == "enabled", requestCorrelation(r))
 	status := action + "d"
 	if action == "rollback" {
 		status = "rolled_back"
 	}
-	writeJSON(w, map[string]any{"status": status, "extension": result})
+	writeJSON(w, map[string]any{"status": status, "extension": result, "lifecycle_hooks": reports})
 }
 
 // ── skills ───────────────────────────────────────────────────────────────
@@ -592,12 +636,18 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.mu.RLock()
 		skill, ok := s.skills[id]
+		var selected *Skill
+		if ok {
+			snapshot := *skill
+			selected = &snapshot
+		}
 		s.mu.RUnlock()
+		emitSkillSelection(id, selected, requestCorrelation(r))
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		writeJSON(w, skill)
+		writeJSON(w, selected)
 
 	case http.MethodDelete:
 		s.mu.Lock()
@@ -653,6 +703,13 @@ type hookDispatchRequest struct {
 	TenantID    string         `json:"tenant_id"`
 	PrincipalID string         `json:"principal_id"`
 	Payload     map[string]any `json:"payload"`
+	// corr carries the §32 correlation IDs of the originating request; it is
+	// never decoded from the body.
+	corr telemetry.Correlation
+	// deliverTo names the one extension whose hooks are delivered whatever
+	// its status: the extension being disabled or uninstalled receives its
+	// own on_disable/on_uninstall. Never decoded from the body.
+	deliverTo string
 }
 
 type hookDispatchResult struct {
@@ -723,25 +780,14 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.TenantID, req.PrincipalID = identity.TenantID, identity.PrincipalID
+	req.corr = requestCorrelation(r)
+	req.corr.Tenant = identity.TenantID
 	dispatchStarted := time.Now()
 	results, err := s.dispatchHooks(r.Context(), req)
-	// §32 hook latency and failure. Latency covers the whole bounded dispatch;
-	// failures are counted per hook so one failing extension is attributable.
-	serviceMetrics.Observe(telemetry.MetricHookLatency, time.Since(dispatchStarted),
-		map[string]string{"event": req.Event}, telemetry.Correlation{})
+	recordHookDispatch(req.Event, dispatchStarted, results, err, req.corr)
 	if err != nil {
-		serviceMetrics.Count(telemetry.MetricHookFailure,
-			map[string]string{"event": req.Event, "reason": "dispatch_error"}, telemetry.Correlation{})
 		http.Error(w, "hook dispatch failed: "+err.Error(), http.StatusServiceUnavailable)
 		return
-	}
-	for _, result := range results {
-		if result.Status == "ok" || result.Status == "succeeded" {
-			continue
-		}
-		serviceMetrics.Count(telemetry.MetricHookFailure, map[string]string{
-			"event": req.Event, "extension": result.ExtensionID, "reason": result.Status,
-		}, telemetry.Correlation{})
 	}
 	writeJSON(w, map[string]any{"event": req.Event, "results": results})
 }
@@ -750,76 +796,129 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 	s.mu.RLock()
 	hooks := append([]*Hook(nil), s.hooks[req.Event]...)
 	s.mu.RUnlock()
+	return s.dispatchHookList(parent, req, hooks)
+}
+
+// dispatchHookList invokes hooks in the given order. Synchronous, blocking and
+// mutating hooks run inline. An asynchronous hook runs detached under its own
+// timeout and reports "queued" -- unless it is fail_closed, which only an
+// awaited call can enforce. A fail_closed failure stops dispatch and returns
+// the results so far, including the failing hook, with an error.
+func (s *extServer) dispatchHookList(parent context.Context, req hookDispatchRequest, hooks []*Hook) ([]hookDispatchResult, error) {
 	results := make([]hookDispatchResult, 0, len(hooks))
+	corr := req.corr
+	if corr.Tenant == "" {
+		corr.Tenant = req.TenantID
+	}
+	body, err := json.Marshal(map[string]any{"event": req.Event, "tenant_id": req.TenantID, "principal_id": req.PrincipalID, "payload": req.Payload})
+	if err != nil {
+		return nil, err
+	}
 	for _, hook := range hooks {
-		if hook.Endpoint == "" {
-			if hook.FallbackPolicy == "fail_closed" {
-				return nil, fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID)
-			}
-			results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "skipped", Reason: "hook endpoint is not declared"})
+		s.mu.RLock()
+		h := *hook
+		undeliverable := s.undeliverableLocked(h.ExtensionID, req.deliverTo)
+		s.mu.RUnlock()
+		// A non-enabled extension is visibly skipped; it cannot veto either.
+		if undeliverable != "" {
+			results = append(results, hookDispatchResult{ExtensionID: h.ExtensionID, Status: "skipped", Reason: undeliverable})
 			continue
 		}
-		if hook.CircuitOpenUntil != "" {
-			if until, err := time.Parse(time.RFC3339, hook.CircuitOpenUntil); err == nil && time.Now().UTC().Before(until) {
-				results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "circuit_open", Reason: "hook circuit breaker is open"})
+		critical := h.FallbackPolicy == fallbackFailClosed
+		if h.Endpoint == "" {
+			if critical {
+				return results, fmt.Errorf("critical hook %s has no declared endpoint", h.ExtensionID)
+			}
+			results = append(results, hookDispatchResult{ExtensionID: h.ExtensionID, Status: "skipped", Reason: "hook endpoint is not declared"})
+			continue
+		}
+		if h.CircuitOpenUntil != "" {
+			if until, err := time.Parse(time.RFC3339, h.CircuitOpenUntil); err == nil && time.Now().UTC().Before(until) {
+				results = append(results, hookDispatchResult{ExtensionID: h.ExtensionID, Status: "circuit_open", Reason: "hook circuit breaker is open"})
 				continue
 			}
 		}
-		parsed, err := url.Parse(hook.Endpoint)
+		parsed, err := url.Parse(h.Endpoint)
 		if err != nil || (parsed.Scheme != "https" && !(parsed.Scheme == "http" && (parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost"))) {
-			return nil, fmt.Errorf("hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID)
+			return results, fmt.Errorf("hook %s endpoint must use HTTPS or loopback HTTP", h.ExtensionID)
 		}
-		body, err := json.Marshal(map[string]any{"event": req.Event, "tenant_id": req.TenantID, "principal_id": req.PrincipalID, "payload": req.Payload})
-		if err != nil {
-			return nil, err
+		timeout := time.Duration(h.TimeoutMs) * time.Millisecond
+		if timeout <= 0 || timeout > maxHookTimeoutMs*time.Millisecond {
+			timeout = maxHookTimeoutMs * time.Millisecond
 		}
-		timeout := time.Duration(hook.TimeoutMs) * time.Millisecond
-		if timeout <= 0 || timeout > 30*time.Second {
-			timeout = 30 * time.Second
-		}
-		ctx, cancel := context.WithTimeout(parent, timeout)
-		hookReq, err := http.NewRequestWithContext(ctx, http.MethodPost, hook.Endpoint, bytes.NewReader(body))
-		if err == nil {
-			hookReq.Header.Set("Content-Type", "application/json")
-			hookReq.Header.Set("X-SCOS-Tenant-ID", req.TenantID)
-			hookReq.Header.Set("X-SCOS-Principal-ID", req.PrincipalID)
-			if token := strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN")); token != "" {
-				hookReq.Header.Set("Authorization", "Bearer "+token)
-			}
-		}
-		if err != nil {
-			cancel()
-			return nil, err
-		}
-		response, callErr := (&http.Client{Timeout: timeout}).Do(hookReq)
-		if response != nil {
-			response.Body.Close()
-		}
-		cancel()
-		if callErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-			s.mu.Lock()
-			hook.ConsecutiveFailures = 0
-			hook.CircuitOpenUntil = ""
-			s.mu.Unlock()
-			results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "succeeded"})
+		if h.Type == hookTypeAsynchronous && !critical {
+			s.asyncHooks.Add(1)
+			go func() {
+				defer s.asyncHooks.Done()
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), timeout)
+				defer cancel()
+				if !s.invokeHook(ctx, hook, req, body, timeout, corr) {
+					log.Printf("extension manager: asynchronous hook %s for %s failed", h.ExtensionID, req.Event)
+					serviceMetrics.Count(telemetry.MetricHookFailure, map[string]string{
+						"event": req.Event, "extension": h.ExtensionID, "reason": "async_failed",
+					}, corr)
+				}
+				if err := s.persist(context.Background()); err != nil {
+					log.Printf("extension manager: persist after asynchronous hook %s: %v", h.ExtensionID, err)
+				}
+			}()
+			results = append(results, hookDispatchResult{ExtensionID: h.ExtensionID, Status: "queued"})
 			continue
 		}
-		s.mu.Lock()
-		hook.ConsecutiveFailures++
-		if hook.ConsecutiveFailures >= 3 {
-			hook.CircuitOpenUntil = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		ok := s.invokeHook(ctx, hook, req, body, timeout, corr)
+		cancel()
+		if ok {
+			results = append(results, hookDispatchResult{ExtensionID: h.ExtensionID, Status: "succeeded"})
+			continue
 		}
-		fallback := hook.FallbackPolicy
-		s.mu.Unlock()
-		if fallback == "fail_closed" {
-			return nil, fmt.Errorf("critical hook %s failed", hook.ExtensionID)
+		if critical {
+			results = append(results, hookDispatchResult{ExtensionID: h.ExtensionID, Status: "failed", Reason: fallbackFailClosed})
+			return results, fmt.Errorf("critical hook %s failed", h.ExtensionID)
 		}
-		results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})
+		results = append(results, hookDispatchResult{ExtensionID: h.ExtensionID, Status: "failed", Reason: "fallback_continue"})
 	}
 	if err := s.persist(parent); err != nil {
-		return nil, err
+		return results, err
 	}
 	return results, nil
+}
+
+// invokeHook performs one hook call and records its outcome in the hook's
+// circuit breaker and the extension's health. It reports success.
+func (s *extServer) invokeHook(ctx context.Context, hook *Hook, req hookDispatchRequest, body []byte, timeout time.Duration, corr telemetry.Correlation) bool {
+	hookReq, err := http.NewRequestWithContext(ctx, http.MethodPost, hook.Endpoint, bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	hookReq.Header.Set("Content-Type", "application/json")
+	hookReq.Header.Set("X-SCOS-Tenant-ID", req.TenantID)
+	hookReq.Header.Set("X-SCOS-Principal-ID", req.PrincipalID)
+	if token := strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN")); token != "" {
+		hookReq.Header.Set("Authorization", "Bearer "+token)
+	}
+	callStarted := time.Now()
+	response, callErr := (&http.Client{Timeout: timeout}).Do(hookReq)
+	if response != nil {
+		response.Body.Close()
+	}
+	emitHookResourceConsumption(hook.ExtensionID, req.Event, time.Since(callStarted), len(body), corr)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if callErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+		hook.ConsecutiveFailures = 0
+		hook.CircuitOpenUntil = ""
+		s.setHealthLocked(hook.ExtensionID, "healthy", 0, corr)
+		return true
+	}
+	hook.ConsecutiveFailures++
+	health := "degraded"
+	if hook.ConsecutiveFailures >= 3 {
+		hook.CircuitOpenUntil = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+		health = "unhealthy"
+	}
+	s.setHealthLocked(hook.ExtensionID, health, hook.ConsecutiveFailures, corr)
+	return false
 }
 
 // ── installation ─────────────────────────────────────────────────────────
@@ -841,6 +940,10 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "package_id and version required", http.StatusBadRequest)
 		return
 	}
+	if err := validateHookDeclarations(manifest); err != nil {
+		http.Error(w, "invalid hook declarations: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := s.validateInstallManifest(manifest); err != nil {
 		http.Error(w, "manifest rejected: "+err.Error(), http.StatusForbidden)
 		return
@@ -848,6 +951,7 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 	warnings := []string{}
 
 	s.mu.Lock()
+	snap := s.snapshotPackageLocked(manifest.PackageID)
 	now := time.Now().UTC().Format(time.RFC3339)
 	if previous, exists := s.extensions[manifest.PackageID]; exists {
 		s.history[manifest.PackageID] = append(s.history[manifest.PackageID], previous.Manifest)
@@ -874,17 +978,37 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		Warnings:    warnings,
 	}
 	s.receipts = append(s.receipts, receipt)
+	installed := *ext
 	s.mu.Unlock()
+	dropReceipt := func() {
+		for i, candidate := range s.receipts {
+			if candidate == receipt {
+				s.receipts = append(s.receipts[:i:i], s.receipts[i+1:]...)
+				return
+			}
+		}
+	}
 	if err := s.persist(r.Context()); err != nil {
+		s.mu.Lock()
+		s.restorePackageLocked(snap)
+		dropReceipt()
+		s.mu.Unlock()
 		http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	report, err := s.raiseLifecycle(r, hooksdk.OnInstall, installed, nil, "")
+	if err != nil {
+		s.rejectLifecycleChange(w, r, snap, report, "install", dropReceipt)
+		return
+	}
+	emitPermissions(manifest, "install", true, requestCorrelation(r))
 
 	writeJSON(w, map[string]any{
-		"status":     "installed",
-		"package_id": manifest.PackageID,
-		"version":    manifest.Version,
-		"warnings":   warnings,
+		"status":          "installed",
+		"package_id":      manifest.PackageID,
+		"version":         manifest.Version,
+		"warnings":        warnings,
+		"lifecycle_hooks": []lifecycleReport{report},
 	})
 }
 
@@ -911,11 +1035,22 @@ func (s *extServer) removeExtensionRegistrationsLocked(packageID string) {
 
 func (s *extServer) registerExtensionLocked(manifest ExtensionManifest) {
 	for _, hookEvent := range manifest.HooksSubscribed {
-		fallback := manifest.HookFallbackPolicies[hookEvent]
-		if fallback == "" {
-			fallback = "continue"
+		hook := &Hook{Event: hookEvent, ExtensionID: manifest.PackageID, Endpoint: manifest.HookEndpoints[hookEvent],
+			// Defaults apply only to a manifest recorded before declarations
+			// were required (a rollback target); they describe how such hooks
+			// always ran: inline, with the maximum timeout, continuing on failure.
+			Type: hookTypeSynchronous, Retryable: true, Idempotent: true, TimeoutMs: maxHookTimeoutMs, FallbackPolicy: fallbackContinue}
+		if d, ok := manifest.HookDeclarations[hookEvent]; ok {
+			hook.Type, hook.TimeoutMs, hook.FallbackPolicy = d.Type, d.TimeoutMs, d.FallbackPolicy
+			if d.Retryable != nil {
+				hook.Retryable = *d.Retryable
+			}
+			if d.Idempotent != nil {
+				hook.Idempotent = *d.Idempotent
+			}
 		}
-		s.hooks[hookEvent] = append(s.hooks[hookEvent], &Hook{Event: hookEvent, ExtensionID: manifest.PackageID, Type: "asynchronous", Retryable: true, Idempotent: true, TimeoutMs: 30000, Endpoint: manifest.HookEndpoints[hookEvent], FallbackPolicy: fallback})
+		s.hooks[hookEvent] = append(s.hooks[hookEvent], hook)
+		sortHooks(s.hooks[hookEvent])
 	}
 	for _, skillName := range manifest.SkillsExported {
 		id := manifest.PackageID + "/" + skillName
@@ -938,6 +1073,9 @@ func (s *extServer) handleInstallDryRun(w http.ResponseWriter, r *http.Request) 
 	}
 
 	warnings := s.validateManifest(manifest)
+	if err := validateHookDeclarations(manifest); err != nil {
+		warnings = append(warnings, err.Error())
+	}
 
 	receipt := InstallationReceipt{
 		PackageID: manifest.PackageID,
@@ -1047,6 +1185,9 @@ func (s *extServer) validateManifest(m ExtensionManifest) []string {
 }
 
 func (s *extServer) validateInstallManifest(m ExtensionManifest) error {
+	if err := validateHookDeclarations(m); err != nil {
+		return err
+	}
 	if warnings := s.validateManifest(m); len(warnings) != 0 {
 		return fmt.Errorf("%s", strings.Join(warnings, ", "))
 	}
@@ -1070,23 +1211,45 @@ func (s *extServer) validateInstallManifest(m ExtensionManifest) error {
 	return nil
 }
 
+const (
+	signatureValid     = "valid"
+	signatureInvalid   = "invalid"
+	signatureMissing   = "missing"
+	signatureMalformed = "malformed"
+	signatureNoKey     = "no_trusted_key"
+)
+
+// verifySignature checks the manifest signature and emits the §32 signature
+// state for every verification performed.
 func (s *extServer) verifySignature(m ExtensionManifest) bool {
+	state := signatureState(m)
+	emitSignatureState(m, state)
+	return state == signatureValid
+}
+
+func signatureState(m ExtensionManifest) string {
 	keyText := strings.TrimSpace(os.Getenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY"))
 	key, err := base64.StdEncoding.DecodeString(keyText)
-	if err != nil || len(key) != ed25519.PublicKeySize || m.Signature == "" {
-		return false
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return signatureNoKey
+	}
+	if m.Signature == "" {
+		return signatureMissing
 	}
 	sig, err := base64.StdEncoding.DecodeString(m.Signature)
 	if err != nil || len(sig) != ed25519.SignatureSize {
-		return false
+		return signatureMalformed
 	}
 	unsigned := m
 	unsigned.Signature = ""
 	payload, err := json.Marshal(unsigned)
 	if err != nil {
-		return false
+		return signatureMalformed
 	}
-	return ed25519.Verify(ed25519.PublicKey(key), payload, sig)
+	if !ed25519.Verify(ed25519.PublicKey(key), payload, sig) {
+		return signatureInvalid
+	}
+	return signatureValid
 }
 
 func compatibleVersion(actual, constraint string) bool {

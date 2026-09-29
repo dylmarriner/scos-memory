@@ -13,7 +13,7 @@ import (
 // MCPRequest defines Model Context Protocol request envelope (§23).
 type MCPRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      string          `json:"id"`
+	ID      any             `json:"id"` // JSON-RPC allows string or number
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
@@ -21,7 +21,7 @@ type MCPRequest struct {
 // MCPResponse defines Model Context Protocol response envelope.
 type MCPResponse struct {
 	JSONRPC string      `json:"jsonrpc"`
-	ID      string      `json:"id"`
+	ID      any         `json:"id"`
 	Result  interface{} `json:"result,omitempty"`
 	Error   interface{} `json:"error,omitempty"`
 }
@@ -29,6 +29,9 @@ type MCPResponse struct {
 // Handler handles incoming MCP tool calls.
 type Handler struct {
 	EndpointURL string
+	// BearerToken authenticates to the control plane; identity then comes
+	// from its claims rather than the caller-supplied tenant/actor fields.
+	BearerToken string
 	HTTPClient  *http.Client
 }
 
@@ -60,8 +63,8 @@ func (h *Handler) HandleCall(ctx context.Context, req *MCPRequest) (*MCPResponse
 	if payload["input"] == nil {
 		payload["input"] = call.Name
 	}
-	if payload["interaction_id"] == nil {
-		payload["interaction_id"] = req.ID
+	if payload["interaction_id"] == nil && req.ID != nil {
+		payload["interaction_id"] = fmt.Sprint(req.ID)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -76,6 +79,9 @@ func (h *Handler) HandleCall(ctx context.Context, req *MCPRequest) (*MCPResponse
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if h.BearerToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+h.BearerToken)
+	}
 	for key, value := range map[string]any{"X-SCOS-Tenant-ID": payload["tenant_id"], "X-SCOS-Principal-ID": payload["actor_id"]} {
 		if text, ok := value.(string); ok && text != "" {
 			httpReq.Header.Set(key, text)
@@ -100,7 +106,7 @@ func (h *Handler) HandleCall(ctx context.Context, req *MCPRequest) (*MCPResponse
 	return response(req.ID, result), nil
 }
 
-func response(id string, result any) *MCPResponse {
+func response(id any, result any) *MCPResponse {
 	return &MCPResponse{JSONRPC: "2.0", ID: id, Result: result}
 }
 

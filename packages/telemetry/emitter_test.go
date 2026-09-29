@@ -3,8 +3,11 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -263,5 +266,37 @@ func allDeclaredMetrics() []string {
 		MetricSkillSelection, MetricAdapterTier, MetricEventStreamLag,
 		MetricProjectionFreshness, MetricGraphConsistency, MetricUserModelChanges,
 		MetricBeliefRevisions, MetricCorrectionPropagation,
+	}
+}
+
+func TestEmitterTrustsDeploymentCAForTLSCollector(t *testing.T) {
+	received := make(chan []MetricPoint, 1)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var points []MetricPoint
+		_ = json.NewDecoder(r.Body).Decode(&points)
+		received <- points
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCOS_TLS_CA_FILE", caFile)
+	e := New("svc", srv.URL, nil)
+	defer e.Close()
+	e.Count(MetricBackupAge, nil, Correlation{})
+	if err := e.Flush(context.Background()); err != nil {
+		t.Fatalf("flush to TLS collector under deployment CA: %v", err)
+	}
+	if points := <-received; len(points) != 1 || points[0].Name != MetricBackupAge {
+		t.Fatalf("received %+v", points)
+	}
+}
+
+func TestEmitterDisabledWhenCAFileUnusable(t *testing.T) {
+	t.Setenv("SCOS_TLS_CA_FILE", filepath.Join(t.TempDir(), "missing.pem"))
+	if e := New("svc", "https://collector.invalid", nil); e.Enabled() {
+		t.Fatal("emitter enabled with an unreadable CA file")
 	}
 }

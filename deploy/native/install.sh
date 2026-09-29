@@ -34,14 +34,16 @@ install -d -o scos -g scos -m 0750 \
   /var/lib/scos/tool-governance \
   /var/lib/scos/wal-archive
 
-# OKF content is Git-authoritative; the container image bakes a copy in for
-# the same reason a native deploy uses a read-only bind: findOKFRoot()
-# (services/okf-synchroniser/cmd/server/main.go) needs a writable directory
-# to index into, and the source of truth should stay this checkout, not a
-# second copy that can drift.
-if [ ! -e /var/lib/scos/okf/.git ] && [ -d "$REPO_ROOT/okf" ]; then
-  cp -a "$REPO_ROOT/okf/." /var/lib/scos/okf/
-  chown -R scos:scos /var/lib/scos/okf
+# OKF content is Git-authoritative. okf-synchroniser bootstraps
+# SCOS_OKF_ROOT (/var/lib/scos/okf/knowledge) as a git repository on first
+# start, seeding it from SCOS_OKF_SEED_DIR; install that seed read-only here.
+# Its projections state file lives beside the root, never inside it, so the
+# working tree stays clean for protected-branch merges.
+rm -rf /opt/scos-fabric/okf-seed
+install -d -o root -g root -m 0755 /opt/scos-fabric/okf-seed
+if [ -d "$REPO_ROOT/okf" ]; then
+  cp -a "$REPO_ROOT/okf/." /opt/scos-fabric/okf-seed/
+  chown -R root:root /opt/scos-fabric/okf-seed
 fi
 
 echo "==> config directories"
@@ -88,7 +90,13 @@ for f in "$NATIVE_DIR"/env/*.env; do
 done
 
 echo "==> systemd units"
-install -m 0644 "$NATIVE_DIR"/systemd/*.service "$NATIVE_DIR"/systemd/*.target /etc/systemd/system/
+install -m 0644 "$NATIVE_DIR"/systemd/*.service "$NATIVE_DIR"/systemd/*.timer "$NATIVE_DIR"/systemd/*.target /etc/systemd/system/
+
+echo "==> periodic Python workers (run from the consolidation venv, which carries psycopg)"
+for w in index-maintenance policy-evaluation; do
+  install -d -o root -g root -m 0755 "/opt/scos-fabric/workers/$w"
+  install -m 0644 "$REPO_ROOT/workers/$w/main.py" "$REPO_ROOT/workers/$w/telemetry.py" "/opt/scos-fabric/workers/$w/"
+done
 systemctl daemon-reload
 
 echo

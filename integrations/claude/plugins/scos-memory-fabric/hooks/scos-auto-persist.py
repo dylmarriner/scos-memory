@@ -3,12 +3,12 @@
 hermes-provider's memory_write, with no explicit write tool call by the
 model (GOVERNANCE.md 4.14 - platform-owned persistence, not agent-optional).
 
-This is a bounded, deliberately simple persistence path (last user+assistant
-message pair from the transcript), not the full Turn Coordinator/journal
-lifecycle described in GOVERNANCE.md 11 - that requires session/turn IDs
-this hook doesn't have. It closes the "nothing is ever saved automatically"
-gap for Claude Code; it is not a substitute for a real control-plane ingress
-adapter.
+Each completed turn is written twice, both idempotently: as a recallable
+memory item (memory_write, keyed on a content digest so a repeat exchange
+versions the same row) and as a journaled session turn (sync_turn, with the
+Stop payload's session_id mapped to the provider's UUID contract the same way
+the Hermes plugin maps it), so the turn enters the same session/turn journal
+the consolidation workers read.
 
 Failures are logged to ~/.hermes/auto-persist.log rather than swallowed: a
 prior version of this script silently discarded every error, which is how a
@@ -26,6 +26,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 ENV_PATH = os.path.expanduser("~/.hermes/scos.env")
 LOG_PATH = os.path.expanduser("~/.hermes/auto-persist.log")
@@ -85,34 +86,125 @@ def last_exchange(transcript_path):
     return user_text, assistant_text
 
 
-def stable_key(session_id, user_text):
-    # Python's hash() is salted per-process (PYTHONHASHSEED) unless
-    # explicitly disabled, so the previous `hash(user_text) & 0xffffffff`
-    # produced a different key for the identical exchange across separate
-    # invocations of this script -- defeating the upsert/versioning
-    # upsertMemory keys on (tenant, namespace, hermes_key) to detect. A
-    # stable digest lets a genuine repeat of the same exchange collapse into
-    # a new version of the same memory_items row instead of a duplicate.
-    digest = hashlib.sha256(user_text.encode("utf-8", "replace")).hexdigest()[:16]
-    return f"claude-code-turn:{session_id}:{digest}"
+def ssl_context(env):
+    # Same policy as the Hermes plugin and MCP bridges: verify by default,
+    # optional private CA, explicit opt-in to skip verification.
+    ca_path = env.get("SCOS_TLS_CA_PATH", "")
+    if ca_path and not os.path.exists(ca_path):
+        raise RuntimeError(f"SCOS_TLS_CA_PATH does not exist: {ca_path}")
+    ctx = ssl.create_default_context(cafile=ca_path or None)
+    if env.get("SCOS_TLS_INSECURE_SKIP_VERIFY") == "1":
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
-def post_memory_write(base_url, token, body):
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+def stable_session_uuid(session_id, env):
+    # hermes-provider requires a UUID session_id; derive it exactly as the
+    # Hermes plugin does so one agent session maps to one SCOS session.
+    try:
+        return str(uuid.UUID(session_id))
+    except (ValueError, AttributeError, TypeError):
+        identity = f"{env.get('SCOS_TENANT_ID', '')}\0{env.get('SCOS_PRINCIPAL_ID', '')}\0{session_id}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, "scos-hermes-session:" + identity))
+
+
+def post_json(env, path, payload):
+    headers = {
+        "Authorization": f"Bearer {env['SCOS_HERMES_BEARER_TOKEN']}",
+        "Content-Type": "application/json",
+    }
+    if env.get("SCOS_TENANT_ID"):
+        headers["X-SCOS-Tenant-ID"] = env["SCOS_TENANT_ID"]
+    if env.get("SCOS_PRINCIPAL_ID"):
+        headers["X-SCOS-Principal-ID"] = env["SCOS_PRINCIPAL_ID"]
     req = urllib.request.Request(
-        base_url.rstrip("/") + "/v1/provider/memory_write",
-        data=body, method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        env["SCOS_HERMES_PROVIDER_URL"].rstrip("/") + path,
+        data=json.dumps(payload).encode(), method="POST", headers=headers,
     )
-    return urllib.request.urlopen(req, timeout=8, context=ctx)
+    with urllib.request.urlopen(req, timeout=8, context=ssl_context(env)) as resp:
+        resp.read()
+
+
+def post_with_retry(env, path, payload):
+    for attempt in (1, 2):
+        try:
+            post_json(env, path, payload)
+            return True
+        except urllib.error.HTTPError as e:
+            # The server processed and rejected the request (auth,
+            # validation, RLS); an identical retry fails the same way.
+            log(f"{path} failed: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:500]}")
+            return False
+        except Exception as e:
+            if attempt == 2:
+                log(f"{path} failed after retry: {type(e).__name__}: {e}")
+                return False
+            time.sleep(0.5)
+    return False
+
+
+def persist_turn(env, source, key_prefix, session_id, user_text, assistant_text):
+    """Write the exchange as a recallable memory item and journal it as a
+    session turn. Both writes are idempotent: the memory key and turn_id are
+    content-derived, so a re-fired hook versions/dedupes instead of
+    duplicating."""
+    namespace_id = env["SCOS_NAMESPACE_ID"]
+    user_text, assistant_text = user_text[:8000], assistant_text[:8000]
+    post_with_retry(env, "/v1/provider/memory_write", {
+        "namespace_id": namespace_id,
+        "key": stable_key(key_prefix, session_id, user_text),
+        "value": f"User: {user_text}\n\nAssistant: {assistant_text}",
+        "scope": "agent",
+        "source": source,
+    })
+    post_with_retry(env, "/v1/provider/sync_turn", {
+        "namespace_id": namespace_id,
+        "session_id": stable_session_uuid(session_id, env),
+        "turn_id": hashlib.sha256(f"{session_id}\0{user_text}\0{assistant_text}".encode("utf-8", "replace")).hexdigest(),
+        "messages": [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text},
+        ],
+        "tool_calls": [],
+    })
+
+
+def stable_key(prefix, session_id, user_text):
+    # hashlib, not hash(): Python's hash() is salted per process, which gave
+    # the same exchange a different key on every hook run and defeated the
+    # (tenant, namespace, key) upsert/versioning.
+    digest = hashlib.sha256(user_text.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"{prefix}:{session_id}:{digest}"
+
+
+def load_persist_env():
+    env = load_env()
+    missing = [k for k in ("SCOS_HERMES_PROVIDER_URL", "SCOS_HERMES_BEARER_TOKEN", "SCOS_NAMESPACE_ID") if not env.get(k)]
+    if missing:
+        log(f"skipped: missing {', '.join(missing)} in {ENV_PATH}")
+        return None
+    return env
+
+
+def end_session(payload):
+    """SessionEnd: close the provider session so hermes-provider drains its
+    queued work and raises on_session_end for this session."""
+    env = load_persist_env()
+    if env is None:
+        return
+    post_with_retry(env, "/v1/provider/session_end", {
+        "session_id": stable_session_uuid(payload.get("session_id", "unknown"), env),
+    })
 
 
 def main():
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "session-end":
+        end_session(payload)
         return
     transcript_path = payload.get("transcript_path")
     if not transcript_path:
@@ -122,38 +214,11 @@ def main():
     if not user_text or not assistant_text:
         return
 
-    env = load_env()
-    base_url = env.get("SCOS_HERMES_PROVIDER_URL")
-    token = env.get("SCOS_HERMES_BEARER_TOKEN")
-    namespace_id = env.get("SCOS_NAMESPACE_ID")
-    if not base_url or not token or not namespace_id:
-        log("skipped: missing SCOS_HERMES_PROVIDER_URL/SCOS_HERMES_BEARER_TOKEN/SCOS_NAMESPACE_ID in scos.env")
+    env = load_persist_env()
+    if env is None:
         return
-
-    session_id = payload.get("session_id", "unknown")
-    body = json.dumps({
-        "namespace_id": namespace_id,
-        "key": stable_key(session_id, user_text),
-        "value": f"User: {user_text[:8000]}\n\nAssistant: {assistant_text[:8000]}",
-        "scope": "agent",
-        "source": "claude-code-stop-hook",
-    }).encode()
-
-    for attempt in (1, 2):
-        try:
-            post_memory_write(base_url, token, body)
-            return
-        except urllib.error.HTTPError as e:
-            # A non-2xx response means the server processed and rejected the
-            # request (auth, validation, RLS) -- retrying the same body
-            # won't change that outcome, so log once and stop.
-            log(f"memory_write failed: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:500]}")
-            return
-        except Exception as e:
-            if attempt == 2:
-                log(f"memory_write failed after retry: {type(e).__name__}: {e}")
-                return
-            time.sleep(0.5)
+    persist_turn(env, "claude-code-stop-hook", "claude-code-turn",
+                 payload.get("session_id", "unknown"), user_text, assistant_text)
 
 
 if __name__ == "__main__":

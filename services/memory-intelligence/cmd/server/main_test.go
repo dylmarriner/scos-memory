@@ -18,6 +18,13 @@ func TestNewEngineServerUsesDatabaseAuthority(t *testing.T) {
 	}
 }
 
+func TestTemporalQueryTimesRequiresRFC3339(t *testing.T) {
+	r := httptest.NewRequest("GET", "/v1/facts?valid_at=tomorrow", nil)
+	if _, _, err := temporalQueryTimes(r); err == nil {
+		t.Fatal("expected invalid valid_at to be rejected")
+	}
+}
+
 func TestFactNetworkToMemoryType(t *testing.T) {
 	tests := map[MemoryNetwork]string{
 		NetworkExperience:        "episodic",

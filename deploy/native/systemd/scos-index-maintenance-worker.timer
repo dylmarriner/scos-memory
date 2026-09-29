@@ -1,0 +1,11 @@
+[Unit]
+Description=SCOS Memory Fabric - run index-maintenance-worker every 1h
+PartOf=scos-fabric.target
+
+[Timer]
+OnActiveSec=5min
+OnUnitInactiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target scos-fabric.target

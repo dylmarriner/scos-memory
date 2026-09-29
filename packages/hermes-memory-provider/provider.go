@@ -2,14 +2,30 @@ package hermesmemoryprovider
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
+
+// Profile permissions. An empty HermesProfile.Permissions list is
+// unrestricted; a non-empty list must grant the operation (or "admin"),
+// matching the memory scopes SCOS claims tokens carry.
+const (
+	PermissionMemoryRead  = "memory:read"
+	PermissionMemoryWrite = "memory:write"
+)
+
+// ErrPermissionDenied is returned when the profile lacks the permission an
+// operation needs.
+var ErrPermissionDenied = errors.New("hermes profile lacks permission")
 
 // HermesProfile defines Hermes agent memory profile isolation (§24.6).
 type HermesProfile struct {
@@ -58,6 +74,7 @@ type ProviderConfig struct{ BaseURL, ProfileScope, TenantID, PrincipalID, Worksp
 type persistedProvider struct {
 	Memories map[string]*MemoryEntry `json:"memories"`
 	Turns    []Turn                  `json:"turns"`
+	Config   map[string]string       `json:"config,omitempty"`
 }
 
 // NewProvider initializes a new Hermes Memory Provider.
@@ -75,7 +92,9 @@ func NewProviderWithStore(profile HermesProfile, storePath string) (*Provider, e
 		memories:  make(map[string]*MemoryEntry),
 		storePath: storePath,
 	}
-	p.load()
+	if err := p.load(); err != nil {
+		return nil, err
+	}
 	p.initialized = true
 	return p, nil
 }
@@ -91,7 +110,9 @@ func (p *Provider) Initialize(profilePath string) error {
 	defer p.mu.Unlock()
 	if profilePath != "" {
 		p.storePath = filepath.Join(profilePath, "scos-nexus-memory.json")
-		p.load()
+		if err := p.load(); err != nil {
+			return err
+		}
 	}
 	p.initialized = true
 	return nil
@@ -105,14 +126,60 @@ func (p *Provider) SystemPromptBlock() string {
 func (p *Provider) Prefetch(ctx context.Context, query string, maxItems int) []Turn {
 	return p.Recall(ctx, query, maxItems)
 }
+
+// QueuePrefetch queues a completed turn without blocking the caller on
+// disk I/O. Queued turns are recorded durably (deduplicated like SyncTurn)
+// at the next turn start, session end or shutdown. It returns false when the
+// turn is invalid or the queue is full.
 func (p *Provider) QueuePrefetch(_ context.Context, turn Turn) bool {
+	if turn.SessionID == "" || turn.TurnID == "" {
+		return false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.queue) >= 256 {
+	if !p.allowed(PermissionMemoryWrite) || len(p.queue) >= 256 {
 		return false
 	}
 	p.queue = append(p.queue, turn)
 	return true
+}
+
+// drainQueueLocked moves queued turns into the durable turn log and
+// persists. On a persist failure the turns stay queued for the next drain.
+func (p *Provider) drainQueueLocked() error {
+	if len(p.queue) == 0 {
+		return nil
+	}
+	before := len(p.turns)
+	for _, turn := range p.queue {
+		p.appendTurnLocked(turn)
+	}
+	if err := p.persistLocked(); err != nil {
+		p.turns = p.turns[:before]
+		return err
+	}
+	p.queue = nil
+	return nil
+}
+
+// appendTurnLocked records turn unless the same (session, turn) exists.
+func (p *Provider) appendTurnLocked(turn Turn) bool {
+	for _, existing := range p.turns {
+		if existing.SessionID == turn.SessionID && existing.TurnID == turn.TurnID {
+			return false
+		}
+	}
+	if turn.CreatedAt.IsZero() {
+		turn.CreatedAt = time.Now().UTC()
+	}
+	p.turns = append(p.turns, turn)
+	return true
+}
+
+func (p *Provider) allowed(permission string) bool {
+	return len(p.profile.Permissions) == 0 ||
+		slices.Contains(p.profile.Permissions, permission) ||
+		slices.Contains(p.profile.Permissions, "admin")
 }
 func (p *Provider) GetToolSchemas() []map[string]any {
 	return []map[string]any{{"name": "scos_recall"}, {"name": "scos_explain"}, {"name": "scos_user_model"}, {"name": "scos_memory_graph"}, {"name": "scos_correct"}, {"name": "scos_forget"}, {"name": "scos_status"}}
@@ -124,24 +191,171 @@ func (p *Provider) HandleToolCall(ctx context.Context, name string, args map[str
 	case "scos_status":
 		p.mu.RLock()
 		defer p.mu.RUnlock()
-		return map[string]any{"provider": p.Name(), "available": p.initialized, "queue_depth": len(p.queue)}, nil
+		return map[string]any{"provider": p.Name(), "available": p.initialized, "queue_depth": len(p.queue), "memories": len(p.memories), "turns": len(p.turns)}, nil
+	case "scos_explain":
+		entry, err := p.memoryByID(stringArg(args, "memory_id"))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"memory": entry, "source": "hermes-local-store", "profile_id": p.profile.ProfileID, "agent_id": p.profile.AgentID, "namespace": p.profile.Namespace}, nil
+	case "scos_correct":
+		return p.CorrectMemory(ctx, stringArg(args, "memory_id"), stringArg(args, "value"))
+	case "scos_forget":
+		if err := p.ForgetMemory(ctx, stringArg(args, "memory_id")); err != nil {
+			return nil, err
+		}
+		return map[string]any{"forgotten": stringArg(args, "memory_id")}, nil
+	case "scos_user_model":
+		return p.memoriesInScopes("user", "preference", "profile"), nil
+	case "scos_memory_graph":
+		return p.MemoryGraph(), nil
 	default:
-		return nil, fmt.Errorf("tool %s is delegated to the authoritative SCOS service", name)
+		return nil, fmt.Errorf("unknown tool %s", name)
 	}
 }
+
+// memoryByID returns a copy of the memory with the given ID.
+func (p *Provider) memoryByID(id string) (MemoryEntry, error) {
+	if id == "" {
+		return MemoryEntry{}, errors.New("memory_id is required")
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if !p.allowed(PermissionMemoryRead) {
+		return MemoryEntry{}, fmt.Errorf("%w: %s", ErrPermissionDenied, PermissionMemoryRead)
+	}
+	for _, entry := range p.memories {
+		if entry.ID == id {
+			return *entry, nil
+		}
+	}
+	return MemoryEntry{}, fmt.Errorf("memory %s not found", id)
+}
+
+// keyForIDLocked returns the store key holding memory id.
+func (p *Provider) keyForIDLocked(id string) (string, bool) {
+	for key, entry := range p.memories {
+		if entry.ID == id {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+// CorrectMemory replaces the value of an existing memory, keeping its ID.
+func (p *Provider) CorrectMemory(ctx context.Context, id, value string) (*MemoryEntry, error) {
+	if id == "" || value == "" {
+		return nil, errors.New("memory_id and value are required")
+	}
+	p.mu.RLock()
+	key, ok := p.keyForIDLocked(id)
+	var scope string
+	if ok {
+		scope = p.memories[key].Scope
+	}
+	p.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("memory %s not found", id)
+	}
+	return p.WriteMemory(ctx, key, value, scope)
+}
+
+// ForgetMemory deletes a memory by ID and persists the removal.
+func (p *Provider) ForgetMemory(_ context.Context, id string) error {
+	if id == "" {
+		return errors.New("memory_id is required")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.allowed(PermissionMemoryWrite) {
+		return fmt.Errorf("%w: %s", ErrPermissionDenied, PermissionMemoryWrite)
+	}
+	key, ok := p.keyForIDLocked(id)
+	if !ok {
+		return fmt.Errorf("memory %s not found", id)
+	}
+	previous := p.memories[key]
+	delete(p.memories, key)
+	if err := p.persistLocked(); err != nil {
+		p.memories[key] = previous
+		return err
+	}
+	return nil
+}
+
+// memoriesInScopes returns copies of memories whose scope is one of scopes,
+// ordered by key.
+func (p *Provider) memoriesInScopes(scopes ...string) []MemoryEntry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if !p.allowed(PermissionMemoryRead) {
+		return nil
+	}
+	out := []MemoryEntry{}
+	for _, entry := range p.memories {
+		if slices.Contains(scopes, entry.Scope) {
+			out = append(out, *entry)
+		}
+	}
+	slices.SortFunc(out, func(a, b MemoryEntry) int { return strings.Compare(a.Key, b.Key) })
+	return out
+}
+
+// MemoryGraph returns memories as nodes plus the session-lineage edges
+// recorded by OnSessionSwitch ("lineage:<to>" = "<from>:<reason>").
+func (p *Provider) MemoryGraph() map[string]any {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if !p.allowed(PermissionMemoryRead) {
+		return map[string]any{"nodes": []any{}, "edges": []any{}}
+	}
+	nodes := make([]map[string]any, 0, len(p.memories))
+	edges := []map[string]any{}
+	for key, entry := range p.memories {
+		nodes = append(nodes, map[string]any{"id": entry.ID, "key": key, "scope": entry.Scope})
+		if to, ok := strings.CutPrefix(key, "lineage:"); ok {
+			from, reason, _ := strings.Cut(entry.Value, ":")
+			edges = append(edges, map[string]any{"from": from, "to": to, "type": "session_switch", "reason": reason})
+		}
+	}
+	slices.SortFunc(nodes, func(a, b map[string]any) int { return strings.Compare(a["key"].(string), b["key"].(string)) })
+	return map[string]any{"nodes": nodes, "edges": edges, "turns": len(p.turns)}
+}
+
+// Shutdown drains queued turns and persists. "pending" is the number of
+// turns that could not be recorded and "error" the reason, if any.
 func (p *Provider) Shutdown(_ context.Context) map[string]any {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	pending := len(p.queue)
-	p.queue = nil
-	p.persistLocked()
+	result := map[string]any{"pending": 0}
+	err := p.drainQueueLocked()
+	if err == nil {
+		err = p.persistLocked()
+	}
+	if err != nil {
+		result["pending"] = len(p.queue)
+		result["error"] = err.Error()
+	}
 	p.initialized = false
-	return map[string]any{"pending": pending}
+	return result
 }
 func (p *Provider) OnTurnStart(ctx context.Context, sessionID, turnID string) []Turn {
+	p.mu.Lock()
+	_ = p.drainQueueLocked() // on failure turns stay queued; Shutdown reports them
+	p.mu.Unlock()
 	return p.Prefetch(ctx, "", 20)
 }
-func (p *Provider) OnSessionEnd(_ context.Context, _ string) { p.persistLocked() }
+
+// OnSessionEnd drains queued turns and persists; the error is returned so
+// the runtime can surface a failed flush.
+func (p *Provider) OnSessionEnd(_ context.Context, _ string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.drainQueueLocked(); err != nil {
+		return err
+	}
+	return p.persistLocked()
+}
 func (p *Provider) OnSessionSwitch(_ context.Context, fromSession, toSession, reason string) error {
 	_, err := p.WriteMemory(context.Background(), "lineage:"+toSession, fromSession+":"+reason, "session")
 	return err
@@ -158,6 +372,21 @@ func (p *Provider) OnDelegation(ctx context.Context, parentSession, subagent, ob
 	_, err := p.WriteMemory(ctx, "delegation:"+parentSession+":"+subagent, observation, "episodic")
 	return err
 }
+
+// Config returns the persisted provider configuration (nil if unset).
+func (p *Provider) Config() map[string]string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.config == nil {
+		return nil
+	}
+	out := make(map[string]string, len(p.config))
+	for k, v := range p.config {
+		out[k] = v
+	}
+	return out
+}
+
 func (p *Provider) BackupPaths() []string {
 	if p.storePath == "" {
 		return nil
@@ -190,49 +419,132 @@ func intArg(args map[string]any, key string, fallback int) int {
 	return fallback
 }
 
-func (p *Provider) load() {
-	if p.storePath == "" {
-		return
-	}
+func (p *Provider) storeKey() string {
+	return p.profile.Namespace + "/" + p.profile.ProfileID + "/" + p.profile.AgentID
+}
+
+// legacyStoreKey is the pre-namespace key, read so existing stores keep
+// their data; the next write moves it under storeKey.
+func (p *Provider) legacyStoreKey() string {
+	return p.profile.ProfileID + "/" + p.profile.AgentID
+}
+
+// readStore parses the whole store file. A missing file is an empty store;
+// an unreadable or corrupt one is an error, never silently treated as empty
+// (the next write would otherwise erase every other profile's data).
+func (p *Provider) readStore() (map[string]persistedProvider, error) {
+	all := make(map[string]persistedProvider)
 	b, err := os.ReadFile(p.storePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return all, nil
+	}
 	if err != nil {
-		return
+		return nil, fmt.Errorf("read hermes memory store: %w", err)
 	}
-	var all map[string]persistedProvider
-	if json.Unmarshal(b, &all) != nil {
-		return
+	if err := json.Unmarshal(b, &all); err != nil {
+		return nil, fmt.Errorf("hermes memory store %s is corrupt, refusing to use it: %w", p.storePath, err)
 	}
-	state, ok := all[p.profile.ProfileID+"/"+p.profile.AgentID]
+	return all, nil
+}
+
+func (p *Provider) load() error {
+	if p.storePath == "" {
+		return nil
+	}
+	all, err := p.readStore()
+	if err != nil {
+		return err
+	}
+	state, ok := all[p.storeKey()]
+	if !ok && p.profile.Namespace != "" {
+		state, ok = all[p.legacyStoreKey()]
+	}
 	if !ok {
-		return
+		return nil
 	}
 	if state.Memories != nil {
 		p.memories = state.Memories
 	}
 	p.turns = state.Turns
+	p.config = state.Config
+	return nil
+}
+
+const storeLockTimeout = 10 * time.Second
+
+// lockStore takes an exclusive lock file beside the store so concurrent
+// processes serialise their read-modify-write. A lock older than
+// storeLockTimeout is treated as abandoned by a crashed writer.
+func (p *Provider) lockStore() (func(), error) {
+	lock := p.storePath + ".lock"
+	deadline := time.Now().Add(storeLockTimeout)
+	for {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			_ = f.Close()
+			return func() { _ = os.Remove(lock) }, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("lock hermes memory store: %w", err)
+		}
+		if info, statErr := os.Stat(lock); statErr == nil && time.Since(info.ModTime()) > storeLockTimeout {
+			_ = os.Remove(lock)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("lock hermes memory store: timed out waiting for %s", lock)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (p *Provider) persistLocked() error {
 	if p.storePath == "" {
 		return nil
 	}
-	all := make(map[string]persistedProvider)
-	if b, err := os.ReadFile(p.storePath); err == nil {
-		_ = json.Unmarshal(b, &all)
+	if err := os.MkdirAll(filepath.Dir(p.storePath), 0755); err != nil {
+		return err
 	}
-	all[p.profile.ProfileID+"/"+p.profile.AgentID] = persistedProvider{p.memories, p.turns}
+	unlock, err := p.lockStore()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	all, err := p.readStore()
+	if err != nil {
+		return err
+	}
+	if p.profile.Namespace != "" {
+		delete(all, p.legacyStoreKey())
+	}
+	all[p.storeKey()] = persistedProvider{Memories: p.memories, Turns: p.turns, Config: p.config}
 	b, err := json.MarshalIndent(all, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(filepath.Dir(p.storePath), 0755); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(p.storePath), filepath.Base(p.storePath)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	tmp := p.storePath + ".tmp"
-	if err = os.WriteFile(tmp, b, 0600); err != nil {
+	defer os.Remove(tmp.Name()) // no-op after a successful rename
+	if _, err = tmp.Write(b); err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p.storePath)
+	return os.Rename(tmp.Name(), p.storePath)
+}
+
+func newMemoryID() (string, error) {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return "hermes-mem-" + hex.EncodeToString(b[:]), nil
 }
 
 // WriteMemory records a key-value memory entry into Hermes profile scope.
@@ -242,16 +554,29 @@ func (p *Provider) WriteMemory(ctx context.Context, key, value, scope string) (*
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	entry := &MemoryEntry{
-		ID:        fmt.Sprintf("hermes-mem-%d", len(p.memories)+1),
-		Key:       key,
-		Value:     value,
-		Scope:     scope,
-		CreatedAt: time.Now().UTC(),
+	if !p.allowed(PermissionMemoryWrite) {
+		return nil, fmt.Errorf("%w: %s", ErrPermissionDenied, PermissionMemoryWrite)
 	}
+
+	// Rewriting a key keeps its ID so references to the memory stay valid.
+	previous, existed := p.memories[key]
+	id := ""
+	if existed {
+		id = previous.ID
+	} else {
+		var err error
+		if id, err = newMemoryID(); err != nil {
+			return nil, fmt.Errorf("generate memory id: %w", err)
+		}
+	}
+	entry := &MemoryEntry{ID: id, Key: key, Value: value, Scope: scope, CreatedAt: time.Now().UTC()}
 	p.memories[key] = entry
 	if err := p.persistLocked(); err != nil {
+		if existed {
+			p.memories[key] = previous
+		} else {
+			delete(p.memories, key)
+		}
 		return nil, err
 	}
 	return entry, nil
@@ -261,6 +586,9 @@ func (p *Provider) WriteMemory(ctx context.Context, key, value, scope string) (*
 func (p *Provider) ReadMemory(ctx context.Context, key string) (*MemoryEntry, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	if !p.allowed(PermissionMemoryRead) {
+		return nil, false
+	}
 	entry, found := p.memories[key]
 	return entry, found
 }
@@ -272,16 +600,14 @@ func (p *Provider) SyncTurn(ctx context.Context, turn Turn) (bool, error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, existing := range p.turns {
-		if existing.SessionID == turn.SessionID && existing.TurnID == turn.TurnID {
-			return false, nil
-		}
+	if !p.allowed(PermissionMemoryWrite) {
+		return false, fmt.Errorf("%w: %s", ErrPermissionDenied, PermissionMemoryWrite)
 	}
-	if turn.CreatedAt.IsZero() {
-		turn.CreatedAt = time.Now().UTC()
+	if !p.appendTurnLocked(turn) {
+		return false, nil
 	}
-	p.turns = append(p.turns, turn)
 	if err := p.persistLocked(); err != nil {
+		p.turns = p.turns[:len(p.turns)-1]
 		return false, err
 	}
 	return true, nil
@@ -291,6 +617,9 @@ func (p *Provider) SyncTurn(ctx context.Context, turn Turn) (bool, error) {
 func (p *Provider) Recall(ctx context.Context, query string, maxItems int) []Turn {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	if !p.allowed(PermissionMemoryRead) {
+		return nil
+	}
 	if maxItems <= 0 {
 		maxItems = 20
 	}
@@ -314,11 +643,4 @@ func containsTurn(turn Turn, query string) bool {
 	return stringContains(string(b), query)
 }
 
-func stringContains(value, query string) bool {
-	for i := 0; i+len(query) <= len(value); i++ {
-		if value[i:i+len(query)] == query {
-			return true
-		}
-	}
-	return false
-}
+func stringContains(value, query string) bool { return strings.Contains(value, query) }

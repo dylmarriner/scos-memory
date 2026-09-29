@@ -69,7 +69,9 @@ class ComposeSecurityTests(unittest.TestCase):
         self.assertNotIn("change-me", ENV_EXAMPLE)
         self.assertNotIn("sslmode=disable", ENV_EXAMPLE)
         self.assertIn("POSTGRES_PASSWORD=", ENV_EXAMPLE)
-        self.assertIn("SCOS_BACKUP_PROVIDER=disabled", ENV_EXAMPLE)
+        self.assertIn("SCOS_BACKUP_PROVIDER=local", ENV_EXAMPLE)
+        self.assertIn("SCOS_BACKUP_SCHEDULE_INTERVAL=24h", ENV_EXAMPLE)
+        self.assertRegex(ENV_EXAMPLE, r"(?m)^SCOS_BACKUP_PASSWORD=$")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -482,11 +483,31 @@ func benchmarkScores(expected, retrieved []string) map[string]float64 {
 
 // ── metrics ──────────────────────────────────────────────────────────────
 
+// handleMetrics lists stored metric points, optionally narrowed by metric
+// family (?metric=token matches every name containing "token", which is
+// how the dashboard's Token Flow and Costs views ask for their series), by
+// exact ?name= and by ?service=. Without a filter it returns everything.
 func (s *observabilityServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	family := strings.ToLower(strings.TrimSpace(q.Get("metric")))
+	name := strings.TrimSpace(q.Get("name"))
+	service := strings.TrimSpace(q.Get("service"))
 	s.mu.RLock()
-	m := s.metrics
+	out := make([]*MetricPoint, 0, len(s.metrics))
+	for _, m := range s.metrics {
+		if family != "" && !strings.Contains(strings.ToLower(m.Name), family) {
+			continue
+		}
+		if name != "" && m.Name != name {
+			continue
+		}
+		if service != "" && (m.Labels == nil || m.Labels["service"] != service) {
+			continue
+		}
+		out = append(out, m)
+	}
 	s.mu.RUnlock()
-	writeJSON(w, m)
+	writeJSON(w, out)
 }
 
 func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http.Request) {

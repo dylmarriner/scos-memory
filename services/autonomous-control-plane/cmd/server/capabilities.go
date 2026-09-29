@@ -22,16 +22,17 @@ var routingRegistry = newPlatformRegistry()
 // controlMetrics emits this service's §32 measures.
 var controlMetrics = telemetry.FromEnvironment("autonomous-control-plane")
 
+// mandatorySystems are the systems §21.8 requires on every interaction:
+// journal, scope resolution, memory retrieval and context optimisation.
+var mandatorySystems = map[string]bool{
+	"journal": true, "autonomous-control-plane": true,
+	"memory-gateway": true, "context-optimisation": true,
+}
+
 // recordRouteMetrics emits the control-plane measures §32 requires for a
 // completed route decision.
 func recordRouteMetrics(req RouteRequest, decision RouteDecision, planning time.Duration) {
-	corr := telemetry.Correlation{
-		SessionID: req.SessionID,
-		TurnID:    req.TurnID,
-		TaskID:    req.TaskID,
-		AgentID:   req.AgentID,
-		Tenant:    req.TenantID,
-	}
+	corr := routeCorrelation(req)
 	controlMetrics.Observe(telemetry.MetricRoutePlanningLatency, planning, nil, corr)
 
 	// Every decision that reaches here entered through the control plane, so
@@ -39,26 +40,16 @@ func recordRouteMetrics(req RouteRequest, decision RouteDecision, planning time.
 	controlMetrics.Count(telemetry.MetricIngressCoverage,
 		map[string]string{"boundary": "control_plane"}, corr)
 
-	// Mandatory-system selection: §21.8 requires journal, scope resolution,
-	// memory retrieval and context optimisation on every interaction. Report
-	// the observed fraction rather than asserting compliance.
-	mandatory := map[string]bool{
-		"journal": false, "autonomous-control-plane": false,
-		"memory-gateway": false, "context-optimisation": false,
-	}
+	// Mandatory-system selection: report the observed fraction rather than
+	// asserting compliance.
+	present := map[string]bool{}
 	for _, step := range decision.SelectedPlan {
-		if _, required := mandatory[step.System]; required {
-			mandatory[step.System] = true
-		}
-	}
-	present := 0
-	for _, ok := range mandatory {
-		if ok {
-			present++
+		if mandatorySystems[step.System] {
+			present[step.System] = true
 		}
 	}
 	controlMetrics.Gauge(telemetry.MetricMandatorySystemSelection,
-		float64(present)/float64(len(mandatory)), "ratio", nil, corr)
+		float64(len(present))/float64(len(mandatorySystems)), "ratio", nil, corr)
 
 	if decision.ConfirmationRequired {
 		controlMetrics.Count(telemetry.MetricConfirmationRecall,
@@ -188,26 +179,6 @@ func platformCapabilities() []*capabilityregistry.CapabilityRecord {
 			FallbackCapabilities:      []string{"tool-governance.authorise"},
 		},
 		{
-			CapabilityID:              "recovery-orchestrator.recover",
-			CapabilityType:            capabilityregistry.CapTypeConnector,
-			Version:                   "1.0.0",
-			Name:                      "Recovery orchestration",
-			SupportedIntents:          []string{"recovery", "workflow_continuation"},
-			RequiredPermissions:       []string{"recovery:invoke"},
-			MaximumDataClassification: "restricted",
-			ReadOrWriteClass:          capabilityregistry.ClassReadWrite,
-			SideEffectClass:           capabilityregistry.SideEffectReversible,
-			ConfirmationPolicy:        capabilityregistry.ConfirmAutomatic,
-			IdempotencySupport:        true,
-			ReconciliationSupport:     true,
-			DataLocality:              "local",
-			FreshnessCharacteristics:  "authoritative",
-			LatencyProfile:            capabilityregistry.LatencyProfile{P50Millis: 50, P95Millis: 250},
-			HistoricalSuccessRate:     0.95,
-			QualityScore:              0.9,
-			FailureModes:              []string{"no_checkpoint", "lease_conflict"},
-		},
-		{
 			CapabilityID:              "observability.status",
 			CapabilityType:            capabilityregistry.CapTypeConnector,
 			Version:                   "1.0.0",
@@ -254,9 +225,6 @@ func grantedPermissions(req RouteRequest, c classification) []string {
 	}
 	if c.has("command_execution") {
 		perms = append(perms, "execution:invoke")
-	}
-	if c.has("recovery") {
-		perms = append(perms, "recovery:invoke")
 	}
 	return perms
 }

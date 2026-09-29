@@ -19,35 +19,58 @@ import (
 	"time"
 )
 
+// Server timeouts applied when the caller leaves them unset. There is no
+// default WriteTimeout: it would cut off streaming responses (SSE, chunked
+// turn output), so handlers bound their own work with request contexts.
+const (
+	DefaultReadHeaderTimeout = 10 * time.Second
+	DefaultIdleTimeout       = 120 * time.Second
+)
+
 // ListenAndServe starts an HTTPS listener when SCOS_TLS_CERT_FILE and
-// SCOS_TLS_KEY_FILE are both set, and plaintext HTTP otherwise. When
-// SCOS_TLS_REQUIRED=true and no certificate is configured, it fails closed
-// rather than silently downgrading to plaintext.
+// SCOS_TLS_KEY_FILE are both set, and plaintext HTTP when neither is. Setting
+// only one is a configuration error, and SCOS_TLS_REQUIRED=true with no
+// certificate fails closed, so a typo can never silently downgrade to
+// plaintext.
 func ListenAndServe(addr string, handler http.Handler) error {
-	certFile := os.Getenv("SCOS_TLS_CERT_FILE")
-	keyFile := os.Getenv("SCOS_TLS_KEY_FILE")
-	if certFile != "" && keyFile != "" {
-		return http.ListenAndServeTLS(addr, certFile, keyFile, handler)
-	}
-	if os.Getenv("SCOS_TLS_REQUIRED") == "true" {
-		return fmt.Errorf("SCOS_TLS_CERT_FILE and SCOS_TLS_KEY_FILE are required when SCOS_TLS_REQUIRED=true")
-	}
-	return http.ListenAndServe(addr, handler)
+	return Serve(&http.Server{Addr: addr, Handler: handler})
 }
 
-// Serve runs a preconfigured *http.Server, using TLS when SCOS_TLS_CERT_FILE
-// and SCOS_TLS_KEY_FILE are both set and plaintext otherwise, mirroring
-// ListenAndServe for callers that need custom server timeouts.
+// Serve runs a preconfigured *http.Server with the same TLS selection as
+// ListenAndServe, filling in DefaultReadHeaderTimeout and DefaultIdleTimeout
+// when the caller has not set them (a server without a header timeout can be
+// held open indefinitely by slow clients).
 func Serve(server *http.Server) error {
-	certFile := os.Getenv("SCOS_TLS_CERT_FILE")
-	keyFile := os.Getenv("SCOS_TLS_KEY_FILE")
-	if certFile != "" && keyFile != "" {
+	certFile, keyFile, err := tlsFiles()
+	if err != nil {
+		return err
+	}
+	if server.ReadHeaderTimeout == 0 {
+		server.ReadHeaderTimeout = DefaultReadHeaderTimeout
+	}
+	if server.IdleTimeout == 0 {
+		server.IdleTimeout = DefaultIdleTimeout
+	}
+	if certFile != "" {
 		return server.ListenAndServeTLS(certFile, keyFile)
 	}
-	if os.Getenv("SCOS_TLS_REQUIRED") == "true" {
-		return fmt.Errorf("SCOS_TLS_CERT_FILE and SCOS_TLS_KEY_FILE are required when SCOS_TLS_REQUIRED=true")
-	}
 	return server.ListenAndServe()
+}
+
+// tlsFiles returns the configured certificate and key paths, both empty for
+// plaintext, or an error for a partial or required-but-missing configuration.
+func tlsFiles() (string, string, error) {
+	certFile := os.Getenv("SCOS_TLS_CERT_FILE")
+	keyFile := os.Getenv("SCOS_TLS_KEY_FILE")
+	switch {
+	case certFile != "" && keyFile != "":
+		return certFile, keyFile, nil
+	case certFile != "" || keyFile != "":
+		return "", "", fmt.Errorf("SCOS_TLS_CERT_FILE and SCOS_TLS_KEY_FILE must be set together")
+	case os.Getenv("SCOS_TLS_REQUIRED") == "true":
+		return "", "", fmt.Errorf("SCOS_TLS_CERT_FILE and SCOS_TLS_KEY_FILE are required when SCOS_TLS_REQUIRED=true")
+	}
+	return "", "", nil
 }
 
 // ServeGracefully runs Serve and shuts the server down cleanly on SIGINT or

@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,8 +140,45 @@ func TestGitMirrorPlanRequiresRemoteAndVerification(t *testing.T) {
 	}
 }
 
+// fakePostgresTools replaces commandContext so pg_dump writes a small archive
+// to its --file target and every other PostgreSQL client tool succeeds,
+// recording each invocation.
+func fakePostgresTools(t *testing.T) *[]string {
+	t.Helper()
+	var calls []string
+	orig := commandContext
+	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if name == "pg_dump" {
+			for i, a := range args {
+				if a == "--file" {
+					return exec.CommandContext(ctx, "sh", "-c", `printf 'PGDMP-archive' > "$1"`, "sh", args[i+1])
+				}
+			}
+		}
+		return exec.CommandContext(ctx, "true")
+	}
+	t.Cleanup(func() { commandContext = orig })
+	return &calls
+}
+
+// writeLocalDump stores a verifiable local backup (dump + manifest).
+func writeLocalDump(t *testing.T, s *backupServer, id, backupType, content string) {
+	t.Helper()
+	if err := os.WriteFile(s.dumpPath(id), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := backupManifest{ID: id, Type: backupType, Format: localDumpFormat, ContentHash: hashString(content), SizeBytes: int64(len(content)), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	data, _ := json.Marshal(backupArtifact{Manifest: m})
+	if err := os.WriteFile(s.artifactPath(id), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLocalBackupArtifactLifecycle(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("SCOS_BACKUP_DATABASE_URL", "postgres://scos@db/scos?sslmode=require")
+	calls := fakePostgresTools(t)
 	s := newBackupServerWithDir(dir)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/backups/start", stringsReader(`{"type":"base_backup"}`))
@@ -152,11 +191,14 @@ func TestLocalBackupArtifactLifecycle(t *testing.T) {
 	if err := json.NewDecoder(start.Body).Decode(&started); err != nil {
 		t.Fatal(err)
 	}
-	if started.Status != "running" || started.Location == "" {
+	if started.Status != "completed" || started.Location != s.dumpPath(started.ID) || started.SizeBytes != int64(len("PGDMP-archive")) {
 		t.Fatalf("unexpected start record: %+v", started)
 	}
-	if _, err := os.Stat(started.Location); err != nil {
-		t.Fatalf("artifact was not created: %v", err)
+	if got, _ := os.ReadFile(started.Location); string(got) != "PGDMP-archive" {
+		t.Fatalf("dump content = %q", got)
+	}
+	if len(*calls) != 1 || !strings.HasPrefix((*calls)[0], "pg_dump --format=custom --no-owner --enable-row-security") || !strings.HasSuffix((*calls)[0], "postgres://scos@db/scos?sslmode=require") {
+		t.Fatalf("pg_dump invocation = %v", *calls)
 	}
 
 	complete := httptest.NewRecorder()
@@ -200,12 +242,8 @@ func TestRetentionCleanupRemovesExpiredArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	s := newBackupServerWithDir(dir)
 	s.retention.WALAndDaily = 1
-	artifact := backupArtifact{Manifest: backupManifest{ID: "backup-old", Type: "base_backup", Format: "scos-local-v1", ContentHash: hashString("old"), SizeBytes: 3}, Payload: "old"}
-	data, _ := json.Marshal(artifact)
+	writeLocalDump(t, s, "backup-old", "base_backup", "old")
 	path := filepath.Join(dir, "backup-old.backup.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
 	old := time.Now().Add(-48 * time.Hour)
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
@@ -213,6 +251,9 @@ func TestRetentionCleanupRemovesExpiredArtifacts(t *testing.T) {
 	removed, err := s.cleanupRetention(time.Now())
 	if err != nil || removed != 1 {
 		t.Fatalf("cleanup removed=%d err=%v", removed, err)
+	}
+	if _, err := os.Stat(s.dumpPath("backup-old")); !os.IsNotExist(err) {
+		t.Fatalf("expired dump not removed: %v", err)
 	}
 }
 
@@ -390,15 +431,11 @@ func TestRestoreCadenceStatusHonoursRecentPass(t *testing.T) {
 func TestRestoreTestPersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	s := newBackupServerWithDir(dir)
-	artifact := backupArtifact{Manifest: backupManifest{ID: "backup-1", Type: "base_backup", Format: "scos-local-v1", ContentHash: hashString("data"), SizeBytes: 4}, Payload: "data"}
-	data, _ := json.Marshal(artifact)
-	if err := os.WriteFile(filepath.Join(dir, "backup-1.backup.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeLocalDump(t, s, "backup-1", "base_backup", "data")
+	// No restore database configured, so the monthly drill fails; the point
+	// here is that the *result* is durable, not its verdict.
 	result := s.executeRestoreTest(restoreTestTypeMonthly, "backup-1")
 	if result.Status != "failed" {
-		// Local synthetic artifacts never satisfy a restore drill by design;
-		// the point here is that the *result* is durable, not its verdict.
 		t.Fatalf("unexpected status: %s", result.Status)
 	}
 
@@ -458,5 +495,84 @@ func TestProductionRestoreDrillRequiresTemporaryDatabase(t *testing.T) {
 	s := newBackupServerWithDir(t.TempDir())
 	if err := s.restoreProduction("missing"); err == nil || !strings.Contains(err.Error(), "no such file") {
 		t.Fatalf("expected unavailable restore source, got %v", err)
+	}
+}
+
+func TestLocalRestoreDrills(t *testing.T) {
+	calls := fakePostgresTools(t)
+	s := newBackupServerWithDir(t.TempDir())
+	writeLocalDump(t, s, "backup-1", "base_backup", "PGDMP")
+
+	if r := s.executeRestoreTest(restoreTestTypeIntegrity, "backup-1"); r.Status != "passed" {
+		t.Fatalf("integrity drill = %+v", r)
+	}
+	if r := s.executeRestoreTest(restoreTestTypeMonthly, "backup-1"); r.Status != "failed" || !strings.Contains(r.Detail, "SCOS_BACKUP_RESTORE_DATABASE_URL") {
+		t.Fatalf("monthly drill without restore database = %+v", r)
+	}
+	t.Setenv("SCOS_BACKUP_RESTORE_DATABASE_URL", "postgres://scos@db/postgres?sslmode=require")
+	if _, err := exec.LookPath("createdb"); err != nil {
+		t.Skip("createdb not on PATH; temporary-database restore path needs it")
+	}
+	if r := s.executeRestoreTest(restoreTestTypeMonthly, "backup-1"); r.Status != "passed" {
+		t.Fatalf("monthly drill with restore database = %+v", r)
+	}
+	joined := strings.Join(*calls, "\n")
+	if !strings.Contains(joined, "createdb") || !strings.Contains(joined, "createdb --maintenance-db") || !strings.Contains(joined, "pg_restore --exit-on-error --no-owner --dbname") || !strings.Contains(joined, "dropdb --if-exists --maintenance-db") {
+		t.Fatalf("restore did not create, restore and drop a temporary database: %s", joined)
+	}
+}
+
+func TestLocalBackupRejectsTamperedDumpAndSyntheticArtifacts(t *testing.T) {
+	s := newBackupServerWithDir(t.TempDir())
+	writeLocalDump(t, s, "backup-1", "base_backup", "PGDMP")
+	if err := os.WriteFile(s.dumpPath("backup-1"), []byte("PGDMX"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.verifyBackup("backup-1"); err == nil {
+		t.Fatal("tampered dump verified")
+	}
+	synthetic, _ := json.Marshal(backupArtifact{Manifest: backupManifest{ID: "backup-2", Format: "scos-local-test-v1", ContentHash: hashString("x"), SizeBytes: 1}, Payload: "x"})
+	if err := os.WriteFile(s.artifactPath("backup-2"), synthetic, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.verifyBackup("backup-2"); err == nil || !strings.Contains(err.Error(), "not a PostgreSQL dump") {
+		t.Fatalf("synthetic artifact verify err = %v", err)
+	}
+}
+
+func TestBackupSchedulerTakesBackupOnlyWhenDue(t *testing.T) {
+	t.Setenv("SCOS_BACKUP_DATABASE_URL", "postgres://scos@db/scos?sslmode=require")
+	calls := fakePostgresTools(t)
+	s := newBackupServerWithDir(t.TempDir())
+	now := time.Now().UTC()
+	s.backupIfDue(context.Background(), time.Hour, now)
+	if len(*calls) != 1 {
+		t.Fatalf("first run should back up, calls = %v", *calls)
+	}
+	s.backupIfDue(context.Background(), time.Hour, now.Add(30*time.Minute))
+	if len(*calls) != 1 {
+		t.Fatalf("backup taken before interval elapsed: %v", *calls)
+	}
+	s.backupIfDue(context.Background(), time.Hour, now.Add(2*time.Hour))
+	if len(*calls) != 2 {
+		t.Fatalf("overdue backup not taken: %v", *calls)
+	}
+	t.Setenv("SCOS_BACKUP_SCHEDULE_INTERVAL", "")
+	if backupScheduleInterval() != 0 {
+		t.Fatal("empty schedule interval should disable the scheduler")
+	}
+	t.Setenv("SCOS_BACKUP_SCHEDULE_INTERVAL", "24h")
+	if backupScheduleInterval() != 24*time.Hour {
+		t.Fatal("schedule interval not parsed")
+	}
+}
+
+func TestSkipExtensionEntries(t *testing.T) {
+	toc := ";\n; Archive created at ...\n2; 3079 16386 EXTENSION - vector \n5504; 0 0 COMMENT - EXTENSION vector \n230; 1259 16400 TABLE public tenants scos\n"
+	got := skipExtensionEntries(toc)
+	for _, want := range []string{";2; 3079 16386 EXTENSION - vector ", ";5504; 0 0 COMMENT - EXTENSION vector ", "\n230; 1259 16400 TABLE public tenants scos"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("skipExtensionEntries missing %q in:\n%s", want, got)
+		}
 	}
 }

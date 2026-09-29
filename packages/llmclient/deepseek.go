@@ -80,10 +80,18 @@ type responseFormat struct {
 	Type string `json:"type"`
 }
 
+// Usage is the token accounting the provider reports for one completion.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 type chatResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
+	Usage *Usage `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -165,8 +173,15 @@ func (c *Client) postOnce(ctx context.Context, encoded []byte) (body []byte, ret
 // used by the autonomous control plane when DeepSeek is the selected agent
 // backend. Structured callers should use ChatJSON instead.
 func (c *Client) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	content, _, err := c.ChatWithUsage(ctx, systemPrompt, userPrompt)
+	return content, err
+}
+
+// ChatWithUsage is Chat plus the provider's token usage for the completion;
+// the usage is nil when the provider did not report it.
+func (c *Client) ChatWithUsage(ctx context.Context, systemPrompt, userPrompt string) (string, *Usage, error) {
 	if c == nil {
-		return "", ErrDisabled
+		return "", nil, ErrDisabled
 	}
 	reqBody := chatRequest{
 		Model: c.model,
@@ -179,20 +194,20 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userPrompt string) (str
 	}
 	body, err := c.post(ctx, reqBody)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var parsed chatResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", fmt.Errorf("decode deepseek response: %w", err)
+		return "", nil, fmt.Errorf("decode deepseek response: %w", err)
 	}
 	if len(parsed.Choices) == 0 {
-		return "", fmt.Errorf("deepseek returned no choices")
+		return "", nil, fmt.Errorf("deepseek returned no choices")
 	}
 	content := strings.TrimSpace(parsed.Choices[0].Message.Content)
 	if content == "" {
-		return "", fmt.Errorf("deepseek returned an empty response")
+		return "", nil, fmt.Errorf("deepseek returned an empty response")
 	}
-	return content, nil
+	return content, parsed.Usage, nil
 }
 
 // ChatJSON asks the model to respond with a single JSON object matching the
@@ -225,8 +240,45 @@ func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userPrompt string, 
 		return fmt.Errorf("deepseek returned no choices")
 	}
 	content := strings.TrimSpace(parsed.Choices[0].Message.Content)
-	if err := json.Unmarshal([]byte(content), target); err != nil {
+	if err := decodeJSONValue(content, target); err != nil {
 		return fmt.Errorf("decode model output as JSON: %w", err)
 	}
 	return nil
+}
+
+// decodeJSONValue decodes the first complete JSON value in content.
+//
+// response_format:json_object asks for exactly one object, but models still
+// emit a second object, a trailing note, or a fenced block around the first
+// one. A strict json.Unmarshal of the whole string rejects all of those with
+// "invalid character '{' after top-level value" -- which is what the
+// dashboard's memory summary was hitting live, silently degrading a working
+// model call to the deterministic fallback. Decoding one value off the front
+// is tolerant of trailing content while staying strict about that first
+// value: prose-only or truncated output still fails, and nothing is invented
+// to fill a missing field.
+func decodeJSONValue(content string, target any) error {
+	content = strings.TrimSpace(content)
+	if strings.HasPrefix(content, "```") {
+		// Drop the opening fence: the rest of that line when the value
+		// starts on its own line ("```json\n{...}"), or the backticks and
+		// language tag themselves when the whole value is on one line.
+		if idx := strings.IndexByte(content, '\n'); idx != -1 {
+			content = content[idx+1:]
+		} else {
+			content = strings.TrimLeft(content, "`")
+			content = strings.TrimPrefix(content, "json")
+			content = strings.TrimPrefix(content, "JSON")
+		}
+		if idx := strings.LastIndex(content, "```"); idx != -1 {
+			content = content[:idx]
+		}
+		content = strings.TrimSpace(content)
+	}
+	decoder := json.NewDecoder(strings.NewReader(content))
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, target)
 }

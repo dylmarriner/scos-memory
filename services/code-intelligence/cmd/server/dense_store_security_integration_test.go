@@ -17,7 +17,7 @@ func TestUpsertCodeEmbeddingRejectsForeignTenantSymbol(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := "package p\nfunc Owned() {}\n"
-	if err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{{Path: "owned.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+	if _, err := store.IndexSnapshot(ctx, snapshotID, repoID, []PGFileInput{{Path: "owned.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
 		t.Fatal(err)
 	}
 	docs, err := store.SnapshotEmbeddingDocuments(ctx, snapshotID)

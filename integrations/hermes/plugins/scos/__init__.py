@@ -185,7 +185,7 @@ class ScosMemoryProvider(MemoryProvider):
             raise RuntimeError("SCOS recall check failed: gateway did not advertise scos_recall")
 
         provider_url = self._env.get("SCOS_HERMES_PROVIDER_URL", "").rstrip("/") + "/v1/provider/status"
-        request = urllib.request.Request(provider_url, headers=self._gateway_headers(), method="GET")
+        request = urllib.request.Request(provider_url, headers=self._provider_headers(), method="GET")
         try:
             with urllib.request.urlopen(request, timeout=8, context=self._ssl_context()) as response:
                 status = json.loads(response.read().decode() or "{}")
@@ -233,6 +233,23 @@ class ScosMemoryProvider(MemoryProvider):
         token = self._env.get("SCOS_BEARER_TOKEN") or self._env.get("SCOS_HERMES_BEARER_TOKEN", "")
         if not token or not self._env.get("SCOS_TENANT_ID") or not self._env.get("SCOS_PRINCIPAL_ID"):
             raise RuntimeError("SCOS_BEARER_TOKEN, SCOS_TENANT_ID and SCOS_PRINCIPAL_ID are required")
+        return {
+            "Content-Type": "application/json",
+            "X-SCOS-Tenant-ID": self._env.get("SCOS_TENANT_ID", ""),
+            "X-SCOS-Principal-ID": self._env.get("SCOS_PRINCIPAL_ID", ""),
+            "Authorization": "Bearer " + token,
+        }
+
+    def _provider_headers(self) -> Dict[str, str]:
+        """Headers for the hermes-provider (persistence) surface.
+
+        The provider authenticates with the claims JWT — it rejects the
+        mcp-gateway account key with 401 "authentication required", so the
+        gateway token must never be sent here.
+        """
+        token = self._env.get("SCOS_HERMES_BEARER_TOKEN") or self._env.get("SCOS_BEARER_TOKEN", "")
+        if not token or not self._env.get("SCOS_TENANT_ID") or not self._env.get("SCOS_PRINCIPAL_ID"):
+            raise RuntimeError("a bearer token, SCOS_TENANT_ID and SCOS_PRINCIPAL_ID are required")
         return {
             "Content-Type": "application/json",
             "X-SCOS-Tenant-ID": self._env.get("SCOS_TENANT_ID", ""),
@@ -318,22 +335,17 @@ class ScosMemoryProvider(MemoryProvider):
                 "messages": turn_messages,
                 "tool_calls": [],
             }).encode()
-            request = urllib.request.Request(
-                base_url.rstrip("/") + "/v1/provider/sync_turn",
-                data=body, method="POST",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "X-SCOS-Tenant-ID": self._env.get("SCOS_TENANT_ID", ""),
-                    "X-SCOS-Principal-ID": self._env.get("SCOS_PRINCIPAL_ID", ""),
-                },
-            )
             try:
+                request = urllib.request.Request(
+                    base_url.rstrip("/") + "/v1/provider/sync_turn",
+                    data=body, method="POST",
+                    headers=self._provider_headers(),
+                )
                 with urllib.request.urlopen(request, timeout=8, context=self._ssl_context()) as response:
                     if response.status // 100 != 2:
                         raise RuntimeError(f"unexpected sync status {response.status}")
             except Exception as error:
-                logger.debug("SCOS sync_turn failed: %s", error)
+                logger.warning("SCOS sync_turn failed; turn not persisted: %s", error)
 
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():

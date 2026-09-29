@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -74,18 +76,32 @@ func TestDeduplicateSegments(t *testing.T) {
 	}
 }
 
+// demandEverywhere gives every §18.6 bucket more droppable content than it
+// could be funded for, so the profile's percentages are what decide.
+func demandEverywhere() []Segment {
+	var segs []Segment
+	for _, class := range []string{"governing_policy", "current_user_instruction", "active_task_state", "evidence", "tool_schema"} {
+		segs = append(segs, Segment{Class: class, OriginalTokens: 100000, Droppable: true})
+	}
+	return segs
+}
+
 func TestAllocateBudget(t *testing.T) {
-	alloc := allocateBudget(8000, "balanced", nil)
+	alloc := allocateBudget(8000, "balanced", demandEverywhere())
 	if alloc.Governing != 1200 {
 		t.Fatalf("expected 1200 governing, got %d", alloc.Governing)
 	}
 	if alloc.Reserve != 800 {
 		t.Fatalf("expected 800 reserve, got %d", alloc.Reserve)
 	}
+	// With nothing to fund, every class's share returns to the reserve.
+	if empty := allocateBudget(8000, "balanced", nil); empty.Reserve != 8000 || empty.Governing != 0 {
+		t.Fatalf("unneeded shares must move to reserve: %+v", empty)
+	}
 }
 
 func TestAllocateBudgetExact(t *testing.T) {
-	alloc := allocateBudget(8000, "exact", nil)
+	alloc := allocateBudget(8000, "exact", demandEverywhere())
 	if alloc.Governing != 2000 {
 		t.Fatalf("expected 2000 governing for exact, got %d", alloc.Governing)
 	}
@@ -160,7 +176,7 @@ func TestExtractExactValuesVersions(t *testing.T) {
 
 func TestOptimiseOutputRemovesRepeats(t *testing.T) {
 	raw := "line1\n\n\n\nline2\n\n\nline3"
-	opt := optimiseOutput(raw, "standard", 1000)
+	opt, _ := optimiseOutput(raw, "standard", 1000, "cap-1")
 	if strings.Contains(opt, "\n\n\n") {
 		t.Fatal("should collapse repeated newlines")
 	}
@@ -168,17 +184,77 @@ func TestOptimiseOutputRemovesRepeats(t *testing.T) {
 
 func TestOptimiseOutputCompact(t *testing.T) {
 	raw := "I think this is true.\n\nLet me check.\n\nBased on the docs, I can confirm."
-	opt := optimiseOutput(raw, "compact", 1000)
-	if strings.Contains(opt, "Let me") {
-		t.Fatal("compact should remove 'Let me' filler")
+	opt, _ := optimiseOutput(raw, "compact", 1000, "cap-1")
+	if strings.Contains(opt, "Let me check") {
+		t.Fatal("compact should remove a pure filler line")
+	}
+	// Hedges and content-bearing sentences survive: removing them changes
+	// what is being claimed.
+	for _, kept := range []string{"I think this is true.", "Based on the docs, I can confirm."} {
+		if !strings.Contains(opt, kept) {
+			t.Fatalf("compact must keep %q, got %q", kept, opt)
+		}
 	}
 }
 
 func TestOptimiseOutputTruncates(t *testing.T) {
 	raw := strings.Repeat("word ", 2000)
-	opt := optimiseOutput(raw, "standard", 100)
+	opt, omitted := optimiseOutput(raw, "standard", 100, "cap-1")
 	if estimateTokens(opt) > 150 {
 		t.Fatalf("expected truncation to ~100 tokens, got %d tokens", estimateTokens(opt))
+	}
+	if omitted == 0 || !strings.Contains(opt, "restore the full output with capsule cap-1") {
+		t.Fatalf("truncation must be explicit and name the restoring capsule: %q", opt)
+	}
+}
+
+func TestOptimiseOutputKeepsErrorLinesWhenTruncating(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 400; i++ {
+		fmt.Fprintf(&b, "progress step %d ok\n", i)
+	}
+	b.WriteString("ERROR: migration 000041 failed: relation missing\n")
+	for i := 0; i < 400; i++ {
+		fmt.Fprintf(&b, "cleanup step %d ok\n", i)
+	}
+	opt, omitted := optimiseOutput(b.String(), "standard", 200, "cap-2")
+	if !strings.Contains(opt, "ERROR: migration 000041 failed") {
+		t.Fatal("an error line must survive truncation")
+	}
+	if omitted == 0 || !strings.HasSuffix(opt, "restore the full output with capsule cap-2]") {
+		t.Fatalf("omission must be stated: %q", opt[len(opt)-120:])
+	}
+}
+
+func TestCompactOutputKeepsHedgesIntact(t *testing.T) {
+	got := compactOutput("I believe the replica is lagging.\nLet me know the deadline is Friday.")
+	if !strings.Contains(got, "I believe the replica is lagging.") || !strings.Contains(got, "Let me know the deadline is Friday.") {
+		t.Fatalf("compaction corrupted or dropped content: %q", got)
+	}
+}
+
+func TestOutputOptimiseResultIsRestorable(t *testing.T) {
+	t.Cleanup(func(prev SourceStore) func() { return func() { authoritativeSourceStore = prev } }(authoritativeSourceStore))
+	authoritativeSourceStore = newFileSourceStore(t.TempDir())
+	raw := strings.Repeat("build log line\n", 3000)
+	w := httptest.NewRecorder()
+	handleOutputOptimise(w, httptest.NewRequest(http.MethodPost, "/v1/output/optimise", strings.NewReader(`{"raw_output":`+strconv.Quote(raw)+`,"max_tokens":50}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("optimise: %d %s", w.Code, w.Body.String())
+	}
+	var resp OutputOptimiseResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OmittedLines == 0 || len(resp.SourceObjects) != 1 {
+		t.Fatalf("expected omitted lines and a stored source: %+v", resp)
+	}
+	body, _ := json.Marshal(map[string]any{"capsule": map[string]any{"capsule_id": resp.CapsuleID, "source_objects": resp.SourceObjects}})
+	w = httptest.NewRecorder()
+	handleContextRestore(w, httptest.NewRequest(http.MethodPost, "/v1/context/restore", strings.NewReader(string(body))))
+	var restored struct{ Content string }
+	if err := json.Unmarshal(w.Body.Bytes(), &restored); err != nil || restored.Content != raw {
+		t.Fatalf("restore did not return the full raw output (%d): %v", w.Code, err)
 	}
 }
 
@@ -196,15 +272,44 @@ func TestPercentOf(t *testing.T) {
 	}
 }
 
-func TestClassBudgetFor(t *testing.T) {
-	alloc := BudgetAllocation{Governing: 1000, Evidence: 500}
-	budget := classBudgetFor("governing_policy", alloc)
-	if budget != 1000 {
-		t.Fatalf("expected 1000, got %d", budget)
+func TestBudgetClassMapping(t *testing.T) {
+	if budgetClass("governing_policy") != "governing" || budgetClass("tool_schema") != "code_tools" {
+		t.Fatal("class mapping changed")
 	}
-	budget = classBudgetFor("unknown", alloc)
-	if budget != 500 {
-		t.Fatalf("expected 500 for unknown, got %d", budget)
+	if budgetClass("optional_background") != "" {
+		t.Fatal("optional background has no bucket of its own; it lives on reserve")
+	}
+}
+
+func TestAllocationNeverExceedsTheBudgetAndReservesMandatoryContent(t *testing.T) {
+	segs := []Segment{
+		{Class: "governing_policy", OriginalTokens: 40, Droppable: false},
+		{Class: "evidence", OriginalTokens: 5, Droppable: true},
+		{Class: "optional_background", OriginalTokens: 5000, Droppable: true},
+	}
+	for _, profile := range []string{"balanced", "aggressive", "conservative"} {
+		a := allocateBudget(200, profile, segs)
+		sum := a.Governing + a.Request + a.TaskState + a.Evidence + a.CodeTools + a.Reserve
+		if a.Mandatory != 40 || sum != 160 {
+			t.Fatalf("%s: mandatory=%d funded=%d; want 40 reserved and exactly 160 left to allocate (%+v)", profile, a.Mandatory, sum, a)
+		}
+		if a.Evidence != 5 {
+			t.Fatalf("%s: evidence needs 5 tokens, so its surplus must move to reserve: %+v", profile, a)
+		}
+	}
+}
+
+func TestLossyCompilationFitsTheBudget(t *testing.T) {
+	input := "Deploy notes. " + strings.Repeat("background detail that is optional. ", 400)
+	segs := deduplicateSegments(classifySegments(canonicalise(input), nil))
+	budget := 120
+	_, compiled := compressSegments(segs, "aggressive", allocateBudget(budget, "aggressive", segs))
+	used := 0
+	for _, seg := range compiled {
+		used += estimateTokens(seg.Content)
+	}
+	if used > budget {
+		t.Fatalf("aggressive compilation used %d tokens of a %d budget", used, budget)
 	}
 }
 
@@ -381,12 +486,13 @@ func TestHighImpactWorkCannotBeAggressivelyCompressed(t *testing.T) {
 		// exact is stricter than the floor and is honoured.
 		{"exact honoured", InputOptimiseRequest{TaskType: "governance", Profile: "exact"}, "exact"},
 		// Ordinary work is unaffected.
-		{"routine default", InputOptimiseRequest{TaskType: "conversation"}, "balanced"},
+		// §18.4: conservative is the default for uncharacterised work.
+		{"routine default", InputOptimiseRequest{TaskType: "conversation"}, "conservative"},
 		{"routine explicit", InputOptimiseRequest{TaskType: "conversation", Profile: "aggressive"}, "aggressive"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveProfile(tc.req); got != tc.want {
+			if got, _ := resolveProfile(tc.req); got != tc.want {
 				t.Fatalf("expected profile %q, got %q", tc.want, got)
 			}
 		})
@@ -404,7 +510,7 @@ func TestLossyProfilesAreNeverSelectedForHighImpactWork(t *testing.T) {
 	for _, req := range markers {
 		for _, profile := range []string{"", "exact", "conservative", "balanced", "aggressive", "adaptive"} {
 			req.Profile = profile
-			if got := resolveProfile(req); lossyProfiles[got] {
+			if got, _ := resolveProfile(req); lossyProfiles[got] {
 				t.Errorf("high-impact request %+v resolved to lossy profile %q", req, got)
 			}
 		}
@@ -423,7 +529,63 @@ func TestCompileAcceptsControlPlanePayload(t *testing.T) {
 	if err := dec.Decode(&req); err != nil {
 		t.Fatalf("control-plane payload rejected: %v", err)
 	}
-	if got := resolveProfile(req); got != "conservative" {
+	if got, _ := resolveProfile(req); got != "conservative" {
 		t.Fatalf("critical/restricted request resolved to %q", got)
+	}
+}
+
+func TestCapsuleCountsUntouchedSegmentsInCompiledSize(t *testing.T) {
+	kept := Segment{Class: "task_instruction", Content: strings.Repeat("keep this exactly ", 40), OriginalTokens: estimateTokens(strings.Repeat("keep this exactly ", 40))}
+	shrunk := Segment{Class: "tool_output", Content: "summary", OriginalTokens: 400, CompiledTokens: estimateTokens("summary")}
+	// kept passes through unchanged, so it carries no CompiledTokens.
+	capsule := buildCapsule("orig", "balanced", []Segment{kept, shrunk}, []Segment{kept, shrunk}, BudgetAllocation{})
+	want := estimateTokens(kept.Content) + estimateTokens("summary")
+	if capsule.CompiledTokens != want {
+		t.Fatalf("compiled tokens = %d, want %d (untouched segment must be counted)", capsule.CompiledTokens, want)
+	}
+}
+
+func TestUnknownProfileIsRejected(t *testing.T) {
+	if _, err := resolveProfile(InputOptimiseRequest{Profile: "agressive"}); err == nil {
+		t.Fatal("a misspelled profile must be rejected, not silently replaced")
+	}
+	w := httptest.NewRecorder()
+	handleInputOptimise(w, httptest.NewRequest(http.MethodPost, "/v1/input/optimise", strings.NewReader(`{"input":"x","profile":"turbo"}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown profile: status %d", w.Code)
+	}
+}
+
+func TestFailedInvariantsFallBackToExactAndReportIt(t *testing.T) {
+	t.Cleanup(func(prev SourceStore) func() { return func() { authoritativeSourceStore = prev } }(authoritativeSourceStore))
+	authoritativeSourceStore = newFileSourceStore(t.TempDir())
+	id := "7f3e2a10-1b2c-4d5e-8f90-1234567890ab"
+	input := "Tool output follows. " + strings.Repeat("noise line without value ", 200) + " the rollback operation id is " + id + " and must survive."
+	// No hint: the validator itself recognises the UUID as an exact value
+	// that aggressive summarisation (first sentence only) would drop.
+	body, _ := json.Marshal(map[string]any{"input": input, "profile": "aggressive", "token_budget": 60})
+	w := httptest.NewRecorder()
+	handleInputOptimise(w, httptest.NewRequest(http.MethodPost, "/v1/input/optimise", bytes.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("optimise: %d %s", w.Code, w.Body.String())
+	}
+	var resp InputOptimiseResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Validated || !strings.Contains(resp.CompiledText, id) {
+		t.Fatalf("a protected identifier was lost: validated=%v", resp.Validated)
+	}
+	applied := strings.Join(resp.Capsule.Transformations, ",")
+	if !strings.Contains(applied, "fallback:exact") || resp.Capsule.Profile != "exact" {
+		t.Fatalf("fallback not recorded: profile=%q transformations=%s", resp.Capsule.Profile, applied)
+	}
+	for _, never := range []string{"delta_context", "code_aware_slicing", "tool_schema_routing"} {
+		if strings.Contains(applied, never) {
+			t.Fatalf("capsule claims a transformation that did not run: %s", never)
+		}
+	}
+	if !resp.Capsule.Validation.Checks["source_hash_recorded"] {
+		t.Fatal("source_hash_recorded must be true once the source is stored")
 	}
 }

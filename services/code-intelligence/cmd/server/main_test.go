@@ -654,6 +654,7 @@ func TestHandleIndexViaCodeRoute(t *testing.T) {
 	srv := &server{store: store}
 	r := httptest.NewRequest(http.MethodPost, "/v1/code/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"abc","files":["main.go"]}`))
 	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	r.Header.Set("X-SCOS-Principal-ID", "principal-1")
 	w := httptest.NewRecorder()
 	srv.handleIndex(w, r)
 	if w.Code != http.StatusOK {
@@ -670,6 +671,7 @@ func TestHandleIndexRejectsEmptyFilePath(t *testing.T) {
 	srv := &server{store: store}
 	r := httptest.NewRequest(http.MethodPost, "/v1/code/index", bytes.NewBufferString(`{"repository_id":"repo-1","files":[""]}`))
 	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	r.Header.Set("X-SCOS-Principal-ID", "principal-1")
 	w := httptest.NewRecorder()
 	srv.handleIndex(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -693,6 +695,7 @@ func TestCodeStoreRestoresRepositoriesAndGenerationsAfterRestart(t *testing.T) {
 
 	index := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"abc","files":["main.go"]}`))
 	index.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	index.Header.Set("X-SCOS-Principal-ID", "principal-1")
 	indexResponse := httptest.NewRecorder()
 	srv.handleIndex(indexResponse, index)
 	if indexResponse.Code != http.StatusOK {
@@ -728,6 +731,7 @@ func TestIndexDoesNotPublishWhenAtomicStoreCommitFails(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"abc","files":["main.go"]}`))
 	request.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	request.Header.Set("X-SCOS-Principal-ID", "principal-1")
 	response := httptest.NewRecorder()
 	srv.handleIndex(response, request)
 	if response.Code != http.StatusInternalServerError {
@@ -833,6 +837,7 @@ func TestReindexReplacesPreviousGenerationForRepository(t *testing.T) {
 
 	first := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"commit-1","files":["main.go","app.py"]}`))
 	first.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	first.Header.Set("X-SCOS-Principal-ID", "principal-1")
 	firstResp := httptest.NewRecorder()
 	srv.handleIndex(firstResp, first)
 	if firstResp.Code != http.StatusOK {
@@ -844,6 +849,7 @@ func TestReindexReplacesPreviousGenerationForRepository(t *testing.T) {
 
 	second := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"commit-2","files":["main.go"]}`))
 	second.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	second.Header.Set("X-SCOS-Principal-ID", "principal-1")
 	secondResp := httptest.NewRecorder()
 	srv.handleIndex(secondResp, second)
 	if secondResp.Code != http.StatusOK {
@@ -867,6 +873,7 @@ func TestIndexCreatesConfigurationSymbols(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"commit-1","files":["config/app.yaml","config/settings.json"]}`))
 	request.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	request.Header.Set("X-SCOS-Principal-ID", "principal-1")
 	response := httptest.NewRecorder()
 	srv.handleIndex(response, request)
 	if response.Code != http.StatusOK {
@@ -886,5 +893,61 @@ func TestIndexCreatesConfigurationSymbols(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("configuration lookup did not surface the indexed config symbol: %+v", results)
+	}
+}
+
+// s.store.repos and s.store.generations are maps, so the dashboard view of
+// them must be explicitly ordered: a Go map iterates differently on every
+// request, which reshuffled the dashboard table on each poll and changed the
+// response bytes every time (defeating the transparency snapshot's ETag).
+func TestHandleReposAndIndexStatusAreDeterministicallyOrdered(t *testing.T) {
+	store := newCodeStore()
+	for _, id := range []string{"repo-c", "repo-a", "repo-b"} {
+		store.repos[id] = &Repository{ID: id, TenantID: "tenant-a", CanonicalPath: "/" + id}
+		store.generations[id] = &IndexGeneration{RepoID: id, Generation: 1, Status: "active"}
+	}
+	srv := &server{store: store}
+
+	fetch := func(handler http.HandlerFunc, path string) string {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("X-SCOS-Tenant-ID", "tenant-a")
+		w := httptest.NewRecorder()
+		handler(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", path, w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	// Repeat enough times that an unordered map would almost certainly
+	// produce a different order at least once across the runs.
+	for attempt := 0; attempt < 12; attempt++ {
+		repos := fetch(srv.handleRepos, "/v1/repos")
+		if !strings.Contains(repos, `"repo-a"`) || strings.Index(repos, "repo-a") > strings.Index(repos, "repo-b") {
+			t.Fatalf("repos not sorted by ID: %s", repos)
+		}
+		gens := fetch(srv.handleIndexStatus, "/v1/index/status")
+		if strings.Index(gens, "repo-a") > strings.Index(gens, "repo-b") || strings.Index(gens, "repo-b") > strings.Index(gens, "repo-c") {
+			t.Fatalf("generations not sorted by repo ID: %s", gens)
+		}
+	}
+}
+
+// A v1 index change is raised under the acting principal, so a
+// static-token caller that names only a tenant is refused rather than
+// indexed without an attributable principal.
+func TestHandleIndexRequiresPrincipal(t *testing.T) {
+	store := newCodeStore()
+	store.repos["repo-1"] = &Repository{ID: "repo-1", TenantID: "tenant-1"}
+	srv := &server{store: store}
+	r := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","commit_id":"abc","files":["main.go"]}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	w := httptest.NewRecorder()
+	srv.handleIndex(w, r)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "X-SCOS-Principal-ID") {
+		t.Fatalf("expected 400 naming the missing principal, got %d: %s", w.Code, w.Body.String())
+	}
+	if store.generations["repo-1"] != nil {
+		t.Fatal("index must not be committed without a principal")
 	}
 }

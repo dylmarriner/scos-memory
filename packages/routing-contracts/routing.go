@@ -3,7 +3,7 @@ package routingcontracts
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"encoding/json"
 	"time"
 )
 
@@ -66,9 +66,12 @@ type ExecutionStep struct {
 	Status       string            `json:"status"`
 }
 
-// ComputeEventHash generates a deterministic SHA-256 fingerprint for an ingress event.
+// ComputeEventHash generates a deterministic SHA-256 fingerprint for an
+// ingress event. Fields are JSON-encoded as an array, so values containing
+// separators cannot collide, and the timestamp keeps nanosecond precision so
+// distinct events in the same second from the same agent hash differently.
 func (e *IngressEvent) ComputeEventHash() string {
-	raw := fmt.Sprintf("%s:%s:%s:%s:%s", e.TenantID, e.SessionID, e.ActorID, e.Content, e.OccurredAt.Format(time.RFC3339))
-	hash := sha256.Sum256([]byte(raw))
+	raw, _ := json.Marshal([]string{e.TenantID, e.SessionID, e.ActorID, e.AgentID, e.Content, e.OccurredAt.UTC().Format(time.RFC3339Nano)})
+	hash := sha256.Sum256(raw)
 	return hex.EncodeToString(hash[:])
 }

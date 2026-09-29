@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -31,6 +32,7 @@ from .models import MemoryCandidate
 from .promoter import evaluate_promotion, build_memory_item, build_memory_version
 from .review import requires_human_review, apply_review
 from .synthesis import run_synthesis_cycle
+from . import hooks, telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,10 @@ def require_tls_database_url(value: str) -> None:
     sslmodes = parse_qs(parsed.query).get("sslmode", [])
     if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname or len(sslmodes) != 1 or sslmodes[0].lower() not in {"require", "verify-ca", "verify-full"}:
         raise SystemExit("SCOS_DATABASE_URL must be a PostgreSQL URL with sslmode=require, verify-ca, or verify-full")
+
+
+# Actor recorded on lifecycle events this worker raises on its own.
+SERVICE_ACTOR = "service:" + hooks.SERVICE
 
 
 # ── main loop ─────────────────────────────────────────────────────────────
@@ -94,17 +100,48 @@ def main() -> None:
 def _process_cycle(conn: psycopg.Connection) -> None:
     """Claim and process up to MAX_JOBS_PER_CYCLE outbox jobs."""
     jobs = _claim_jobs(conn)
+    # Commit the claim on its own so the lease and attempts increment persist
+    # even if every job below fails -- otherwise a poison job would never
+    # accumulate attempts and could never reach dead_letter.
+    conn.commit()
     if not jobs:
         return
 
+    tally: Counter = Counter()
     for job in jobs:
+        # §22.6 events the job raises are held until its writes commit, so a
+        # rolled-back job never announces a candidate or promotion.
+        job_events: list[hooks.Event] = []
         try:
-            _process_job(conn, job)
+            # A savepoint per job: a failure rolls back only this job's
+            # partial writes and leaves the transaction usable for
+            # _mark_failed and for the jobs after it.
+            with conn.transaction():
+                outcome = _process_job(conn, job, job_events)
+            tally += outcome
         except Exception:
             logger.exception("job %s failed", job["id"])
+            job_events = []
             _mark_failed(conn, job)
+        conn.commit()
+        hooks.notify(job_events)
+    _emit_consolidation_rates(tally)
 
-    conn.commit()
+
+def _emit_consolidation_rates(tally: Counter) -> None:
+    """§32 consolidation rates over the candidates this cycle committed.
+
+    Nothing is emitted for a cycle with no candidates: a rate over zero
+    decisions is undefined, not 0%.
+    """
+    candidates = tally["candidates"]
+    if not candidates:
+        return
+    telemetry.emit("consolidation", [
+        telemetry.Point(telemetry.PROMOTION_RATE, tally["promoted"] / candidates, "ratio"),
+        telemetry.Point(telemetry.DUPLICATE_RATE, tally["duplicates"] / candidates, "ratio"),
+        telemetry.Point(telemetry.CONFLICT_RATE, tally["conflicted"] / candidates, "ratio"),
+    ])
 
 
 def _claim_jobs(conn: psycopg.Connection) -> list[dict[str, Any]]:
@@ -139,16 +176,28 @@ def _claim_jobs(conn: psycopg.Connection) -> list[dict[str, Any]]:
         return cur.fetchall()
 
 
-def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
-    """Process one outbox job end-to-end."""
+def _process_job(
+    conn: psycopg.Connection,
+    job: dict[str, Any],
+    events: list[hooks.Event] | None = None,
+) -> Counter:
+    """Process one outbox job end-to-end; returns per-candidate outcome counts.
+
+    Lifecycle events are appended to ``events`` for the caller to send once
+    this job's transaction has committed -- never from inside it.
+    """
+    outcome: Counter = Counter()
+    if events is None:
+        events = []
     job_id = job["id"]
-    tenant_id = UUID(job["tenant_id"])
+    tenant_id = job["tenant_id"] if isinstance(job["tenant_id"], UUID) else UUID(str(job["tenant_id"]))
     payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
 
     turn_id = payload.get("turn_id")
     if not turn_id:
         logger.warning("job %s: no turn_id in payload", job_id)
-        return
+        _mark_failed(conn, job)
+        return outcome
 
     logger.info("processing turn %s", turn_id)
 
@@ -157,7 +206,7 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
     if not event:
         logger.error("job %s: no completion event for turn %s", job_id, turn_id)
         _mark_failed(conn, job)
-        return
+        return outcome
 
     messages = _load_session_messages(conn, tenant_id, event.get("session_id"), event.get("aggregate_id"))
 
@@ -166,7 +215,7 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
     if not candidates:
         logger.info("turn %s: no extractable candidates", turn_id)
         _mark_completed(conn, job_id)
-        return
+        return outcome
 
     # ── 2.5. Optional LLM rewrite of title/content for clarity ───────
     # No-op (returns candidates unchanged) unless DEEPSEEK_API_KEY is set;
@@ -191,13 +240,33 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
     conflicts = detect_conflicts(all_candidates, existing)
 
     # ── 6. Evaluate promotion for each candidate ─────────────────────
+    # The owning principal of the turn these candidates came from; events
+    # carry ids and classification only, never memory content.
+    principal_id = str(candidates[0].metadata.get("actor_id") or event.get("actor_id") or "")
+    persisted: list[str] = []
+    promoted: list[str] = []
     for result in dedup_results:
-        if result.action == "superseded" or not result.candidate:
+        if not result.candidate:
             continue
 
         candidate = result.candidate
+        persisted.append(str(candidate.candidate_id))
         candidate_conflicts = [c for c in conflicts
                                if str(candidate.source_event_id) in c.subjects]
+        outcome["candidates"] += 1
+        if result.action in ("merged", "superseded"):
+            outcome["duplicates"] += 1
+        if candidate_conflicts:
+            outcome["conflicted"] += 1
+
+        # §16: a duplicate merges its evidence into the memory it matches
+        # instead of becoming another active copy of the same fact.
+        if result.action == "merged" and result.merged_into:
+            _write_candidate(conn, candidate, status="merged")
+            _record_merge(conn, candidate, result.merged_into)
+            logger.info("candidate %s: merged into %s",
+                        candidate.candidate_id, result.merged_into.get("id"))
+            continue
 
         promotion = evaluate_promotion(candidate, candidate_conflicts)
 
@@ -216,27 +285,44 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
         needs_review, review_reason = requires_human_review(candidate_dict)
         needs_review = needs_review or promotion.requires_human
 
+        supersedes = result.superseded_by if result.action == "superseded" else None
+
         if needs_review:
             _write_candidate(conn, candidate, status="pending_review")
+            if supersedes:
+                # The reviewer must see which active memory approval retires.
+                _annotate_candidate(conn, candidate, {"supersedes": str(supersedes.get("id", ""))})
             logger.info("candidate %s: pending human review (%s)",
                         candidate.candidate_id, promotion.reason)
         else:
             # ── 8. Promote to active memory ──────────────────────────
             _promote_candidate(conn, candidate, promotion)
+            promoted.append(str(candidate.candidate_id))
+            outcome["promoted"] += 1
+            if supersedes:
+                _supersede_existing(conn, candidate, supersedes)
             logger.info("candidate %s: promoted to %s",
                         candidate.candidate_id, promotion.target_status)
-
-        # Write dedup results for merged candidates
-        if result.action == "merged" and result.merged_into:
-            _record_merge(conn, candidate, result.merged_into)
 
     # ── 9. Persist conflict sets ──────────────────────────────────────
     for conflict in conflicts:
         _write_conflict(conn, conflict)
 
     _mark_completed(conn, job_id)
+    if principal_id:
+        common = {"namespace_id": str(namespace_id), "actor": SERVICE_ACTOR, "principal_id": principal_id,
+                  "turn_id": str(turn_id)}
+        if persisted:
+            events.append(hooks.Event(hooks.ON_MEMORY_CANDIDATE, str(tenant_id), principal_id,
+                                      {**common, "memory_ids": persisted, "change_type": "extracted"}))
+        if promoted:
+            events.append(hooks.Event(hooks.ON_MEMORY_PROMOTED, str(tenant_id), principal_id,
+                                      {**common, "memory_ids": promoted, "change_type": "promoted"}))
+    elif persisted:
+        logger.warning("turn %s: no owning principal; lifecycle hooks not raised", turn_id)
     logger.info("turn %s: consolidation complete (%d candidates, %d conflicts)",
                 turn_id, len(candidates), len(conflicts))
+    return outcome
 
 
 # ── database helpers ──────────────────────────────────────────────────────
@@ -248,13 +334,16 @@ def _load_event_for_turn(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT id, tenant_id, aggregate_id, event_type, subject,
-                   actor_id, occurred_at, data
-            FROM events
-            WHERE tenant_id = %s
-              AND aggregate_id = %s
-              AND event_type IN ('turn.completed', 'turn.message_accepted')
-            ORDER BY aggregate_sequence DESC
+            SELECT e.id, e.tenant_id, e.aggregate_id, e.event_type, e.subject,
+                   COALESCE(e.actor_id, s.created_by) AS actor_id,
+                   e.occurred_at, e.data, t.session_id, s.namespace_id
+            FROM events e
+            JOIN turns t ON t.id = e.aggregate_id
+            JOIN sessions s ON s.id = t.session_id AND s.tenant_id = e.tenant_id
+            WHERE e.tenant_id = %s
+              AND e.aggregate_id = %s
+              AND e.event_type IN ('turn.completed', 'turn.message_accepted')
+            ORDER BY e.aggregate_sequence DESC
             LIMIT 1
             """,
             (tenant_id, turn_id),
@@ -298,13 +387,16 @@ def _load_existing_memory(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT id, title, content, authority_level, confidence_score,
-                   sensitivity, status, metadata
-            FROM memory_items
-            WHERE tenant_id = %s
-              AND namespace_id = %s
-              AND status = 'active'
-            ORDER BY authority_level DESC, confidence_score DESC
+            SELECT mi.id, mi.title,
+                   COALESCE(mv.content, mi.canonical_summary) AS content,
+                   mi.authority_level, mi.confidence_score,
+                   mi.sensitivity, mi.status, mi.metadata
+            FROM memory_items mi
+            LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
+            WHERE mi.tenant_id = %s
+              AND mi.namespace_id = %s
+              AND mi.status = 'active'
+            ORDER BY mi.authority_level DESC, mi.confidence_score DESC
             LIMIT 100
             """,
             (tenant_id, namespace_id),
@@ -447,42 +539,111 @@ def _record_merge(
     candidate: MemoryCandidate,
     existing: dict[str, Any],
 ) -> None:
-    """Record that a candidate was merged into an existing memory item."""
+    """Record that a candidate was merged into an existing memory item.
+
+    The candidate's evidence is attached to the existing memory as durable
+    provenance, skipping references that memory already cites.
+    """
+    memory_id = existing.get("id")
+    _annotate_candidate(conn, candidate, {
+        "merged_into": str(memory_id or ""),
+        "merged_by": "consolidation-worker",
+        "merged_at": datetime.now(timezone.utc).isoformat(),
+    }, status="merged")
+    if not memory_id:
+        return
+    with conn.cursor() as cur:
+        for evidence in candidate.evidence:
+            cur.execute(
+                """
+                INSERT INTO memory_evidence
+                    (memory_id, evidence_kind, reference_id, content_hash)
+                SELECT %s, %s, %s, %s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM memory_evidence
+                    WHERE memory_id = %s AND evidence_kind = %s AND reference_id = %s
+                )
+                """,
+                (
+                    memory_id, evidence.kind, evidence.reference_id, evidence.content_hash,
+                    memory_id, evidence.kind, evidence.reference_id,
+                ),
+            )
+
+
+def _annotate_candidate(
+    conn: psycopg.Connection,
+    candidate: MemoryCandidate,
+    assessment: dict[str, Any],
+    status: str | None = None,
+) -> None:
+    """Merge keys into a candidate's conflict_assessment, optionally setting status."""
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE memory_candidates
-            SET status = 'merged',
-                conflict_assessment = conflict_assessment || %s
+            SET status = COALESCE(%s, status),
+                conflict_assessment = COALESCE(conflict_assessment, '{}'::jsonb) || %s::jsonb
             WHERE id = %s
             """,
-            (
-                json.dumps({
-                    "merged_into": str(existing.get("id", "")),
-                    "merged_by": "consolidation-worker",
-                    "merged_at": datetime.now(timezone.utc).isoformat(),
-                }),
-                candidate.candidate_id,
-            ),
+            (status, json.dumps(assessment), candidate.candidate_id),
+        )
+
+
+def _supersede_existing(
+    conn: psycopg.Connection,
+    candidate: MemoryCandidate,
+    existing: dict[str, Any],
+) -> None:
+    """Retire the lower-authority memory the promoted candidate replaces.
+
+    Same convention as memory-intelligence's correctFact: the old row stays
+    for audit, marked 'superseded' and pointing at its replacement, with an
+    explicit 'supersedes' relation for the memory graph.
+    """
+    old_id = existing.get("id")
+    if not old_id:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE memory_items
+            SET status = 'superseded', superseded_by_id = %s,
+                belief_expired_at = COALESCE(belief_expired_at, now())
+            WHERE id = %s AND tenant_id = %s AND status = 'active'
+            """,
+            (candidate.candidate_id, old_id, candidate.tenant_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO memory_relations (source_memory_id, relation_type, target_memory_id, confidence_score)
+            VALUES (%s, 'supersedes', %s, %s)
+            ON CONFLICT (source_memory_id, relation_type, target_memory_id) DO NOTHING
+            """,
+            (candidate.candidate_id, old_id, candidate.confidence_score),
         )
 
 
 def _write_conflict(conn: psycopg.Connection, conflict: ConflictSet) -> None:
-    """Record a conflict set as structured metadata on affected candidates."""
-    conflict_data = conflict.to_dict()
-    for subject in conflict.subjects:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE memory_candidates
-                SET conflict_assessment = conflict_assessment || %s
-                WHERE id = %s
-                """,
-                (
-                    json.dumps({"conflict": conflict_data}),
-                    subject,
-                ),
-            )
+    """Record a conflict set as structured metadata on affected candidates.
+
+    ``subjects`` holds the incoming candidate's source event id and the id of
+    the existing memory it conflicts with (memory_items.id is the id of the
+    candidate it was promoted from), so both sides are matched here.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE memory_candidates
+            SET conflict_assessment = COALESCE(conflict_assessment, '{}'::jsonb) || %s::jsonb
+            WHERE source_event_id::text = ANY(%s) OR id::text = ANY(%s)
+            """,
+            (
+                json.dumps({"conflict": conflict.to_dict()}),
+                list(conflict.subjects),
+                list(conflict.subjects),
+            ),
+        )
 
 
 def _mark_completed(conn: psycopg.Connection, job_id: UUID) -> None:

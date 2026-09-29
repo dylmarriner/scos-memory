@@ -550,7 +550,7 @@ func TestHandlePGQueryExactBypassesCodeModelRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "pkg/exact.go", Language: "go", ContentHash: hashContent("package pkg\nfunc Exact() {}\n"), Content: "package pkg\nfunc Exact() {}\n"}}); err != nil {
+	if _, err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "pkg/exact.go", Language: "go", ContentHash: hashContent("package pkg\nfunc Exact() {}\n"), Content: "package pkg\nfunc Exact() {}\n"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -605,7 +605,7 @@ func TestHandlePGQueryDegradesToLexicalWhenCodeRuntimeFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := "package auth\nfunc Middleware() {}\n"
-	if err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "internal/auth/middleware.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+	if _, err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "internal/auth/middleware.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -657,7 +657,7 @@ func TestHandlePGQueryUsesHybridBGECodeRetrieval(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := "package auth\n\n// Middleware validates a request.\nfunc Middleware() {}\n"
-	if err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "internal/auth/middleware.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+	if _, err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "internal/auth/middleware.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -736,7 +736,7 @@ func TestHandlePGQueryFusesStructuralAndPageRankSignals(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := "package graph\nfunc Target() {}\nfunc Caller(){ Target() }\n"
-	if err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "graph.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
+	if _, err := store.IndexSnapshot(t.Context(), snapshotID, repoID, []PGFileInput{{Path: "graph.go", Language: "go", ContentHash: hashContent(content), Content: content}}); err != nil {
 		t.Fatal(err)
 	}
 

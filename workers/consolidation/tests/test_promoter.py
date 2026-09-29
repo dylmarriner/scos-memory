@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scos_consolidation.models import MemoryCandidate, MemoryClass, SensitivityClass, EvidenceReference
 from scos_consolidation.promoter import (
+    structured_content,
     evaluate_promotion,
     build_memory_item,
     build_memory_version,
@@ -121,6 +122,29 @@ class PromoterTests(unittest.TestCase):
             sha256(c.content.encode("utf-8")).hexdigest(),
         )
         self.assertNotEqual(version["content_hash"], c.content)
+
+    def test_structured_content_matches_memory_intelligence_contract(self):
+        # memory-intelligence decodes network/source/scope/observed_at from
+        # structured_content; without them a consolidated fact read back blank.
+        from datetime import datetime, timedelta, timezone
+        start = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+        c = _candidate(memory_class=MemoryClass.EPISODIC, valid_from=start, valid_until=start + timedelta(days=30))
+        sc = structured_content(c)
+        for key in ("network", "source", "scope", "observed_at", "valid_from", "valid_until", "inferred", "derivation"):
+            self.assertIn(key, sc)
+        self.assertEqual(sc["network"], "experience")
+        self.assertEqual(sc["source"], "observed")
+        self.assertEqual(sc["scope"], "global")
+        self.assertEqual(sc["observed_at"], start.isoformat())
+        self.assertFalse(sc["inferred"])
+        self.assertIn(str(c.source_event_id), sc["derivation"])
+
+    def test_every_class_maps_to_a_memory_intelligence_network(self):
+        networks = {"world", "experience", "entity", "belief", "procedure", "negative"}
+        for cls in MemoryClass:
+            if cls in (MemoryClass.DISCARD, MemoryClass.JOURNAL_ONLY):
+                continue  # never promoted
+            self.assertIn(structured_content(_candidate(memory_class=cls))["network"], networks, cls)
 
 
 if __name__ == "__main__":

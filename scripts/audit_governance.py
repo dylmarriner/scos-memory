@@ -220,6 +220,8 @@ def audit() -> list[str]:
             or ".git" in path.parts
             or ".github" in path.parts
             or "node_modules" in path.parts
+            or ".venv" in path.parts
+            or "site-packages" in path.parts
             or "vendor" in path.parts
             or "dist" in path.parts
             or "build" in path.parts

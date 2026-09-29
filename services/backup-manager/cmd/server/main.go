@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -14,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"io"
@@ -230,6 +232,10 @@ func main() {
 		go s.runRestoreCadenceScheduler(context.Background(), interval)
 		log.Printf("restore-test cadence scheduler enabled, checking every %s", interval)
 	}
+	if interval := backupScheduleInterval(); interval > 0 {
+		go s.runBackupScheduler(context.Background(), interval)
+		log.Printf("backup scheduler enabled, taking a backup every %s", interval)
+	}
 	log.Printf("backup manager listening on %s", addr)
 	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
 		log.Fatal(err)
@@ -279,7 +285,11 @@ func (s *backupServer) handleReady(w http.ResponseWriter, _ *http.Request) {
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"status": "unready", "dependency": "backup_storage", "error": err.Error()})
 		return
 	}
-	writeJSON(w, map[string]string{"status": "ready"})
+	if err := localToolingError(); err != nil {
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"status": "unready", "dependency": "pg_dump", "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ready", "provider": s.provider})
 }
 
 func (s *backupServer) checkStorage() error {
@@ -386,28 +396,11 @@ func (s *backupServer) handleBackupStart(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Type == "" {
-		req.Type = "base_backup"
-	}
-	if err := os.MkdirAll(s.backupDir, 0750); err != nil {
-		http.Error(w, "backup storage unavailable: "+err.Error(), http.StatusServiceUnavailable)
+	b, err := s.createLocalBackup(r.Context(), req.Type)
+	if err != nil {
+		http.Error(w, "backup failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	id := s.nextID()
-	payload := fmt.Sprintf("SCOS local backup artifact\ntype=%s\nid=%s\n", req.Type, id)
-	contentHash := hashString(payload)
-	manifest := backupManifest{ID: id, Type: req.Type, Format: "scos-local-test-v1", ContentHash: contentHash, SizeBytes: int64(len(payload)), Production: false, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	artifact := backupArtifact{Manifest: manifest, Payload: payload}
-	data, _ := json.Marshal(artifact)
-	if err := os.WriteFile(s.artifactPath(id), data, 0600); err != nil {
-		http.Error(w, "backup creation failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	b := &BackupRecord{ID: id, Type: req.Type, Status: "running", Encrypted: false, Production: false, StartedAt: now, Location: s.artifactPath(id), SizeBytes: manifest.SizeBytes, ContentHash: contentHash, ManifestHash: hashManifest(manifest)}
-	s.mu.Lock()
-	s.backups[id] = b
-	s.mu.Unlock()
 	writeJSON(w, b)
 }
 
@@ -460,12 +453,12 @@ func (s *backupServer) handleRestore(w http.ResponseWriter, r *http.Request, id 
 		s.unavailable(w)
 		return
 	}
-	b, err := s.verifyBackup(id)
+	detail, err := s.restoreLocal(r.Context(), id, "")
 	if err != nil {
 		writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]string{"status": "failed", "backup_id": id, "error": err.Error()})
 		return
 	}
-	writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{"status": "failed", "backup": b, "detail": "synthetic local artifact is not a production backup and was not restored"})
+	writeJSON(w, map[string]any{"status": "passed", "backup_id": id, "detail": detail})
 }
 
 func (s *backupServer) handleRestoreTests(w http.ResponseWriter, _ *http.Request) {
@@ -491,12 +484,10 @@ func (s *backupServer) executeRestoreTest(testType, backupID string) *RestoreTes
 		} else {
 			t.Status, t.Detail = "passed", "backup restored into a temporary PostgreSQL database"
 		}
-	} else if _, err := s.verifyBackup(backupID); err != nil {
-		t.Status = "failed"
-		t.Detail = err.Error()
+	} else if detail, err := s.restoreLocal(context.Background(), backupID, testType); err != nil {
+		t.Status, t.Detail = "failed", err.Error()
 	} else {
-		t.Status = "failed"
-		t.Detail = "synthetic local artifact is not a production backup and cannot satisfy a restore drill"
+		t.Status, t.Detail = "passed", detail
 	}
 	t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 	s.mu.Lock()
@@ -558,10 +549,10 @@ func (s *backupServer) handleRestoreTestComplete(w http.ResponseWriter, r *http.
 		} else {
 			t.Status, t.Detail = "passed", "backup restored into a temporary PostgreSQL database"
 		}
-	} else if _, err := s.verifyBackup(t.BackupID); err != nil {
+	} else if detail, err := s.restoreLocal(context.Background(), t.BackupID, t.TestType); err != nil {
 		t.Status, t.Detail = "failed", err.Error()
 	} else {
-		t.Status, t.Detail = "failed", "synthetic local artifact is not a production backup and cannot satisfy a restore drill"
+		t.Status, t.Detail = "passed", detail
 	}
 	t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 	s.recordRestoreTest(t)
@@ -871,67 +862,156 @@ func (s *backupServer) handleProductionBackupStart(w http.ResponseWriter, r *htt
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Type == "" {
-		req.Type = "base_backup"
+	b, err := s.createProductionBackup(r.Context(), req.Type)
+	if err != nil {
+		var se statusError
+		code := http.StatusInternalServerError
+		if errors.As(err, &se) {
+			code = se.code
+		}
+		http.Error(w, err.Error(), code)
+		return
+	}
+	writeJSON(w, b)
+}
+
+// statusError carries the HTTP status a backup failure maps to.
+type statusError struct {
+	code int
+	err  error
+}
+
+func (e statusError) Error() string { return e.err.Error() }
+func (e statusError) Unwrap() error { return e.err }
+
+func failWith(code int, format string, args ...any) error {
+	return statusError{code: code, err: fmt.Errorf(format, args...)}
+}
+
+// createProductionBackup dumps, encrypts and writes a MAC'd manifest to the
+// verified production destination.
+func (s *backupServer) createProductionBackup(ctx context.Context, backupType string) (*BackupRecord, error) {
+	if backupType == "" {
+		backupType = "base_backup"
 	}
 	if err := s.productionConfigError(); err != nil {
-		http.Error(w, "backup unavailable: "+err.Error(), http.StatusServiceUnavailable)
-		return
+		return nil, failWith(http.StatusServiceUnavailable, "backup unavailable: %v", err)
 	}
 	dest, err := s.destination()
 	if err != nil {
-		http.Error(w, "backup destination unavailable: "+err.Error(), http.StatusServiceUnavailable)
-		return
+		return nil, failWith(http.StatusServiceUnavailable, "backup destination unavailable: %v", err)
 	}
 	if err := os.MkdirAll(dest, 0750); err != nil {
-		http.Error(w, "backup destination unavailable: "+err.Error(), http.StatusServiceUnavailable)
-		return
+		return nil, failWith(http.StatusServiceUnavailable, "backup destination unavailable: %v", err)
 	}
 	id := s.nextID()
 	plainFile, err := os.CreateTemp("", "scos-pg-dump-*")
 	if err != nil {
-		http.Error(w, "backup creation failed: "+err.Error(), 500)
-		return
+		return nil, fmt.Errorf("backup creation failed: %w", err)
 	}
 	plainPath := plainFile.Name()
 	_ = plainFile.Close()
 	defer os.Remove(plainPath)
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	if out, err := commandContext(ctx, "pg_dump", "--format=custom", "--no-owner", "--file", plainPath, databaseURL()).CombinedOutput(); err != nil {
-		http.Error(w, fmt.Sprintf("pg_dump failed: %v: %s", err, strings.TrimSpace(string(out))), http.StatusBadGateway)
-		return
+	if out, err := commandContext(ctx, "pg_dump", "--format=custom", "--no-owner", "--enable-row-security", "--file", plainPath, databaseURL()).CombinedOutput(); err != nil {
+		return nil, failWith(http.StatusBadGateway, "pg_dump failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	plain, err := os.ReadFile(plainPath)
 	if err != nil {
-		http.Error(w, "backup creation failed: "+err.Error(), 500)
-		return
+		return nil, fmt.Errorf("backup creation failed: %w", err)
 	}
 	key, _ := backupKey()
 	encrypted, err := encryptBackup(key, plain)
 	if err != nil {
-		http.Error(w, "backup encryption failed: "+err.Error(), 500)
-		return
+		return nil, fmt.Errorf("backup encryption failed: %w", err)
 	}
 	artifactPath := filepath.Join(dest, id+".backup")
-	manifest := backupManifest{ID: id, Type: req.Type, Format: "postgresql-custom-v1", ContentHash: hashBytes(plain), SizeBytes: int64(len(plain)), Encrypted: true, Algorithm: "AES-256-GCM", ArtifactHash: hashBytes(encrypted), ArtifactSize: int64(len(encrypted)), Production: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	manifest := backupManifest{ID: id, Type: backupType, Format: "postgresql-custom-v1", ContentHash: hashBytes(plain), SizeBytes: int64(len(plain)), Encrypted: true, Algorithm: "AES-256-GCM", ArtifactHash: hashBytes(encrypted), ArtifactSize: int64(len(encrypted)), Production: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
 	manifest.ManifestMAC, _ = manifestMAC(manifest, key)
 	if err := writeAtomic(artifactPath, encrypted, 0600); err != nil {
-		http.Error(w, "backup upload failed: "+err.Error(), http.StatusBadGateway)
-		return
+		return nil, failWith(http.StatusBadGateway, "backup upload failed: %v", err)
 	}
 	manifestData, _ := json.Marshal(manifest)
 	if err := writeAtomic(artifactPath+".manifest.json", manifestData, 0600); err != nil {
 		_ = os.Remove(artifactPath)
-		http.Error(w, "manifest upload failed: "+err.Error(), http.StatusBadGateway)
-		return
+		return nil, failWith(http.StatusBadGateway, "manifest upload failed: %v", err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	b := &BackupRecord{ID: id, Type: req.Type, Status: "completed", SizeBytes: manifest.SizeBytes, Location: artifactPath, Encrypted: true, Production: true, StartedAt: now, CompletedAt: now, VerifiedAt: now, ManifestHash: hashString(string(manifestData)), ContentHash: manifest.ContentHash}
+	b := &BackupRecord{ID: id, Type: backupType, Status: "completed", SizeBytes: manifest.SizeBytes, Location: artifactPath, Encrypted: true, Production: true, StartedAt: now, CompletedAt: now, VerifiedAt: now, ManifestHash: hashString(string(manifestData)), ContentHash: manifest.ContentHash}
 	s.mu.Lock()
 	s.backups[id] = b
 	s.mu.Unlock()
-	writeJSON(w, b)
+	return b, nil
+}
+
+// createBackup takes a backup with whichever provider is configured.
+func (s *backupServer) createBackup(ctx context.Context, backupType string) (*BackupRecord, error) {
+	switch {
+	case s.production():
+		return s.createProductionBackup(ctx, backupType)
+	case s.provider == "local":
+		return s.createLocalBackup(ctx, backupType)
+	default:
+		return nil, fmt.Errorf("backup provider %q is not supported", s.provider)
+	}
+}
+
+// backupScheduleInterval is SCOS_BACKUP_SCHEDULE_INTERVAL, or 0 (disabled).
+func backupScheduleInterval() time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("SCOS_BACKUP_SCHEDULE_INTERVAL")))
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// backupIfDue takes a backup when the newest verified one is older than
+// interval (or none exists), so a restart never skips or doubles a cycle.
+func (s *backupServer) backupIfDue(ctx context.Context, interval time.Duration, now time.Time) {
+	var backups []*BackupRecord
+	var err error
+	if s.production() {
+		backups, err = s.readProductionBackups()
+	} else {
+		backups, err = s.readBackups()
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("backup scheduler: listing backups: %v", err)
+		return
+	}
+	var newest time.Time
+	for _, b := range backups {
+		if b.Status != "completed" {
+			continue
+		}
+		if created, err := time.Parse(time.RFC3339, b.StartedAt); err == nil && created.After(newest) {
+			newest = created
+		}
+	}
+	if !newest.IsZero() && now.Sub(newest) < interval {
+		return
+	}
+	b, err := s.createBackup(ctx, "base_backup")
+	if err != nil {
+		log.Printf("backup scheduler: backup failed: %v", err)
+		return
+	}
+	log.Printf("backup scheduler: created %s (%d bytes)", b.ID, b.SizeBytes)
+}
+
+func (s *backupServer) runBackupScheduler(ctx context.Context, interval time.Duration) {
+	check := min(max(interval/4, time.Minute), time.Hour)
+	ticker := time.NewTicker(check)
+	defer ticker.Stop()
+	for {
+		s.backupIfDue(ctx, interval, time.Now().UTC())
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func hashBytes(v []byte) string { h := sha256.Sum256(v); return hex.EncodeToString(h[:]) }
@@ -1077,20 +1157,6 @@ func (s *backupServer) restoreProduction(id string) error {
 	if restoreURL == "" {
 		return fmt.Errorf("SCOS_BACKUP_RESTORE_DATABASE_URL is required for a restore drill")
 	}
-	if _, err := exec.LookPath("createdb"); err != nil {
-		return fmt.Errorf("createdb is unavailable: %w", err)
-	}
-	name := "scos_restore_" + strings.ReplaceAll(id, "-", "_") + fmt.Sprintf("_%d", time.Now().UnixNano())
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-	if out, err := commandContext(ctx, "createdb", "--dbname", restoreURL, name).CombinedOutput(); err != nil {
-		return fmt.Errorf("temporary database creation failed: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	defer commandContext(context.Background(), "dropdb", "--if-exists", "--dbname", restoreURL, name).Run()
-	target, err := databaseWithName(restoreURL, name)
-	if err != nil {
-		return err
-	}
 	f, err := os.CreateTemp("", "scos-restore-*")
 	if err != nil {
 		return err
@@ -1103,10 +1169,70 @@ func (s *backupServer) restoreProduction(id string) error {
 	if err != nil {
 		return err
 	}
-	if out, err := commandContext(ctx, "pg_restore", "--exit-on-error", "--no-owner", "--dbname", target, path).CombinedOutput(); err != nil {
+	return restoreIntoTemporaryDatabase(restoreURL, id, path)
+}
+
+// restoreIntoTemporaryDatabase restores a pg_dump custom-format archive into
+// a freshly created database, dropping it afterwards. A clean pg_restore
+// --exit-on-error is the proof the backup is recoverable.
+//
+// With SCOS_BACKUP_RESTORE_TEMPLATE set, the database is created from that
+// template and the archive's EXTENSION entries are skipped: a non-superuser
+// restore role cannot create untrusted extensions such as pgvector, so an
+// operator pre-installs them in a template the restore role owns.
+func restoreIntoTemporaryDatabase(restoreURL, id, dumpPath string) error {
+	if _, err := exec.LookPath("createdb"); err != nil {
+		return fmt.Errorf("createdb is unavailable: %w", err)
+	}
+	name := "scos_restore_" + strings.ReplaceAll(id, "-", "_") + fmt.Sprintf("_%d", time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	template := strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_TEMPLATE"))
+	createArgs := []string{"--maintenance-db", restoreURL}
+	restoreArgs := []string{"--exit-on-error", "--no-owner"}
+	if template != "" {
+		createArgs = append(createArgs, "--template", template)
+		toc, err := commandContext(ctx, "pg_restore", "--list", dumpPath).Output()
+		if err != nil {
+			return fmt.Errorf("pg_restore could not read the archive: %w", err)
+		}
+		list, err := os.CreateTemp("", "scos-restore-list-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(list.Name())
+		if _, err = list.WriteString(skipExtensionEntries(string(toc))); err == nil {
+			err = list.Close()
+		}
+		if err != nil {
+			return err
+		}
+		restoreArgs = append(restoreArgs, "--use-list", list.Name())
+	}
+	if out, err := commandContext(ctx, "createdb", append(createArgs, name)...).CombinedOutput(); err != nil {
+		return fmt.Errorf("temporary database creation failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	defer commandContext(context.Background(), "dropdb", "--if-exists", "--maintenance-db", restoreURL, name).Run()
+	target, err := databaseWithName(restoreURL, name)
+	if err != nil {
+		return err
+	}
+	if out, err := commandContext(ctx, "pg_restore", append(restoreArgs, "--dbname", target, dumpPath)...).CombinedOutput(); err != nil {
 		return fmt.Errorf("temporary database restore failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// skipExtensionEntries comments out the EXTENSION and COMMENT ON EXTENSION
+// entries of a pg_restore --list table of contents.
+func skipExtensionEntries(toc string) string {
+	lines := strings.Split(toc, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(line, ";") && strings.Contains(line, " EXTENSION ") {
+			lines[i] = ";" + line
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func databaseWithName(raw, name string) (string, error) {
@@ -1121,6 +1247,12 @@ func databaseWithName(raw, name string) (string, error) {
 	return u.String(), nil
 }
 
+const localDumpFormat = "postgresql-custom-v1"
+
+func (s *backupServer) dumpPath(id string) string { return filepath.Join(s.backupDir, id+".dump") }
+
+// verifyBackup checks a local backup's manifest against the dump on disk:
+// the dump must exist and match the recorded SHA-256 and size.
 func (s *backupServer) verifyBackup(id string) (*BackupRecord, error) {
 	data, err := os.ReadFile(s.artifactPath(id))
 	if err != nil {
@@ -1130,11 +1262,133 @@ func (s *backupServer) verifyBackup(id string) (*BackupRecord, error) {
 	if err := json.Unmarshal(data, &artifact); err != nil {
 		return nil, err
 	}
-	if artifact.Manifest.ID != id || artifact.Manifest.ContentHash != hashString(artifact.Payload) || artifact.Manifest.SizeBytes != int64(len(artifact.Payload)) {
+	m := artifact.Manifest
+	if m.ID != id {
+		return nil, fmt.Errorf("manifest/content hash mismatch")
+	}
+	if m.Format != localDumpFormat {
+		return nil, fmt.Errorf("artifact format %q is not a PostgreSQL dump and cannot be restored", m.Format)
+	}
+	hash, size, err := hashFile(s.dumpPath(id))
+	if err != nil {
+		return nil, fmt.Errorf("backup dump unavailable: %w", err)
+	}
+	if hash != m.ContentHash || size != m.SizeBytes {
 		return nil, fmt.Errorf("manifest/content hash mismatch")
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	return &BackupRecord{ID: id, Type: artifact.Manifest.Type, Status: "completed", Production: artifact.Manifest.Production, SizeBytes: artifact.Manifest.SizeBytes, Location: s.artifactPath(id), StartedAt: now, CompletedAt: now, VerifiedAt: now, ManifestHash: hashManifest(artifact.Manifest), ContentHash: artifact.Manifest.ContentHash}, nil
+	return &BackupRecord{ID: id, Type: m.Type, Status: "completed", Production: m.Production, SizeBytes: m.SizeBytes, Location: s.dumpPath(id), StartedAt: m.CreatedAt, CompletedAt: m.CreatedAt, VerifiedAt: now, ManifestHash: hashManifest(m), ContentHash: m.ContentHash}, nil
+}
+
+func hashFile(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// localToolingError reports what local backups are missing to run.
+func localToolingError() error {
+	if databaseURL() == "" {
+		return fmt.Errorf("SCOS_BACKUP_DATABASE_URL or SCOS_DATABASE_URL is required")
+	}
+	for _, tool := range []string{"pg_dump", "pg_restore"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			return fmt.Errorf("%s is unavailable: %w", tool, err)
+		}
+	}
+	return nil
+}
+
+// createLocalBackup dumps the database with pg_dump into the backup
+// directory and writes a manifest binding the dump's hash and size. Local
+// backups are on-host and unencrypted (0600, same trust boundary as the
+// database files); off-host encrypted copies are the production providers'.
+func (s *backupServer) createLocalBackup(ctx context.Context, backupType string) (*BackupRecord, error) {
+	if backupType == "" {
+		backupType = "base_backup"
+	}
+	dbURL := databaseURL()
+	if dbURL == "" {
+		return nil, fmt.Errorf("SCOS_BACKUP_DATABASE_URL or SCOS_DATABASE_URL is required")
+	}
+	if err := os.MkdirAll(s.backupDir, 0750); err != nil {
+		return nil, fmt.Errorf("backup storage unavailable: %w", err)
+	}
+	id := s.nextID()
+	partial := s.dumpPath(id) + ".partial"
+	defer os.Remove(partial)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	if out, err := commandContext(ctx, "pg_dump", "--format=custom", "--no-owner", "--enable-row-security", "--file", partial, dbURL).CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("pg_dump failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	hash, size, err := hashFile(partial)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 {
+		return nil, fmt.Errorf("pg_dump produced an empty archive")
+	}
+	if err := os.Chmod(partial, 0600); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(partial, s.dumpPath(id)); err != nil {
+		return nil, err
+	}
+	manifest := backupManifest{ID: id, Type: backupType, Format: localDumpFormat, ContentHash: hash, SizeBytes: size, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	data, _ := json.Marshal(backupArtifact{Manifest: manifest})
+	if err := writeAtomic(s.artifactPath(id), data, 0600); err != nil {
+		_ = os.Remove(s.dumpPath(id))
+		return nil, err
+	}
+	b, err := s.verifyBackup(id)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.backups[id] = b
+	s.mu.Unlock()
+	if _, err := s.cleanupRetention(time.Now()); err != nil {
+		log.Printf("backup retention cleanup: %v", err)
+	}
+	return b, nil
+}
+
+// restoreLocal proves a local backup is recoverable. With
+// SCOS_BACKUP_RESTORE_DATABASE_URL it restores into a temporary database;
+// without it only the automated integrity drill can pass (hash check plus
+// pg_restore --list reading the archive), since a monthly or quarterly drill
+// or a manual restore is only satisfied by an actual restore.
+func (s *backupServer) restoreLocal(ctx context.Context, id, testType string) (string, error) {
+	if s.provider != "local" {
+		return "", fmt.Errorf("backup provider %q is not supported", s.provider)
+	}
+	if _, err := s.verifyBackup(id); err != nil {
+		return "", err
+	}
+	if restoreURL := strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_DATABASE_URL")); restoreURL != "" {
+		if err := restoreIntoTemporaryDatabase(restoreURL, id, s.dumpPath(id)); err != nil {
+			return "", err
+		}
+		return "backup restored into a temporary PostgreSQL database", nil
+	}
+	if testType != restoreTestTypeIntegrity {
+		return "", fmt.Errorf("SCOS_BACKUP_RESTORE_DATABASE_URL is required: only a restore into a temporary database satisfies this restore")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if out, err := commandContext(ctx, "pg_restore", "--list", s.dumpPath(id)).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("pg_restore could not read the archive: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return "dump hash verified and archive readable by pg_restore --list", nil
 }
 
 func (s *backupServer) readBackup(id string) (*BackupRecord, error) { return s.verifyBackup(id) }
@@ -1188,6 +1442,9 @@ func (s *backupServer) cleanupRetention(now time.Time) (int, error) {
 		}
 		if days > 0 && now.Sub(info.ModTime()) > time.Duration(days)*24*time.Hour {
 			if err := os.Remove(filepath.Join(s.backupDir, entry.Name())); err != nil {
+				return removed, err
+			}
+			if err := os.Remove(s.dumpPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return removed, err
 			}
 			removed++

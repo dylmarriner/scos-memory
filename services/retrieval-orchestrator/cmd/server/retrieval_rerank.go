@@ -13,6 +13,8 @@ type retrievalExecutionMeta struct {
 	PlannerMode      string
 	DegradedModels   []string
 	DegradedSources  []string
+	// Sensitivity is the effective ceiling the lanes enforced.
+	Sensitivity string
 }
 
 func (s *server) rerankWithModel(ctx context.Context, query string, results []RetrievalResult) ([]RetrievalResult, string, string, error) {

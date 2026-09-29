@@ -12,6 +12,10 @@ class ASTAdapterTests(unittest.TestCase):
         self.assertIn("User", names)
         self.assertIn("process", names)
 
+    def test_parse_async_function(self):
+        symbols = PythonASTAdapter().parse_symbols("async def fetch():\n    return 1\n")
+        self.assertEqual([(s.name, s.kind) for s in symbols], [("fetch", "function")])
+
 
 if __name__ == "__main__":
     unittest.main()

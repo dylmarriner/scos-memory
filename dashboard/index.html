@@ -236,12 +236,117 @@
       .memory-grid, .agents-grid, .flow-grid { grid-template-columns: 1fr !important; }
     }
     @media (max-width: 640px) { .shell { padding: 1.1rem .9rem 5.5rem; } }
+
+    /* ══ enhancement layer ═══════════════════════════════════════════════
+       Everything below is additive: the shell above renders identically
+       without it. Kept in the same file (and therefore the same inline
+       <script>/<style> scope) because transparency-projection serves only
+       / and /index.html -- a separate .css/.js asset would 401. */
+    :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; border-radius: .2rem; }
+    .skip-link { position: absolute; left: -9999px; top: 0; z-index: 99; background: #0d1120; color: var(--cyan); border: 1px solid var(--cyan); border-radius: .4rem; padding: .5rem .8rem; font-size: .78rem; text-decoration: none; }
+    .skip-link:focus { left: .75rem; top: .75rem; }
+
+    /* ── operator toolbar ─────────────────────────────────────────────── */
+    .enh-toolbar { display: flex; align-items: center; gap: .55rem; flex-wrap: wrap; margin-top: .8rem; padding: .5rem .65rem; background: rgba(13,17,28,.5); border: 1px solid var(--border-soft); border-radius: .55rem; font-size: .72rem; }
+    .enh-toolbar .enh-sep { width: 1px; height: 1.1rem; background: var(--border); }
+    .enh-meter-wrap { display: inline-flex; align-items: center; gap: .45rem; color: var(--text-dim); }
+    .refresh-meter { display: inline-block; width: 70px; height: 3px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; }
+    .refresh-meter i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--violet), var(--cyan)); }
+    .enh-stat { color: var(--text-dim); white-space: nowrap; }
+    .enh-stat b { color: var(--text); font-weight: 600; }
+    .enh-stat.warn b { color: var(--amber); }
+    .enh-stat.bad b { color: var(--red); }
+    .enh-stat.good b { color: var(--green); }
+    button.enh-on { border-color: rgba(246,173,85,.5); color: var(--amber); background: #201708; }
+    .enh-spacer { flex: 1; }
+
+    /* ── change highlighting ──────────────────────────────────────────── */
+    @keyframes enhFlash { 0% { background-color: rgba(0,240,255,.16); box-shadow: 0 0 0 1px rgba(0,240,255,.45) inset; } 100% { background-color: transparent; box-shadow: none; } }
+    .enh-changed { animation: enhFlash 1.8s ease-out 1; }
+
+    /* ── command palette ──────────────────────────────────────────────── */
+    .enh-backdrop { position: fixed; inset: 0; z-index: 70; background: rgba(3,5,9,.72); backdrop-filter: blur(4px); display: none; }
+    .enh-backdrop.open { display: block; }
+    .palette { position: absolute; left: 50%; top: 10vh; transform: translateX(-50%); width: min(720px, 93vw); background: #0b0f19; border: 1px solid rgba(0,240,255,.32); border-radius: .75rem; box-shadow: 0 40px 90px -24px rgba(0,0,0,.95), 0 0 50px -20px rgba(0,240,255,.35); overflow: hidden; animation: rise .14s ease both; }
+    .palette input { width: 100%; box-sizing: border-box; border: none; outline: none; background: #05070d; color: var(--text); font: 15px/1.4 'IBM Plex Mono', monospace; padding: .95rem 1.05rem; border-bottom: 1px solid var(--border); }
+    .palette input::placeholder { color: var(--text-faint); }
+    .palette ul { list-style: none; margin: 0; padding: .4rem; max-height: 56vh; overflow: auto; }
+    .palette li { display: flex; align-items: baseline; gap: .6rem; padding: .45rem .6rem; border-radius: .4rem; cursor: pointer; font-size: .78rem; }
+    .palette li[aria-selected="true"] { background: rgba(0,240,255,.12); }
+    .palette li:hover { background: rgba(255,255,255,.04); }
+    .palette .p-kind { flex: none; font-size: .6rem; letter-spacing: .06em; text-transform: uppercase; color: var(--cyan); background: rgba(0,240,255,.1); border-radius: .25rem; padding: .1rem .35rem; min-width: 3.6rem; text-align: center; }
+    .palette .p-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d3dae6; }
+    .palette .p-text mark { background: rgba(0,240,255,.22); color: var(--cyan); border-radius: .15rem; }
+    .palette .p-hint { flex: none; color: var(--text-faint); font-size: .66rem; }
+    .palette .p-empty { padding: 1.1rem; text-align: center; color: var(--text-faint); font-style: italic; font-size: .8rem; }
+    .palette-foot { display: flex; gap: .9rem; padding: .45rem .8rem; border-top: 1px solid var(--border-soft); color: var(--text-faint); font-size: .65rem; }
+    kbd { font: .68rem 'IBM Plex Mono', monospace; background: #141a2b; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: .28rem; padding: .08rem .34rem; color: var(--text); }
+
+    /* ── fact explorer ────────────────────────────────────────────────── */
+    .fx-toolbar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .65rem; }
+    .fx-toolbar input, .fx-toolbar select { background: #05070d; color: var(--text); border: 1px solid rgba(255,255,255,.12); border-radius: .4rem; padding: .38rem .55rem; font: inherit; font-size: .76rem; }
+    .fx-toolbar input { flex: 1; min-width: 170px; }
+    .fx-count { color: var(--text-faint); font-size: .7rem; margin-left: auto; }
+    table.records th.fx-sortable { cursor: pointer; user-select: none; }
+    table.records th.fx-sortable:hover { color: var(--cyan); }
+    table.records th .fx-arrow { color: var(--cyan); margin-left: .2rem; }
+    table.records td.fx-content { max-width: 46ch; }
+    .fx-pill { display: inline-block; font-size: .64rem; letter-spacing: .04em; text-transform: uppercase; padding: .08rem .4rem; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+    .fx-pill.active { color: var(--green); border-color: rgba(34,224,176,.35); }
+    .fx-pill.revoked, .fx-pill.forgotten { color: var(--red); border-color: rgba(255,77,109,.35); }
+    .fx-conf { display: inline-block; width: 42px; height: 4px; border-radius: 99px; background: rgba(255,255,255,.08); vertical-align: middle; margin-right: .4rem; overflow: hidden; }
+    .fx-conf i { display: block; height: 100%; background: var(--amber); }
+    mark.fx-hit { background: rgba(246,173,85,.28); color: var(--amber); border-radius: .15rem; }
+
+    /* ── shortcut sheet ───────────────────────────────────────────────── */
+    .kbd-grid { display: grid; grid-template-columns: max-content 1fr; gap: .5rem 1.1rem; font-size: .82rem; color: var(--text-dim); align-items: baseline; }
+    .kbd-grid b { color: var(--text); font-weight: 500; }
+
+    /* ── small-screen ergonomics ──────────────────────────────────────── */
+    @media (max-width: 1180px) {
+      [style*="grid-template-columns"] { grid-template-columns: minmax(0,1fr) !important; }
+      .service-grid, .stat-grid { grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); }
+    }
+    @media (max-width: 760px) {
+      .enh-toolbar { gap: .4rem; font-size: .68rem; }
+      .enh-toolbar .enh-sep { display: none; }
+      .tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+      .tab-btn { flex: none; padding: .5rem .7rem; }
+      .horizon, .overview-grid, .memory-grid { gap: .7rem !important; }
+      .shell { padding: 1rem .85rem 5.5rem; }
+      .panel-body { max-height: 58vh; }
+      .stat-value { font-size: 1.3rem; }
+      .palette { top: 4vh; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+      .marquee-scroll { animation: none !important; padding-left: 0; }
+    }
+    /* §25.10 memory graph explorer */
+    .graph-filters { display: flex; flex-wrap: wrap; gap: .6rem; margin-bottom: .4rem; }
+    .graph-filter { display: flex; flex-direction: column; font-size: .72rem; color: var(--text-faint); gap: .2rem; }
+    .graph-filter-status { font-size: .75rem; color: var(--text-faint); margin-bottom: .4rem; }
+    .graph-details { border: 1px solid var(--border-soft); border-radius: .4rem; padding: .6rem; margin-top: .6rem; overflow-wrap: anywhere; }
+    /* §25.11 user knowledge ledger */
+    .ledger-group { margin: .6rem 0 1rem; }
+    .ledger-group-head { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--border-soft); padding-bottom: .25rem; margin-bottom: .4rem; }
+    .ledger-group-title { font-weight: 600; text-transform: capitalize; }
+    .ledger-group-count { color: var(--text-faint); font-size: .8rem; }
+    .ledger-empty { color: var(--text-faint); font-size: .8rem; font-style: italic; }
+    .ledger-entry { border: 1px solid var(--border-soft); border-radius: .4rem; padding: .5rem .6rem; margin: .35rem 0; background: rgba(255,255,255,.02); }
+    .ledger-content { margin-bottom: .35rem; overflow-wrap: anywhere; }
+    .ledger-badges { display: flex; flex-wrap: wrap; gap: .3rem; }
+    .ledger-badge { font-size: .72rem; border: 1px solid var(--border-soft); border-radius: .25rem; padding: .05rem .35rem; color: var(--text-faint); }
+    .ledger-badge.inferred { color: var(--amber); border-color: var(--amber); }
+    .ledger-meta { font-size: .75rem; color: var(--text-faint); margin-top: .3rem; overflow-wrap: anywhere; }
+    .ledger-actions { display: flex; gap: .4rem; margin-top: .4rem; }
   </style>
 </head>
 <body>
   <div class="bg-fx"><div class="bg-blob a"></div><div class="bg-blob b"></div><div class="bg-grid"></div></div>
 
   <div class="shell">
+    <a class="skip-link" href="#tab-overview">skip to dashboard content</a>
     <header>
       <div class="brand">
         <div class="brand-mark"></div>
@@ -259,7 +364,11 @@
       </div>
     </header>
 
-    <nav class="tabs" id="tabs" role="tablist"></nav>
+    <!-- Operator toolbar. Populated by the enhancement layer; hidden until
+         then so a snapshot that never arrives doesn't show a dead control. -->
+    <div class="enh-toolbar" id="enh-toolbar" role="status" aria-live="polite" hidden></div>
+
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Dashboard sections"></nav>
 
     <section class="tab-panel" data-tab="overview" id="tab-overview">
       <div class="overview-grid" style="display:grid;grid-template-columns:230px minmax(0,1fr) 230px;gap:1rem;align-items:start">
@@ -916,7 +1025,7 @@
       return `M${sx},${sy} Q${mx + nx * bend},${my + ny * bend} ${tx},${ty}`;
     }
 
-    function renderGraph(data, heightPx) {
+    function renderGraph(data, heightPx, onSelect) {
       const wrap = document.createElement('div');
 
       const allNodes = (data.nodes || []).filter((n) => n && n.id != null);
@@ -1028,7 +1137,10 @@
         nodeEl.addEventListener('mouseenter', (ev) => { highlightNode(i); showTooltip(ev, n, isEntity); });
         nodeEl.addEventListener('mousemove', (ev) => showTooltip(ev, n, isEntity));
         nodeEl.addEventListener('mouseleave', () => { clearHighlight(); hideTooltip(); });
-        if (!isEntity) {
+        if (onSelect) {
+          nodeEl.style.cursor = 'pointer';
+          nodeEl.addEventListener('click', () => onSelect(n, [...neighbors[i]].map((j) => nodes[j])));
+        } else if (!isEntity) {
           nodeEl.style.cursor = 'pointer';
           nodeEl.addEventListener('click', () => openHistory(n.id));
         }
@@ -1453,6 +1565,186 @@
       for (const mount of state.mounts) paintMount(state, mount);
     }
 
+    // ── §25.11 user knowledge ledger ─────────────────────────────────────
+    // Renders the grouped ledger memory-intelligence returns. Every value
+    // is set through textContent, so stored memory text is never parsed as
+    // markup. Correct/forget reuse the governed fact dialogs.
+    function paintLedger(bodyEl, value) {
+      if (!value || typeof value !== 'object' || !value.ledger || !Array.isArray(value.group_order)) {
+        defaultPaint(bodyEl, value);
+        return;
+      }
+      const node = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined && text !== null) n.textContent = String(text);
+        return n;
+      };
+      for (const group of value.group_order) {
+        const entries = value.ledger[group] || [];
+        const section = node('section', 'ledger-group');
+        section.setAttribute('aria-label', group.replace(/_/g, ' '));
+        const head = node('div', 'ledger-group-head');
+        head.append(node('span', 'ledger-group-title', group.replace(/_/g, ' ')), node('span', 'ledger-group-count', `${entries.length}`));
+        section.appendChild(head);
+        if (!entries.length) section.appendChild(node('div', 'ledger-empty', 'none recorded'));
+        for (const e of entries) {
+          const item = node('article', 'ledger-entry');
+          item.appendChild(node('div', 'ledger-content', e.content));
+          const badges = node('div', 'ledger-badges');
+          const badge = (text, cls) => { if (text !== undefined && text !== null && text !== '') badges.appendChild(node('span', 'ledger-badge' + (cls ? ' ' + cls : ''), text)); };
+          badge(e.type);
+          badge(e.explicit ? 'explicit' : 'inferred', e.explicit ? '' : 'inferred');
+          badge(e.source ? `source: ${e.source}` : '');
+          if (e.authority_level) badge(`authority ${e.authority_level}`);
+          if (e.confidence) badge(`confidence ${Number(e.confidence).toFixed(2)}`);
+          badge(e.scope ? `scope: ${e.scope}` : '');
+          if (e.version) badge(`v${e.version}`);
+          item.appendChild(badges);
+          const meta = [];
+          if (e.valid_from || e.valid_until) meta.push(`valid ${e.valid_from || '…'} → ${e.valid_until || 'open'}`);
+          if (e.observed_at) meta.push(`observed ${e.observed_at}`);
+          if (e.recorded_at) meta.push(`recorded ${e.recorded_at}`);
+          if (e.evidence && e.evidence.length) meta.push(`evidence: ${e.evidence.length}`);
+          if (e.linked_memories && e.linked_memories.length) meta.push(`linked: ${e.linked_memories.length}`);
+          const used = e.used_in_responses || [];
+          meta.push(used.length ? `used in ${used.length} response${used.length === 1 ? '' : 's'} (latest ${used[0].at})` : 'not yet used in a response');
+          item.appendChild(node('div', 'ledger-meta', meta.join(' · ')));
+          if (e.fact_id) {
+            const actions = node('div', 'ledger-actions');
+            const correct = node('button', '', 'Correct');
+            correct.type = 'button';
+            correct.addEventListener('click', () => openCorrect(e.fact_id, e.content));
+            const forget = node('button', 'danger', 'Forget');
+            forget.type = 'button';
+            forget.addEventListener('click', () => openForget(e.fact_id));
+            actions.append(correct, forget);
+            item.appendChild(actions);
+          }
+          section.appendChild(item);
+        }
+        bodyEl.appendChild(section);
+      }
+    }
+
+    // ── §25.10 memory graph explorer ─────────────────────────────────────
+    // Filters the graph by kind, network, source, scope, minimum authority
+    // and confidence, scrubs it through recorded time, and opens a details
+    // pane per node: provenance, evidence, explicit vs inferred, linked
+    // (downstream) memories, version history and correct/revoke controls.
+    function renderMemoryExplorer(value) {
+      if (!looksLikeGraph(value)) return render(value);
+      const wrap = document.createElement('div');
+      const node = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined && text !== null) n.textContent = String(text);
+        return n;
+      };
+      const facts = value.nodes.filter((n) => n.type !== 'entity');
+      const distinct = (key) => [...new Set(facts.map((n) => n[key]).filter(Boolean))].sort();
+      const times = [...new Set(facts.map((n) => n.recorded_at).filter(Boolean))].sort();
+
+      const bar = node('div', 'graph-filters');
+      const field = (label, input) => { const l = node('label', 'graph-filter', label); l.appendChild(input); bar.appendChild(l); return input; };
+      const select = (label, options) => {
+        const sel = document.createElement('select');
+        sel.appendChild(new Option('all', ''));
+        options.forEach((o) => sel.appendChild(new Option(o, o)));
+        return field(label, sel);
+      };
+      const range = (label, min, max, step, init) => {
+        const input = document.createElement('input');
+        Object.assign(input, { type: 'range', min, max, step, value: init });
+        return field(label, input);
+      };
+      const kindSel = select('kind', ['fact', 'entity']);
+      const networkSel = select('network', distinct('network'));
+      const sourceSel = select('source', distinct('source'));
+      const scopeSel = select('scope', distinct('scope'));
+      const authorityIn = range('min authority', 0, 100, 5, 0);
+      const confidenceIn = range('min confidence', 0, 1, 0.05, 0);
+      const timeIn = range('recorded up to', 0, Math.max(times.length - 1, 0), 1, Math.max(times.length - 1, 0));
+      const status = node('div', 'graph-filter-status');
+      wrap.append(bar, status);
+      const graphMount = node('div');
+      const details = node('aside', 'graph-details');
+      details.setAttribute('aria-live', 'polite');
+      details.appendChild(node('p', 'hud-empty', 'select a node to trace it'));
+      wrap.append(graphMount, details);
+
+      function filtered() {
+        const minAuthority = Number(authorityIn.value), minConfidence = Number(confidenceIn.value);
+        const cutoff = times.length ? times[Number(timeIn.value)] : null;
+        const keepFact = (n) =>
+          (!networkSel.value || n.network === networkSel.value) &&
+          (!sourceSel.value || n.source === sourceSel.value) &&
+          (!scopeSel.value || n.scope === scopeSel.value) &&
+          (Number(n.authority_level || 0) >= minAuthority) &&
+          (Number(n.confidence || 0) >= minConfidence) &&
+          (!cutoff || !n.recorded_at || n.recorded_at <= cutoff);
+        const visible = new Set();
+        for (const n of value.nodes) {
+          if (n.type === 'entity') { if (kindSel.value !== 'fact') visible.add(n.id); }
+          else if (kindSel.value !== 'entity' && keepFact(n)) visible.add(n.id);
+        }
+        const edges = value.edges.filter((e) => visible.has(e.source) && visible.has(e.target) && (!cutoff || !e.created_at || e.created_at <= cutoff));
+        // Entities are shown when they link a visible fact (or on their own).
+        const linked = new Set(edges.flatMap((e) => [e.source, e.target]));
+        const nodes = value.nodes.filter((n) => visible.has(n.id) && (n.type !== 'entity' || kindSel.value === 'entity' || linked.has(n.id)));
+        return { nodes, edges, cutoff };
+      }
+
+      function showDetails(n, neighbours) {
+        details.replaceChildren();
+        details.appendChild(node('h4', '', n.type === 'entity' ? `entity · ${n.entity_type || ''}` : 'fact'));
+        details.appendChild(node('p', 'ledger-content', n.content || n.label || n.id));
+        const rows = [
+          ['explicit / inferred', n.type === 'entity' ? '' : (n.inferred || n.source === 'inferred' ? 'inferred' : 'explicit')],
+          ['network', n.network], ['source', n.source], ['scope', n.scope],
+          ['authority', n.authority_level], ['confidence', n.confidence],
+          ['valid', (n.valid_from || n.valid_until) ? `${n.valid_from || '…'} → ${n.valid_until || 'open'}` : ''],
+          ['recorded', n.recorded_at], ['derivation', n.derivation], ['version', n.revision],
+        ];
+        const table = node('table', 'kv');
+        for (const [k, v] of rows) {
+          if (v === undefined || v === null || v === '') continue;
+          const tr = document.createElement('tr');
+          tr.append(node('td', '', k), node('td', '', v));
+          table.appendChild(tr);
+        }
+        details.appendChild(table);
+        if (n.evidence && n.evidence.length) {
+          details.appendChild(node('h5', '', `evidence (${n.evidence.length})`));
+          const list = node('ul');
+          n.evidence.forEach((ev) => list.appendChild(node('li', '', ev)));
+          details.appendChild(list);
+        }
+        details.appendChild(node('h5', '', `linked memories (${neighbours.length})`));
+        const linkedList = node('ul');
+        neighbours.forEach((m) => linkedList.appendChild(node('li', '', `${m.type === 'entity' ? 'entity' : 'fact'}: ${m.label || m.id}`)));
+        details.appendChild(linkedList);
+        if (n.type !== 'entity') {
+          const actions = node('div', 'ledger-actions');
+          const mk = (label, cls, fn) => { const b = node('button', cls, label); b.type = 'button'; b.addEventListener('click', fn); actions.appendChild(b); };
+          mk('Versions', '', () => openHistory(n.id));
+          mk('Correct', '', () => openCorrect(n.id, n.content || n.label));
+          mk('Revoke', 'danger', () => openForget(n.id));
+          details.appendChild(actions);
+        }
+      }
+
+      function redraw() {
+        const view = filtered();
+        status.textContent = `showing ${view.nodes.length} of ${value.nodes.length} nodes · ${view.edges.length} of ${value.edges.length} links` +
+          (view.cutoff ? ` · as recorded by ${view.cutoff}` : '');
+        graphMount.replaceChildren(renderGraph({ nodes: view.nodes, edges: view.edges }, 520, showDetails));
+      }
+      for (const input of [kindSel, networkSel, sourceSel, scopeSel, authorityIn, confidenceIn, timeIn]) input.addEventListener('input', redraw);
+      redraw();
+      return wrap;
+    }
+
     function defaultPaint(bodyEl, value) { bodyEl.appendChild(render(value)); }
 
     // ── build the tab bar ────────────────────────────────────────────────
@@ -1553,7 +1845,7 @@
       return el;
     }
     mountPanel('memory', null, document.getElementById('mem-graph-mount'), (bodyEl, value) => {
-      bodyEl.appendChild(renderGraph(value, 520));
+      bodyEl.appendChild(renderMemoryExplorer(value));
     });
     mountPanel('memory', null, document.getElementById('mem-stats'), (bodyEl, value) => {
       if (!looksLikeGraph(value)) { bodyEl.appendChild(render(value)); return; }
@@ -1693,7 +1985,7 @@
       const { el, bodyEl } = makeHudPanel(panel.key, panel.tag, 'var(--violet)');
       el.querySelector('.hud-title').textContent = panel.title;
       document.getElementById('sys-panels').appendChild(el);
-      mountPanel(panel.key, null, bodyEl, defaultPaint);
+      mountPanel(panel.key, null, bodyEl, panel.key === 'user_model' ? paintLedger : defaultPaint);
     }
 
     // ── Flow tab ─────────────────────────────────────────────────────────
@@ -1801,12 +2093,44 @@
 
     function paintPanel(key) { paintAllMounts(key); }
 
-    async function refreshSnapshot() {
-      const response = await fetch(snapshotEndpoint, { credentials: 'same-origin' });
+    // Instrumented wrapper: the enhancement layer (second <script> block)
+    // renders the refresh countdown, availability meter and change
+    // highlighting from the state this publishes, and re-renders the fact
+    // explorer when the underlying records change. Publication lives here
+    // rather than in the enhancer so a refresh still records itself even if
+    // the enhancer never runs.
+    // ETag from the last 200, replayed as If-None-Match. The projection
+    // validates on view content alone (its "generated" timestamp is excluded
+    // from the validator and reported as a header instead), so an unchanged
+    // dashboard costs a 304 and a few hundred bytes rather than a megabyte.
+    let snapshotETag = '';
+
+    async function refreshSnapshotImpl() {
+      const startedAt = Date.now();
+      const headers = {};
+      if (snapshotETag) headers['If-None-Match'] = snapshotETag;
+      const response = await fetch(snapshotEndpoint, { credentials: 'same-origin', headers });
       if (response.status === 401) {
         throw new Error('unauthorized (the transparency API should be public)');
       }
+      // 304: the projection assembled exactly the views already on screen.
+      // Nothing is re-rendered -- the panels keep the values the server just
+      // validated -- and only the freshness clock moves. "generated" is read
+      // from the header precisely so the 304 still says when the content it
+      // matched was assembled.
+      if (response.status === 304) {
+        if (!lastSnapshot) throw new Error('projection returned 304 before any snapshot was cached');
+        publishSnapshot(lastSnapshot.views, lastSnapshot.unavailable, Date.now() - startedAt, {
+          notModified: true,
+          generated: response.headers.get('X-SCOS-Generated') || lastSnapshot.generated,
+        });
+        statusPill.classList.remove('error');
+        statusText.textContent = `unchanged ${new Date().toISOString()}`;
+        return;
+      }
       if (!response.ok) throw new Error(`projection returned ${response.status}`);
+      const etag = response.headers.get('ETag');
+      if (etag) snapshotETag = etag;
       const payload = await response.json();
       const views = payload.views || {};
       const unavailable = payload.unavailable || {};
@@ -1831,6 +2155,48 @@
       statusPill.classList.remove('error');
       statusText.textContent = `refreshed ${new Date().toISOString()}`;
       if (anyUnavailable) statusText.textContent += ' (partial)';
+      publishSnapshot(views, unavailable, Date.now() - startedAt, {
+        generated: payload.generated || null,
+        // Per-view upstream fetch times, from the projection's own view
+        // cache: a view served from cache is reported as such rather than
+        // being presented as freshly assembled.
+        serverCached: payload.cached || null,
+      });
+    }
+
+    // One publication point every consumer reads from, so the toolbar, the
+    // fact explorer and the change highlighter can never disagree about what
+    // the last refresh actually saw. `available`/`total` mirror the
+    // views_available/views_total pair transparency-projection already
+    // reports as a service metric -- this is the same count, client-side.
+    let lastSnapshot = null;
+    function publishSnapshot(views, unavailable, durationMs, extra) {
+      const opts = extra || {};
+      const available = Object.keys(views).length;
+      const next = {
+        views, unavailable,
+        at: Date.now(),
+        generated: opts.generated !== undefined ? opts.generated : (lastSnapshot ? lastSnapshot.generated : null),
+        durationMs,
+        notModified: !!opts.notModified,
+        serverCached: opts.serverCached || null,
+        available,
+        total: available + Object.keys(unavailable).length,
+      };
+      lastSnapshot = next;
+      try {
+        window.dispatchEvent(new CustomEvent('scos:snapshot', { detail: next }));
+      } catch (error) {
+        // No CustomEvent (very old browser): the enhancer simply stays on
+        // its initial render instead of the dashboard failing.
+      }
+    }
+
+    // The public name stays `refreshSnapshot`: the enhancer, the toolbar and
+    // the scheduler all call it, and the instrumentation must not change how
+    // any of them await it.
+    async function refreshSnapshot() {
+      return refreshSnapshotImpl();
     }
 
     function setStatusError(message) {
@@ -2279,10 +2645,846 @@
     };
 
     renderEditState();
+    // The refresh cadence is owned here (rather than a bare setInterval) so
+    // the enhancement layer can pause/resume it and show a countdown without
+    // a second, competing timer running against the same projection.
+    const REFRESH_INTERVAL_MS = 15000;
+    // Everything the enhancement layer needs, exposed explicitly instead of
+    // reaching into this script's scope by name.
+    window.__scos = {
+      refreshSnapshot,
+      setTab: (id) => setTab(id),
+      panelState,
+      mountPanel,
+      PANELS,
+      TABS,
+      REFRESH_INTERVAL_MS,
+      snapshot: () => lastSnapshot,
+      escapeHtml,
+      humanizeKey,
+      render,
+      renderScalar,
+      factActions,
+      looksLikeFact,
+      looksLikeGraph,
+      statTile,
+      paused: false,
+      timer: null,
+      scheduleRefresh: scheduleRefresh,
+    };
+    function scheduleRefresh() {
+      clearTimeout(window.__scos.timer);
+      window.__scos.timer = setTimeout(function tick() {
+        refreshSnapshot()
+          .catch((error) => setStatusError(`projection unavailable: ${error.message}`))
+          .then(() => { if (!window.__scos.paused) scheduleRefresh(); });
+      }, REFRESH_INTERVAL_MS);
+    }
     refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`));
-    setInterval(() => refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`)), 15000);
+    scheduleRefresh();
     connectTrace();
     checkSession();
+  </script>
+
+  <!-- ══ enhancement layer ══════════════════════════════════════════════
+       Additive operator surface built on the shell above. It reads state
+       only through window.__scos and renders with the same helpers the
+       shell already uses -- one data path, no fabricated values, and the
+       dashboard renders correctly with this whole block removed. -->
+  <script>
+  (function () {
+    'use strict';
+    var SCOS = window.__scos;
+    if (!SCOS) return;
+    var PANELS = SCOS.PANELS;
+    var TABS = SCOS.TABS;
+    var TAB_IDS = TABS.map(function (t) { return t.id; });
+    var REDUCED = false;
+    try { REDUCED = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) {}
+
+    function $(sel, root) { return (root || document).querySelector(sel); }
+    function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+    function el(tag, cls, text) {
+      var n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined && text !== null) n.textContent = String(text);
+      return n;
+    }
+    function currentTabId() {
+      var panel = $('.tab-panel:not([hidden])');
+      return panel ? panel.dataset.tab : 'overview';
+    }
+    function download(name, text, mime) {
+      try {
+        var blob = new Blob([text], { type: mime });
+        var url = URL.createObjectURL(blob);
+        var a = el('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(url); if (a.parentNode) a.parentNode.removeChild(a); }, 0);
+        return true;
+      } catch (e) { return false; }
+    }
+
+    var state = { snapshot: null, changed: [], primed: false, nextAt: Date.now() + SCOS.REFRESH_INTERVAL_MS, hashes: {} };
+
+    // ── 1. deep links ────────────────────────────────────────────────────
+    // Every section is addressable as #/<tab>, and the fact explorer takes a
+    // pre-applied filter as #/facts?q=<term>. Popstate and hashchange are
+    // both wired because pushState fires neither on its own.
+    var PANEL_TAB = {
+      system: 'system', user_model: 'system', code_intelligence: 'system', code_repos: 'system',
+      credentials: 'system', recovery: 'system', security: 'system',
+      memory: 'memory',
+      facts: 'facts', learnings: 'facts', contradictions: 'facts', okf_documents: 'facts',
+      diary: 'flow', timeline: 'flow', token_flow: 'flow', costs: 'flow', memory_summary: 'flow',
+      agents: 'agents', tool_operations: 'agents', plugins: 'agents', skills: 'agents',
+      hooks: 'agents', routing: 'agents',
+    };
+
+    function parseHash() {
+      var raw = (location.hash || '').replace(/^#/, '');
+      if (raw.charAt(0) === '/') raw = raw.slice(1);
+      if (!raw) return { tab: null, query: '' };
+      var qi = raw.indexOf('?');
+      var tab = (qi === -1 ? raw : raw.slice(0, qi)).toLowerCase();
+      if (tab.indexOf('tab-') === 0) tab = tab.slice(4);
+      var query = '';
+      if (qi !== -1) {
+        var m = /(?:^|&)q=([^&]*)/.exec(raw.slice(qi + 1));
+        if (m) { try { query = decodeURIComponent(m[1]); } catch (e) { query = m[1]; } }
+      }
+      return { tab: TAB_IDS.indexOf(tab) !== -1 ? tab : null, query: query };
+    }
+    function writeHash(tab, query, replace) {
+      var next = '#/' + tab + (query ? '?q=' + encodeURIComponent(query) : '');
+      if (location.hash === next) return;
+      if (replace) history.replaceState({ tab: tab }, '', next);
+      else history.pushState({ tab: tab }, '', next);
+    }
+    function tabLabel(id) {
+      for (var i = 0; i < TABS.length; i++) if (TABS[i].id === id) return TABS[i].label;
+      return id;
+    }
+    function goto(tabId, query, replace) {
+      var id = TAB_IDS.indexOf(tabId) !== -1 ? tabId : 'overview';
+      SCOS.setTab(id);
+      writeHash(id, query || '', !!replace);
+      afterTabChange(id, query || '');
+    }
+    function afterTabChange(id, query) {
+      document.title = 'SCOS // ' + tabLabel(id).toUpperCase() + ' \u00b7 Memory Command';
+      if (id === 'facts' && query) FX.setQuery(query, false);
+    }
+    function syncFromHash() {
+      var h = parseHash();
+      if (!h.tab) return;
+      if (h.tab === currentTabId()) { if (h.query) FX.setQuery(h.query, false); return; }
+      SCOS.setTab(h.tab);
+      afterTabChange(h.tab, h.query);
+    }
+    window.addEventListener('popstate', syncFromHash);
+    window.addEventListener('hashchange', syncFromHash);
+
+    // ── 2. fact explorer ─────────────────────────────────────────────────
+    // Replaces the shell's generic KV paint for the fact table only: that
+    // renderer has no sorting, filtering or export, and it rebuilds the
+    // whole subtree on every 15s refresh, which would drop the operator's
+    // filter mid-keystroke. Ownership of this one mount moves here, driven
+    // by the same published snapshot.
+    var FX = (function () {
+      var host = document.getElementById('facts-table-mount');
+      if (!host) return { update: function () {}, setQuery: function () {} };
+      var st = SCOS.panelState.get('facts');
+      if (st) st.mounts = st.mounts.filter(function (m) { return m.bodyEl !== host; });
+      host.classList.remove('panel-body');
+      host.style.maxHeight = 'none';
+      host.innerHTML = '';
+
+      var ui = { q: '', network: '', status: '', sort: 'recorded_at', dir: -1 };
+      var rows = [];
+      var lastSerialised = null;
+
+      var COLUMNS = [
+        { key: 'content', label: 'content', cls: 'fx-content' },
+        { key: 'network', label: 'network' },
+        { key: 'confidence', label: 'confidence' },
+        { key: 'authority_level', label: 'authority' },
+        { key: 'status', label: 'status' },
+        { key: 'source', label: 'source' },
+        { key: 'recorded_at', label: 'recorded' },
+        { key: '__actions', label: 'actions' },
+      ];
+      var SORTABLE = { content: 1, network: 1, confidence: 1, authority_level: 1, status: 1, source: 1, recorded_at: 1 };
+      // An empty network is a real value (facts recorded without one), so it
+      // gets its own sentinel option. Reusing "" for it would collide with
+      // the "all networks" option and make "(none)" silently mean
+      // "everything" -- which is exactly the kind of lie this dashboard is
+      // built not to tell.
+      var NO_NETWORK = '\u0000none';
+
+      var bar = el('div', 'fx-toolbar');
+      var input = el('input');
+      input.type = 'search';
+      input.placeholder = 'filter facts\u2026 (content, network, source)';
+      input.setAttribute('aria-label', 'Filter facts');
+      var netSel = el('select');
+      netSel.setAttribute('aria-label', 'Filter by network');
+      var stSel = el('select');
+      stSel.setAttribute('aria-label', 'Filter by status');
+      var csvBtn = el('button', 'small', 'csv');
+      csvBtn.type = 'button';
+      csvBtn.title = 'Download the filtered rows as CSV';
+      var jsonBtn = el('button', 'small', 'json');
+      jsonBtn.type = 'button';
+      jsonBtn.title = 'Download the filtered rows as JSON';
+      var countEl = el('span', 'fx-count', 'waiting for projection\u2026');
+      bar.append(input, netSel, stSel, csvBtn, jsonBtn, countEl);
+
+      var table = el('table', 'records');
+      var thead = el('thead');
+      var tbody = el('tbody');
+      table.append(thead, tbody);
+      host.append(bar, table);
+
+      function terms() {
+        return ui.q.toLowerCase().split(' ').filter(function (t) { return t.length > 0; });
+      }
+      function cellText(row, key) {
+        var v = row[key];
+        if (v === null || v === undefined) return '';
+        return typeof v === 'object' ? JSON.stringify(v) : String(v);
+      }
+      function filtered() {
+        var ts = terms();
+        var netFilter = ui.network === NO_NETWORK ? '' : ui.network;
+        return rows.filter(function (r) {
+          if (ui.network && String(r.network || '') !== netFilter) return false;
+          if (ui.status && String(r.status || '') !== ui.status) return false;
+          if (!ts.length) return true;
+          var hay = (cellText(r, 'content') + ' ' + cellText(r, 'network') + ' ' + cellText(r, 'source') + ' ' + cellText(r, 'status')).toLowerCase();
+          for (var i = 0; i < ts.length; i++) if (hay.indexOf(ts[i]) === -1) return false;
+          return true;
+        });
+      }
+      function sorted(list) {
+        var key = ui.sort;
+        var dir = ui.dir;
+        return list.slice().sort(function (a, b) {
+          var av = key === '__actions' ? '' : a[key];
+          var bv = key === '__actions' ? '' : b[key];
+          if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+          var as = cellText(a, key).toLowerCase();
+          var bs = cellText(b, key).toLowerCase();
+          if (as === bs) return 0;
+          return (as < bs ? -1 : 1) * dir;
+        });
+      }
+      function highlightInto(parent, text, ts) {
+        var lower = text.toLowerCase();
+        var hits = [];
+        for (var i = 0; i < ts.length; i++) {
+          var from = 0, idx;
+          while ((idx = lower.indexOf(ts[i], from)) !== -1) {
+            hits.push([idx, idx + ts[i].length]);
+            from = idx + ts[i].length;
+          }
+        }
+        hits.sort(function (a, b) { return a[0] - b[0]; });
+        var merged = [];
+        for (var h = 0; h < hits.length; h++) {
+          var last = merged[merged.length - 1];
+          if (last && hits[h][0] <= last[1]) last[1] = Math.max(last[1], hits[h][1]);
+          else merged.push(hits[h].slice());
+        }
+        var pos = 0;
+        for (var m = 0; m < merged.length; m++) {
+          if (merged[m][0] > pos) parent.appendChild(document.createTextNode(text.slice(pos, merged[m][0])));
+          var mark = el('mark', 'fx-hit', text.slice(merged[m][0], merged[m][1]));
+          parent.appendChild(mark);
+          pos = merged[m][1];
+        }
+        if (pos < text.length) parent.appendChild(document.createTextNode(text.slice(pos)));
+      }
+      // The sort arrows are updated in place rather than by rebuilding the
+      // header: rebuilding on every sort click would drop keyboard focus off
+      // the header cell the operator just activated.
+      function updateSortArrows() {
+        var cells = thead.querySelectorAll('th[data-sort-key]');
+        for (var i = 0; i < cells.length; i++) {
+          var active = cells[i].dataset.sortKey === ui.sort;
+          var span = cells[i].querySelector('.fx-arrow');
+          if (!span) { span = el('span', 'fx-arrow'); cells[i].appendChild(span); }
+          span.textContent = active ? (ui.dir < 0 ? '\u25bc' : '\u25b2') : '';
+        }
+      }
+      function renderHead() {
+        thead.innerHTML = '';
+        var tr = el('tr');
+        for (var i = 0; i < COLUMNS.length; i++) {
+          var col = COLUMNS[i];
+          var th = el('th');
+          var sortable = SORTABLE[col.key];
+          if (sortable) {
+            th.className = 'fx-sortable';
+            th.dataset.sortKey = col.key;
+            th.tabIndex = 0;
+            th.setAttribute('role', 'button');
+            th.setAttribute('aria-label', 'Sort by ' + col.label);
+            th.appendChild(document.createTextNode(col.label));
+            (function (key) {
+              function toggle() {
+                if (ui.sort === key) ui.dir = -ui.dir;
+                else { ui.sort = key; ui.dir = key === 'recorded_at' || key === 'confidence' ? -1 : 1; }
+                updateSortArrows();
+                render();
+              }
+              th.addEventListener('click', toggle);
+              th.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+            })(col.key);
+          } else {
+            th.textContent = col.label;
+          }
+          tr.appendChild(th);
+        }
+        thead.appendChild(tr);
+        updateSortArrows();
+      }
+      function scalarCell(value, cls) {
+        var td = el('td', cls);
+        if (value === null || value === undefined) { td.className = (cls ? cls + ' ' : '') + 'missing'; td.textContent = '\u2014'; return td; }
+        td.appendChild(document.createTextNode(String(value)));
+        return td;
+      }
+      function render() {
+        var list = sorted(filtered());
+        var ts = terms();
+        tbody.innerHTML = '';
+        for (var i = 0; i < list.length; i++) {
+          var row = list[i];
+          var tr = el('tr');
+          var content = cellText(row, 'content');
+          var tdContent = el('td', 'fx-content');
+          if (ts.length) highlightInto(tdContent, content, ts); else tdContent.textContent = content;
+          tr.appendChild(tdContent);
+          tr.appendChild(scalarCell(row.network, ''));
+          var conf = Number(row.confidence);
+          var tdConf = el('td');
+          if (!isNaN(conf)) {
+            var meter = el('span', 'fx-conf');
+            var fill = el('i');
+            fill.style.width = Math.max(0, Math.min(100, Math.round(conf * 100))) + '%';
+            meter.appendChild(fill);
+            tdConf.append(meter, document.createTextNode(conf.toFixed(2)));
+          } else { tdConf.className = 'missing'; tdConf.textContent = '\u2014'; }
+          tr.appendChild(tdConf);
+          tr.appendChild(scalarCell(row.authority_level, ''));
+          var tdStatus = el('td');
+          var statusText = String(row.status || 'unknown');
+          var pill = el('span', 'fx-pill ' + statusText.toLowerCase(), statusText);
+          tdStatus.appendChild(pill);
+          tr.appendChild(tdStatus);
+          tr.appendChild(scalarCell(row.source, ''));
+          var tdDate = el('td');
+          var iso = String(row.recorded_at || '');
+          tdDate.appendChild(SCOS.renderScalar(iso));
+          tr.appendChild(tdDate);
+          var tdActions = el('td', 'cell-actions');
+          if (SCOS.looksLikeFact(row)) tdActions.appendChild(SCOS.factActions(row));
+          tr.appendChild(tdActions);
+          tbody.appendChild(tr);
+        }
+        if (!list.length) {
+          var empty = el('tr');
+          var td = el('td', 'missing', rows.length ? 'no facts match this filter' : 'no facts reported');
+          td.colSpan = COLUMNS.length;
+          empty.appendChild(td);
+          tbody.appendChild(empty);
+        }
+        countEl.textContent = (list.length === rows.length ? rows.length : list.length + ' of ' + rows.length) + ' fact' + (rows.length === 1 ? '' : 's');
+      }
+      function rebuildDropdowns() {
+        var nets = {}, stats = {};
+        for (var i = 0; i < rows.length; i++) {
+          nets[String(rows[i].network || '')] = 1;
+          stats[String(rows[i].status || 'unknown')] = 1;
+        }
+        ui.network = fillSelect(netSel, nets, ui.network, 'all networks');
+        ui.status = fillSelect(stSel, stats, ui.status, 'all statuses');
+      }
+      // Rebuilds a filter dropdown from the values actually present, with an
+      // explicit "all" option at value "" and an optional sentinel for the
+      // empty value. Keeps the operator's current selection only while that
+      // value still exists in the data.
+      function fillSelect(sel, values, current, allLabel) {
+        sel.innerHTML = '';
+        var optAll = el('option', null, allLabel);
+        optAll.value = '';
+        sel.appendChild(optAll);
+        var keys = Object.keys(values).filter(function (k) { return k !== ''; }).sort();
+        for (var k = 0; k < keys.length; k++) {
+          var o = el('option', null, keys[k]);
+          o.value = keys[k];
+          sel.appendChild(o);
+        }
+        if (Object.prototype.hasOwnProperty.call(values, '')) {
+          var none = el('option', null, '(none)');
+          none.value = NO_NETWORK;
+          sel.appendChild(none);
+        }
+        var lookup = current === NO_NETWORK ? '' : current;
+        sel.value = Object.prototype.hasOwnProperty.call(values, lookup) || current === '' ? current : '';
+        return sel.value;
+      }
+      function filteredForExport() { return sorted(filtered()); }
+      input.addEventListener('input', function () { ui.q = input.value.trim(); render(); });
+      netSel.addEventListener('change', function () { ui.network = netSel.value; render(); });
+      stSel.addEventListener('change', function () { ui.status = stSel.value; render(); });
+      csvBtn.addEventListener('click', function () {
+        var list = filteredForExport();
+        var cols = ['id', 'content', 'network', 'confidence', 'authority_level', 'status', 'source', 'observed_at', 'recorded_at', 'revision'];
+        var lines = [cols.join(',')];
+        for (var i = 0; i < list.length; i++) {
+          var cells = [];
+          for (var c = 0; c < cols.length; c++) {
+            var raw = cellText(list[i], cols[c]).replace(/"/g, '""');
+            cells.push('"' + raw + '"');
+          }
+          lines.push(cells.join(','));
+        }
+        if (!download('scos-facts-' + new Date().toISOString().slice(0, 10) + '.csv', lines.join('\r\n'), 'text/csv')) {
+          countEl.textContent = 'download blocked by this browser \u2014 use json';
+        }
+      });
+      jsonBtn.addEventListener('click', function () {
+        var body = JSON.stringify({ generated: new Date().toISOString(), count: 0, entries: filteredForExport() }, null, 2);
+        var parsed = JSON.parse(body);
+        parsed.count = parsed.entries.length;
+        if (!download('scos-facts-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(parsed, null, 2), 'application/json')) {
+          countEl.textContent = 'download blocked by this browser';
+        }
+      });
+
+      renderHead();
+
+      return {
+        update: function (value) {
+          var entries = value && Array.isArray(value.entries) ? value.entries : (Array.isArray(value) ? value : []);
+          var serialised;
+          try { serialised = JSON.stringify(entries); } catch (e) { serialised = null; }
+          // Only rebuild when the records actually changed, so an operator
+          // mid-filter is never interrupted by the 15s poll.
+          if (serialised !== null && serialised === lastSerialised) return;
+          lastSerialised = serialised;
+          rows = entries;
+          rebuildDropdowns();
+          render();
+        },
+        setQuery: function (term, focus) {
+          ui.q = String(term || '');
+          input.value = ui.q;
+          render();
+          if (focus) input.focus();
+        },
+      };
+    })();
+
+    // ── 3. operator toolbar ──────────────────────────────────────────────
+    var toolbar = document.getElementById('enh-toolbar');
+    var meterFill, countdownEl, viewsEl, latencyEl, ageEl, changedEl, modeEl, pauseBtn;
+    if (toolbar) {
+      toolbar.hidden = false;
+      toolbar.innerHTML = [
+        '<button id="enh-refresh" class="small" type="button" title="Refresh the projection now (r)">\u21bb refresh</button>',
+        '<span class="enh-meter-wrap" title="automatic refresh countdown"><span class="refresh-meter"><i id="enh-meter"></i></span><span id="enh-countdown">\u2014</span></span>',
+        '<button id="enh-pause" class="small" type="button" title="Pause / resume automatic refresh (p)">pause</button>',
+        '<span class="enh-sep"></span>',
+        '<span class="enh-stat" id="enh-views">views <b>\u2014</b></span>',
+        '<span class="enh-stat" id="enh-latency">latency <b>\u2014</b></span>',
+        '<span class="enh-stat" id="enh-age">age <b>\u2014</b></span>',
+        '<span class="enh-stat" id="enh-changed" hidden>changed <b>0</b></span>',
+        '<span class="enh-stat" id="enh-mode" hidden></span>',
+        '<span class="enh-spacer"></span>',
+        '<button id="enh-search" class="small" type="button" title="Search tabs, panels, facts, entities (Ctrl/Cmd+K)">\u2318K search</button>',
+        '<button id="enh-export" class="small" type="button" title="Download the last snapshot as JSON">export</button>',
+        '<button id="enh-help" class="small" type="button" title="Keyboard shortcuts (?)">? keys</button>',
+      ].join('');
+      meterFill = $('#enh-meter');
+      countdownEl = $('#enh-countdown');
+      viewsEl = $('#enh-views');
+      latencyEl = $('#enh-latency');
+      ageEl = $('#enh-age');
+      changedEl = $('#enh-changed');
+      modeEl = $('#enh-mode');
+      pauseBtn = $('#enh-pause');
+
+      $('#enh-refresh').addEventListener('click', function () {
+        state.nextAt = Date.now() + SCOS.REFRESH_INTERVAL_MS;
+        SCOS.refreshSnapshot().catch(function (e) { countdownEl.textContent = 'failed'; });
+      });
+      pauseBtn.addEventListener('click', togglePause);
+      $('#enh-search').addEventListener('click', function () { Palette.open(); });
+      $('#enh-export').addEventListener('click', function () {
+        if (!state.snapshot) { countdownEl.textContent = 'nothing yet'; return; }
+        if (!download('scos-snapshot-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json',
+          JSON.stringify({ generated: state.snapshot.generated, captured_at: new Date(state.snapshot.at).toISOString(), available: state.snapshot.available, total: state.snapshot.total, unavailable: state.snapshot.unavailable, views: state.snapshot.views }, null, 2),
+          'application/json')) countdownEl.textContent = 'download blocked';
+      });
+      $('#enh-help').addEventListener('click', showHelp);
+    }
+    function togglePause() {
+      SCOS.paused = !SCOS.paused;
+      pauseBtn.textContent = SCOS.paused ? 'resume' : 'pause';
+      pauseBtn.classList.toggle('enh-on', SCOS.paused);
+      if (SCOS.paused) { clearTimeout(SCOS.timer); countdownEl.textContent = 'paused'; meterFill.style.width = '0%'; }
+      else { state.nextAt = Date.now() + SCOS.REFRESH_INTERVAL_MS; SCOS.scheduleRefresh(); }
+    }
+    function renderStats() {
+      var s = state.snapshot;
+      if (!s) return;
+      var missing = s.total - s.available;
+      viewsEl.innerHTML = 'views <b>' + s.available + '/' + s.total + '</b>';
+      viewsEl.className = 'enh-stat ' + (missing === 0 ? 'good' : (missing < 3 ? 'warn' : 'bad'));
+      viewsEl.title = missing ? ('unavailable: ' + Object.keys(s.unavailable).join(', ')) : 'every projected view responded';
+      latencyEl.innerHTML = 'latency <b>' + s.durationMs + 'ms</b>';
+      latencyEl.className = 'enh-stat ' + (s.durationMs < 1500 ? 'good' : (s.durationMs < 8000 ? 'warn' : 'bad'));
+      var n = state.changed.length;
+      changedEl.hidden = n === 0;
+      if (n) changedEl.innerHTML = 'changed <b>' + n + '</b>';
+      // How the bytes arrived, stated plainly: a 304 means the server
+      // validated what is already on screen; "server-cached" means some
+      // views were reused server-side and are therefore older than this
+      // request (hover for which, and from when).
+      var cachedNames = s.serverCached ? Object.keys(s.serverCached) : [];
+      if (s.notModified) {
+        modeEl.hidden = false;
+        modeEl.className = 'enh-stat good';
+        modeEl.innerHTML = 'not modified <b>304</b>';
+        modeEl.title = 'the projection validated the views already on screen; nothing was re-sent or re-rendered';
+      } else if (cachedNames.length) {
+        modeEl.hidden = false;
+        modeEl.className = 'enh-stat warn';
+        modeEl.innerHTML = 'server-cached <b>' + cachedNames.length + '</b>';
+        modeEl.title = cachedNames.map(function (k) { return k + ' fetched ' + s.serverCached[k]; }).join('\n');
+      } else {
+        modeEl.hidden = true;
+      }
+    }
+    setInterval(function () {
+      if (!state.snapshot) return;
+      var age = Math.round((Date.now() - state.snapshot.at) / 1000);
+      ageEl.innerHTML = 'age <b>' + age + 's</b>';
+      ageEl.className = 'enh-stat ' + (age < 30 ? 'good' : (age < 90 ? 'warn' : 'bad'));
+      if (SCOS.paused) { countdownEl.textContent = 'paused'; return; }
+      var left = Math.max(0, state.nextAt - Date.now());
+      meterFill.style.width = Math.max(0, Math.min(100, 100 * (1 - left / SCOS.REFRESH_INTERVAL_MS))) + '%';
+      countdownEl.textContent = left <= 250 ? 'refreshing\u2026' : 'next ' + Math.ceil(left / 1000) + 's';
+    }, 250);
+
+    // ── 4. snapshot subscription, change highlighting, facts feed ─────────
+    window.addEventListener('scos:snapshot', function (evt) {
+      var detail = evt.detail;
+      state.snapshot = detail;
+      state.nextAt = detail.at + SCOS.REFRESH_INTERVAL_MS;
+      var changed = [];
+      for (var i = 0; i < PANELS.length; i++) {
+        var key = PANELS[i].key;
+        if (!(key in detail.views)) continue;
+        var serialised;
+        try { serialised = JSON.stringify(detail.views[key]); } catch (e) { serialised = null; }
+        if (serialised === null) continue;
+        var prev = state.hashes[key];
+        if (state.primed && prev !== undefined && prev !== serialised) changed.push(key);
+        state.hashes[key] = serialised;
+      }
+      state.changed = changed;
+      if (state.primed && changed.length) flash(changed);
+      state.primed = true;
+      renderStats();
+      FX.update(detail.views.facts);
+      if (Palette.isOpen()) Palette.refresh();
+    });
+    function flash(keys) {
+      for (var i = 0; i < keys.length; i++) {
+        var st = SCOS.panelState.get(keys[i]);
+        if (!st) continue;
+        for (var m = 0; m < st.mounts.length; m++) {
+          var body = st.mounts[m].bodyEl;
+          if (!body) continue;
+          var target = body.closest ? (body.closest('.hud-panel, .glass-card, .stat-tile') || body) : body;
+          target.classList.remove('enh-changed');
+          void target.offsetWidth; // restart the animation
+          target.classList.add('enh-changed');
+          (function (node) { setTimeout(function () { node.classList.remove('enh-changed'); }, 2000); })(target);
+        }
+      }
+    }
+
+    // ── 5. command palette ───────────────────────────────────────────────
+    // Searches the same published snapshot the panels render from, plus the
+    // static section list. Nothing here is a second source of truth: every
+    // result navigates to a real panel or applies a filter to real records.
+    var Palette = (function () {
+      var backdrop = el('div', 'enh-backdrop');
+      var box = el('div', 'palette');
+      box.setAttribute('role', 'dialog');
+      box.setAttribute('aria-modal', 'true');
+      box.setAttribute('aria-label', 'Search the dashboard');
+      var input = el('input');
+      input.type = 'text';
+      input.placeholder = 'search tabs, panels, facts, entities, services\u2026';
+      input.setAttribute('aria-label', 'Search the dashboard');
+      var list = el('ul');
+      list.setAttribute('role', 'listbox');
+      var foot = el('div', 'palette-foot');
+      foot.innerHTML = '<span><kbd>\u2191</kbd><kbd>\u2193</kbd> navigate</span><span><kbd>\u21b5</kbd> open</span><span><kbd>esc</kbd> close</span>';
+      box.append(input, list, foot);
+      backdrop.appendChild(box);
+      document.body.appendChild(backdrop);
+
+      var items = [];
+      var results = [];
+      var selected = 0;
+
+      function buildItems() {
+        var out = [];
+        for (var t = 0; t < TABS.length; t++) {
+          out.push({ kind: 'section', text: TABS[t].label, hint: '#' + TABS[t].id, tab: TABS[t].id, query: '', blurb: 'go to the ' + TABS[t].label + ' section' });
+        }
+        for (var p = 0; p < PANELS.length; p++) {
+          out.push({ kind: 'panel', text: PANELS[p].title, hint: PANELS[p].tag + ' panel', tab: PANEL_TAB[PANELS[p].key] || 'overview', query: '', blurb: 'panel on the ' + tabLabel(PANEL_TAB[PANELS[p].key] || 'overview') + ' section' });
+        }
+        var s = state.snapshot;
+        if (s) {
+          var facts = s.views.facts && s.views.facts.entries ? s.views.facts.entries : [];
+          for (var f = 0; f < facts.length; f++) {
+            var content = String(facts[f].content || '');
+            if (!content) continue;
+            out.push({ kind: 'fact', text: content, hint: (facts[f].network || 'no network') + ' \u00b7 ' + (facts[f].status || 'unknown'), tab: 'facts', query: content.slice(0, 60), blurb: 'filter the facts table to this record' });
+          }
+          var nodes = s.views.memory && s.views.memory.nodes ? s.views.memory.nodes : [];
+          for (var n = 0; n < nodes.length; n++) {
+            if (nodes[n].type !== 'entity') continue;
+            out.push({ kind: 'entity', text: String(nodes[n].label || nodes[n].id), hint: 'memory entity', tab: 'memory', query: '', blurb: 'open the memory graph' });
+          }
+          var svc = s.views.system && s.views.system.entries ? s.views.system.entries : [];
+          for (var v = 0; v < svc.length; v++) {
+            out.push({ kind: 'service', text: String(svc[v].service || ''), hint: String(svc[v].status || '') + (svc[v].version ? ' \u00b7 ' + svc[v].version : ''), tab: 'system', query: '', blurb: 'service mesh entry' });
+          }
+          var repos = Array.isArray(s.views.code_repos) ? s.views.code_repos : [];
+          for (var r = 0; r < repos.length; r++) {
+            out.push({ kind: 'repo', text: String(repos[r].canonical_path || repos[r].repository_id || ''), hint: 'code repository', tab: 'system', query: '', blurb: 'code intelligence' });
+          }
+        }
+        return out;
+      }
+      function score(text, ts) {
+        if (!ts.length) return 1;
+        var lower = text.toLowerCase();
+        var total = 0;
+        for (var i = 0; i < ts.length; i++) {
+          var idx = lower.indexOf(ts[i]);
+          if (idx === -1) return 0;
+          total += 100 - Math.min(90, idx);
+          var before = idx === 0 ? ' ' : lower.charAt(idx - 1);
+          if (before === ' ' || ' -_/.'.indexOf(before) !== -1) total += 40;
+        }
+        return total;
+      }
+      function search(term) {
+        var ts = term.toLowerCase().split(' ').filter(function (x) { return x.length > 0; });
+        if (!ts.length) {
+          results = items.slice(0, 60);
+          return;
+        }
+        var scored = [];
+        for (var i = 0; i < items.length; i++) {
+          var sc = score(items[i].text, ts);
+          if (items[i].kind === 'section' || items[i].kind === 'panel') sc *= 1.4;
+          if (sc > 0) scored.push({ item: items[i], score: sc });
+        }
+        scored.sort(function (a, b) {
+          if (b.score !== a.score) return b.score - a.score;
+          return a.item.text.length - b.item.text.length;
+        });
+        var seen = {};
+        var out = [];
+        for (var s = 0; s < scored.length && out.length < 80; s++) {
+          var k = scored[s].item.kind + '\u0000' + scored[s].item.text;
+          if (seen[k]) continue;
+          seen[k] = 1;
+          out.push(scored[s].item);
+        }
+        results = out;
+      }
+      function markInto(parent, text, term) {
+        var ts = term.toLowerCase().split(' ').filter(function (x) { return x.length > 0; });
+        if (!ts.length) { parent.textContent = text; return; }
+        var lower = text.toLowerCase();
+        var hits = [];
+        for (var i = 0; i < ts.length; i++) {
+          var idx = lower.indexOf(ts[i]);
+          if (idx !== -1) hits.push([idx, idx + ts[i].length]);
+        }
+        hits.sort(function (a, b) { return a[0] - b[0]; });
+        var pos = 0;
+        for (var h = 0; h < hits.length; h++) {
+          if (hits[h][0] < pos) continue;
+          if (hits[h][0] > pos) parent.appendChild(document.createTextNode(text.slice(pos, hits[h][0])));
+          parent.appendChild(el('mark', null, text.slice(hits[h][0], hits[h][1])));
+          pos = hits[h][1];
+        }
+        if (pos < text.length) parent.appendChild(document.createTextNode(text.slice(pos)));
+      }
+      function draw() {
+        list.innerHTML = '';
+        if (!results.length) {
+          var li = el('li', 'p-empty', 'nothing matches');
+          li.setAttribute('role', 'presentation');
+          list.appendChild(li);
+          return;
+        }
+        var term = input.value.trim();
+        for (var i = 0; i < results.length; i++) {
+          var item = results[i];
+          var row = el('li');
+          row.setAttribute('role', 'option');
+          row.setAttribute('aria-selected', String(i === selected));
+          row.appendChild(el('span', 'p-kind', item.kind));
+          var text = el('span', 'p-text');
+          markInto(text, item.text, term);
+          row.appendChild(text);
+          row.appendChild(el('span', 'p-hint', item.hint));
+          row.dataset.index = String(i);
+          if (i === selected) {
+            // Scroll the list only -- never the page. scrollIntoView would
+            // walk up and yank the whole document on open.
+            var top = row.offsetTop - list.offsetTop;
+            var bottom = top + row.offsetHeight;
+            if (top < list.scrollTop) list.scrollTop = top;
+            else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+          }
+          list.appendChild(row);
+        }
+      }
+      function choose(index) {
+        var item = results[index];
+        if (!item) return;
+        close();
+        goto(item.tab, item.query, false);
+        if (item.query) FX.setQuery(item.query, true);
+      }
+      function open() {
+        items = buildItems();
+        input.value = '';
+        selected = 0;
+        search('');
+        draw();
+        backdrop.classList.add('open');
+        input.focus();
+      }
+      function close() {
+        backdrop.classList.remove('open');
+        input.value = '';
+      }
+      input.addEventListener('input', function () { selected = 0; search(input.value.trim()); draw(); });
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); selected = Math.min(results.length - 1, selected + 1); draw(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); selected = Math.max(0, selected - 1); draw(); }
+        else if (e.key === 'Enter') { e.preventDefault(); choose(selected); }
+        else if (e.key === 'Escape') { e.preventDefault(); close(); }
+      });
+      list.addEventListener('click', function (e) {
+        var li = e.target.closest ? e.target.closest('li[data-index]') : null;
+        if (li) choose(Number(li.dataset.index));
+      });
+      backdrop.addEventListener('click', function (e) { if (e.target === backdrop) close(); });
+      return {
+        open: open,
+        close: close,
+        isOpen: function () { return backdrop.classList.contains('open'); },
+        refresh: function () { items = buildItems(); search(input.value.trim()); draw(); },
+      };
+    })();
+
+    // ── 6. keyboard shortcuts ────────────────────────────────────────────
+    function typing(target) {
+      if (!target) return false;
+      var tag = (target.tagName || '').toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable;
+    }
+    function showHelp() {
+      var dlg = document.getElementById('enh-help-dialog');
+      if (!dlg) {
+        dlg = document.createElement('dialog');
+        dlg.id = 'enh-help-dialog';
+        dlg.innerHTML = '<h3>Keyboard shortcuts</h3><div class="kbd-grid">' + [
+          ['<kbd>Ctrl</kbd>/<kbd>\u2318</kbd> + <kbd>K</kbd> or <kbd>/</kbd>', 'search tabs, panels, facts, entities'],
+          ['<kbd>r</kbd>', 'refresh the projection now'],
+          ['<kbd>p</kbd>', 'pause / resume automatic refresh'],
+          ['<kbd>[</kbd> <kbd>]</kbd>', 'previous / next section'],
+          ['<kbd>Alt</kbd> + <kbd>1</kbd>\u2026<kbd>9</kbd>', 'jump to section'],
+          ['<kbd>?</kbd>', 'this list'],
+          ['<kbd>esc</kbd>', 'close any overlay'],
+        ].map(function (row) { return '<b>' + row[0] + '</b><span>' + row[1] + '</span>'; }).join('') + '</div><div class="dialog-actions"><button id="enh-help-close">close</button></div>';
+        document.body.appendChild(dlg);
+        dlg.querySelector('#enh-help-close').addEventListener('click', function () { dlg.close(); });
+        dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+      }
+      if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+    }
+    document.addEventListener('keydown', function (e) {
+      var mod = e.ctrlKey || e.metaKey;
+      if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); if (Palette.isOpen()) Palette.close(); else Palette.open(); return; }
+      if (Palette.isOpen()) return; // the palette owns every key while it is up
+      if (typing(e.target)) return;
+      if (e.key === '/' ) { e.preventDefault(); Palette.open(); return; }
+      if (e.altKey && e.key >= '1' && e.key <= '9') {
+        var idx = Number(e.key) - 1;
+        var visible = TABS.filter(function (t) { var b = $('.tab-btn[data-tab="' + t.id + '"]'); return b && !b.hidden; });
+        if (visible[idx]) { e.preventDefault(); goto(visible[idx].id, '', false); }
+        return;
+      }
+      if (e.key === '[' || e.key === ']') {
+        var ids = TABS.filter(function (t) { var b = $('.tab-btn[data-tab="' + t.id + '"]'); return b && !b.hidden; }).map(function (t) { return t.id; });
+        var at = ids.indexOf(currentTabId());
+        var next = ids[(at + (e.key === ']' ? 1 : ids.length - 1)) % ids.length];
+        if (next) { e.preventDefault(); goto(next, '', false); }
+        return;
+      }
+      if (e.key === 'r' && !e.shiftKey) { e.preventDefault(); state.nextAt = Date.now() + SCOS.REFRESH_INTERVAL_MS; SCOS.refreshSnapshot().catch(function () {}); return; }
+      if (e.key === 'p' && !e.shiftKey) { e.preventDefault(); togglePause(); return; }
+      if (e.key === '?') { e.preventDefault(); showHelp(); }
+    });
+
+    // ── 7. accessibility pass on the shell's tabs ────────────────────────
+    var tabList = $('#tabs');
+    if (tabList) {
+      $$('.tab-btn').forEach(function (btn, i) {
+        btn.setAttribute('aria-controls', 'tab-' + btn.dataset.tab);
+        if (i === 0) btn.setAttribute('tabindex', '0');
+        btn.addEventListener('keydown', function (e) {
+          if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+          var visible = $$('.tab-btn').filter(function (b) { return !b.hidden; });
+          var at = visible.indexOf(btn);
+          var next = visible[(at + (e.key === 'ArrowRight' ? 1 : visible.length - 1)) % visible.length];
+          if (next) { e.preventDefault(); goto(next.dataset.tab, '', false); next.focus(); }
+        });
+      });
+      $$('.tab-panel').forEach(function (panel) {
+        panel.setAttribute('role', 'tabpanel');
+        panel.setAttribute('aria-labelledby', 'tab-' + panel.dataset.tab);
+        panel.setAttribute('tabindex', '-1');
+      });
+    }
+
+    // ── 8. boot ──────────────────────────────────────────────────────────
+    var initial = parseHash();
+    if (initial.tab && initial.tab !== 'overview') goto(initial.tab, initial.query, true);
+    else { writeHash('overview', '', true); document.title = 'SCOS // OVERVIEW \u00b7 Memory Command'; }
+    if (SCOS.snapshot()) FX.update(SCOS.snapshot().views.facts);
+  })();
   </script>
 </body>
 </html>

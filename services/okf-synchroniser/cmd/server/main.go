@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -68,6 +69,9 @@ type okfServer struct {
 	okfRoot     string
 	statePath   string
 	db          *pgxpool.Pool
+	// roleLookup, when set, replaces the okf_governance_roles query. Only
+	// tests set it; with neither it nor db, requireRole fails closed.
+	roleLookup func(ctx context.Context, principal, role string) (bool, error)
 }
 
 func (s *okfServer) readinessCheck() error {
@@ -100,7 +104,12 @@ func newOKFServer() *okfServer {
 	return s
 }
 
+// findOKFRoot returns SCOS_OKF_ROOT when set; otherwise it probes paths
+// relative to the working directory (repo checkouts and containers).
 func findOKFRoot() string {
+	if root := strings.TrimSpace(os.Getenv("SCOS_OKF_ROOT")); root != "" {
+		return root
+	}
 	candidates := []string{"okf", "docs", ".okf"}
 	for _, c := range candidates {
 		if info, err := os.Stat(c); err == nil && info.IsDir() {
@@ -135,6 +144,13 @@ func main() {
 	}
 	defer db.Close()
 	srv.db = db
+	created, err := srv.bootstrapRepository(context.Background(), strings.TrimSpace(os.Getenv("SCOS_OKF_SEED_DIR")), strings.TrimSpace(os.Getenv("SCOS_OKF_PROTECTED_BRANCH")))
+	if err != nil {
+		log.Fatalf("OKF repository: %v", err)
+	}
+	if created {
+		log.Printf("created OKF repository at %s with a baseline commit", srv.okfRoot)
+	}
 	if err := srv.loadConceptsFromDB(context.Background()); err != nil {
 		log.Fatalf("load okf concepts: %v", err)
 	}
@@ -223,6 +239,13 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 		s.statePath = filepath.Join(filepath.Dir(s.okfRoot), ".okf-projections.json")
 	}
 	commitHash := gitCommit(s.okfRoot)
+	// §26: Git is authoritative for approved content. Outside a repository
+	// nothing is authoritative, which is reported on every sync rather than
+	// indexed as if it were.
+	gitBacked := commitHash != ""
+	if !gitBacked {
+		result.Errors = append(result.Errors, "OKF root is not a git repository; content is indexed without Git authority")
+	}
 
 	// Track seen paths
 	seen := make(map[string]bool)
@@ -239,6 +262,29 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 
 		contentHash := sha256Hex(content)
 		category := classifyPath(file)
+		fileCommit := commitHash
+		if gitBacked {
+			// Uncommitted edits are not approved content: keep what was
+			// last imported and surface the file for review instead.
+			if status, err := s.git(ctx, "status", "--porcelain", "--", file); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("git status %s: %v", file, err))
+				continue
+			} else if status != "" {
+				if doc := s.documentForPath(file); doc != nil {
+					doc.Status = "diverged"
+				}
+				if proj := s.projections[file]; proj != nil {
+					proj.ImportStatus = "diverged"
+				}
+				result.Diverged = appendUnique(result.Diverged, file)
+				continue
+			}
+			// The commit that last touched this file, not merely HEAD.
+			if last, err := s.git(ctx, "log", "-1", "--format=%H", "--", file); err == nil && last != "" {
+				fileCommit = last
+			}
+		}
+		metadata := extractMetadata(file, content)
 
 		existing, exists := s.projections[file]
 		if !exists {
@@ -250,15 +296,16 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 				Category:    category,
 				Title:       extractTitle(content),
 				ContentHash: contentHash,
-				CommitID:    commitHash,
+				CommitID:    fileCommit,
 				Status:      "current",
 				ImportedAt:  time.Now().UTC().Format(time.RFC3339),
 				UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
 				Content:     string(content),
+				Metadata:    metadata,
 			}
 			s.documents[id] = doc
 			s.projections[file] = &IndexProjection{
-				CommitHash:   commitHash,
+				CommitHash:   fileCommit,
 				Path:         file,
 				ContentHash:  contentHash,
 				ImportStatus: "synced",
@@ -279,25 +326,26 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 				s.documents[id] = doc
 			}
 			doc.ContentHash = contentHash
-			doc.CommitID = commitHash
+			doc.CommitID = fileCommit
 			doc.Content = string(content)
 			doc.Title = extractTitle(content)
+			doc.Metadata = metadata
 			doc.Status = "changed"
 			doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			existing.ContentHash = contentHash
-			existing.CommitHash = commitHash
+			existing.CommitHash = fileCommit
 			existing.ImportStatus = "synced"
 			result.Updated = append(result.Updated, file)
 		} else {
-			existing.CommitHash = commitHash
+			existing.CommitHash = fileCommit
 			existing.ImportStatus = "synced"
 			doc := s.documentForPath(file)
 			if doc == nil {
 				id := fmt.Sprintf("okf-%d", len(s.documents)+1)
-				doc = &OKFDocument{ID: id, Path: file, Category: category, Title: extractTitle(content), ContentHash: contentHash, CommitID: commitHash, Status: "current", ImportedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339), Content: string(content)}
+				doc = &OKFDocument{ID: id, Path: file, Category: category, Title: extractTitle(content), ContentHash: contentHash, CommitID: fileCommit, Status: "current", ImportedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339), Content: string(content), Metadata: metadata}
 				s.documents[id] = doc
 			} else {
-				doc.CommitID = commitHash
+				doc.CommitID = fileCommit
 				doc.Status = "current"
 			}
 		}
@@ -312,6 +360,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 				doc.Status = "diverged"
 			}
 			s.projections[path].ImportStatus = "diverged"
+			result.Removed = appendUnique(result.Removed, path)
 			result.Diverged = appendUnique(result.Diverged, path)
 		}
 	}
@@ -412,7 +461,7 @@ func (s *okfServer) loadConceptsFromDB(ctx context.Context) error {
 	if s.db == nil {
 		return nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT id, path, category, title, content, content_hash, commit_hash, import_status, status, imported_at, updated_at FROM okf_concepts`)
+	rows, err := s.db.Query(ctx, `SELECT id, path, category, title, content, content_hash, commit_hash, import_status, status, imported_at, updated_at, metadata FROM okf_concepts`)
 	if err != nil {
 		return err
 	}
@@ -426,9 +475,13 @@ func (s *okfServer) loadConceptsFromDB(ctx context.Context) error {
 			importStatus string
 			importedAt   time.Time
 			updatedAt    time.Time
+			metadataRaw  []byte
 		)
-		if err := rows.Scan(&doc.ID, &doc.Path, &doc.Category, &doc.Title, &doc.Content, &doc.ContentHash, &commitHash, &importStatus, &doc.Status, &importedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&doc.ID, &doc.Path, &doc.Category, &doc.Title, &doc.Content, &doc.ContentHash, &commitHash, &importStatus, &doc.Status, &importedAt, &updatedAt, &metadataRaw); err != nil {
 			return err
+		}
+		if err := json.Unmarshal(metadataRaw, &doc.Metadata); err != nil {
+			return fmt.Errorf("decode okf_concepts.metadata for %s: %w", doc.Path, err)
 		}
 		doc.CommitID = commitHash
 		doc.ImportedAt = importedAt.UTC().Format(time.RFC3339)
@@ -460,8 +513,15 @@ func (s *okfServer) persistConceptsToDB(ctx context.Context) error {
 		if proj != nil {
 			importStatus = proj.ImportStatus
 		}
-		if _, err := s.db.Exec(ctx, `INSERT INTO okf_concepts (id, path, category, title, content, content_hash, commit_hash, import_status, status, imported_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
+		metadata, err := json.Marshal(doc.Metadata)
+		if err != nil {
+			return err
+		}
+		if doc.Metadata == nil {
+			metadata = []byte("{}")
+		}
+		if _, err := s.db.Exec(ctx, `INSERT INTO okf_concepts (id, path, category, title, content, content_hash, commit_hash, import_status, status, imported_at, updated_at, metadata)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now(),$10)
 			ON CONFLICT (path) DO UPDATE SET
 				category=EXCLUDED.category,
 				title=EXCLUDED.title,
@@ -470,8 +530,9 @@ func (s *okfServer) persistConceptsToDB(ctx context.Context) error {
 				commit_hash=EXCLUDED.commit_hash,
 				import_status=EXCLUDED.import_status,
 				status=EXCLUDED.status,
+				metadata=EXCLUDED.metadata,
 				updated_at=now()`,
-			doc.ID, doc.Path, doc.Category, doc.Title, doc.Content, doc.ContentHash, doc.CommitID, importStatus, doc.Status); err != nil {
+			doc.ID, doc.Path, doc.Category, doc.Title, doc.Content, doc.ContentHash, doc.CommitID, importStatus, doc.Status, metadata); err != nil {
 			return err
 		}
 	}
@@ -615,6 +676,44 @@ func classifyPath(path string) string {
 	default:
 		return "general"
 	}
+}
+
+// extractMetadata reads flat "key: value" metadata: a markdown document's
+// leading front-matter block, or a YAML document's top-level scalars.
+func extractMetadata(path string, content []byte) map[string]string {
+	text := strings.ReplaceAll(string(content), "\r\n", "\n")
+	var block string
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md":
+		if !strings.HasPrefix(text, "---\n") {
+			return nil
+		}
+		end := strings.Index(text[4:], "\n---")
+		if end < 0 {
+			return nil
+		}
+		block = text[4 : 4+end]
+	case ".yaml", ".yml":
+		block = text
+	default:
+		return nil
+	}
+	meta := map[string]string{}
+	for _, line := range strings.Split(block, "\n") {
+		if line == "" || line[0] == ' ' || line[0] == '\t' || line[0] == '#' || line[0] == '-' {
+			continue // nested, comment or list line: not a top-level scalar
+		}
+		key, value, ok := strings.Cut(line, ":")
+		key, value = strings.TrimSpace(key), strings.Trim(strings.TrimSpace(value), `"'`)
+		if !ok || key == "" || value == "" || value == "|" || value == ">" {
+			continue
+		}
+		meta[key] = value
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
 }
 
 func extractTitle(content []byte) string {

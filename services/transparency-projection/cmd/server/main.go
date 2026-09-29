@@ -37,6 +37,11 @@ type projectionServer struct {
 	client               *http.Client // fast client for health probes and event streaming
 	snapshotClient       *http.Client // slow client for snapshot assembly (heavyweight views)
 
+	// viewCache coalesces snapshot view assembly across polls. Nil-safe: a
+	// server without one (including every test that builds the struct
+	// literal directly) simply fetches every view on every request.
+	viewCache *snapshotViewCache
+
 	editPassphrase string // SCOS_DASHBOARD_EDIT_PASSPHRASE; empty disables editing entirely
 	editSecret     string // HMAC key for dashboard edit-session tokens (reuses the security issuer secret)
 }
@@ -98,6 +103,7 @@ func main() {
 		cloudControlPlaneURL: upstreams["cloud_control_plane"],
 		controlPlaneToken:    strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		client:               client,
+		viewCache:            newSnapshotViewCache(),
 		editPassphrase:       strings.TrimSpace(os.Getenv("SCOS_DASHBOARD_EDIT_PASSPHRASE")),
 		editSecret:           strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET")),
 	}
@@ -238,17 +244,43 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make(map[string]json.RawMessage, len(views))
 	errored := make(map[string]string)
+	// cachedAt records, per view, when the bytes actually came back from the
+	// upstream -- whether that was during this request or an earlier one.
+	// Without it a cache hit would be indistinguishable from a fresh fetch,
+	// and the dashboard would render seconds-old data as if it had just been
+	// assembled.
+	cachedAt := make(map[string]string, len(views))
 	var mu sync.Mutex
+	cacheHits := 0
 	projectionStarted := time.Now()
 	// Views are fetched concurrently: a slow upstream (contradictions can
 	// take 30s+) must not delay every other panel. Each fetch keeps its own
 	// 90s client timeout, so the snapshot completes in max(view times) —
-	// not the sum of all view times.
+	// not the sum of all view times. A cache hit short-circuits the fetch
+	// entirely, which is what keeps a 15s dashboard poll from re-running the
+	// same heavyweight queries for every viewer.
+	identity := identityKey(r)
 	var wg sync.WaitGroup
 	for name, view := range views {
 		wg.Add(1)
 		go func(name string, view viewSource) {
 			defer wg.Done()
+			cacheKey := identity + "|" + name
+			if entry, ok := s.viewCache.lookup(cacheKey); ok {
+				mu.Lock()
+				defer mu.Unlock()
+				cacheHits++
+				switch {
+				case entry.errText != "":
+					errored[name] = entry.errText
+				case entry.status/100 != 2:
+					errored[name] = fmt.Sprintf("upstream returned status %d", entry.status)
+				default:
+					result[name] = entry.body
+					cachedAt[name] = entry.fetchedAt.UTC().Format(time.RFC3339Nano)
+				}
+				return
+			}
 			body, status, err := s.fetch(r, view.base, view.path)
 			mu.Lock()
 			defer mu.Unlock()
@@ -258,25 +290,40 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 				// dashboard does not carry. Its "required" response is a valid
 				// empty state, not a broken view.
 				if name == "routing" && strings.Contains(err.Error(), "required") {
-					result[name] = json.RawMessage("[]")
+					empty := json.RawMessage("[]")
+					result[name] = empty
+					cachedAt[name] = time.Now().UTC().Format(time.RFC3339Nano)
+					s.viewCache.store(cacheKey, cachedView{body: empty, status: http.StatusOK, fetchedAt: time.Now()})
 					return
 				}
 				errored[name] = err.Error()
+				// Failures are cached too: a dead upstream should be re-probed
+				// once per TTL, not once per viewer per poll.
+				s.viewCache.store(cacheKey, cachedView{status: status, errText: err.Error(), fetchedAt: time.Now()})
 				return
 			}
 			if status/100 != 2 {
-				// The routing view has no list endpoint: the control plane
-				// requires an interaction_id per decision, which a system-level
-				// dashboard does not carry. Its 401 "required" response is a
-				// valid empty state, not a broken view.
+				// Same empty-state exception as above, reached via a 401 body
+				// rather than a transport error.
 				if name == "routing" && status == http.StatusUnauthorized && strings.Contains(string(body), "required") {
-					result[name] = json.RawMessage("[]")
+					empty := json.RawMessage("[]")
+					result[name] = empty
+					cachedAt[name] = time.Now().UTC().Format(time.RFC3339Nano)
+					s.viewCache.store(cacheKey, cachedView{body: empty, status: http.StatusOK, fetchedAt: time.Now()})
 					return
 				}
 				errored[name] = fmt.Sprintf("upstream returned status %d", status)
+				s.viewCache.store(cacheKey, cachedView{status: status, errText: errored[name], fetchedAt: time.Now()})
 				return
 			}
 			result[name] = body
+			cachedAt[name] = time.Now().UTC().Format(time.RFC3339Nano)
+			s.viewCache.store(cacheKey, cachedView{body: body, status: status, fetchedAt: time.Now()})
+			if name == "memory" {
+				// Scored once per upstream fetch, not per cache hit: a cached
+				// body is the same projection already measured.
+				recordGraphConsistency(body)
+			}
 		}(name, view)
 	}
 	wg.Wait()
@@ -291,13 +338,36 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		map[string]string{
 			"views_available": strconv.Itoa(len(result)),
 			"views_total":     strconv.Itoa(len(views)),
+			"views_cached":    strconv.Itoa(cacheHits),
 		}, telemetry.Correlation{})
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"generated":   time.Now().UTC().Format(time.RFC3339Nano),
+	generated := time.Now().UTC().Format(time.RFC3339Nano)
+	payload := map[string]any{
+		"generated":   generated,
 		"views":       result,
 		"unavailable": errored,
-	})
+	}
+	if len(cachedAt) > 0 {
+		payload["cached"] = cachedAt
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encode snapshot: " + err.Error()})
+		return
+	}
+
+	// Conditional GET. The validator covers views+unavailable only, so a
+	// dashboard whose data has not changed costs a 304 instead of a
+	// megabyte; `no-cache` still forces the revalidation itself.
+	etag := snapshotETag(result, errored)
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-SCOS-Generated", generated)
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	writeSnapshot(w, r, http.StatusOK, encoded)
 }
 
 func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {

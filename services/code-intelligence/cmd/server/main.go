@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -380,6 +381,9 @@ type server struct {
 	// same as every other Postgres-backed service in this fleet -- DATABASE_URL
 	// missing or unreachable fails startup rather than degrading quietly.
 	pgStore *pgCodeStore
+	// hooks dispatches §22.6 lifecycle events (on_index_change). nil when no
+	// extension manager is configured, which dispatches nothing.
+	hooks *hooksdk.Client
 }
 
 func main() {
@@ -404,6 +408,9 @@ func main() {
 	}
 	database.TuneSQLDB(db)
 	srv.pgStore = newPGCodeStore(db)
+	if srv.hooks, err = hooksdk.ClientFromEnvironment("code-intelligence"); err != nil {
+		log.Fatalf("configure lifecycle hooks: %v", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -589,6 +596,11 @@ func (s *server) handleRepos(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.store.mu.RUnlock()
+		// Deterministic order. s.store.repos is a map, so without this the
+		// list came back in a different order on every request: the
+		// dashboard's repo table reshuffled on each poll, and the changing
+		// bytes made the transparency snapshot's ETag unstable.
+		sort.Slice(repos, func(i, j int) bool { return repos[i].ID < repos[j].ID })
 		writeJSON(w, repos)
 
 	case http.MethodPost:
@@ -667,6 +679,15 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	tenant, ok := requireTenant(r)
 	if !ok {
 		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+	// An index change is raised as on_index_change under the acting
+	// principal, as on /v2/code/index. Verified claims always carry one; a
+	// static-service-token caller must send X-SCOS-Principal-ID (there is
+	// no per-tenant service principal to fall back to).
+	principal, ok := requirePrincipal(r)
+	if !ok {
+		http.Error(w, "principal is required: authenticate with tenant/principal claims or send X-SCOS-Principal-ID", http.StatusBadRequest)
 		return
 	}
 
@@ -782,6 +803,10 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	s.store.relations = candidate.relations
 	s.store.mu.Unlock()
 
+	// The v1 store has no snapshot rows; a generation is identified by
+	// repository and generation number.
+	s.hooks.Notify(r.Context(), hooksdk.OnIndexChange, tenant, principal,
+		indexChangePayload(req.RepoID, repo.CanonicalPath, repo.Branch, req.CommitID, fmt.Sprintf("%s@%d", req.RepoID, gen), len(req.Files)))
 	writeJSON(w, generation)
 }
 
@@ -816,6 +841,15 @@ func (s *server) handleIndexStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.store.mu.RUnlock()
+	// Deterministic order: s.store.generations is a map, so the previous
+	// order differed on every request, reshuffling the dashboard's index
+	// table and changing the response bytes each poll.
+	sort.Slice(gens, func(i, j int) bool {
+		if gens[i].RepoID != gens[j].RepoID {
+			return gens[i].RepoID < gens[j].RepoID
+		}
+		return gens[i].Generation < gens[j].Generation
+	})
 	writeJSON(w, gens)
 }
 

@@ -627,16 +627,18 @@ const corpusSupplement = {
     try {
       const items = await recall(config, params.query, params.maxResults ?? 8, params.signal)
       return items
-        .filter((it) => typeof it.content === "string" && it.content.trim())
+        // An item without a memory_id cannot be cited or re-fetched via
+        // get(), so it is not a usable corpus hit.
+        .filter((it) => typeof it.content === "string" && it.content.trim() && it.memory_id)
         .map((it) => ({
           corpus: SCOS_CORPUS,
-          path: `scos://${it.memory_id ?? "unknown"}`,
+          path: `scos://${it.memory_id}`,
           title: it.title || (it.content ?? "").slice(0, 120),
           kind: it.type ?? "fact",
-          score: typeof it.rank === "number" ? it.rank : (it.confidence_score ?? 0.5),
+          score: typeof it.rank === "number" ? it.rank : (it.confidence_score ?? 0),
           snippet: it.content ?? "",
           id: it.memory_id,
-          citation: `scos:${it.memory_id ?? "unknown"}`,
+          citation: `scos:${it.memory_id}`,
           provenanceLabel: "SCOS Memory Fabric",
         }))
     } catch (err) {

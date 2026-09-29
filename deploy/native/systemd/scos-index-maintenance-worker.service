@@ -1,0 +1,24 @@
+[Unit]
+Description=SCOS Memory Fabric - index-maintenance-worker (hourly retention sweeps and index maintenance)
+Documentation=https://github.com/dylmarriner/scos-memory/blob/main/deploy/native/README.md
+After=network-online.target scos-fabric-migrations.service
+Wants=network-online.target
+Requires=scos-fabric-migrations.service
+
+[Service]
+# One pass per activation; scos-index-maintenance-worker.timer schedules it (compose runs
+# the same main.py in a sleep loop).
+Type=oneshot
+User=scos
+Group=scos
+EnvironmentFile=/etc/scos/scos-fabric.env
+EnvironmentFile=-/etc/scos/env/index-maintenance-worker.env
+WorkingDirectory=/opt/scos-fabric/workers/index-maintenance
+ExecStart=/opt/scos-fabric/venv/consolidation/bin/python main.py
+TimeoutStartSec=30min
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/scos

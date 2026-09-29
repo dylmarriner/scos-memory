@@ -31,6 +31,29 @@ func TestMCPHandler(t *testing.T) {
 	}
 
 	if resp.ID != "req-1" {
-		t.Fatalf("expected ID 'req-1', got %s", resp.ID)
+		t.Fatalf("expected ID req-1, got %v", resp.ID)
+	}
+}
+
+func TestMCPHandlerNumericIDAndBearer(t *testing.T) {
+	var ingest map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer jwt" {
+			t.Errorf("missing bearer token")
+		}
+		_ = json.NewDecoder(r.Body).Decode(&ingest)
+		_, _ = w.Write([]byte(`{"status":"completed"}`))
+	}))
+	defer server.Close()
+	var req MCPRequest
+	if err := json.Unmarshal([]byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"scos.route","arguments":{"input":"hi"}}}`), &req); err != nil {
+		t.Fatalf("numeric JSON-RPC id must decode: %v", err)
+	}
+	resp, err := (&Handler{EndpointURL: server.URL, BearerToken: "jwt"}).HandleCall(context.Background(), &req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ID != float64(7) || ingest["interaction_id"] != "7" {
+		t.Fatalf("id not propagated: resp=%v ingest=%v", resp.ID, ingest["interaction_id"])
 	}
 }

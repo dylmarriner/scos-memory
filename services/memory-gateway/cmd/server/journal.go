@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -20,6 +21,9 @@ type journalStore struct {
 type requestContext struct {
 	TenantID    string
 	PrincipalID string
+	// AgentID is the acting agent from verified claims; empty when the caller
+	// authenticated by internal headers only.
+	AgentID string
 }
 
 type createSessionRequest struct {
@@ -28,6 +32,16 @@ type createSessionRequest struct {
 
 type createSessionResponse struct {
 	ID string `json:"id"`
+	// Replayed marks a result served from an earlier idempotent request, so
+	// the caller does not raise lifecycle events for it a second time.
+	Replayed bool `json:"-"`
+}
+
+type endSessionResponse struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	// Replayed marks a session that was already ended before this request.
+	Replayed bool `json:"-"`
 }
 
 type appendMessageRequest struct {
@@ -39,6 +53,8 @@ type appendMessageResponse struct {
 	TurnID    string `json:"turn_id"`
 	MessageID string `json:"message_id"`
 	Sequence  int64  `json:"sequence"`
+	// Replayed marks a result served from an earlier idempotent request.
+	Replayed bool `json:"-"`
 }
 
 type appendChunkRequest struct {
@@ -270,6 +286,7 @@ func (s journalStore) createSession(ctx context.Context, rc requestContext, idem
 		if json.Unmarshal([]byte(previousResponse), &result) != nil {
 			return createSessionResponse{}, fmt.Errorf("stored idempotency result is invalid")
 		}
+		result.Replayed = true
 		return result, nil
 	}
 	if err != sql.ErrNoRows {
@@ -294,6 +311,43 @@ func (s journalStore) createSession(ctx context.Context, rc requestContext, idem
 		return createSessionResponse{}, err
 	}
 	return result, nil
+}
+
+var errSessionNotFound = errors.New("session not found")
+
+// endSession marks a session ended. Ending an already-ended session is
+// idempotent: it succeeds with Replayed set and records no second event.
+func (s journalStore) endSession(ctx context.Context, rc requestContext, sessionID string) (endSessionResponse, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return endSessionResponse{}, err
+	}
+	defer tx.Rollback()
+	if err = setPrincipalContext(ctx, tx, rc); err != nil {
+		return endSessionResponse{}, err
+	}
+	var id string
+	err = tx.QueryRowContext(ctx, `UPDATE sessions SET status='ended', updated_at=now() WHERE id=$1 AND tenant_id=$2 AND status<>'ended' RETURNING id`, sessionID, rc.TenantID).Scan(&id)
+	if err == sql.ErrNoRows {
+		var exists bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sessions WHERE id=$1 AND tenant_id=$2)`, sessionID, rc.TenantID).Scan(&exists); err != nil {
+			return endSessionResponse{}, err
+		}
+		if !exists {
+			return endSessionResponse{}, errSessionNotFound
+		}
+		return endSessionResponse{ID: sessionID, Status: "ended", Replayed: true}, nil
+	}
+	if err != nil {
+		return endSessionResponse{}, err
+	}
+	if _, err = appendEvent(ctx, tx, s.validator, rc.TenantID, id, "session.ended", "session/"+id, rc.PrincipalID, map[string]string{}); err != nil {
+		return endSessionResponse{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return endSessionResponse{}, err
+	}
+	return endSessionResponse{ID: id, Status: "ended"}, nil
 }
 
 func (s journalStore) appendMessage(ctx context.Context, rc requestContext, sessionID, idempotencyKey string, req appendMessageRequest) (appendMessageResponse, error) {
@@ -333,6 +387,7 @@ func (s journalStore) appendMessage(ctx context.Context, rc requestContext, sess
 		if json.Unmarshal([]byte(previousResponse), &result) != nil {
 			return appendMessageResponse{}, fmt.Errorf("stored idempotency result is invalid")
 		}
+		result.Replayed = true
 		return result, nil
 	}
 	if err != sql.ErrNoRows {

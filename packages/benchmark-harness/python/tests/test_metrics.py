@@ -11,6 +11,12 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(mean_reciprocal_rank(exp, ret), 1.0)
         self.assertTrue(ndcg_at_k(exp, ret, 3) > 0)
 
+    def test_duplicates_counted_once(self):
+        self.assertEqual(recall_at_k(["a"], ["a", "a"], 2), 1.0)
+        self.assertEqual(precision_at_k(["a"], ["a", "a"], 2), 0.5)
+        self.assertEqual(ndcg_at_k(["a"], ["a", "a"], 2), 1.0)
+        self.assertLess(ndcg_at_k(["a", "b"], ["a"], 3), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

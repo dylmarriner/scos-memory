@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 )
 
 // Side-by-side extension versions for canary testing (GOVERNANCE.md §22.3).
@@ -295,8 +297,8 @@ func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, package
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	previous := *ext
-	previousHistory := append([]ExtensionManifest(nil), s.history[packageID]...)
+	snap := s.snapshotPackageLocked(packageID)
+	previousUpdatedAt := deployment.UpdatedAt
 
 	if promote {
 		// The superseded manifest joins the undo stack so a promoted canary
@@ -314,20 +316,37 @@ func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, package
 	}
 	deployment.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	result := map[string]any{"package_id": packageID, "canary": *deployment, "installed_version": ext.Manifest.Version}
+	installed := *ext
+	discarded := Extension{Manifest: deployment.CanaryManifest, Status: "rolled_back"}
+	reactivate := func() { deployment.Status = "active"; deployment.UpdatedAt = previousUpdatedAt }
 	s.mu.Unlock()
 
 	if err := s.persist(r.Context()); err != nil {
-		// Restore the pre-change state so a failed persist cannot leave the
-		// package half-promoted.
+		// Restore the pre-change state -- manifest, history and hook/skill
+		// registrations -- so a failed persist cannot leave it half-promoted.
 		s.mu.Lock()
-		*ext = previous
-		s.history[packageID] = previousHistory
-		deployment.Status = "active"
+		s.restorePackageLocked(snap)
+		reactivate()
 		s.mu.Unlock()
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "persist canary decision: " + err.Error(),
 		})
 		return
+	}
+	// Promotion activates the candidate for everyone (on_enable, which a
+	// critical hook may veto); discarding it deactivates the candidate
+	// version (on_disable, reported but never blocking).
+	if promote {
+		report, err := s.raiseLifecycle(r, hooksdk.OnEnable, installed, nil, "")
+		if err != nil {
+			s.rejectLifecycleChange(w, r, snap, report, "canary_promote", reactivate)
+			return
+		}
+		result["lifecycle_hooks"] = []lifecycleReport{report}
+		emitPermissions(installed.Manifest, "canary_promote", true, requestCorrelation(r))
+	} else {
+		report, _ := s.raiseLifecycle(r, hooksdk.OnDisable, discarded, nil, "")
+		result["lifecycle_hooks"] = []lifecycleReport{report}
 	}
 	writeJSON(w, result)
 }

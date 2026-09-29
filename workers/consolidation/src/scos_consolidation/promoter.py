@@ -198,6 +198,44 @@ def build_memory_item(
     }
 
 
+# memory-intelligence reads every fact's network/source/scope/observed_at
+# from memory_versions.structured_content (store.go), and maps its networks
+# onto memory_type via factNetworkToMemoryType; this is the inverse for the
+# classes consolidation produces, so consolidated memories read back as the
+# same kind of fact memory-intelligence would have written itself.
+_CLASS_NETWORK = {
+    MemoryClass.SEMANTIC: "world",
+    MemoryClass.GOVERNING: "world",
+    MemoryClass.EPISODIC: "experience",
+    MemoryClass.WORKING: "experience",
+    MemoryClass.PROCEDURAL: "procedure",
+    MemoryClass.REVOCATION: "negative",
+    MemoryClass.ARTIFACT_REFERENCE: "entity",
+}
+
+
+def _iso(value: datetime | None) -> str:
+    return value.isoformat() if value else ""
+
+
+def structured_content(candidate: MemoryCandidate) -> dict[str, Any]:
+    """The memory_versions.structured_content contract shared with memory-intelligence."""
+    return {
+        "network": _CLASS_NETWORK.get(candidate.memory_class, "world"),
+        # Extracted from an observed conversation turn -- not asserted
+        # explicitly by the user and not inferred by a model.
+        "source": "observed",
+        "scope": "global",
+        "observed_at": _iso(candidate.valid_from),
+        "valid_from": _iso(candidate.valid_from),
+        "valid_until": _iso(candidate.valid_until),
+        "inferred": False,
+        "derivation": f"consolidated from event {candidate.source_event_id}",
+        "title": candidate.title,
+        "evidence": [ev.model_dump(mode="json") for ev in candidate.evidence],
+    }
+
+
 def build_memory_version(
     candidate: MemoryCandidate,
     memory_item_id: UUID,
@@ -210,12 +248,9 @@ def build_memory_version(
         "memory_id": memory_item_id,
         "version_number": 1,
         "content": candidate.content,
-        "structured_content": json.dumps({
-            "title": candidate.title,
-            "evidence": [ev.model_dump() for ev in candidate.evidence],
-        }),
+        "structured_content": json.dumps(structured_content(candidate)),
         "content_hash": sha256(candidate.content.encode("utf-8")).hexdigest(),
         "change_reason": "initial consolidation",
-        "created_by": candidate.metadata.get("actor_id", UUID("00000000-0000-0000-0000-000000000000")),
+        "created_by": candidate.metadata.get("actor_id"),
         "created_at": now,
     }

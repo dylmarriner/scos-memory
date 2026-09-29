@@ -28,3 +28,28 @@ func TestMetrics(t *testing.T) {
 		t.Fatalf("expected nDCG to be between 0 and 1, got %f", ndcg)
 	}
 }
+
+func TestMetricsIgnoreDuplicateHits(t *testing.T) {
+	expected := []string{"a"}
+	retrieved := []string{"a", "a"}
+	if r := ComputeRecallAtK(expected, retrieved, 2); r != 1.0 {
+		t.Fatalf("recall with a repeated hit = %v, want 1", r)
+	}
+	if p := ComputePrecisionAtK(expected, retrieved, 2); p != 0.5 {
+		t.Fatalf("precision with a repeated hit = %v, want 0.5", p)
+	}
+	if n := ComputeNDCGAtK(expected, retrieved, 2); n != 1.0 {
+		t.Fatalf("nDCG with a repeated hit = %v, want 1", n)
+	}
+	if r := ComputeRecallAtK([]string{"a", "a"}, []string{"a"}, 1); r != 1.0 {
+		t.Fatalf("duplicate expected IDs must count once, recall = %v", r)
+	}
+}
+
+func TestNDCGUsesKForIdealRanking(t *testing.T) {
+	// Two relevant docs, k=3, only one result returned: the ideal ranking
+	// still has two hits, so the score is below 1.
+	if n := ComputeNDCGAtK([]string{"a", "b"}, []string{"a"}, 3); n >= 1.0 {
+		t.Fatalf("short result list scored as ideal: %v", n)
+	}
+}

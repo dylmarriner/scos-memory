@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 SCOS Nexus Memory Fabric — stdio-to-HTTP MCP relay for external agents
-(kilo, codex, opencode, Claude Code, OpenAI tunnel).
+(cline, cursor, windsurf, antigravity, qwen, openclaw, continue, gemini, kilo,
+codex, opencode, Claude Code, OpenAI tunnel).
 
 This is a pure relay to mcp-gateway (services/mcp-gateway), which is the
 single source of truth for the governed tool catalogue and owns all
@@ -11,15 +12,19 @@ does not hardcode a tool list or talk to any backend service directly —
 whatever mcp-gateway's tools/list returns is what gets served here, so the
 tool surface never drifts out of date as the fabric grows. This mirrors
 the stdio<->HTTP relay used by the Claude Desktop extension
-(integrations/claude/desktop-extension/server/index.js).
+(integrations/claude/desktop-extension/server/index.js). Installed to
+~/.hermes/scripts/scos-mcp-bridge.py by scripts/install_agent_plugins.py; most
+agent configs launch it via the thin per-client launchers alongside this file
+(e.g. integrations/agent-plugins/gemini/scos-mcp-bridge.py).
 
 Config comes from ~/.hermes/scos.env:
-  SCOS_GATEWAY_URL        mcp-gateway MCP endpoint (default
-                           localhost development endpoint; set this for production)
+  SCOS_GATEWAY_URL        mcp-gateway MCP endpoint (default localhost
+                           development endpoint; set this for production)
   SCOS_BEARER_TOKEN        internal service token / claims JWT (falls back
                            to the legacy SCOS_HERMES_BEARER_TOKEN name)
   SCOS_TENANT_ID / SCOS_PRINCIPAL_ID  identity
   SCOS_TLS_CA_PATH         CA for TLS verification (optional)
+  SCOS_TLS_INSECURE_SKIP_VERIFY=1  disable TLS verification (development only)
 
 Route logs to stderr so stdout stays protocol-clean.
 """
@@ -35,6 +40,7 @@ ENV_PATH = os.path.expanduser("~/.hermes/scos.env")
 DEFAULTS = {
     "SCOS_GATEWAY_URL": "https://127.0.0.1:8098/mcp",
     "SCOS_TLS_CA_PATH": "",
+    "SCOS_TLS_INSECURE_SKIP_VERIFY": "",
 }
 
 
@@ -47,10 +53,12 @@ def load_env():
                 if line and "=" in line and not line.startswith("#"):
                     k, v = line.split("=", 1)
                     env[k] = v
-    # Process environment wins
-    for k in list(env.keys()):
-        if os.getenv(k):
-            env[k] = os.getenv(k)
+    # Process environment wins -- including SCOS_* keys absent from both the
+    # defaults and scos.env, so credentials passed through an MCP client's
+    # "env" block are honoured rather than silently dropped.
+    for k, v in os.environ.items():
+        if v and (k in env or k.startswith("SCOS_")):
+            env[k] = v
     return env
 
 
@@ -75,23 +83,30 @@ def ssl_ctx():
     if CA_PATH and not os.path.exists(CA_PATH):
         raise RuntimeError(f"SCOS_TLS_CA_PATH does not exist: {CA_PATH}")
     ctx = ssl.create_default_context(cafile=CA_PATH or None)
-    if os.environ.get("SCOS_TLS_INSECURE_SKIP_VERIFY") == "1":
+    if ENV.get("SCOS_TLS_INSECURE_SKIP_VERIFY") == "1":
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
 def gateway_headers():
-    if not TOKEN or not TENANT_ID or not PRINCIPAL_ID:
-        raise RuntimeError("SCOS_BEARER_TOKEN, SCOS_TENANT_ID and SCOS_PRINCIPAL_ID are required")
     h = {
         "Content-Type": "application/json",
-        "X-SCOS-Tenant-ID": TENANT_ID,
-        "X-SCOS-Principal-ID": PRINCIPAL_ID,
         "X-SCOS-Agent-Name": AGENT_NAME,
     }
-    if TOKEN:
-        h["Authorization"] = "Bearer " + TOKEN
+    if not TOKEN and not TENANT_ID and not PRINCIPAL_ID:
+        # Self-hosted gateway running with SCOS_AUTH_MODE=local: it resolves
+        # every caller to its own reserved identity, so there's nothing to
+        # send here. Leaving all three unset in scos.env opts into this.
+        return h
+    if not TOKEN or not TENANT_ID or not PRINCIPAL_ID:
+        raise RuntimeError(
+            "SCOS_BEARER_TOKEN, SCOS_TENANT_ID and SCOS_PRINCIPAL_ID are required "
+            "(or leave all three unset to talk to a local, no-auth SCOS_AUTH_MODE=local gateway)"
+        )
+    h["X-SCOS-Tenant-ID"] = TENANT_ID
+    h["X-SCOS-Principal-ID"] = PRINCIPAL_ID
+    h["Authorization"] = "Bearer " + TOKEN
     return h
 
 

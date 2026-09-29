@@ -25,3 +25,22 @@ func TestIngressEventHash(t *testing.T) {
 		t.Fatalf("expected deterministic hash, got %s vs %s", hash1, hash2)
 	}
 }
+
+func TestComputeEventHashIsUnambiguous(t *testing.T) {
+	at := time.Date(2026, 9, 27, 10, 0, 0, 0, time.UTC)
+	a := IngressEvent{TenantID: "t", SessionID: "s:x", ActorID: "a", Content: "c", OccurredAt: at}
+	b := IngressEvent{TenantID: "t", SessionID: "s", ActorID: "x:a", Content: "c", OccurredAt: at}
+	if a.ComputeEventHash() == b.ComputeEventHash() {
+		t.Fatal("separator-shifted fields collided")
+	}
+	c := a
+	c.OccurredAt = at.Add(time.Millisecond)
+	d := a
+	d.AgentID = "other"
+	if a.ComputeEventHash() == c.ComputeEventHash() || a.ComputeEventHash() == d.ComputeEventHash() {
+		t.Fatal("sub-second time and agent must affect the hash")
+	}
+	if a.ComputeEventHash() != a.ComputeEventHash() {
+		t.Fatal("hash must be deterministic")
+	}
+}

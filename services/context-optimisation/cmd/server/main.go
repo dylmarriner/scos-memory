@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -14,9 +15,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
@@ -79,6 +83,8 @@ type Segment struct {
 }
 
 type BudgetAllocation struct {
+	// Mandatory is the non-droppable content emitted regardless of budget.
+	Mandatory int `json:"mandatory"`
 	Governing int `json:"governing_policy"`
 	Request   int `json:"current_request"`
 	TaskState int `json:"task_state"`
@@ -153,6 +159,10 @@ type OutputOptimiseResponse struct {
 	Optimised string `json:"optimised"`
 	Reduction int    `json:"token_reduction"`
 	CapsuleID string `json:"capsule_id,omitempty"`
+	// SourceObjects names the stored raw output; POST it with capsule_id to
+	// /v1/context/restore to recover anything the optimisation left out.
+	SourceObjects []SourceObjectRef `json:"source_objects,omitempty"`
+	OmittedLines  int               `json:"omitted_lines"`
 }
 
 // ── server ───────────────────────────────────────────────────────────────
@@ -355,7 +365,11 @@ func handleInputOptimise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	profile := resolveProfile(req)
+	profile, err := resolveProfile(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	tokenBudget := req.TokenBudget
 	if tokenBudget <= 0 {
@@ -379,15 +393,28 @@ func handleInputOptimise(w http.ResponseWriter, r *http.Request) {
 
 	// ── 6. Invariant validation ─────────────────────────────────────
 	validated := validateInvariants(req.Input, compiled, req.NonDroppableHints)
+	applied := []string{"canonicalisation", "exact_deduplication", "class_budget_allocation", "profile_compression:" + profile, "invariant_validation"}
+	if !validated && profile != "exact" {
+		// A compilation that loses a protected value is not returned: fall
+		// back to the lossless exact profile and say so.
+		profile = "exact"
+		compiled, compiledSegments = compressSegments(segments, profile, allocation)
+		validated = validateInvariants(req.Input, compiled, req.NonDroppableHints)
+		applied = append(applied, "fallback:exact")
+	}
 
 	// ── 7. Build capsule ────────────────────────────────────────────
 	capsule := buildCapsule(req.Input, profile, segments, compiledSegments, allocation, validated)
+	// The capsule records the transformations this run applied -- not the
+	// §18.3 catalogue of every transform the compiler could name.
+	capsule.Transformations = applied
 	for _, source := range capsule.SourceObjects {
 		if err := authoritativeSourceStore.Put(source.ObjectID, source.Version, source.ContentHash, req.Input); err != nil {
 			http.Error(w, "failed to persist authoritative source", http.StatusInternalServerError)
 			return
 		}
 	}
+	capsule.Validation.Checks["source_hash_recorded"] = true
 
 	resp := InputOptimiseResponse{
 		Capsule:      capsule,
@@ -410,11 +437,65 @@ func handleInputOptimise(w http.ResponseWriter, r *http.Request) {
 		boolAsRatio(validated), "ratio", labels, corr)
 	serviceMetrics.Gauge(telemetry.MetricExactValueRetention,
 		boolAsRatio(capsule.Validation.Valid), "ratio", labels, corr)
+	// Semantic retention is measured on the text actually handed back, not
+	// inferred from the invariant flag. Inputs with no salient terms have no
+	// measurable content to retain, so no point is emitted for them.
+	if retention, ok := semanticRetention(req.Input, compiled); ok {
+		serviceMetrics.Gauge(telemetry.MetricSemanticRetention, retention, "ratio", labels, corr)
+	}
 	// Every capsule must carry a restoration handle; report whether it does.
 	serviceMetrics.Gauge(telemetry.MetricRestorationSuccess,
 		boolAsRatio(len(capsule.RestorationHandles) > 0), "ratio", labels, corr)
 
 	writeJSON(w, resp)
+}
+
+// semanticRetention is the fraction of the original input's distinct salient
+// terms that still appear in the compiled text. Method (embedding-free lexical
+// coverage): both texts are lower-cased and split on every non-letter/non-digit
+// rune; a salient term is a token of at least four runes that is not in
+// semanticStopwords. The result is |salient(original) ∩ terms(compiled)| /
+// |salient(original)|. ok is false when the original has no salient terms.
+func semanticRetention(original, compiled string) (float64, bool) {
+	split := func(text string) []string {
+		return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		})
+	}
+	kept := make(map[string]struct{})
+	for _, t := range split(compiled) {
+		kept[t] = struct{}{}
+	}
+	salient := make(map[string]struct{})
+	for _, t := range split(original) {
+		if utf8.RuneCountInString(t) >= 4 && !semanticStopwords[t] {
+			salient[t] = struct{}{}
+		}
+	}
+	if len(salient) == 0 {
+		return 0, false
+	}
+	retained := 0
+	for t := range salient {
+		if _, ok := kept[t]; ok {
+			retained++
+		}
+	}
+	return float64(retained) / float64(len(salient)), true
+}
+
+// semanticStopwords are high-frequency function words of four or more letters
+// that carry no task meaning and would otherwise inflate retention.
+var semanticStopwords = map[string]bool{
+	"about": true, "after": true, "also": true, "been": true, "before": true,
+	"being": true, "could": true, "does": true, "each": true, "from": true,
+	"have": true, "into": true, "just": true, "more": true, "most": true,
+	"must": true, "only": true, "other": true, "over": true, "same": true,
+	"should": true, "some": true, "such": true, "than": true, "that": true,
+	"their": true, "them": true, "then": true, "there": true, "these": true,
+	"they": true, "this": true, "those": true, "very": true, "were": true,
+	"what": true, "when": true, "where": true, "which": true, "while": true,
+	"will": true, "with": true, "would": true, "your": true,
 }
 
 // boolAsRatio renders a pass/fail invariant as a 1/0 ratio.
@@ -450,14 +531,25 @@ func handleOutputOptimise(w http.ResponseWriter, r *http.Request) {
 		maxTokens = 2000
 	}
 
-	optimised := optimiseOutput(req.RawOutput, req.Format, maxTokens)
+	// The raw output is the authoritative source: store it first so the
+	// capsule returned below really can restore it (§18.1/§18.5).
+	contentHash := sha256Hex([]byte(req.RawOutput))
+	source := SourceObjectRef{ObjectID: "output-" + contentHash[:32], Version: "1", ContentHash: contentHash}
+	if err := authoritativeSourceStore.Put(source.ObjectID, source.Version, source.ContentHash, req.RawOutput); err != nil {
+		http.Error(w, "store raw output: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	capsuleID := newCapsuleID()
+	optimised, omitted := optimiseOutput(req.RawOutput, req.Format, maxTokens, capsuleID)
 	originalTokens := estimateTokens(req.RawOutput)
 	optimisedTokens := estimateTokens(optimised)
 
 	resp := OutputOptimiseResponse{
-		Optimised: optimised,
-		Reduction: originalTokens - optimisedTokens,
-		CapsuleID: newCapsuleID(),
+		Optimised:     optimised,
+		Reduction:     originalTokens - optimisedTokens,
+		CapsuleID:     capsuleID,
+		SourceObjects: []SourceObjectRef{source},
+		OmittedLines:  omitted,
 	}
 	writeJSON(w, resp)
 }
@@ -609,152 +701,129 @@ func deduplicateSegments(segments []Segment) []Segment {
 
 // ── budget allocation (§18.6) ────────────────────────────────────────────
 
+// budgetClass names the §18.6 bucket a segment class draws from; ""
+// (optional background) has no bucket of its own and lives on reserve.
+func budgetClass(class string) string {
+	switch class {
+	case "governing_policy":
+		return "governing"
+	case "current_user_instruction":
+		return "request"
+	case "active_task_state", "acceptance_criteria":
+		return "task_state"
+	case "confirmed_memory", "evidence":
+		return "evidence"
+	case "code_symbol", "code_dependency", "tool_schema":
+		return "code_tools"
+	default:
+		return ""
+	}
+}
+
+// allocateBudget implements §18.6. Mandatory (non-droppable) content is
+// reserved first -- it is always emitted -- and only what remains is split
+// across the classes by the profile's percentages. A class whose content
+// needs less than its share returns the surplus to the shared reserve, so
+// the allocation never exceeds totalBudget and nothing is budgeted twice.
 func allocateBudget(totalBudget int, profile string, segments []Segment) BudgetAllocation {
-	allocation := BudgetAllocation{
-		Governing: percentOf(totalBudget, 15),
-		Request:   percentOf(totalBudget, 15),
-		TaskState: percentOf(totalBudget, 15),
-		Evidence:  percentOf(totalBudget, 25),
-		CodeTools: percentOf(totalBudget, 20),
-		Reserve:   percentOf(totalBudget, 10),
-	}
-
-	if profile == "exact" || profile == "conservative" {
-		// For exact/conservative, give more room to governing and request
-		allocation = BudgetAllocation{
-			Governing: percentOf(totalBudget, 25),
-			Request:   percentOf(totalBudget, 25),
-			TaskState: percentOf(totalBudget, 15),
-			Evidence:  percentOf(totalBudget, 15),
-			CodeTools: percentOf(totalBudget, 10),
-			Reserve:   percentOf(totalBudget, 10),
-		}
-	}
-
-	// Tally actual tokens per class from segments
-	governingTokens := 0
-	requestTokens := 0
-	taskStateTokens := 0
-	evidenceTokens := 0
-	codeTokens := 0
-	otherTokens := 0
-
+	mandatory := 0
+	demand := map[string]int{}
 	for _, seg := range segments {
-		switch seg.Class {
-		case "governing_policy":
-			governingTokens += seg.OriginalTokens
-		case "current_user_instruction":
-			requestTokens += seg.OriginalTokens
-		case "active_task_state", "acceptance_criteria":
-			taskStateTokens += seg.OriginalTokens
-		case "confirmed_memory", "evidence":
-			evidenceTokens += seg.OriginalTokens
-		case "code_symbol", "code_dependency", "tool_schema":
-			codeTokens += seg.OriginalTokens
-		default:
-			otherTokens += seg.OriginalTokens
+		if !seg.Droppable {
+			mandatory += seg.OriginalTokens
+			continue
+		}
+		demand[budgetClass(seg.Class)] += seg.OriginalTokens
+	}
+	available := totalBudget - mandatory
+	if available < 0 {
+		available = 0
+	}
+	split := map[string]int{"governing": 15, "request": 15, "task_state": 15, "evidence": 25, "code_tools": 20, "reserve": 10}
+	if profile == "exact" || profile == "conservative" {
+		split = map[string]int{"governing": 25, "request": 25, "task_state": 15, "evidence": 15, "code_tools": 10, "reserve": 10}
+	}
+	share := map[string]int{}
+	allocated := 0
+	for class, pct := range split {
+		share[class] = percentOf(available, pct)
+		allocated += share[class]
+	}
+	share["reserve"] += available - allocated // rounding remainder
+	for _, class := range []string{"governing", "request", "task_state", "evidence", "code_tools"} {
+		if surplus := share[class] - demand[class]; surplus > 0 {
+			share[class] -= surplus
+			share["reserve"] += surplus
 		}
 	}
-
-	// Use remaining evidence budget for confirmed_memory/evidence class
-	allocation.Evidence += otherTokens
-	return allocation
+	return BudgetAllocation{
+		Mandatory: mandatory,
+		Governing: share["governing"],
+		Request:   share["request"],
+		TaskState: share["task_state"],
+		Evidence:  share["evidence"],
+		CodeTools: share["code_tools"],
+		Reserve:   share["reserve"],
+	}
 }
 
 // ── compression (§18.3, §18.4) ───────────────────────────────────────────
 
 func compressSegments(segments []Segment, profile string, allocation BudgetAllocation) (string, []Segment) {
 	var compressed []Segment
-	totalUsed := 0
-	reserveRemaining := allocation.Reserve
+	remaining := map[string]int{
+		"governing":  allocation.Governing,
+		"request":    allocation.Request,
+		"task_state": allocation.TaskState,
+		"evidence":   allocation.Evidence,
+		"code_tools": allocation.CodeTools,
+	}
+	reserve := allocation.Reserve
+	// fits charges tokens to the segment's own class first, then to the
+	// shared reserve; it reports false (charging nothing) when neither can
+	// cover them.
+	fits := func(class string, tokens int) bool {
+		own := remaining[class]
+		if own >= tokens {
+			remaining[class] -= tokens
+			return true
+		}
+		if own+reserve >= tokens {
+			remaining[class] = 0
+			reserve -= tokens - own
+			return true
+		}
+		return false
+	}
+	emit := func(seg Segment, content string, droppable bool) {
+		compressed = append(compressed, Segment{Class: seg.Class, Content: content, OriginalTokens: seg.OriginalTokens, CompiledTokens: estimateTokens(content), Droppable: droppable})
+	}
 
 	for _, seg := range segments {
-		// Determine budget for this segment's class
-		classBudget := classBudgetFor(seg.Class, allocation)
-
-		// Never drop non-droppable classes
+		// Mandatory content is always emitted verbatim; its size was
+		// reserved before the classes were funded.
 		if !seg.Droppable {
-			compressed = append(compressed, seg)
-			totalUsed += seg.OriginalTokens
+			emit(seg, seg.Content, false)
 			continue
 		}
-
-		// Apply profile-based compression
+		class := budgetClass(seg.Class)
+		if profile == "exact" || profile == "conservative" || fits(class, seg.OriginalTokens) {
+			// exact and conservative are lossless: content that does not
+			// fit is still emitted rather than dropped or rewritten.
+			emit(seg, seg.Content, seg.Droppable)
+			continue
+		}
+		// Over budget under a lossy profile.
 		switch profile {
-		case "exact":
-			// Only dedup and canonicalisation, no semantic compression
-			compressed = append(compressed, seg)
-			totalUsed += seg.OriginalTokens
-
-		case "conservative":
-			// Lossless transforms: truncate trailing whitespace, remove URLs
-			content := seg.Content
-			compressed = append(compressed, Segment{
-				Class:          seg.Class,
-				Content:        content,
-				OriginalTokens: seg.OriginalTokens,
-				CompiledTokens: estimateTokens(content),
-				Droppable:      seg.Droppable,
-			})
-			totalUsed += estimateTokens(content)
-
 		case "balanced":
-			// Reversible: remove optional sections after first occurrence
-			if classBudget > 0 && totalUsed+seg.OriginalTokens <= classBudget+reserveRemaining {
-				content := seg.Content
-				if len(content) > 1000 {
-					content = content[:1000] + "\n<!-- truncated; full content in capsule -->"
-				}
-				compressed = append(compressed, Segment{
-					Class:          seg.Class,
-					Content:        content,
-					OriginalTokens: seg.OriginalTokens,
-					CompiledTokens: estimateTokens(content),
-					Droppable:      seg.Droppable,
-				})
-				totalUsed += estimateTokens(content)
-			} else if !seg.Droppable {
-				compressed = append(compressed, seg)
-				totalUsed += seg.OriginalTokens
-			} else {
-				// Droppable class, over budget → replace with reference
-				ref := "[Reference: " + seg.Class + " hash=" + sha256Hex([]byte(seg.Content))[:12] + "]"
-				compressed = append(compressed, Segment{
-					Class:          seg.Class,
-					Content:        ref,
-					OriginalTokens: seg.OriginalTokens,
-					CompiledTokens: estimateTokens(ref),
-					Droppable:      true,
-				})
-				totalUsed += estimateTokens(ref)
-			}
-
-		case "aggressive":
-			// Strong reduction: summarise to one line per segment
-			if classBudget > 0 && totalUsed+seg.OriginalTokens <= classBudget+reserveRemaining {
-				compressed = append(compressed, seg)
-				totalUsed += seg.OriginalTokens
-			} else {
-				summary := summarise(seg.Content, seg.Class)
-				compressed = append(compressed, Segment{
-					Class:          seg.Class,
-					Content:        summary,
-					OriginalTokens: seg.OriginalTokens,
-					CompiledTokens: estimateTokens(summary),
-					Droppable:      true,
-				})
-				totalUsed += estimateTokens(summary)
-			}
-
-		default: // adaptive — bounded deterministic policy selection per segment
-			if seg.OriginalTokens > 250 {
-				summary := summarise(seg.Content, seg.Class)
-				compressed = append(compressed, Segment{Class: seg.Class, Content: summary, OriginalTokens: seg.OriginalTokens, CompiledTokens: estimateTokens(summary), Droppable: true})
-				totalUsed += estimateTokens(summary)
-			} else {
-				compressed = append(compressed, seg)
-				totalUsed += seg.OriginalTokens
-			}
+			// Reversible: a reference the capsule's restoration handle resolves.
+			ref := "[Reference: " + seg.Class + " hash=" + sha256Hex([]byte(seg.Content))[:12] + " (restorable from the capsule)]"
+			fits(class, estimateTokens(ref))
+			emit(seg, ref, true)
+		default: // aggressive, adaptive
+			summary := summarise(seg.Content, seg.Class)
+			fits(class, estimateTokens(summary))
+			emit(seg, summary, true)
 		}
 	}
 
@@ -812,34 +881,64 @@ func looksLikeVersion(s string) bool {
 
 // ── output optimisation (§18.7) ──────────────────────────────────────────
 
-func optimiseOutput(raw string, format string, maxTokens int) string {
-	if format == "compact" || format == "diff" {
-		return compactOutput(raw)
-	}
+// outputSignal marks lines §18.2 never allows to be dropped: errors,
+// warnings and failures carry the result the caller acts on.
+var outputSignal = regexp.MustCompile(`(?i)\b(error|errors|warn|warning|fail|failed|failure|fatal|panic|exception|traceback|denied|refused)\b`)
 
+// optimiseOutput fits raw output to maxTokens without silently discarding
+// what matters (§18.7). When the budget is exceeded it keeps every error or
+// warning line plus as much surrounding output as fits, in the original
+// order, and ends with an explicit marker naming how many lines were left
+// out and the capsule that restores them. It returns the text and the
+// number of omitted lines.
+func optimiseOutput(raw, format string, maxTokens int, capsuleID string) (string, int) {
 	optimised := raw
-	// Remove repeated empty lines
-	optimised = strings.ReplaceAll(optimised, "\n\n\n\n", "\n\n")
-	optimised = strings.ReplaceAll(optimised, "\n\n\n", "\n\n")
-
-	// Truncate to token budget
-	if estimateTokens(optimised) > maxTokens {
-		lines := strings.Split(optimised, "\n")
-		var keep []string
-		used := 0
-		for _, line := range lines {
-			t := estimateTokens(line)
-			if used+t > maxTokens {
-				break
-			}
-			keep = append(keep, line)
-			used += t
-		}
-		optimised = strings.Join(keep, "\n")
+	if format == "compact" || format == "diff" {
+		optimised = compactOutput(raw)
+	} else {
+		optimised = strings.ReplaceAll(optimised, "\n\n\n\n", "\n\n")
+		optimised = strings.ReplaceAll(optimised, "\n\n\n", "\n\n")
 	}
-
-	return optimised
+	if estimateTokens(optimised) <= maxTokens {
+		return optimised, 0
+	}
+	lines := strings.Split(optimised, "\n")
+	keep := make([]bool, len(lines))
+	used := 0
+	for i, line := range lines {
+		if outputSignal.MatchString(line) {
+			keep[i] = true
+			used += estimateTokens(line) + 1
+		}
+	}
+	for i, line := range lines {
+		if keep[i] {
+			continue
+		}
+		t := estimateTokens(line) + 1
+		if used+t > maxTokens {
+			break
+		}
+		keep[i] = true
+		used += t
+	}
+	var out []string
+	omitted := 0
+	for i, line := range lines {
+		if keep[i] {
+			out = append(out, line)
+		} else {
+			omitted++
+		}
+	}
+	if omitted > 0 {
+		out = append(out, fmt.Sprintf("[%d of %d lines omitted to fit %d tokens; restore the full output with capsule %s]", omitted, len(lines), maxTokens, capsuleID))
+	}
+	return strings.Join(out, "\n"), omitted
 }
+
+// fillerLine matches a whole line of pure narration with no content.
+var fillerLine = regexp.MustCompile(`(?i)^(let me (check|think|see|look)( (at|into) (this|that|it))?|one moment|okay|ok|sure)[.!…]*$`)
 
 func compactOutput(raw string) string {
 	lines := strings.Split(raw, "\n")
@@ -856,15 +955,11 @@ func compactOutput(raw string) string {
 		}
 		seen[trimmed] = true
 
-		// Remove redundant "I think", "Let me", "Based on"
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "i think ") || strings.HasPrefix(lower, "i believe ") {
-			trimmed = trimmed[7:]
-		}
-		if strings.HasPrefix(lower, "let me ") {
-			continue
-		}
-		if strings.HasPrefix(lower, "based on ") && strings.Contains(lower, "i can") {
+		// Hedges stay: "I think X" and "X" are different claims, and a
+		// sentence that merely starts "Let me" can carry content ("Let me
+		// know the deadline is Friday"). Only lines that are nothing but
+		// conversational filler are dropped.
+		if fillerLine.MatchString(trimmed) {
 			continue
 		}
 		compact = append(compact, trimmed)
@@ -879,12 +974,12 @@ func buildCapsule(original, profile string, segments, compiled []Segment, alloca
 	for _, s := range segments {
 		origTokens += s.OriginalTokens
 	}
+	// Count what is actually emitted: segments passed through unchanged
+	// carry no CompiledTokens of their own, and summing that field
+	// under-reported the compiled size and inflated the reduction ratio.
 	compiledTokens := 0
 	for _, s := range compiled {
-		compiledTokens += s.CompiledTokens
-	}
-	if compiledTokens == 0 {
-		compiledTokens = origTokens
+		compiledTokens += estimateTokens(s.Content)
 	}
 
 	reduction := 0.0
@@ -901,8 +996,9 @@ func buildCapsule(original, profile string, segments, compiled []Segment, alloca
 		valid = validation[0]
 	}
 	checks := map[string]bool{
-		"semantic_invariants":  valid,
-		"source_hash_recorded": true,
+		"semantic_invariants": valid,
+		// Set true only once the source is actually persisted.
+		"source_hash_recorded": false,
 	}
 	return ContextCapsule{
 		CapsuleID:                newCapsuleID(),
@@ -924,7 +1020,6 @@ func buildCapsule(original, profile string, segments, compiled []Segment, alloca
 		SemanticInvariants:       extractExactValues(original),
 		Validation:               ValidationResults{Valid: valid, Checks: checks},
 		RestorationHandles:       []RestorationHandle{{HandleID: "restore-" + contentHash[:32], ObjectID: objectID, ContentHash: contentHash}},
-		Transformations:          []string{"canonicalisation", "exact_deduplication", "semantic_deduplication", "delta_context", "instruction_factoring", "task_state_compilation", "progressive_disclosure", "relevance_allocation", "code_aware_slicing", "tool_schema_routing", "cache_aware_ordering", "tokenizer_accounting", "local_semantic_compression", "invariant_validation"},
 	}
 }
 
@@ -951,23 +1046,6 @@ func estimateTokens(text string) int {
 
 func percentOf(total, pct int) int {
 	return total * pct / 100
-}
-
-func classBudgetFor(class string, alloc BudgetAllocation) int {
-	switch class {
-	case "governing_policy":
-		return alloc.Governing
-	case "current_user_instruction":
-		return alloc.Request
-	case "active_task_state", "acceptance_criteria":
-		return alloc.TaskState
-	case "confirmed_memory", "evidence":
-		return alloc.Evidence
-	case "code_symbol", "code_dependency", "tool_schema":
-		return alloc.CodeTools
-	default:
-		return alloc.Evidence // use evidence budget for background
-	}
 }
 
 func summarise(content string, class string) string {
@@ -1027,16 +1105,26 @@ func isHighImpact(req InputOptimiseRequest) bool {
 // profile is refused for them rather than silently honoured: §42 forbids
 // dropping governing instructions, exact values or evidence during
 // compression, so the caller does not get to opt out of that floor.
-func resolveProfile(req InputOptimiseRequest) string {
+// contextProfiles are the §18.4 compression profiles.
+var contextProfiles = map[string]bool{"exact": true, "conservative": true, "balanced": true, "aggressive": true, "adaptive": true}
+
+// resolveProfile applies §18.4: conservative is the default for work the
+// caller has not characterised, high-impact or restricted work is floored
+// at conservative, and an unknown profile name is an error rather than a
+// silent choice of some other compression.
+func resolveProfile(req InputOptimiseRequest) (string, error) {
 	requested := strings.ToLower(strings.TrimSpace(req.Profile))
+	if requested != "" && !contextProfiles[requested] {
+		return "", fmt.Errorf("unknown context profile %q", req.Profile)
+	}
 	if isHighImpact(req) {
 		if requested == "exact" || requested == "conservative" {
-			return requested
+			return requested, nil
 		}
-		return "conservative"
+		return "conservative", nil
 	}
 	if requested == "" {
-		return "balanced"
+		return "conservative", nil
 	}
-	return requested
+	return requested, nil
 }

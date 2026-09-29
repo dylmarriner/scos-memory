@@ -8,8 +8,10 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,5 +82,31 @@ func TestTrustedClientLoadsValidCAFile(t *testing.T) {
 	}
 	if client.Transport == nil {
 		t.Fatal("expected a configured transport when a CA file is set")
+	}
+}
+
+func TestPartialTLSConfigIsAnError(t *testing.T) {
+	for _, env := range [][2]string{{"SCOS_TLS_CERT_FILE", "/tmp/cert.pem"}, {"SCOS_TLS_KEY_FILE", "/tmp/key.pem"}} {
+		t.Setenv("SCOS_TLS_CERT_FILE", "")
+		t.Setenv("SCOS_TLS_KEY_FILE", "")
+		t.Setenv(env[0], env[1])
+		if err := ListenAndServe("127.0.0.1:0", http.NotFoundHandler()); err == nil || !strings.Contains(err.Error(), "set together") {
+			t.Fatalf("%s alone: expected a configuration error, got %v", env[0], err)
+		}
+	}
+}
+
+func TestServeAppliesDefaultTimeouts(t *testing.T) {
+	t.Setenv("SCOS_TLS_CERT_FILE", "")
+	t.Setenv("SCOS_TLS_KEY_FILE", "")
+	t.Setenv("SCOS_TLS_REQUIRED", "")
+	srv := &http.Server{Addr: "127.0.0.1:0", Handler: http.NotFoundHandler()}
+	done := make(chan error, 1)
+	go func() { done <- Serve(srv) }()
+	time.Sleep(50 * time.Millisecond)
+	_ = srv.Close()
+	<-done
+	if srv.ReadHeaderTimeout != DefaultReadHeaderTimeout || srv.IdleTimeout != DefaultIdleTimeout {
+		t.Fatalf("defaults not applied: header=%v idle=%v", srv.ReadHeaderTimeout, srv.IdleTimeout)
 	}
 }

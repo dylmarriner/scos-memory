@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -363,13 +364,22 @@ func (s *server) current(r *http.Request) (identity, error) {
 	var id identity
 	err = s.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.platform_role,p.tenant_id,p.id FROM cloud_sessions cs JOIN cloud_users u ON u.id=cs.user_id JOIN principals p ON p.external_id=u.id::text WHERE cs.token_hash=$1 AND cs.revoked_at IS NULL AND cs.expires_at>now() AND u.status='active' LIMIT 1`, hash(c.Value)).Scan(&id.UserID, &id.Email, &id.DisplayName, &id.PlatformRole, &id.TenantID, &id.PrincipalID)
 	if err == nil {
-		_, _ = s.db.ExecContext(r.Context(), `UPDATE cloud_sessions SET last_seen_at=now() WHERE token_hash=$1`, hash(c.Value))
+		// last_seen_at is informational; a failed touch must not log the user
+		// out, but it is reported.
+		if _, touchErr := s.db.ExecContext(r.Context(), `UPDATE cloud_sessions SET last_seen_at=now() WHERE token_hash=$1`, hash(c.Value)); touchErr != nil {
+			log.Printf("cloud-control-plane: update session last_seen_at: %v", touchErr)
+		}
 	}
 	return id, err
 }
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	if c, e := r.Cookie("scos_session"); e == nil {
-		_, _ = s.db.ExecContext(r.Context(), `UPDATE cloud_sessions SET revoked_at=now() WHERE token_hash=$1`, hash(c.Value))
+		// Logout must revoke server-side: clearing only the cookie would
+		// leave a copied session token valid.
+		if _, err := s.db.ExecContext(r.Context(), `UPDATE cloud_sessions SET revoked_at=now() WHERE token_hash=$1`, hash(c.Value)); err != nil {
+			http.Error(w, "logout failed: session could not be revoked", 503)
+			return
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: "scos_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true})
 	jsonWrite(w, 200, map[string]bool{"ok": true})
@@ -618,17 +628,38 @@ func (s *server) plans(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, 200, out)
 }
 
-func (s *server) validPlanID(ctx context.Context, id string) bool {
+func (s *server) validPlanID(ctx context.Context, id string) (bool, error) {
 	var exists bool
-	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM cloud_plan_definitions WHERE id=$1)`, id).Scan(&exists)
-	return exists
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM cloud_plan_definitions WHERE id=$1)`, id).Scan(&exists)
+	return exists, err
 }
 
-// recordAudit is best-effort: a failed audit write must never block the
-// admin action it is describing, so errors are swallowed here.
-func (s *server) recordAudit(ctx context.Context, actorUserID, action, target string, details any) {
-	b, _ := json.Marshal(details)
-	_, _ = s.db.ExecContext(ctx, `INSERT INTO cloud_admin_audit_log(actor_user_id,action,target,details) VALUES($1,$2,$3,$4)`, actorUserID, action, target, b)
+// auditedExec runs an admin mutation and its cloud_admin_audit_log entry in
+// one transaction: the change commits only together with its audit record,
+// so no admin action can land unaudited. It returns the mutation's affected
+// row count; with zero rows nothing is audited or changed.
+func (s *server) auditedExec(ctx context.Context, actorUserID, action, target string, details any, query string, args ...any) (int64, error) {
+	b, err := json.Marshal(details)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n == 0 {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO cloud_admin_audit_log(actor_user_id,action,target,details) VALUES($1,$2,$3,$4)`, actorUserID, action, target, b); err != nil {
+		return 0, fmt.Errorf("record admin audit: %w", err)
+	}
+	return n, tx.Commit()
 }
 
 func (s *server) settings(w http.ResponseWriter, r *http.Request) {
@@ -676,8 +707,14 @@ func (s *server) adminOverview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	_ = s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM tenants`).Scan(&tenants)
-	_ = s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM cloud_api_keys WHERE revoked_at IS NULL`).Scan(&keys)
+	if err := s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM tenants`).Scan(&tenants); err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
+	if err := s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM cloud_api_keys WHERE revoked_at IS NULL`).Scan(&keys); err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
 	jsonWrite(w, 200, map[string]int{"users": users, "tenants": tenants, "active_api_keys": keys})
 }
 
@@ -721,21 +758,25 @@ func (s *server) adminSetPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", 400)
 		return
 	}
-	if in.TenantID == "" || !s.validPlanID(r.Context(), in.Plan) {
-		http.Error(w, "valid tenant_id and plan are required", 400)
-		return
-	}
-	res, err := s.db.ExecContext(r.Context(), `UPDATE cloud_subscriptions SET plan=$1,updated_at=now() WHERE tenant_id=$2`, in.Plan, in.TenantID)
+	validPlan, err := s.validPlanID(r.Context(), in.Plan)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	n, _ := res.RowsAffected()
+	if in.TenantID == "" || !validPlan {
+		http.Error(w, "valid tenant_id and plan are required", 400)
+		return
+	}
+	n, err := s.auditedExec(r.Context(), actor.UserID, "subscription.plan_changed", in.TenantID, map[string]string{"plan": in.Plan},
+		`UPDATE cloud_subscriptions SET plan=$1,updated_at=now() WHERE tenant_id=$2`, in.Plan, in.TenantID)
+	if err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
 	if n == 0 {
 		http.Error(w, "tenant subscription not found", 404)
 		return
 	}
-	s.recordAudit(r.Context(), actor.UserID, "subscription.plan_changed", in.TenantID, map[string]string{"plan": in.Plan})
 	jsonWrite(w, 200, map[string]any{"ok": true, "tenant_id": in.TenantID, "plan": in.Plan})
 }
 
@@ -753,17 +794,16 @@ func (s *server) adminSetRole(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "valid user_id and role are required", 400)
 		return
 	}
-	res, err := s.db.ExecContext(r.Context(), `UPDATE cloud_users SET platform_role=$1,updated_at=now() WHERE id=$2`, in.Role, in.UserID)
+	n, err := s.auditedExec(r.Context(), actor.UserID, "user.role_changed", in.UserID, map[string]string{"role": in.Role},
+		`UPDATE cloud_users SET platform_role=$1,updated_at=now() WHERE id=$2`, in.Role, in.UserID)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	n, _ := res.RowsAffected()
 	if n == 0 {
 		http.Error(w, "user not found", 404)
 		return
 	}
-	s.recordAudit(r.Context(), actor.UserID, "user.role_changed", in.UserID, map[string]string{"role": in.Role})
 	jsonWrite(w, 200, map[string]any{"ok": true, "user_id": in.UserID, "role": in.Role})
 }
 
@@ -795,20 +835,27 @@ func (s *server) adminPlanUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	var before planDefinition
 	var beforePerks []byte
-	_ = s.db.QueryRowContext(r.Context(), `SELECT name,price,perks FROM cloud_plan_definitions WHERE id=$1`, in.ID).Scan(&before.Name, &before.Price, &beforePerks)
-	before.ID, before.Perks = in.ID, decodePerks(beforePerks)
-	res, err := s.db.ExecContext(r.Context(), `UPDATE cloud_plan_definitions SET name=$1,price=$2,perks=$3,updated_at=now() WHERE id=$4`, strings.TrimSpace(in.Name), strings.TrimSpace(in.Price), perksJSON, in.ID)
+	err = s.db.QueryRowContext(r.Context(), `SELECT name,price,perks FROM cloud_plan_definitions WHERE id=$1`, in.ID).Scan(&before.Name, &before.Price, &beforePerks)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "plan not found", 404)
+		return
+	}
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	n, _ := res.RowsAffected()
+	before.ID, before.Perks = in.ID, decodePerks(beforePerks)
+	after := planDefinition{ID: in.ID, Name: strings.TrimSpace(in.Name), Price: strings.TrimSpace(in.Price), Perks: in.Perks}
+	n, err := s.auditedExec(r.Context(), actor.UserID, "plan.updated", in.ID, map[string]any{"before": before, "after": after},
+		`UPDATE cloud_plan_definitions SET name=$1,price=$2,perks=$3,updated_at=now() WHERE id=$4`, after.Name, after.Price, perksJSON, in.ID)
+	if err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
 	if n == 0 {
 		http.Error(w, "plan not found", 404)
 		return
 	}
-	after := planDefinition{ID: in.ID, Name: strings.TrimSpace(in.Name), Price: strings.TrimSpace(in.Price), Perks: in.Perks}
-	s.recordAudit(r.Context(), actor.UserID, "plan.updated", in.ID, map[string]any{"before": before, "after": after})
 	jsonWrite(w, 200, map[string]any{"ok": true, "id": in.ID})
 }
 
@@ -875,8 +922,15 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid API key", 401)
 		return
 	}
-	_, _ = s.db.ExecContext(r.Context(), `UPDATE cloud_api_keys SET last_used_at=now() WHERE key_hash=$1`, hash(h))
-	_, _ = s.db.ExecContext(r.Context(), `INSERT INTO cloud_usage_daily(tenant_id,usage_date,api_requests) VALUES($1,current_date,1) ON CONFLICT (tenant_id,usage_date) DO UPDATE SET api_requests=cloud_usage_daily.api_requests+1`, id.TenantID)
+	// Usage is metered before the request is proxied; an unmeterable request
+	// is refused rather than served unbilled.
+	if _, err := s.db.ExecContext(r.Context(), `INSERT INTO cloud_usage_daily(tenant_id,usage_date,api_requests) VALUES($1,current_date,1) ON CONFLICT (tenant_id,usage_date) DO UPDATE SET api_requests=cloud_usage_daily.api_requests+1`, id.TenantID); err != nil {
+		http.Error(w, "usage metering unavailable", 503)
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(), `UPDATE cloud_api_keys SET last_used_at=now() WHERE key_hash=$1`, hash(h)); err != nil {
+		log.Printf("cloud-control-plane: update api key last_used_at: %v", err)
+	}
 	claims := auth.Claims{TenantID: id.TenantID, PrincipalID: id.PrincipalID, Subject: id.UserID, JTI: hash(h)[:32], Scopes: []string{"memory:read", "memory:write"}, ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
 	token, err := auth.SignClaims(claims, s.issuerSecret)
 	if err != nil {

@@ -11,11 +11,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/tlsserve"
 )
 
 // MetricPoint mirrors the observability service's ingest contract. Correlation
@@ -91,8 +94,17 @@ func New(service, endpoint string, client *http.Client) *Emitter {
 		client:   client,
 		stop:     make(chan struct{}),
 	}
-	if e.client == nil {
-		e.client = &http.Client{Timeout: flushTimeout}
+	if e.client == nil && e.endpoint != "" {
+		// The observability service is internal and serves TLS under the
+		// deployment CA (SCOS_TLS_CA_FILE); a system-roots client would fail
+		// verification on every flush and silently lose every point.
+		trusted, err := tlsserve.TrustedClient(flushTimeout)
+		if err != nil {
+			log.Printf("telemetry: %s metric emission disabled: %v", service, err)
+			e.endpoint = ""
+		} else {
+			e.client = trusted
+		}
 	}
 	if e.Enabled() {
 		e.wg.Add(1)

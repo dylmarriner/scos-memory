@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 	"github.com/dylmarriner/scos-memory/packages/llmclient"
 	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
@@ -267,6 +268,18 @@ type engineServer struct {
 	// dashboard polls every 15s; without this, every poll from every viewer
 	// drove a fresh ChatJSON call over up to 200 facts.
 	summaryCache *summaryCache
+
+	// hooks dispatches §22.6 lifecycle events to extension-manager. nil (no
+	// SCOS_EXTENSION_MANAGER_URL) is a valid no-op client.
+	hooks *hooksdk.Client
+}
+
+// notifyLifecycle raises a §22.6 lifecycle event for a change that has
+// already committed. Payloads carry ids, namespace and change type only --
+// never memory content -- and the acting principal as the actor.
+func (s *engineServer) notifyLifecycle(ctx context.Context, event string, id requestIdentity, payload map[string]any) {
+	payload["actor"] = id.PrincipalID
+	s.hooks.Notify(ctx, event, id.TenantID, id.PrincipalID, payload)
 }
 
 // peerDefault names an environment variable and its fallback base URL for a
@@ -277,14 +290,31 @@ type peerDefault struct {
 	fallback string
 }
 
+// peerDefaults is every other fleet service the System Map probes (§25.9:
+// "every service"), with the standard SCOS_<NAME>_URL override and the
+// compose address as the default.
 var peerDefaults = []peerDefault{
+	{"cloud-control-plane", "SCOS_CLOUD_CONTROL_PLANE_URL", "https://cloud-control-plane:8079"},
 	{"memory-gateway", "SCOS_MEMORY_GATEWAY_URL", "https://memory-gateway:8080"},
+	{"autonomous-control-plane", "SCOS_AUTONOMOUS_CONTROL_PLANE_URL", "https://autonomous-control-plane:8081"},
 	{"retrieval-orchestrator", "SCOS_RETRIEVAL_ORCHESTRATOR_URL", "https://retrieval-orchestrator:8082"},
 	{"context-optimisation", "SCOS_CONTEXT_OPTIMISATION_URL", "https://context-optimisation:8083"},
 	{"code-intelligence", "SCOS_CODE_INTELLIGENCE_URL", "https://code-intelligence:8084"},
 	{"execution-proxy", "SCOS_EXECUTION_PROXY_URL", "https://execution-proxy:8085"},
 	{"extension-manager", "SCOS_EXTENSION_MANAGER_URL", "https://extension-manager:8086"},
 	{"compatibility-gateway", "SCOS_COMPATIBILITY_GATEWAY_URL", "https://compatibility-gateway:8087"},
+	{"hermes-provider", "SCOS_HERMES_PROVIDER_URL", "https://hermes-provider:8088"},
+	{"okf-synchroniser", "SCOS_OKF_SYNCHRONISER_URL", "https://okf-synchroniser:8090"},
+	{"security-gate", "SCOS_SECURITY_GATE_URL", "https://security-gate:8091"},
+	{"tool-governance", "SCOS_TOOL_GOVERNANCE_URL", "https://tool-governance:8092"},
+	{"agent-registry", "SCOS_AGENT_REGISTRY_URL", "https://agent-registry:8093"},
+	{"recovery-orchestrator", "SCOS_RECOVERY_ORCHESTRATOR_URL", "https://recovery-orchestrator:8094"},
+	{"backup-manager", "SCOS_BACKUP_MANAGER_URL", "https://backup-manager:8095"},
+	{"observability", "SCOS_OBSERVABILITY_URL", "https://observability:8096"},
+	{"transparency-projection", "SCOS_TRANSPARENCY_PROJECTION_URL", "https://transparency-projection:8097"},
+	{"mcp-gateway", "SCOS_MCP_GATEWAY_URL", "https://mcp-gateway:8098"},
+	{"graphify-provider", "SCOS_GRAPHIFY_PROVIDER_URL", "https://graphify-provider:8099"},
+	{"credential-vault", "SCOS_CREDENTIAL_VAULT_URL", "https://credential-vault:8100"},
 }
 
 func resolveUpstream(envVar, fallback string) string {
@@ -422,6 +452,9 @@ func main() {
 	srv.okfAuthorityThresh = envInt("SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD", 90)
 	srv.okfConfidenceThresh = envFloat("SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD", 0.85)
 	srv.internalServiceToken = strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN"))
+	if srv.hooks, err = hooksdk.ClientFromEnvironment("memory-intelligence"); err != nil {
+		log.Fatalf("configure lifecycle hooks: %v", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -774,6 +807,13 @@ func (s *engineServer) handleFactsForgetAll(w http.ResponseWriter, r *http.Reque
 	serviceMetrics.Gauge(telemetry.MetricUserModelChanges, float64(revoked), "count",
 		map[string]string{"change": "facts_bulk_forgotten", "namespace_scoped": strconv.FormatBool(namespaceID != "")},
 		telemetry.Correlation{Tenant: identity.TenantID})
+	if revoked > 0 {
+		// A bulk forget can revoke a whole tenant's memory; the event names
+		// the scope and count rather than every id.
+		s.notifyLifecycle(r.Context(), hooksdk.OnMemoryRevoked, identity, map[string]any{
+			"namespace_id": namespaceID, "change_type": "bulk_forget", "revoked_count": revoked,
+		})
+	}
 	writeJSON(w, map[string]any{
 		"forgotten":     true,
 		"namespace_id":  namespaceID,
@@ -892,6 +932,7 @@ func (s *engineServer) handleFactCorrect(w http.ResponseWriter, r *http.Request,
 	serviceMetrics.Count(telemetry.MetricUserModelChanges,
 		map[string]string{"change": "fact_corrected"},
 		telemetry.Correlation{Tenant: identity.TenantID})
+	s.notifyLifecycle(r.Context(), hooksdk.OnMemoryCorrected, identity, correctionPayload(id, corrected))
 	s.maybePromoteToOKF(corrected, identity.TenantID)
 	writeJSON(w, map[string]any{
 		"corrected":        true,
@@ -1200,7 +1241,8 @@ func (s *engineServer) handleFactForget(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	cascade := r.URL.Query().Get("cascade") == "true"
-	revoked, err := forgetFact(r.Context(), s.db, identity, id, cascade)
+	forgotten, err := forgetFact(r.Context(), s.db, identity, id, cascade)
+	revoked := len(forgotten.RevokedIDs)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -1211,6 +1253,7 @@ func (s *engineServer) handleFactForget(w http.ResponseWriter, r *http.Request, 
 	serviceMetrics.Count(telemetry.MetricUserModelChanges,
 		map[string]string{"change": "fact_forgotten", "cascade": strconv.FormatBool(cascade)},
 		telemetry.Correlation{Tenant: identity.TenantID})
+	s.notifyRevoked(r.Context(), identity, forgotten, cascade)
 	writeJSON(w, map[string]any{
 		"forgotten":     true,
 		"id":            id,
@@ -1269,6 +1312,29 @@ func (s *engineServer) handleFactFeedback(w http.ResponseWriter, r *http.Request
 	writeJSON(w, map[string]any{"recorded": true, "fact_id": id, "feedback": feedback})
 }
 
+func correctionPayload(previousID string, corrected *Fact) map[string]any {
+	return map[string]any{
+		"memory_id": corrected.ID, "previous_memory_id": previousID,
+		"namespace_id": corrected.NamespaceID, "change_type": "correction",
+	}
+}
+
+// notifyRevoked raises on_memory_revoked for a committed forget. An
+// idempotent forget of an already-revoked fact revoked nothing and raises
+// nothing.
+func (s *engineServer) notifyRevoked(ctx context.Context, id requestIdentity, forgotten forgetResult, cascade bool) {
+	if len(forgotten.RevokedIDs) == 0 {
+		return
+	}
+	changeType := "forget"
+	if cascade {
+		changeType = "forget_cascade"
+	}
+	s.notifyLifecycle(ctx, hooksdk.OnMemoryRevoked, id, map[string]any{
+		"memory_ids": forgotten.RevokedIDs, "namespace_id": forgotten.NamespaceID, "change_type": changeType,
+	})
+}
+
 // batchLimit caps batch fact operations at a defensible size: large enough
 // for real agent workflows, small enough that one request can't tie up the
 // database indefinitely or be used to bulk-drain the tenant one call at a time.
@@ -1324,6 +1390,7 @@ func (s *engineServer) handleFactsBatchCorrect(w http.ResponseWriter, r *http.Re
 			continue
 		}
 		succeeded++
+		s.notifyLifecycle(r.Context(), hooksdk.OnMemoryCorrected, identity, correctionPayload(c.MemoryID, corrected))
 		results = append(results, map[string]any{"memory_id": c.MemoryID, "ok": true, "fact": corrected})
 	}
 	serviceMetrics.Count(telemetry.MetricUserModelChanges,
@@ -1368,11 +1435,13 @@ func (s *engineServer) handleFactsBatchForget(w http.ResponseWriter, r *http.Req
 	results := make([]map[string]any, 0, len(body.MemoryIDs))
 	succeeded, totalRevoked := 0, 0
 	for _, memoryID := range body.MemoryIDs {
-		revoked, err := forgetFact(r.Context(), s.db, identity, memoryID, body.Cascade)
+		forgotten, err := forgetFact(r.Context(), s.db, identity, memoryID, body.Cascade)
 		if err != nil {
 			results = append(results, map[string]any{"memory_id": memoryID, "ok": false, "error": err.Error()})
 			continue
 		}
+		revoked := len(forgotten.RevokedIDs)
+		s.notifyRevoked(r.Context(), identity, forgotten, body.Cascade)
 		succeeded++
 		totalRevoked += revoked
 		results = append(results, map[string]any{"memory_id": memoryID, "ok": true, "revoked_count": revoked})
@@ -1445,6 +1514,10 @@ func (s *engineServer) handleEntities(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		entity.ID = entityID
+		s.notifyLifecycle(ctx, hooksdk.OnUserModelChange, identity, map[string]any{
+			"entity_id": entityID, "entity_type": entity.Type, "scope": entity.Scope, "change_type": "entity_created",
+			"preferences": len(entity.Preferences), "goals": len(entity.Goals), "traits": len(entity.Traits),
+		})
 		writeJSON(w, entity)
 
 	default:
@@ -2054,22 +2127,30 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 	}
 
 	nodes := make([]map[string]any, 0, len(facts)+len(entities))
+	// Nodes carry the attributes §25.10 filters and scrubs by (type,
+	// source, scope, authority, confidence, time) and the provenance the
+	// details pane traces (evidence, explicit vs inferred, derivation).
 	for _, f := range facts {
 		nodes = append(nodes, map[string]any{
-			"id": f.ID, "label": truncate(f.Content, 60),
-			"type": "fact", "network": f.Network,
+			"id": f.ID, "label": truncate(f.Content, 60), "content": f.Content,
+			"type": "fact", "network": f.Network, "source": f.Source, "scope": f.Scope,
+			"authority_level": f.Authority, "confidence": f.Confidence,
+			"recorded_at": f.RecordedAt, "observed_at": f.ObservedAt,
+			"valid_from": f.ValidFrom, "valid_until": f.ValidUntil,
+			"inferred": f.Inferred, "derivation": f.Derivation,
+			"evidence": f.Evidence, "revision": f.Revision,
 		})
 	}
 	for _, e := range entities {
 		nodes = append(nodes, map[string]any{
-			"id": e.ID, "label": e.Name, "type": "entity",
+			"id": e.ID, "label": e.Name, "type": "entity", "entity_type": e.Type, "scope": e.Scope,
 		})
 	}
 	edges := make([]map[string]any, 0, len(relations))
 	for _, rel := range relations {
 		edges = append(edges, map[string]any{
 			"source": rel.SourceID, "target": rel.TargetID,
-			"type": rel.Type,
+			"type": rel.Type, "created_at": rel.CreatedAt,
 		})
 	}
 	// Entity-mention edges: linkEntityMentions (store.go) records, on every
@@ -2398,36 +2479,23 @@ func (s *engineServer) handleDashboardUserModel(w http.ResponseWriter, r *http.R
 		http.Error(w, msg, status)
 		return
 	}
-	ctx := r.Context()
-	entities, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*Entity, error) {
-		return loadEntities(ctx, q, identity.TenantID)
-	})
+	ledger, users, userFacts, err := s.buildUserLedger(r.Context(), identity)
 	if err != nil {
-		http.Error(w, "load entities: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "build user knowledge ledger: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var entityList []*Entity
-	for _, e := range entities {
-		if e.Type == "user" {
-			entityList = append(entityList, e)
-		}
+	counts := make(map[string]int, len(ledger))
+	for group, entries := range ledger {
+		counts[group] = len(entries)
 	}
-	var userFacts []*Fact
-	for _, e := range entityList {
-		for _, factID := range e.Facts {
-			if f, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
-				return getFact(ctx, q, identity.TenantID, factID)
-			}); err == nil {
-				userFacts = append(userFacts, f)
-			}
-		}
-	}
-
 	writeJSON(w, map[string]any{
 		"type":         "user_model",
-		"entities":     entityList,
+		"entities":     users,
 		"facts":        userFacts,
 		"fact_count":   len(userFacts),
+		"ledger":       ledger,
+		"group_order":  ledgerGroups,
+		"group_counts": counts,
 		"last_updated": newestTimestamp(factTimestamps(userFacts)...),
 	})
 }

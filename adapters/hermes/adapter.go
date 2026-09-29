@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -13,6 +14,10 @@ import (
 // HermesBridge bridges Hermes Agent Memory Provider lifecycle methods (§24).
 type HermesBridge struct {
 	EndpointURL string
+	// BearerToken is the claims JWT memory-gateway authenticates with. When
+	// it is empty the gateway falls back to the TenantID/PrincipalID
+	// headers, which it only honours in its local (unauthenticated) mode.
+	BearerToken string
 	TenantID    string
 	PrincipalID string
 	HTTPClient  *http.Client
@@ -31,6 +36,9 @@ func (b *HermesBridge) SyncTurn(ctx context.Context, payload *MemoryPayload) err
 	if payload == nil || strings.TrimSpace(payload.SessionID) == "" || strings.TrimSpace(payload.Key) == "" || strings.TrimSpace(b.EndpointURL) == "" {
 		return fmt.Errorf("invalid memory payload")
 	}
+	if b.BearerToken == "" && (strings.TrimSpace(b.TenantID) == "" || strings.TrimSpace(b.PrincipalID) == "") {
+		return fmt.Errorf("hermes bridge needs a bearer token or both tenant and principal IDs")
+	}
 	body, err := json.Marshal(map[string]string{"role": "user", "content": payload.Key + ": " + payload.Value})
 	if err != nil {
 		return err
@@ -39,12 +47,15 @@ func (b *HermesBridge) SyncTurn(ctx context.Context, payload *MemoryPayload) err
 	if client == nil {
 		client = http.DefaultClient
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(b.EndpointURL, "/")+"/v1/sessions/"+payload.SessionID+"/messages", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(b.EndpointURL, "/")+"/v1/sessions/"+url.PathEscape(payload.SessionID)+"/messages", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "hermes-"+payload.SessionID+"-"+payload.Key+"-"+payload.Timestamp.UTC().Format(time.RFC3339Nano))
+	if b.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+b.BearerToken)
+	}
 	req.Header.Set("X-SCOS-Tenant-ID", b.TenantID)
 	req.Header.Set("X-SCOS-Principal-ID", b.PrincipalID)
 	resp, err := client.Do(req)

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -206,7 +207,9 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 			return "", fmt.Errorf("insert fact evidence: %w", err)
 		}
 	}
-	linkEntityMentions(ctx, tx, id.TenantID, memoryID, mentions)
+	if err := linkEntityMentions(ctx, tx, id.TenantID, memoryID, mentions); err != nil {
+		return "", err
+	}
 	return memoryID, nil
 }
 
@@ -247,6 +250,13 @@ func loadFacts(ctx context.Context, db querier, tenantID, network string) ([]*Fa
 	return loadFactsByStatus(ctx, db, tenantID, network, []string{"active"})
 }
 
+func loadFactsAt(ctx context.Context, db querier, tenantID, network string, loader func(context.Context, querier, string, string) ([]*Fact, error), validAt, recordedAt *time.Time) ([]*Fact, error) {
+	if validAt == nil && recordedAt == nil {
+		return loader(ctx, db, tenantID, network)
+	}
+	return loadFactsByStatusAt(ctx, db, tenantID, network, []string{"active", "superseded", "merged"}, validAt, recordedAt)
+}
+
 // loadFactsIncludingMerged behaves like loadFacts but also returns facts
 // marked 'merged' (Dream's include_merged=true read mode) — still excludes
 // 'superseded'/'revoked', which have their own dedicated access paths
@@ -260,6 +270,10 @@ func loadFactsIncludingMerged(ctx context.Context, db querier, tenantID, network
 // building the IN(...) clause by string join is safe and sidesteps relying
 // on driver-specific array-parameter binding.
 func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string, statuses []string) ([]*Fact, error) {
+	return loadFactsByStatusAt(ctx, db, tenantID, network, statuses, nil, nil)
+}
+
+func loadFactsByStatusAt(ctx context.Context, db querier, tenantID, network string, statuses []string, validAt, recordedAt *time.Time) ([]*Fact, error) {
 	placeholders := make([]string, len(statuses))
 	args := make([]any, 0, len(statuses)+1)
 	args = append(args, tenantID)
@@ -267,15 +281,26 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		args = append(args, st)
 		placeholders[i] = fmt.Sprintf("$%d", i+2)
 	}
+	statusClause := "mi.status IN (" + strings.Join(placeholders, ",") + ")"
+	validClause := "(mi.valid_from IS NULL OR mi.valid_from <= now()) AND (mi.valid_until IS NULL OR mi.valid_until > now())"
+	if validAt != nil {
+		validClause = fmt.Sprintf("(mi.valid_from IS NULL OR mi.valid_from <= $%d) AND (mi.valid_until IS NULL OR mi.valid_until > $%d)", len(args)+1, len(args)+1)
+		args = append(args, *validAt)
+	}
+	if recordedAt != nil {
+		validClause += fmt.Sprintf(" AND mv.created_at <= $%d AND (mi.belief_expired_at IS NULL OR mi.belief_expired_at > $%d)", len(args)+1, len(args)+1)
+		args = append(args, *recordedAt)
+	}
 	query := fmt.Sprintf(`
-		SELECT mi.id, mi.namespace_id, mi.authority_level, mi.confidence_score, mi.created_at, mi.status,
+		SELECT mi.id, mi.namespace_id, mi.authority_level, mi.confidence_score, mi.created_at, mi.belief_expired_at, mi.status,
 		       mv.content, mv.structured_content, mv.version_number, mv.created_at
 		FROM memory_items mi
 		JOIN memory_versions mv ON mv.id = mi.current_version_id
-		WHERE mi.tenant_id = $1 AND mi.status IN (%s)
-		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
+		WHERE mi.tenant_id = $1
+		  AND %s
+		  AND %s
 		ORDER BY mv.created_at DESC
-	`, strings.Join(placeholders, ","))
+	`, statusClause, validClause)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -286,7 +311,8 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		var f Fact
 		var structuredRaw []byte
 		var itemCreatedAt, versionCreatedAt time.Time
-		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
+		var beliefExpiredAt sql.NullTime
+		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &beliefExpiredAt, &f.Status, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -313,6 +339,9 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		f.Inferred = structured.Inferred
 		f.Derivation = structured.Derivation
 		f.RecordedAt = versionCreatedAt.UTC().Format(time.RFC3339)
+		if beliefExpiredAt.Valid {
+			f.BeliefExpiredAt = beliefExpiredAt.Time.UTC().Format(time.RFC3339)
+		}
 		if network != "" && string(f.Network) != network {
 			continue
 		}
@@ -380,7 +409,7 @@ func getFact(ctx context.Context, db querier, tenantID, factID string) (*Fact, e
 // same transaction as the canonical fact's own insertFact, by the caller.
 func markFactMerged(ctx context.Context, tx *sql.Tx, tenantID, duplicateFactID, canonicalFactID string) error {
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE memory_items SET status='merged', superseded_by_id=$1
+		UPDATE memory_items SET status='merged', superseded_by_id=$1, belief_expired_at=COALESCE(belief_expired_at, now())
 		WHERE id=$2 AND tenant_id=$3 AND status='active'
 	`, canonicalFactID, duplicateFactID, tenantID); err != nil {
 		return fmt.Errorf("mark fact merged: %w", err)
@@ -447,9 +476,10 @@ func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID,
 		return nil, fmt.Errorf("insert corrected fact: %w", err)
 	}
 	corrected.ID = newFactID
+	corrected.NamespaceID = old.NamespaceID
 
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE memory_items SET status='superseded', superseded_by_id=$1
+		UPDATE memory_items SET status='superseded', superseded_by_id=$1, belief_expired_at=COALESCE(belief_expired_at, now())
 		WHERE id=$2 AND tenant_id=$3 AND status='active'
 	`, newFactID, oldFactID, id.TenantID); err != nil {
 		return nil, fmt.Errorf("mark fact superseded: %w", err)
@@ -641,7 +671,7 @@ func resolveEntityMentions(ctx context.Context, content string) []string {
 // and retrieval can boost on entity overlap the way mem0's entity store
 // does. Best-effort: a failure to link one mention does not fail the fact
 // write, since these are candidate proper nouns, not required data.
-func linkEntityMentions(ctx context.Context, tx *sql.Tx, tenantID, factID string, mentions []string) {
+func linkEntityMentions(ctx context.Context, tx *sql.Tx, tenantID, factID string, mentions []string) error {
 	for _, mention := range mentions {
 		var entityID string
 		var metadataRaw []byte
@@ -650,47 +680,59 @@ func linkEntityMentions(ctx context.Context, tx *sql.Tx, tenantID, factID string
 			WHERE tenant_id=$1 AND entity_type='entity' AND lower(display_name)=lower($2)
 		`, tenantID, mention).Scan(&entityID, &metadataRaw)
 		if err == sql.ErrNoRows {
-			newID, genErr := newID()
-			if genErr != nil {
-				continue
+			newID, err := newID()
+			if err != nil {
+				return err
 			}
-			metadata, _ := json.Marshal(map[string]any{"fact_ids": []string{factID}})
+			metadata, err := json.Marshal(map[string]any{"fact_ids": []string{factID}})
+			if err != nil {
+				return err
+			}
 			// $1 is passed twice (id and entity_key are both this generated
 			// UUID) rather than reused positionally: pgx's extended protocol
 			// infers each bind parameter's type once, and id (uuid) vs
 			// entity_key (text) sharing $1 makes that inference ambiguous --
 			// "inconsistent types deduced for parameter $1: uuid versus text".
-			if _, insErr := tx.ExecContext(ctx, `
+			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO entities (id, tenant_id, entity_key, entity_type, display_name, scope, metadata)
 				VALUES ($1,$2,$3,'entity',$4,'global',$5)
-			`, newID, tenantID, newID, mention, metadata); insErr != nil {
-				continue
+			`, newID, tenantID, newID, mention, metadata); err != nil {
+				return fmt.Errorf("create entity for mention %q: %w", mention, err)
 			}
 			continue
 		}
 		if err != nil {
-			continue
+			return fmt.Errorf("look up entity for mention %q: %w", mention, err)
 		}
-		var metadata struct {
-			FactIDs []string `json:"fact_ids"`
-		}
+		// Decode into a generic map so preferences, goals, traits and any
+		// other keys survive; only fact_ids is extended.
+		metadata := map[string]any{}
 		if len(metadataRaw) > 0 {
-			_ = json.Unmarshal(metadataRaw, &metadata)
-		}
-		linked := false
-		for _, existing := range metadata.FactIDs {
-			if existing == factID {
-				linked = true
-				break
+			if err := json.Unmarshal(metadataRaw, &metadata); err != nil {
+				return fmt.Errorf("decode entity %s metadata: %w", entityID, err)
 			}
 		}
-		if linked {
+		var factIDs []string
+		if raw, ok := metadata["fact_ids"].([]any); ok {
+			for _, v := range raw {
+				if id, ok := v.(string); ok {
+					factIDs = append(factIDs, id)
+				}
+			}
+		}
+		if slices.Contains(factIDs, factID) {
 			continue
 		}
-		metadata.FactIDs = append(metadata.FactIDs, factID)
-		updated, _ := json.Marshal(metadata)
-		_, _ = tx.ExecContext(ctx, `UPDATE entities SET metadata=$1 WHERE id=$2`, updated, entityID)
+		metadata["fact_ids"] = append(factIDs, factID)
+		updated, err := json.Marshal(metadata)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE entities SET metadata=$1 WHERE id=$2`, updated, entityID); err != nil {
+			return fmt.Errorf("link fact to entity %s: %w", entityID, err)
+		}
 	}
+	return nil
 }
 
 // forgetFact implements scos_forget (§25/§42): the fact is soft-deleted
@@ -703,37 +745,32 @@ func linkEntityMentions(ctx context.Context, tx *sql.Tx, tenantID, factID string
 // walks factID's supersession chain backward (every fact that led up to
 // factID via scos_correct) and revokes those too, so a superseded ancestor
 // does not stay in 'superseded' limbo forever once the fact that replaced it
-// is gone. Without cascade, only factID itself is revoked. Returns the total
-// number of facts revoked (1, or more when cascading).
-func forgetFact(ctx context.Context, db *sql.DB, id requestIdentity, factID string, cascade bool) (int, error) {
+// is gone. Without cascade, only factID itself is revoked. Returns every
+// fact id revoked (factID, plus its ancestors when cascading) and factID's
+// namespace.
+func forgetFact(ctx context.Context, db *sql.DB, id requestIdentity, factID string, cascade bool) (forgetResult, error) {
+	var none forgetResult
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return none, err
 	}
 	defer tx.Rollback()
 	if err := setPrincipalContext(ctx, tx, id); err != nil {
-		return 0, err
+		return none, err
 	}
-	res, err := tx.ExecContext(ctx, `
-		UPDATE memory_items SET status='revoked'
-		WHERE id=$1 AND tenant_id=$2 AND status NOT IN ('revoked')
-	`, factID, id.TenantID)
+	var result forgetResult
+	var previousStatus string
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(namespace_id::text, ''), status FROM memory_items WHERE id=$1 AND tenant_id=$2 FOR UPDATE`, factID, id.TenantID).Scan(&result.NamespaceID, &previousStatus)
 	if err != nil {
-		return 0, fmt.Errorf("revoke fact: %w", err)
+		return none, err // sql.ErrNoRows when the fact does not exist
 	}
-	revoked := 0
-	if affected, err := res.RowsAffected(); err == nil && affected > 0 {
-		revoked = 1
-	} else if err == nil && affected == 0 {
-		var exists bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, factID, id.TenantID).Scan(&exists); err != nil {
-			return 0, err
+	if previousStatus != "revoked" {
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_items SET status='revoked' WHERE id=$1 AND tenant_id=$2`, factID, id.TenantID); err != nil {
+			return none, fmt.Errorf("revoke fact: %w", err)
 		}
-		if !exists {
-			return 0, sql.ErrNoRows
-		}
-		// Already revoked: idempotent no-op, but still eligible to cascade.
+		result.RevokedIDs = append(result.RevokedIDs, factID)
 	}
+	// Already revoked: idempotent no-op, but still eligible to cascade.
 
 	if cascade {
 		current := factID
@@ -747,20 +784,26 @@ func forgetFact(ctx context.Context, db *sql.DB, id requestIdentity, factID stri
 				break
 			}
 			if err != nil {
-				return 0, fmt.Errorf("walk supersession chain: %w", err)
+				return none, fmt.Errorf("walk supersession chain: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE memory_items SET status='revoked' WHERE id=$1`, predecessor); err != nil {
-				return 0, fmt.Errorf("revoke superseded predecessor: %w", err)
+				return none, fmt.Errorf("revoke superseded predecessor: %w", err)
 			}
-			revoked++
+			result.RevokedIDs = append(result.RevokedIDs, predecessor)
 			current = predecessor
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return none, err
 	}
-	return revoked, nil
+	return result, nil
+}
+
+// forgetResult is what a committed forgetFact revoked.
+type forgetResult struct {
+	RevokedIDs  []string
+	NamespaceID string
 }
 
 // insertRelation records a temporal relation between two facts, deduplicated
@@ -891,7 +934,7 @@ func getEntity(ctx context.Context, db querier, tenantID, entityID string) (*Ent
 // what belief_evidence's hard foreign key actually points at.
 func factEvidenceRowID(ctx context.Context, tx *sql.Tx, factID string) (string, error) {
 	var evidenceID string
-	err := tx.QueryRowContext(ctx, `SELECT id FROM memory_evidence WHERE memory_id=$1 AND evidence_kind='fact' AND reference_id=$1`, factID).Scan(&evidenceID)
+	err := tx.QueryRowContext(ctx, `SELECT id FROM memory_evidence WHERE memory_id=$1::uuid AND evidence_kind='fact' AND reference_id=$1::text`, factID).Scan(&evidenceID)
 	if err == nil {
 		return evidenceID, nil
 	}
@@ -899,7 +942,7 @@ func factEvidenceRowID(ctx context.Context, tx *sql.Tx, factID string) (string, 
 		return "", err
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO memory_evidence (memory_id, evidence_kind, reference_id) VALUES ($1,'fact',$1) RETURNING id
+		INSERT INTO memory_evidence (memory_id, evidence_kind, reference_id) VALUES ($1::uuid,'fact',$1::text) RETURNING id
 	`, factID).Scan(&evidenceID); err != nil {
 		return "", fmt.Errorf("create fact evidence row: %w", err)
 	}
@@ -1097,17 +1140,26 @@ func recordFactFeedback(ctx context.Context, db *sql.DB, id requestIdentity, fac
 	return tx.Commit()
 }
 
-func loadDiary(ctx context.Context, db querier, tenantID string) ([]any, error) {
-	rows, err := db.QueryContext(ctx, `SELECT content FROM diary_entries WHERE tenant_id=$1 ORDER BY occurred_at DESC`, tenantID)
+func loadDiary(ctx context.Context, db querier, tenantID string) ([]any, string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT content, occurred_at FROM diary_entries WHERE tenant_id=$1 ORDER BY occurred_at DESC`, tenantID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	entries := make([]any, 0)
+	newest := ""
 	for rows.Next() {
 		var content string
-		if err := rows.Scan(&content); err != nil {
-			return nil, err
+		var occurredAt time.Time
+		if err := rows.Scan(&content, &occurredAt); err != nil {
+			return nil, "", err
+		}
+		// The view reports when its data last changed, so the timestamp
+		// comes from the rows rather than from the read. Rows are already
+		// DESC, but take the max explicitly so the value does not depend on
+		// the ordering holding.
+		if stamp := occurredAt.UTC().Format(time.RFC3339); stamp > newest {
+			newest = stamp
 		}
 		var decoded any
 		if err := json.Unmarshal([]byte(content), &decoded); err != nil {
@@ -1115,7 +1167,7 @@ func loadDiary(ctx context.Context, db querier, tenantID string) ([]any, error) 
 		}
 		entries = append(entries, decoded)
 	}
-	return entries, rows.Err()
+	return entries, newest, rows.Err()
 }
 
 func truncate(s string, max int) string {

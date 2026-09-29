@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	hooksdk "github.com/dylmarriner/scos-memory/packages/hook-sdk"
 )
 
 func TestExtensionStateSurvivesRestart(t *testing.T) {
@@ -23,9 +25,10 @@ func TestExtensionStateSurvivesRestart(t *testing.T) {
 	manifest := ExtensionManifest{
 		SchemaVersion: "1.0", PackageID: "restart.ext", Name: "Restart", Version: "1.0.0",
 		Publisher: "Test", License: "MIT", ExtensionTypes: []string{"plugin"}, RequiredCoreVersion: "^0.1.0",
-		ContentHash: "hash", Isolation: "separate_process", HooksSubscribed: []string{"turn.completed"},
-		HookEndpoints: map[string]string{"turn.completed": "http://127.0.0.1:9999/hook"},
-		RollbackPlan:  "uninstall and restore previous package version",
+		ContentHash: "hash", Isolation: "separate_process", HooksSubscribed: []string{hooksdk.OnTurnStart},
+		HookEndpoints:    map[string]string{hooksdk.OnTurnStart: "http://127.0.0.1:9999/hook"},
+		HookDeclarations: map[string]HookDeclaration{hooksdk.OnTurnStart: hookDecl(hookTypeSynchronous, fallbackContinue)},
+		RollbackPlan:     "uninstall and restore previous package version",
 	}
 	manifest.Signature = signManifest(t, manifest, privateKey)
 	res := httptest.NewRecorder()
@@ -41,7 +44,7 @@ func TestExtensionStateSurvivesRestart(t *testing.T) {
 
 	restarted := newExtServerAt(path)
 	ext := restarted.extensions["restart.ext"]
-	if ext == nil || ext.Status != "disabled" || len(restarted.hooks["turn.completed"]) != 1 {
+	if ext == nil || ext.Status != "disabled" || len(restarted.hooks[hooksdk.OnTurnStart]) != 1 {
 		t.Fatalf("state did not survive restart: %#v", restarted)
 	}
 }
@@ -556,6 +559,7 @@ func TestHookDispatchOrderingIsDeterministic(t *testing.T) {
 	defer third.Close()
 
 	srv := newExtServer()
+	enableExtensions(srv, "ext-a", "ext-b", "ext-c")
 	srv.hooks["on_turn_start"] = []*Hook{
 		{Event: "on_turn_start", ExtensionID: "ext-a", Endpoint: first.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
 		{Event: "on_turn_start", ExtensionID: "ext-b", Endpoint: second.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
@@ -612,6 +616,7 @@ func TestHookDispatchTimeoutFallsBackToContinue(t *testing.T) {
 	defer slow.Close()
 
 	srv := newExtServer()
+	enableExtensions(srv, "slow-ext")
 	srv.hooks["on_before_tool"] = []*Hook{{
 		Event: "on_before_tool", ExtensionID: "slow-ext", Endpoint: slow.URL,
 		TimeoutMs: 50, FallbackPolicy: "continue",
@@ -641,6 +646,7 @@ func TestHookDispatchCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	defer failing.Close()
 
 	srv := newExtServer()
+	enableExtensions(srv, "flaky-ext")
 	hook := &Hook{Event: "on_after_tool", ExtensionID: "flaky-ext", Endpoint: failing.URL, TimeoutMs: 1000, FallbackPolicy: "continue"}
 	srv.hooks["on_after_tool"] = []*Hook{hook}
 
@@ -674,6 +680,7 @@ func TestHookDispatchCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 // silently skipped — it SHALL fail the dispatch closed.
 func TestHookDispatchFailsClosedOnUndeclaredEndpoint(t *testing.T) {
 	srv := newExtServer()
+	enableExtensions(srv, "critical-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{{
 		Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: "", FallbackPolicy: "fail_closed",
 	}}
@@ -691,6 +698,7 @@ func TestHookDispatchFailsClosedOnUndeclaredEndpoint(t *testing.T) {
 // rather than silently dropped, and SHALL NOT block dispatch.
 func TestHookDispatchSkipsUndeclaredEndpointWhenNotCritical(t *testing.T) {
 	srv := newExtServer()
+	enableExtensions(srv, "optional-ext")
 	srv.hooks["on_memory_candidate"] = []*Hook{{
 		Event: "on_memory_candidate", ExtensionID: "optional-ext", Endpoint: "", FallbackPolicy: "continue",
 	}}
@@ -701,7 +709,7 @@ func TestHookDispatchSkipsUndeclaredEndpointWhenNotCritical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch should not fail dispatch-wide for a non-critical undeclared endpoint: %v", err)
 	}
-	if len(results) != 1 || results[0].Status != "skipped" {
+	if len(results) != 1 || results[0].Status != "skipped" || results[0].Reason != "hook endpoint is not declared" {
 		t.Fatalf("expected skipped status, got %#v", results)
 	}
 }
@@ -739,15 +747,17 @@ func TestAllRequiredLifecycleHooksAreRegistrable(t *testing.T) {
 	srv := newExtServer()
 
 	endpoints := make(map[string]string)
+	declarations := make(map[string]HookDeclaration)
 	for _, hookEvent := range requiredHooks {
 		endpoints[hookEvent] = "http://127.0.0.1:9/unused"
+		declarations[hookEvent] = hookDecl(hookTypeSynchronous, fallbackContinue)
 	}
 	manifest := ExtensionManifest{
 		SchemaVersion: "1.0", PackageID: "full.lifecycle.ext", Name: "Full Lifecycle", Version: "1.0.0",
 		Publisher: "Test", License: "MIT", ExtensionTypes: []string{"hook"}, RequiredCoreVersion: "^0.1.0",
 		ContentHash: "hash", Isolation: "in_process_trusted", HooksSubscribed: requiredHooks,
-		HookEndpoints: endpoints,
-		RollbackPlan:  "uninstall and restore previous package version",
+		HookEndpoints: endpoints, HookDeclarations: declarations,
+		RollbackPlan: "uninstall and restore previous package version",
 	}
 	manifest.Signature = signManifest(t, manifest, privateKey)
 

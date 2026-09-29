@@ -226,11 +226,6 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
     return out
 
 
-def _purge_stale_spaces(*_args, **_kwargs) -> int:
-    """Compatibility guard: explicit spaces make global purges unnecessary."""
-    return 0
-
-
 def _embedding_provider() -> str:
     return "scos-model-runtime" if MODEL_RUNTIME_URL else "fastembed"
 

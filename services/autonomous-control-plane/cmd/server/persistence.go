@@ -20,6 +20,75 @@ type lifecycleState struct {
 	ReplayStatus   string          `json:"replay_status,omitempty"`
 	RecoveryStatus string          `json:"recovery_status,omitempty"`
 	UpdatedAt      time.Time       `json:"updated_at"`
+
+	// Request and Outputs are what a recovery needs to resume the run: the
+	// original request and the results of stages that already completed.
+	Request *RouteRequest `json:"request,omitempty"`
+	Outputs stageOutputs  `json:"outputs"`
+
+	// FailureDetail records why a run degraded when no stage carries the
+	// cause (a failed turn-boundary hook), so recovery can classify it.
+	FailureDetail string `json:"failure_detail,omitempty"`
+
+	// Recovery bookkeeping. In PostgreSQL the lease lives in the
+	// recovery_lease_* columns and the rest in the checkpoint JSON.
+	LeaseOwner            string     `json:"lease_owner,omitempty"`
+	LeaseExpiresAt        *time.Time `json:"lease_expires_at,omitempty"`
+	RecoveryAttempts      int        `json:"recovery_attempts,omitempty"`
+	RecoveryPermanent     bool       `json:"recovery_permanent,omitempty"`
+	RecoveryFailureReason string     `json:"recovery_failure_reason,omitempty"`
+}
+
+// stageOutputs holds the results later stages consume, so a resumed run does
+// not have to repeat completed stages.
+type stageOutputs struct {
+	Memory   string      `json:"memory,omitempty"`
+	Code     string      `json:"code,omitempty"`
+	Compiled string      `json:"compiled_context,omitempty"`
+	Agent    *agentReply `json:"agent_reply,omitempty"`
+}
+
+// staleRunAfter is how long a never-claimed "running" run must go without
+// recording progress before it is presumed crashed rather than live. Runs
+// claimed for recovery are protected by their lease instead.
+const staleRunAfter = 5 * time.Minute
+
+// recoveryLeaseTTL is how long a recovery claim lives without a progress
+// write renewing it. Every stage boundary renews it, so it only has to
+// outlast the slowest single stage.
+const recoveryLeaseTTL = 2 * time.Minute
+
+// maxRecoveryAttempts bounds how often one run is recovered before it is
+// marked permanently failed.
+const maxRecoveryAttempts = 3
+
+// errLeaseLost reports that another recoverer now holds the run's lease, so
+// this execution must stop writing progress.
+var errLeaseLost = errors.New("recovery lease lost: another recoverer holds this run")
+
+func leaseLive(s lifecycleState, now time.Time) bool {
+	return s.LeaseOwner != "" && s.LeaseExpiresAt != nil && now.Before(*s.LeaseExpiresAt)
+}
+
+// claimable reports whether a run may be claimed for recovery. The SQL claim
+// in beginRecoveryDB applies the same rule.
+func claimable(s lifecycleState, now time.Time) bool {
+	if s.RecoveryPermanent || leaseLive(s, now) {
+		return false
+	}
+	switch s.State {
+	case "interrupted", "degraded", "failed", "recovering":
+		return true
+	case "running", "planned":
+		return s.UpdatedAt.IsZero() || now.Sub(s.UpdatedAt) > staleRunAfter
+	}
+	return false
+}
+
+// fenceAllows reports whether a writer holding owner ("" for a first
+// execution) may write a run's progress.
+func fenceAllows(s lifecycleState, owner string, now time.Time) bool {
+	return s.LeaseOwner == "" || s.LeaseOwner == owner || !leaseLive(s, now)
 }
 
 type stageState struct {
@@ -183,25 +252,67 @@ func (s *localStateStore) markReplay(tenantID, actorID, interactionID string) er
 	return s.writeLocked()
 }
 
-func (s *localStateStore) beginRecovery(tenantID, actorID, interactionID string) (string, error) {
+// claim applies claimable and, when it holds, takes the lease.
+func (s *localStateStore) claim(tenantID, actorID, interactionID, owner string) (recoveryClaim, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := stateKey(tenantID, actorID, interactionID)
 	state, ok := s.data.Lifecycles[key]
 	if !ok {
-		return "", errLocalStateNotFound
+		return recoveryClaim{}, errLocalStateNotFound
 	}
-	if state.State != "running" && state.State != "interrupted" {
-		return state.State, nil
+	now := time.Now().UTC()
+	if !claimable(state, now) {
+		return recoveryClaim{State: state.State}, nil
 	}
-	state.State = "recovering"
-	state.RecoveryStatus = "started"
-	state.UpdatedAt = time.Now().UTC()
+	expires := now.Add(recoveryLeaseTTL)
+	state.State, state.RecoveryStatus = "recovering", "started"
+	state.LeaseOwner, state.LeaseExpiresAt = owner, &expires
+	state.RecoveryAttempts++
+	state.UpdatedAt = now
 	s.data.Lifecycles[key] = state
 	if err := s.writeLocked(); err != nil {
-		return "", err
+		return recoveryClaim{}, err
 	}
-	return "recovering", nil
+	return recoveryClaim{State: "recovering", Claimed: true, Owner: owner, Attempts: state.RecoveryAttempts}, nil
+}
+
+// fencedUpdate applies update only while owner may write the run, renewing
+// the lease for a recovery owner or releasing it when release is set.
+func (s *localStateStore) fencedUpdate(tenantID, actorID, interactionID, owner string, release bool, update func(*lifecycleState)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := stateKey(tenantID, actorID, interactionID)
+	state, ok := s.data.Lifecycles[key]
+	if !ok {
+		return errLocalStateNotFound
+	}
+	now := time.Now().UTC()
+	if !fenceAllows(state, owner, now) {
+		return errLeaseLost
+	}
+	update(&state)
+	switch {
+	case release:
+		state.LeaseOwner, state.LeaseExpiresAt = "", nil
+	case owner != "":
+		expires := now.Add(recoveryLeaseTTL)
+		state.LeaseOwner, state.LeaseExpiresAt = owner, &expires
+	}
+	state.UpdatedAt = now
+	s.data.Lifecycles[key] = state
+	return s.writeLocked()
+}
+
+func (s *localStateStore) runState(tenantID, actorID, interactionID string) (lifecycleState, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	state, ok := s.data.Lifecycles[stateKey(tenantID, actorID, interactionID)]
+	if !ok {
+		return lifecycleState{}, errLocalStateNotFound
+	}
+	state.Stages = append([]stageState(nil), state.Stages...)
+	return state, nil
 }
 
 var errLocalStateNotFound = errors.New("local control state not found")

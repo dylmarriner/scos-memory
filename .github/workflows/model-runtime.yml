@@ -87,6 +87,8 @@ jobs:
           SCOS_DATABASE_URL: postgresql://scos:ci@postgres:5432/scos_memory?sslmode=require
           SCOS_APP_PASSWORD: ci-app-password
           SCOS_APP_DATABASE_URL: postgresql://scos_app:ci@postgres:5432/scos_memory?sslmode=require
+          SCOS_WORKER_PASSWORD: ci-worker-password
+          SCOS_WORKER_DATABASE_URL: postgresql://scos_worker:ci@postgres:5432/scos_memory?sslmode=require
           SCOS_CREDENTIAL_VAULT_MASTER_KEY: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
           GRAPHIFY_WORKSPACE_HOST_PATH: /tmp
           CONTROL_PLANE_API_KEY: ci-openai-control-key

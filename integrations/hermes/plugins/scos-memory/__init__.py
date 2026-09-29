@@ -6,14 +6,16 @@ backend service directly. At registration time it fetches the live tool
 list from mcp-gateway's tools/list and registers each one generically, so
 the tool surface here never drifts behind the fabric as it grows (it used
 to hardcode a 7-tool memory-only list pointed at hermes-provider). If the
-gateway is unreachable at startup, a small static fallback list keeps the
-plugin usable in a degraded state.
+gateway is unreachable at startup, the two core tools (scos_recall,
+scos_status) are registered from a static schema and a warning is logged;
+their calls go to the same gateway and succeed once it is reachable.
 
 Reads connection settings from the shared ~/.hermes/scos.env file used by
 the other SCOS integrations.
 """
 
 import json
+import logging
 import os
 import ssl
 import urllib.error
@@ -23,7 +25,7 @@ from pathlib import Path
 
 
 ENV_PATH = Path.home() / ".hermes" / "scos.env"
-SESSION_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "scos-hermes-agent"))
+logger = logging.getLogger(__name__)
 
 # Minimal fallback used only if the gateway can't be reached at registration
 # time, so the plugin degrades gracefully instead of registering nothing.
@@ -80,16 +82,31 @@ def _gateway_headers(env):
     return headers
 
 
-def _gateway_rpc(method, params, timeout=30):
-    env = _load_env()
+def _session_id(env, hermes_session=""):
+    """The recall session: Hermes' own session when it passes one, mapped to
+    the provider's UUID contract exactly as the scos memory-provider plugin
+    maps it; otherwise one stable session per tenant/principal (never one
+    shared by every user)."""
+    tenant, principal = env.get("SCOS_TENANT_ID", ""), env.get("SCOS_PRINCIPAL_ID", "")
+    if hermes_session:
+        try:
+            return str(uuid.UUID(hermes_session))
+        except (ValueError, AttributeError, TypeError):
+            identity = f"{tenant}\0{principal}\0{hermes_session}"
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, "scos-hermes-session:" + identity))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"scos-hermes-agent:{tenant}\0{principal}"))
+
+
+def _gateway_rpc(method, params, timeout=30, env=None):
+    env = env or _load_env()
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    request = urllib.request.Request(
-        env["SCOS_GATEWAY_URL"],
-        data=json.dumps(payload).encode(),
-        headers=_gateway_headers(env),
-        method="POST",
-    )
     try:
+        request = urllib.request.Request(
+            env["SCOS_GATEWAY_URL"],
+            data=json.dumps(payload).encode(),
+            headers=_gateway_headers(env),
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context(env)) as response:
             body = response.read().decode()
             return json.loads(body) if body else {}
@@ -99,11 +116,12 @@ def _gateway_rpc(method, params, timeout=30):
         return {"error": {"code": -1, "message": str(error)}}
 
 
-def _call(tool, arguments):
+def _call(tool, arguments, hermes_session=""):
+    env = _load_env()
     args = dict(arguments or {})
     if tool == "scos_recall":
-        args.setdefault("session_id", SESSION_ID)
-    response = _gateway_rpc("tools/call", {"name": tool, "arguments": args})
+        args.setdefault("session_id", _session_id(env, hermes_session))
+    response = _gateway_rpc("tools/call", {"name": tool, "arguments": args}, env=env)
     if "error" in response:
         return {"error": response["error"]}
     result = response.get("result", {})
@@ -119,8 +137,7 @@ def _call(tool, arguments):
 
 def _handler(tool):
     def handle(arguments, **kwargs):
-        del kwargs
-        return json.dumps(_call(tool, arguments))
+        return json.dumps(_call(tool, arguments, str(kwargs.get("session_id") or "")))
     return handle
 
 
@@ -129,6 +146,10 @@ def _discover_tools():
     tools = (response.get("result") or {}).get("tools")
     if isinstance(tools, list) and tools:
         return tools
+    logger.warning(
+        "SCOS tool discovery failed (%s); registering core tools only",
+        response.get("error") or "empty tools/list",
+    )
     return FALLBACK_TOOLS
 
 

@@ -1,3 +1,3 @@
-from .manifest import Manifest
+from .manifest import HookDef, Manifest, SkillDef
 
-__all__ = ["Manifest"]
+__all__ = ["HookDef", "Manifest", "SkillDef"]

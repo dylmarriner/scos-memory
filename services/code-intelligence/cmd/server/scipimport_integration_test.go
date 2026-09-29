@@ -30,7 +30,7 @@ func TestPGIndexSnapshotFromSCIPExtractsRealSymbols(t *testing.T) {
 		t.Fatalf("create snapshot: %v", err)
 	}
 
-	count, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, sampleSCIPIndex())
+	count, _, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, sampleSCIPIndex())
 	if err != nil {
 		t.Fatalf("index from SCIP: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestPGIndexSnapshotFromSCIPReusesIdentityAcrossSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 1: %v", err)
 	}
-	if _, err := store.IndexSnapshotFromSCIP(ctx, snap1, repoID, sampleSCIPIndex()); err != nil {
+	if _, _, err := store.IndexSnapshotFromSCIP(ctx, snap1, repoID, sampleSCIPIndex()); err != nil {
 		t.Fatalf("index snapshot 1: %v", err)
 	}
 	before, err := store.QueryByPathOrFQN(ctx, repoID, "main", "create_user")
@@ -105,7 +105,7 @@ func TestPGIndexSnapshotFromSCIPReusesIdentityAcrossSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot 2: %v", err)
 	}
-	if _, err := store.IndexSnapshotFromSCIP(ctx, snap2, repoID, sampleSCIPIndex()); err != nil {
+	if _, _, err := store.IndexSnapshotFromSCIP(ctx, snap2, repoID, sampleSCIPIndex()); err != nil {
 		t.Fatalf("index snapshot 2: %v", err)
 	}
 	after, err := store.QueryByPathOrFQN(ctx, repoID, "main", "create_user")
@@ -137,7 +137,7 @@ func TestPGIndexSnapshotFromSCIPHandlesEmptyIndex(t *testing.T) {
 		t.Fatalf("create snapshot: %v", err)
 	}
 
-	count, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, &scip.Index{})
+	count, _, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, &scip.Index{})
 	if err != nil {
 		t.Fatalf("index empty SCIP index: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestPGIndexSnapshotFromSCIPCreatesRelationshipEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if _, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, sampleSCIPIndexWithRelationships()); err != nil {
+	if _, _, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, sampleSCIPIndexWithRelationships()); err != nil {
 		t.Fatalf("index from SCIP: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestPGIndexSnapshotFromSCIPCreatesOccurrenceReferenceEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	if _, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, sampleSCIPIndexWithOccurrenceReferences()); err != nil {
+	if _, _, err := store.IndexSnapshotFromSCIP(ctx, snap, repoID, sampleSCIPIndexWithOccurrenceReferences()); err != nil {
 		t.Fatalf("index from SCIP: %v", err)
 	}
 

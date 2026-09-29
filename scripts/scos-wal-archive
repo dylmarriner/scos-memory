@@ -1,4 +1,11 @@
 #!/bin/sh
+# PostgreSQL archive_command: scos-wal-archive %p %f
+#
+# PostgreSQL treats exit 0 as "this segment is safely archived" and may then
+# recycle it, so the copy must be durable before exiting and an existing
+# archived segment must never be overwritten with different content (that
+# would silently corrupt the archive). Re-archiving an identical segment,
+# which happens after a crash between copy and acknowledgement, succeeds.
 set -eu
 
 source_path=$1
@@ -11,4 +18,20 @@ case "$destination" in
   *) echo "only an explicitly mounted file:// WAL destination is implemented" >&2; exit 1 ;;
 esac
 mkdir -p "$destination"
-install -m 0600 "$source_path" "$destination/$wal_name"
+target="$destination/$wal_name"
+
+if [ -e "$target" ]; then
+  if cmp -s "$source_path" "$target"; then
+    exit 0
+  fi
+  echo "refusing to overwrite archived WAL segment $wal_name with different content" >&2
+  exit 1
+fi
+
+partial="$target.partial.$$"
+trap 'rm -f "$partial"' EXIT
+install -m 0600 "$source_path" "$partial"
+sync "$partial"
+mv "$partial" "$target"
+sync "$destination"
+trap - EXIT

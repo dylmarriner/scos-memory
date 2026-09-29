@@ -90,16 +90,18 @@ var RequiredMetrics = map[string][]string{
 		MetricOutboxBacklog,
 		MetricDeadLetters,
 	},
+	// Staleness is scored on the read path against the stale-memory
+	// revalidation ledger (migration 000039) for the items actually served.
 	"retrieval-orchestrator": {
 		MetricRetrievalLatency,
-	},
-	// Index freshness, staleness and the embedding backlog are measured by the
-	// maintenance worker rather than the read path, which sees no freshness
-	// timestamp and would otherwise have to invent one.
-	"index-maintenance": {
 		MetricStaleRetrieval,
+	},
+	// The embedding backlog is measured by the maintenance worker's sweep.
+	"index-maintenance": {
 		MetricEmbeddingBacklog,
-		MetricIndexFreshness,
+	},
+	"policy-evaluation": {
+		MetricPolicyRegressionRate,
 	},
 	"consolidation": {
 		MetricPromotionRate,
@@ -123,9 +125,18 @@ var RequiredMetrics = map[string][]string{
 		MetricConfirmationRecall,
 		MetricFallbackUse,
 		MetricBypassAttempts,
+		MetricCheckpointCoverage,
+		MetricTriggerCoverage,
+		MetricRoutePrecision,
+		MetricRouteRecall,
+		MetricMissedCapabilityRate,
+		MetricUnnecessaryCapabilityRate,
+		MetricCostPerSuccessfulTask,
+		MetricAutonomousRecovery,
 	},
 	"context-optimisation": {
 		MetricTokenReduction,
+		MetricSemanticRetention,
 		MetricInstructionRetention,
 		MetricExactValueRetention,
 		MetricRestorationSuccess,
@@ -133,6 +144,7 @@ var RequiredMetrics = map[string][]string{
 	"code-intelligence": {
 		MetricIndexFreshness,
 		MetricSymbolQuality,
+		MetricReferenceQuality,
 		MetricContextTokensPerTask,
 	},
 	"execution-proxy": {
@@ -144,6 +156,9 @@ var RequiredMetrics = map[string][]string{
 		MetricSignatureState,
 		MetricHookLatency,
 		MetricHookFailure,
+		MetricExtensionPermissions,
+		MetricResourceConsumption,
+		MetricSkillSelection,
 	},
 	"compatibility-gateway": {
 		MetricAdapterTier,
@@ -151,6 +166,7 @@ var RequiredMetrics = map[string][]string{
 	"transparency-projection": {
 		MetricEventStreamLag,
 		MetricProjectionFreshness,
+		MetricGraphConsistency,
 	},
 	"memory-intelligence": {
 		MetricUserModelChanges,

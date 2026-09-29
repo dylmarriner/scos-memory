@@ -202,9 +202,9 @@ func TestLocalRecoveryInspectsPersistedLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateName, err := (&controlPlane{store: reloaded}).beginRecovery(context.Background(), "tenant", "actor", "recover-1")
-	if err != nil || stateName != "recovering" {
-		t.Fatalf("recovery state = %q, err = %v", stateName, err)
+	claim, err := (&controlPlane{store: reloaded}).beginRecovery(context.Background(), "tenant", "actor", "recover-1", "owner-1")
+	if err != nil || !claim.Claimed || claim.State != "recovering" || claim.Attempts != 1 {
+		t.Fatalf("recovery claim = %+v, err = %v", claim, err)
 	}
 	final, err := newLocalStateStore(path)
 	if err != nil {
