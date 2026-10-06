@@ -2,11 +2,11 @@
 
 - **Status:** Canonical placement guide for the continuous ARIS runtime
 - **Canonical copy:** `dylmarriner/ARIS/docs/ARIS_SYSTEM_MAP.md`
-- **Mirrored in:** `ARIS-harness`, `ARIS-intelligence`, `scos-memory` (each at `docs/ARIS_SYSTEM_MAP.md`)
+- **Mirrored in:** `ARIS-intelligence` and `scos-memory` (each at `docs/ARIS_SYSTEM_MAP.md`)
 - **Parent document:** [`ARIS_MASTER_TECHNICAL_BLUEPRINT.md`](https://github.com/dylmarriner/ARIS/blob/main/docs/ARIS_MASTER_TECHNICAL_BLUEPRINT.md)
 - **Last decided:** 2026-09-28
 
-This page answers one question: **which repository does a piece of ARIS belong in?** It does not replace the master blueprint. Where the two disagree, the master blueprint wins until it is updated. Edit the canonical copy first, then copy it unchanged into the three mirrors in the same change set. The ARIS-harness mirror additionally carries that repository's language switcher line, the Chinese translation `docs/ARIS_SYSTEM_MAP.zh.md` and its consistency record `docs/ARIS_SYSTEM_MAP.i18n.yaml`.
+This page answers one question: **which repository does a piece of ARIS belong in?** It does not replace the master blueprint. Where the two disagree, the master blueprint wins until it is updated. Edit the canonical copy first, then copy it unchanged into the two mirrors in the same change set. The standalone ARIS-Harness repository keeps its own focused architecture and migration documentation rather than mirroring this OS-level placement guide.
 
 ## 1. The shift this map describes
 
@@ -41,7 +41,7 @@ Because ARIS controls the operating system, most perception is semantic (`proces
                          ARIS                                         ARIS-harness
  ┌──────────────────────────────────────────────┐   ┌──────────────────────────────────────────┐
  │ PERCEPTION ADAPTERS                          │   │ TIER 2: WORLD MODEL                      │
- │ procfs systemd journald udev sysfs mounts    │   │ entities, relationships, activities,     │
+ │ CN_PROC procfs systemd journald udev sysfs   │   │ entities, relationships, activities,     │
  │ NetworkManager PipeWire KDE/KWin filesystem  │   │ intentions, confidence, provenance       │
  │ microphone camera screen sensors             │   │                                          │
  │ Home Assistant                               │   │ ATTENTION / SALIENCE                     │
@@ -78,7 +78,7 @@ Rules for the pipeline:
 
 | Part | Owner | Implemented today | Status |
 | --- | --- | --- | --- |
-| Linux perception (procfs, systemd, journald, udev, sysfs, mounts, NetworkManager, login sessions) | ARIS | `packages/domain` sources, `services/eventd` | Partial, exercised live |
+| Linux perception (kernel CN_PROC + procfs, systemd, journald, udev, sysfs, mounts, NetworkManager, login sessions) | ARIS | `kernel/proc-events`, `packages/domain` sources, `services/eventd` | Partial, kernel process path exercised live on Linnyux |
 | KDE/KWin window observation | ARIS | `shell/kwin/aris-window-observer` | Partial |
 | Microphone, camera, screen capture | ARIS (perception service publishing `observation.*`) | None | Planned. Speech and vision models used for it are trained and released by ARIS-intelligence |
 | Home Assistant and smart-home devices | ARIS (perception and executor adapters) | None | Planned |
@@ -102,7 +102,7 @@ Rules for the pipeline:
 
 ### 5.1 World state has two tiers
 
-**Tier 1, ARIS (`aris-eventd`):** raw host state and ring buffers, close to the hardware. It answers "should this event leave the host at all?" with cheap, deterministic filtering and coalescing, and publishes normalized events.
+**Tier 1, ARIS (`aris-eventd`):** raw host state and ring buffers, including kernel-originated CN_PROC process lifecycle events, close to the hardware. It answers "should this event leave the host at all?" with cheap, deterministic filtering and coalescing, and publishes normalized events.
 
 **Tier 2, ARIS-harness:** the cognitive world model and attention. It answers "does this matter to a goal, and should ARIS speak, act or wait?" It holds entities, relationships, activities, intentions, confidence and provenance.
 
