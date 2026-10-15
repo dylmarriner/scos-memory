@@ -32,3 +32,13 @@ services:
       # shared internal self-signed dev CA every other service already uses.
       SCOS_TLS_CERT_FILE: /etc/scos/tls/tls.crt
       SCOS_TLS_KEY_FILE: /etc/scos/tls/tls.key
+  transparency-projection:
+    environment:
+      # The local stack does not run cloud-control-plane (accounts, teams,
+      # admin). Say so explicitly, so the dashboard hides the account views
+      # instead of offering sign-up and sign-in forms nothing can answer.
+      SCOS_CLOUD_CONTROL_PLANE_URL: disabled
+      # Show the single local user's data: the same reserved identity
+      # mcp-gateway gives every caller in local mode.
+      SCOS_SERVICE_TENANT_ID: 00000000-0000-0000-0000-000000000001
+      SCOS_SERVICE_PRINCIPAL_ID: 00000000-0000-0000-0000-000000000001

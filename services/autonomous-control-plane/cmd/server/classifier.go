@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -104,9 +105,23 @@ var phraseIndicators = []phraseGroup{
 	{"planning", []string{"plan", "design", "strategy", "how should we", "approach for", "break down"}},
 	{"monitoring", []string{"status of", "health of", "is it up", "metrics", "dashboard", "alert"}},
 	{"recovery", []string{"crashed", "recover", "rollback", "restore", "failed run", "interrupted"}},
-	{"high_impact_action", []string{"delete", "remove access", "send email", "make payment", "production deploy", "permission", "drop table", "revoke"}},
+	{"high_impact_action", []string{"delete", "remove access", "send email", "make payment", "production deploy", "permission", "drop table", "revoke", "destructive"}},
 	{"compile", []string{"compile", "build", "test failure"}},
 }
+
+// contextCompilation matches "compile" whose object is the context itself
+// ("compile context", "compile a minimal context capsule", "compile the
+// working context"): that is context assembly, not code work.
+var contextCompilation = regexp.MustCompile(`\bcompil\w*\b[^.;:!?]{0,40}\b(context|capsule)\b`)
+
+// commandRequest matches an explicit request to run a command in any of its
+// common phrasings ("execute the command", "run the proxy command safely",
+// "run a read-only command", "issue the execute command").
+var commandRequest = regexp.MustCompile(`\b(run|execute|exec|issue|invoke)\b[^.;:!?]{0,40}\bcommands?\b`)
+
+// proxyExecution matches work addressed to the execution proxy itself
+// ("through the safe execution proxy", "a destructive proxy command").
+var proxyExecution = regexp.MustCompile(`\b(proxy|shell|terminal)\s+commands?\b|\bthrough\b[^.;:!?]{0,30}\bproxy\b`)
 
 // classifyIntent produces the multi-label classification for a request.
 func classifyIntent(req RouteRequest) classification {
@@ -162,6 +177,9 @@ func classifyIntent(req RouteRequest) classification {
 				// "compile"/"build"/"test failure" indicate code work rather
 				// than a label of their own.
 				if label == "compile" {
+					if p == "compile" && contextCompilation.MatchString(input) {
+						continue
+					}
 					board.observe("code_lookup", confidencePhrase, "phrase:"+p)
 					board.observe("repository_analysis", confidencePhrase, "phrase:"+p)
 					continue
@@ -169,6 +187,13 @@ func classifyIntent(req RouteRequest) classification {
 				board.observe(label, confidencePhrase, "phrase:"+p)
 			}
 		}
+	}
+
+	if commandRequest.MatchString(input) {
+		board.observe("command_execution", confidencePhrase, "phrase:command_request")
+	}
+	if proxyExecution.MatchString(input) {
+		board.observe("command_execution", confidencePhrase, "phrase:proxy_execution")
 	}
 
 	// A code change implies the repository must be analysed and read first.

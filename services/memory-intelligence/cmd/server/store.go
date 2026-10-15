@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -268,7 +269,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		placeholders[i] = fmt.Sprintf("$%d", i+2)
 	}
 	query := fmt.Sprintf(`
-		SELECT mi.id, mi.namespace_id, mi.authority_level, mi.confidence_score, mi.created_at, mi.status,
+		SELECT mi.id, mi.namespace_id, mi.authority_level, mi.confidence_score, mi.created_at, mi.status, mi.type,
 		       mv.content, mv.structured_content, mv.version_number, mv.created_at
 		FROM memory_items mi
 		JOIN memory_versions mv ON mv.id = mi.current_version_id
@@ -286,7 +287,8 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		var f Fact
 		var structuredRaw []byte
 		var itemCreatedAt, versionCreatedAt time.Time
-		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
+		var memoryType string
+		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &memoryType, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -306,6 +308,16 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		}
 		f.Network = structured.Network
 		f.Source = structured.Source
+		// Memories promoted by the consolidation worker before it recorded
+		// these fields carry only a title and evidence: their network
+		// follows from the memory type, and they were observed in the
+		// conversation they were consolidated from.
+		if f.Network == "" {
+			f.Network = memoryTypeToNetwork(memoryType)
+		}
+		if f.Source == "" {
+			f.Source = "observed"
+		}
 		f.Scope = structured.Scope
 		f.ObservedAt = structured.ObservedAt
 		f.ValidFrom = structured.ValidFrom
@@ -333,7 +345,16 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 	}
 
 	for _, f := range facts {
-		evRows, err := db.QueryContext(ctx, `SELECT reference_id FROM memory_evidence WHERE memory_id=$1 AND evidence_kind='fact_citation'`, f.ID)
+		// Fact citations are the references a writer supplied, reported as
+		// given; every other kind (the turn events and messages a memory was
+		// consolidated from) is reported as kind:reference, so a memory
+		// learned from conversation shows where it came from.
+		evRows, err := db.QueryContext(ctx, `
+			SELECT CASE WHEN evidence_kind = 'fact_citation' THEN reference_id::text
+			            ELSE evidence_kind || ':' || reference_id::text END
+			  FROM memory_evidence
+			 WHERE memory_id = $1 AND evidence_kind <> 'fact'
+			 ORDER BY created_at, id`, f.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -378,14 +399,17 @@ func getFact(ctx context.Context, db querier, tenantID, factID string) (*Fact, e
 // tells a reader *why* a fact stopped being current (contradicted vs.
 // duplicated), the pointer mechanism is identical either way. Called on the
 // same transaction as the canonical fact's own insertFact, by the caller.
-func markFactMerged(ctx context.Context, tx *sql.Tx, tenantID, duplicateFactID, canonicalFactID string) error {
+//
+// The duplicate_of relation carries the merge decision's own measure of how
+// closely the two statements match (mergeDecision.Score).
+func markFactMerged(ctx context.Context, tx *sql.Tx, tenantID, duplicateFactID, canonicalFactID string, matchScore float64) error {
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE memory_items SET status='merged', superseded_by_id=$1
 		WHERE id=$2 AND tenant_id=$3 AND status='active'
 	`, canonicalFactID, duplicateFactID, tenantID); err != nil {
 		return fmt.Errorf("mark fact merged: %w", err)
 	}
-	return insertRelation(ctx, tx, canonicalFactID, duplicateFactID, "duplicate_of")
+	return insertRelation(ctx, tx, canonicalFactID, duplicateFactID, "duplicate_of", clampFloat(matchScore, 0, 1))
 }
 
 // correctFact implements scos_correct (§25/§42): facts are append-only and
@@ -454,8 +478,17 @@ func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID,
 	`, newFactID, oldFactID, id.TenantID); err != nil {
 		return nil, fmt.Errorf("mark fact superseded: %w", err)
 	}
-	if err := insertRelation(ctx, tx, newFactID, oldFactID, "supersedes"); err != nil {
+	// The correction is an explicit act by the caller, recorded as it
+	// happened: the supersession itself is certain, whatever the confidence
+	// in either statement.
+	if err := insertRelation(ctx, tx, newFactID, oldFactID, "supersedes", 1.0); err != nil {
 		return nil, fmt.Errorf("insert supersedes relation: %w", err)
+	}
+	if err := recordDiaryEntry(ctx, tx, id, "fact_corrected", map[string]any{
+		"fact_id": newFactID, "previous_fact_id": oldFactID, "reason": reason,
+		"summary": truncate(newContent, 120),
+	}); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -544,6 +577,13 @@ func forgetAllFacts(ctx context.Context, db *sql.DB, id requestIdentity, namespa
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return 0, err
+	}
+	if affected > 0 {
+		if err := recordDiaryEntry(ctx, tx, id, "facts_bulk_forgotten", map[string]any{
+			"namespace_id": namespaceID, "revoked_count": affected,
+		}); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -756,6 +796,13 @@ func forgetFact(ctx context.Context, db *sql.DB, id requestIdentity, factID stri
 			current = predecessor
 		}
 	}
+	if revoked > 0 {
+		if err := recordDiaryEntry(ctx, tx, id, "fact_forgotten", map[string]any{
+			"fact_id": factID, "cascade": cascade, "revoked_count": revoked,
+		}); err != nil {
+			return 0, err
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -763,20 +810,38 @@ func forgetFact(ctx context.Context, db *sql.DB, id requestIdentity, factID stri
 	return revoked, nil
 }
 
-// insertRelation records a temporal relation between two facts, deduplicated
-// on the (source, type, target) primary key.
-func insertRelation(ctx context.Context, tx *sql.Tx, sourceFactID, targetFactID, relType string) error {
+// validRelationConfidence reports whether c is a usable relation
+// confidence: a probability in [0, 1] (NaN fails both comparisons).
+func validRelationConfidence(c float64) bool {
+	return c >= 0 && c <= 1
+}
+
+// relationConfidenceFromFacts is the confidence a relation between two facts
+// carries when nobody stated one: a link can be no more certain than the
+// less certain of the two facts it connects.
+func relationConfidenceFromFacts(a, b *Fact) float64 {
+	return clampFloat(math.Min(a.Confidence, b.Confidence), 0, 1)
+}
+
+// insertRelation records a temporal relation between two facts with the
+// confidence the caller determined for it. A relation already recorded for
+// the same (source, type, target) takes the newer confidence: re-asserting
+// a relation is a statement about it now.
+func insertRelation(ctx context.Context, tx *sql.Tx, sourceFactID, targetFactID, relType string, confidence float64) error {
+	if !validRelationConfidence(confidence) {
+		return fmt.Errorf("relation confidence %v is outside [0, 1]", confidence)
+	}
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_relations (source_memory_id, relation_type, target_memory_id, confidence_score)
-		VALUES ($1,$2,$3,0.8)
-		ON CONFLICT (source_memory_id, relation_type, target_memory_id) DO NOTHING
-	`, sourceFactID, relType, targetFactID)
+		VALUES ($1,$2,$3,$4)
+		ON CONFLICT (source_memory_id, relation_type, target_memory_id) DO UPDATE SET confidence_score = EXCLUDED.confidence_score
+	`, sourceFactID, relType, targetFactID, confidence)
 	return err
 }
 
 func loadRelations(ctx context.Context, db querier, tenantID string) ([]*TemporalRelation, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT r.source_memory_id, r.target_memory_id, r.relation_type, r.created_at
+		SELECT r.source_memory_id, r.target_memory_id, r.relation_type, r.confidence_score, r.created_at
 		FROM memory_relations r
 		JOIN memory_items mi ON mi.id = r.source_memory_id
 		WHERE mi.tenant_id = $1
@@ -790,7 +855,7 @@ func loadRelations(ctx context.Context, db querier, tenantID string) ([]*Tempora
 	for rows.Next() {
 		var rel TemporalRelation
 		var createdAt time.Time
-		if err := rows.Scan(&rel.SourceID, &rel.TargetID, &rel.Type, &createdAt); err != nil {
+		if err := rows.Scan(&rel.SourceID, &rel.TargetID, &rel.Type, &rel.Confidence, &createdAt); err != nil {
 			return nil, err
 		}
 		rel.CreatedAt = createdAt.UTC().Format(time.RFC3339)
@@ -891,7 +956,11 @@ func getEntity(ctx context.Context, db querier, tenantID, entityID string) (*Ent
 // what belief_evidence's hard foreign key actually points at.
 func factEvidenceRowID(ctx context.Context, tx *sql.Tx, factID string) (string, error) {
 	var evidenceID string
-	err := tx.QueryRowContext(ctx, `SELECT id FROM memory_evidence WHERE memory_id=$1 AND evidence_kind='fact' AND reference_id=$1`, factID).Scan(&evidenceID)
+	// factID is bound twice rather than reusing $1: memory_id is uuid and
+	// reference_id text, and one parameter cannot be inferred as both (the
+	// shared form failed every belief write with "operator does not exist:
+	// text = uuid").
+	err := tx.QueryRowContext(ctx, `SELECT id FROM memory_evidence WHERE memory_id=$1 AND evidence_kind='fact' AND reference_id=$2`, factID, factID).Scan(&evidenceID)
 	if err == nil {
 		return evidenceID, nil
 	}
@@ -899,8 +968,8 @@ func factEvidenceRowID(ctx context.Context, tx *sql.Tx, factID string) (string, 
 		return "", err
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO memory_evidence (memory_id, evidence_kind, reference_id) VALUES ($1,'fact',$1) RETURNING id
-	`, factID).Scan(&evidenceID); err != nil {
+		INSERT INTO memory_evidence (memory_id, evidence_kind, reference_id) VALUES ($1,'fact',$2) RETURNING id
+	`, factID, factID).Scan(&evidenceID); err != nil {
 		return "", fmt.Errorf("create fact evidence row: %w", err)
 	}
 	return evidenceID, nil
@@ -940,7 +1009,7 @@ func insertBelief(ctx context.Context, tx *sql.Tx, id requestIdentity, belief *B
 
 func loadBeliefs(ctx context.Context, db querier, tenantID string) ([]*Belief, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, premise, conclusion, confidence, COALESCE(revised_by::text,''), created_at
+		SELECT id, premise, conclusion, confidence, COALESCE(revised_by::text,''), status, created_at, updated_at
 		FROM beliefs WHERE tenant_id=$1 ORDER BY created_at DESC
 	`, tenantID)
 	if err != nil {
@@ -950,13 +1019,15 @@ func loadBeliefs(ctx context.Context, db querier, tenantID string) ([]*Belief, e
 	for rows.Next() {
 		var b Belief
 		var premise sql.NullString
-		var createdAt time.Time
-		if err := rows.Scan(&b.ID, &premise, &b.Conclusion, &b.Confidence, &b.RevisedBy, &createdAt); err != nil {
+		var createdAt, updatedAt time.Time
+		if err := rows.Scan(&b.ID, &premise, &b.Conclusion, &b.Confidence, &b.RevisedBy, &b.Status, &createdAt, &updatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		b.Premise = premise.String
 		b.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		b.UpdatedAt = updatedAt.UTC().Format(time.RFC3339Nano)
+		b.revisedAt = updatedAt
 		beliefs = append(beliefs, &b)
 	}
 	if err := rows.Err(); err != nil {
@@ -1001,58 +1072,191 @@ func loadBeliefs(ctx context.Context, db querier, tenantID string) ([]*Belief, e
 	return beliefs, nil
 }
 
-// insertHierarchyNode persists a memory-palace hierarchy node.
-func insertHierarchyNode(ctx context.Context, tx *sql.Tx, tenantID string, node *HierarchyNode) (string, error) {
+// insertHierarchyNode persists a memory-palace hierarchy node and its
+// direct member facts. The node carries no stored fact count: loadHierarchy
+// counts the active facts in its subtree on every read.
+func insertHierarchyNode(ctx context.Context, tx *sql.Tx, tenantID string, node *HierarchyNode, factIDs []string) (string, error) {
 	var parentID any
 	if node.ParentID != "" {
 		parentID = node.ParentID
 	}
 	var id string
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO hierarchy_nodes (tenant_id, level, name, parent_id, scope, summary, fact_count)
-		VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id
-	`, tenantID, string(node.Level), node.Name, parentID, node.Scope, node.Summary, node.FactCount).Scan(&id); err != nil {
+		INSERT INTO hierarchy_nodes (tenant_id, level, name, parent_id, scope, summary)
+		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id
+	`, tenantID, string(node.Level), node.Name, parentID, node.Scope, node.Summary).Scan(&id); err != nil {
 		return "", fmt.Errorf("insert hierarchy node: %w", err)
+	}
+	if err := addHierarchyFacts(ctx, tx, tenantID, id, factIDs); err != nil {
+		return "", err
 	}
 	return id, nil
 }
 
+// addHierarchyFacts files facts under a hierarchy node. Re-filing a fact
+// already under the node is a no-op. The caller has already established
+// that every fact is an active fact of tenantID.
+func addHierarchyFacts(ctx context.Context, tx *sql.Tx, tenantID, nodeID string, factIDs []string) error {
+	for _, factID := range factIDs {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO hierarchy_node_facts (node_id, memory_id, tenant_id) VALUES ($1,$2,$3)
+			ON CONFLICT (node_id, memory_id) DO NOTHING
+		`, nodeID, factID, tenantID); err != nil {
+			return fmt.Errorf("file fact %s under hierarchy node: %w", factID, err)
+		}
+	}
+	if len(factIDs) > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE hierarchy_nodes SET updated_at = now() WHERE id = $1 AND tenant_id = $2`, nodeID, tenantID); err != nil {
+			return fmt.Errorf("touch hierarchy node: %w", err)
+		}
+	}
+	return nil
+}
+
+// hierarchyNodeExists reports whether nodeID is a hierarchy node of tenantID
+// visible to the caller. A foreign key check alone would accept another
+// tenant's node, since referential checks are not subject to row security.
+func hierarchyNodeExists(ctx context.Context, q querier, tenantID, nodeID string) (bool, error) {
+	if !isUUIDLike(nodeID) {
+		return false, nil
+	}
+	var exists bool
+	err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM hierarchy_nodes WHERE id=$1 AND tenant_id=$2)`, nodeID, tenantID).Scan(&exists)
+	return exists, err
+}
+
+// loadHierarchy returns every hierarchy node of the tenant. A node's
+// fact_ids are the facts filed directly under it that are still active; its
+// fact_count is the number of distinct active facts filed anywhere in its
+// subtree (the node and its descendants), so a palace counts what its
+// wings, drawers and closets hold. Corrected, merged, forgotten and expired
+// facts stop counting the moment they stop being active.
 func loadHierarchy(ctx context.Context, db querier, tenantID string) ([]*HierarchyNode, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, level, name, COALESCE(parent_id::text,''), scope, COALESCE(summary,''), fact_count, updated_at
+		SELECT id, level, name, COALESCE(parent_id::text,''), scope, COALESCE(summary,''), updated_at
 		FROM hierarchy_nodes WHERE tenant_id=$1 ORDER BY created_at DESC
 	`, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	nodes := make([]*HierarchyNode, 0)
+	byID := make(map[string]*HierarchyNode)
 	for rows.Next() {
 		var n HierarchyNode
 		var level string
 		var updatedAt time.Time
-		if err := rows.Scan(&n.ID, &level, &n.Name, &n.ParentID, &n.Scope, &n.Summary, &n.FactCount, &updatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &level, &n.Name, &n.ParentID, &n.Scope, &n.Summary, &updatedAt); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		n.Level = MemoryHierarchy(level)
 		n.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
 		nodes = append(nodes, &n)
+		byID[n.ID] = &n
 	}
-	return nodes, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	// Close before the next query: db may be one pinned transaction
+	// connection (see loadFactsByStatus).
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	memberRows, err := db.QueryContext(ctx, `
+		SELECT f.node_id::text, f.memory_id::text
+		  FROM hierarchy_node_facts f
+		  JOIN memory_items mi ON mi.id = f.memory_id
+		 WHERE f.tenant_id = $1
+		   AND mi.status = 'active'
+		   AND (mi.valid_until IS NULL OR mi.valid_until > now())
+		 ORDER BY f.created_at ASC
+	`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	direct := make(map[string][]string)
+	for memberRows.Next() {
+		var nodeID, factID string
+		if err := memberRows.Scan(&nodeID, &factID); err != nil {
+			memberRows.Close()
+			return nil, err
+		}
+		direct[nodeID] = append(direct[nodeID], factID)
+	}
+	if err := memberRows.Err(); err != nil {
+		memberRows.Close()
+		return nil, err
+	}
+	if err := memberRows.Close(); err != nil {
+		return nil, err
+	}
+
+	children := make(map[string][]string)
+	for _, n := range nodes {
+		if n.ParentID != "" {
+			children[n.ParentID] = append(children[n.ParentID], n.ID)
+		}
+	}
+	for _, n := range nodes {
+		n.FactIDs = direct[n.ID]
+		n.FactCount = len(subtreeFacts(n.ID, children, direct))
+	}
+	return nodes, nil
 }
 
-// insertDiaryEntry persists a raw diary payload verbatim as JSON content so
-// it can be read back byte-for-byte into the same `any` shape it arrived as.
-func insertDiaryEntry(ctx context.Context, tx *sql.Tx, id requestIdentity, entry any) error {
-	body, err := json.Marshal(entry)
+// subtreeFacts is the set of distinct facts filed under root or any of its
+// descendants. visited guards against a parent cycle, which the schema does
+// not itself forbid.
+func subtreeFacts(root string, children, direct map[string][]string) map[string]bool {
+	facts := make(map[string]bool)
+	visited := make(map[string]bool)
+	stack := []string{root}
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if visited[id] {
+			continue
+		}
+		visited[id] = true
+		for _, f := range direct[id] {
+			facts[f] = true
+		}
+		stack = append(stack, children[id]...)
+	}
+	return facts
+}
+
+// recordDiaryEntry appends one entry to the tenant's diary (§25.6: the
+// chronological synthesis of what happened to memory). It is written in the
+// same transaction as the change it describes, so the diary never records a
+// change that rolled back and never misses one that committed. Entries
+// describe the change and cite ids; detail never carries more content than
+// the change's own short summary.
+func recordDiaryEntry(ctx context.Context, tx *sql.Tx, id requestIdentity, entryType string, detail map[string]any) error {
+	content := make(map[string]any, len(detail)+3)
+	for k, v := range detail {
+		content[k] = v
+	}
+	content["type"] = entryType
+	content["principal_id"] = id.PrincipalID
+	content["recorded_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	body, err := json.Marshal(content)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO diary_entries (tenant_id, principal_id, entry_type, content)
-		VALUES ($1,$2,'observation',$3)
-	`, id.TenantID, id.PrincipalID, string(body))
-	return err
+	var principal any
+	if id.PrincipalID != "" {
+		principal = id.PrincipalID
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO diary_entries (tenant_id, principal_id, entry_type, content, source)
+		VALUES ($1,$2,$3,$4,'memory-intelligence')
+	`, id.TenantID, principal, entryType, string(body)); err != nil {
+		return fmt.Errorf("record %s diary entry: %w", entryType, err)
+	}
+	return nil
 }
 
 // FactFeedback is quality signal recorded against a fact (mem0's
@@ -1078,21 +1282,10 @@ func recordFactFeedback(ctx context.Context, db *sql.DB, id requestIdentity, fac
 	if err := setPrincipalContext(ctx, tx, id); err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]any{
-		"type":        "fact_feedback",
-		"fact_id":     factID,
-		"feedback":    feedback,
-		"reason":      reason,
-		"recorded_at": time.Now().UTC().Format(time.RFC3339),
-	})
-	if err != nil {
+	if err := recordDiaryEntry(ctx, tx, id, "fact_feedback", map[string]any{
+		"fact_id": factID, "feedback": feedback, "reason": reason,
+	}); err != nil {
 		return err
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO diary_entries (tenant_id, principal_id, entry_type, content)
-		VALUES ($1,$2,'fact_feedback',$3)
-	`, id.TenantID, id.PrincipalID, string(body)); err != nil {
-		return fmt.Errorf("record fact feedback: %w", err)
 	}
 	return tx.Commit()
 }
@@ -1125,9 +1318,21 @@ func truncate(s string, max int) string {
 	return s[:max]
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
+// defaultWritableNamespace is the namespace a fact goes to when the caller
+// names none: the one they own, else one they may write candidates to,
+// preferring namespaces they administer. Empty when there is none.
+func defaultWritableNamespace(ctx context.Context, q querier, id requestIdentity) (string, error) {
+	var ns string
+	err := q.QueryRowContext(ctx, `
+		SELECT n.id::text
+		  FROM namespaces n
+		  LEFT JOIN namespace_memberships m ON m.namespace_id = n.id AND m.principal_id = $2::uuid
+		 WHERE n.tenant_id = $1::uuid
+		   AND (n.owner_principal_id = $2::uuid OR m.can_write_candidates)
+		 ORDER BY (n.owner_principal_id = $2::uuid) DESC, m.can_administer DESC NULLS LAST, n.created_at ASC
+		 LIMIT 1`, id.TenantID, id.PrincipalID).Scan(&ns)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
 	}
-	return b
+	return ns, err
 }

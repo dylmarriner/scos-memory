@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -107,9 +108,14 @@ class RemainingBatchTests(unittest.TestCase):
         conn = FakeConn()
         rows = worker._unembedded_batch(conn, 10, "space-1")
         self.assertEqual(len(rows), 1)
-        self.assertIn("me.embedding_space_id = %s::uuid", conn._sql)
-        self.assertNotIn("me.model = %s", conn._sql)
+        self.assertIn("scos_worker_unembedded_versions(%s::uuid, %s)", conn._sql)
         self.assertEqual(conn._params, ("space-1", 10))
+        # The scan itself lives in the migration: it must match the exact
+        # embedding space, never just the model name.
+        migration = (Path(__file__).resolve().parents[3] / "database/migrations/000043_worker_functions.sql").read_text()
+        scan = migration[migration.index("FUNCTION scos_worker_unembedded_versions"):migration.index("FUNCTION scos_worker_store_embedding")]
+        self.assertIn("me.embedding_space_id = p_space_id", scan)
+        self.assertNotIn("me.model", scan)
 
 
 class EmbedTextsTests(unittest.TestCase):
@@ -191,12 +197,13 @@ class ReplacementTests(unittest.TestCase):
         )
         self.assertEqual(len(conn.cur.calls), 1)
         sql, params = conn.cur.calls[0]
-        self.assertNotIn("DELETE FROM memory_embeddings", sql)
-        self.assertIn("embedding_space_id", sql)
-        self.assertIn(
-            "ON CONFLICT (memory_version_id, embedding_space_id, chunk_number)", sql
-        )
-        self.assertIn("space-1", params)
+        self.assertIn("scos_worker_store_embedding", sql)
+        self.assertEqual(params[:2], ("v1", "space-1"))
+        self.assertEqual(params[5], 3)
+        migration = (Path(__file__).resolve().parents[3] / "database/migrations/000043_worker_functions.sql").read_text()
+        store = migration[migration.index("FUNCTION scos_worker_store_embedding"):migration.index("FUNCTION scos_worker_expire_memories")]
+        self.assertNotIn("DELETE FROM memory_embeddings", store)
+        self.assertIn("ON CONFLICT (memory_version_id, embedding_space_id, chunk_number)", store)
 
 
 class RunCycleTests(unittest.TestCase):
@@ -214,14 +221,69 @@ class RunCycleTests(unittest.TestCase):
     def test_cycle_resolves_space_once_and_does_not_globally_purge_history(self):
         conn = self.FakeConn()
         with patch.object(worker, "_ensure_embedding_space", return_value="space-1") as ensure:
-            with patch.object(worker, "_unembedded_batch", return_value=[]) as batch:
-                with patch.object(worker, "_purge_stale_spaces", return_value=99) as purge:
-                    written = worker.run_cycle(conn)
+            with patch.object(worker, "_activate_embedding_space", return_value=False) as activate:
+                with patch.object(worker, "_unembedded_batch", return_value=[]) as batch:
+                    with patch.object(worker, "_purge_stale_spaces", return_value=99) as purge:
+                        written = worker.run_cycle(conn)
         self.assertEqual(written, 0)
         ensure.assert_called_once()
+        activate.assert_called_once_with(conn, "space-1")
         batch.assert_called_once_with(conn, worker.BATCH_SIZE, "space-1")
         purge.assert_not_called()
-        self.assertEqual(conn.commits, 1)
+        # The activation is committed on its own, then the empty batch.
+        self.assertEqual(conn.commits, 2)
+
+    def test_activation_survives_an_embedding_failure(self):
+        conn = self.FakeConn()
+        order = []
+        conn.commit = lambda: order.append("commit")
+        conn.rollback = lambda: order.append("rollback")
+        with patch.object(worker, "_ensure_embedding_space", return_value="space-1"):
+            with patch.object(worker, "_activate_embedding_space", side_effect=lambda *_: order.append("activate")):
+                with patch.object(worker, "_unembedded_batch", return_value=[{"id": "v1", "content": "x"}]):
+                    with patch.object(worker, "embed_texts", return_value=None):
+                        self.assertEqual(worker.run_cycle(conn), 0)
+        self.assertEqual(order, ["activate", "commit", "rollback"])
+
+
+class ActivationTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self, rowcount):
+            self.calls = []
+            self.rowcount = rowcount
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+    class FakeConn:
+        def __init__(self, rowcount):
+            self.cur = ActivationTests.FakeCursor(rowcount)
+
+        def cursor(self, row_factory=None):
+            return self.cur
+
+    def test_activation_marks_the_space_unless_it_is_already_active(self):
+        conn = self.FakeConn(rowcount=1)
+        self.assertTrue(worker._activate_embedding_space(conn, "space-2"))
+        sql, params = conn.cur.calls[0]
+        self.assertIn("UPDATE embedding_spaces", sql)
+        self.assertIn("SET activated_at", sql)
+        self.assertIn("IS DISTINCT FROM", sql)
+        self.assertEqual(params, ("space-2",))
+        self.assertFalse(worker._activate_embedding_space(self.FakeConn(rowcount=0), "space-2"))
+
+    def test_backlog_counts_against_the_active_space(self):
+        migration = (Path(__file__).resolve().parents[3] / "database/migrations/000053_hierarchy_membership_and_active_embedding_space.sql").read_text()
+        backlog = migration[migration.index("FUNCTION scos_worker_embedding_backlog()"):]
+        self.assertIn("activated_at IS NOT NULL", backlog)
+        self.assertIn("me.embedding_space_id = (SELECT id FROM active_space)", backlog)
+        self.assertIn("me.chunk_number = 0", backlog)
 
 
 class RerankCandidatesTests(unittest.TestCase):

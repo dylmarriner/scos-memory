@@ -4,11 +4,20 @@
 categories and to track Recall@K, Precision@K, MRR, nDCG, citation
 accuracy, authority accuracy, conflict detection, duplicate rate,
 stale-hit rate, promotion precision/recall, token efficiency and answer
-regression. These tests guard against silently losing any of them.
+regression. Each of these must come from what the system under test
+returned; a signal the system does not report must be absent from the
+summary, never a constant.
 """
+import io
+import json
+import os
 import pathlib
 import sys
+import tempfile
+import threading
 import unittest
+from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT))
@@ -17,7 +26,10 @@ from benchmarks.harness import (  # noqa: E402
     BenchmarkCase,
     BenchmarkResult,
     BenchmarkRunner,
+    BenchmarkSuite,
     DeterministicLexicalBaseline,
+    GatewayMemoryAdapter,
+    RetrievalOutcome,
     answer_regression,
     authority_accuracy,
     citation_accuracy,
@@ -25,6 +37,8 @@ from benchmarks.harness import (  # noqa: E402
     conflict_detection,
     create_default_frozen_suite,
     duplicate_rate,
+    load_suite,
+    main,
     promotion_precision_recall,
     stale_hit_rate,
     token_efficiency,
@@ -43,13 +57,14 @@ REQUIRED_CATEGORIES = {
     "prompt_injection",
 }
 
-REQUIRED_SUMMARY_METRICS = {
+# Metrics every run measures from the retrieved ids alone.
+RETRIEVAL_METRICS = {
     "recall@1", "precision@1", "mrr", "ndcg@5",
-    "citation_accuracy", "authority_accuracy", "conflict_detection",
-    "duplicate_rate", "stale_hit_rate",
-    "promotion_precision", "promotion_recall",
-    "answer_regression",
+    "authority_accuracy", "conflict_detection", "duplicate_rate", "stale_hit_rate",
+    "task_success",
 }
+# Metrics that need a signal a plain retriever does not report.
+REPORTED_SIGNAL_METRICS = {"citation_accuracy", "promotion_precision", "promotion_recall", "token_efficiency"}
 
 
 class DefaultSuiteCoversAllCategoriesTests(unittest.TestCase):
@@ -67,22 +82,62 @@ class DefaultSuiteCoversAllCategoriesTests(unittest.TestCase):
         isolation_ids = {i for c in by_category["project_isolation"] for i in c.expected_ids}
         self.assertTrue(permissions_ids.isdisjoint(isolation_ids))
 
-    def test_summary_reports_all_required_metrics(self):
+    def test_summary_reports_measured_metrics_and_omits_unreported_signals(self):
         suite = create_default_frozen_suite()
         runner = BenchmarkRunner(suite)
-        runner.run(DeterministicLexicalBaseline())
+        runner.run(DeterministicLexicalBaseline(suite.corpus))
         summary = runner.summary()
-        self.assertTrue(REQUIRED_SUMMARY_METRICS.issubset(summary["average_scores"].keys()))
+        self.assertTrue(RETRIEVAL_METRICS.issubset(summary["average_scores"].keys()))
+        self.assertTrue(REPORTED_SIGNAL_METRICS.isdisjoint(summary["average_scores"].keys()))
+        self.assertNotIn("answer_regression", summary["average_scores"])
         self.assertEqual(set(summary["categories"]), REQUIRED_CATEGORIES)
+
+    def test_reported_signals_are_scored_from_the_outcome(self):
+        suite = create_default_frozen_suite()
+
+        def retriever(query, context):
+            ids = DeterministicLexicalBaseline(suite.corpus)(query, context)
+            return RetrievalOutcome(ids=ids, cited_ids=ids[:1], promoted=bool(ids), tokens_used=400)
+
+        runner = BenchmarkRunner(suite)
+        runner.run(retriever)
+        scores = runner.summary()["average_scores"]
+        self.assertTrue(REPORTED_SIGNAL_METRICS.issubset(scores.keys()))
+        # case_001 has a 200-token budget and 400 tokens were used.
+        self.assertEqual(scores["token_efficiency"], 0.5)
+
+    def test_answer_regression_compares_against_a_baseline_run(self):
+        suite = create_default_frozen_suite()
+        baseline = BenchmarkRunner(suite)
+        baseline.run(DeterministicLexicalBaseline(suite.corpus))
+        answered = sum(r.answer_correct for r in baseline.results)
+        self.assertGreater(answered, 0)
+        empty = BenchmarkRunner(suite)
+        empty.run(lambda query, context: [])
+        regression = empty.summary(baseline_results=baseline.results)["average_scores"]["answer_regression"]
+        self.assertEqual(regression, answered / len(suite.cases))
+        same = BenchmarkRunner(suite)
+        same.run(DeterministicLexicalBaseline(suite.corpus))
+        self.assertEqual(same.summary(baseline_results=baseline.results)["average_scores"]["answer_regression"], 0.0)
+
+    def test_answer_correct_is_computed_from_the_retrieved_ids(self):
+        suite = create_default_frozen_suite()
+        runner = BenchmarkRunner(suite)
+        result = runner.run_single(suite.cases[1], lambda query, context: ["sys_memory_item_9921a"])
+        self.assertTrue(result.answer_correct)
+        result = runner.run_single(suite.cases[1], lambda query, context: ["doc_generic_match"])
+        self.assertFalse(result.answer_correct)
 
 
 class MetricFunctionTests(unittest.TestCase):
-    def test_citation_accuracy_none_when_no_assertion(self):
+    def test_citation_accuracy_none_when_no_assertion_or_no_report(self):
         self.assertIsNone(citation_accuracy([], ["a"]))
+        self.assertIsNone(citation_accuracy(["a"], None))
 
     def test_citation_accuracy_scores_correct_and_incorrect_citations(self):
         self.assertEqual(citation_accuracy(["a"], ["a"]), 1.0)
         self.assertEqual(citation_accuracy(["a"], ["b"]), 0.0)
+        self.assertEqual(citation_accuracy(["a"], []), 0.0)
 
     def test_authority_accuracy_measures_top_k_authority_share(self):
         self.assertEqual(authority_accuracy(["a"], ["a", "b"], 2), 0.5)
@@ -102,6 +157,7 @@ class MetricFunctionTests(unittest.TestCase):
         self.assertEqual(token_efficiency(100, 50), 1.0)
         self.assertEqual(token_efficiency(100, 200), 0.5)
         self.assertIsNone(token_efficiency(0, 50))
+        self.assertIsNone(token_efficiency(100, None))
 
     def test_answer_regression_only_when_baseline_correct_and_current_is_not(self):
         self.assertEqual(answer_regression(True, False), 1.0)
@@ -121,10 +177,117 @@ class MetricFunctionTests(unittest.TestCase):
         self.assertEqual(stats["promotion_precision"], 0.5)
         self.assertEqual(stats["promotion_recall"], 1.0)
 
+    def test_promotion_is_absent_when_no_decision_was_reported(self):
+        cases = [BenchmarkCase(id="c1", query="q", expected_ids=[], category="known_answer", promotion_expected=True)]
+        results = [BenchmarkResult(case_id="c1", retrieved_ids=[], latency_ms=0)]
+        self.assertEqual(promotion_precision_recall(cases, results), {})
+
     def test_compute_scores_without_case_or_result_is_base_metrics_only(self):
         scores = compute_scores({"a"}, ["a"])
         self.assertNotIn("citation_accuracy", scores)
         self.assertIn("recall@1", scores)
+
+
+class SuiteFileTests(unittest.TestCase):
+    def _write(self, payload):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(payload, handle)
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def test_load_suite_and_run_it_from_the_command_line(self):
+        path = self._write({
+            "name": "tiny", "version": "1", "corpus": {"a": "alpha beta", "b": "gamma delta"},
+            "cases": [{"id": "t1", "query": "alpha", "expected_ids": ["a"], "category": "known_answer"}],
+        })
+        suite = load_suite(path)
+        self.assertEqual([case.id for case in suite.cases], ["t1"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(["--suite", path]), 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["baseline"]["summary"]["suite"], "tiny")
+        self.assertEqual(report["baseline"]["summary"]["average_scores"]["recall@1"], 1.0)
+        self.assertEqual(report["system_under_test"]["status"], "not_run")
+
+    def test_load_suite_rejects_ids_outside_the_corpus(self):
+        path = self._write({
+            "name": "bad", "version": "1", "corpus": {"a": "alpha"},
+            "cases": [{"id": "t1", "query": "alpha", "expected_ids": ["missing"], "category": "known_answer"}],
+        })
+        with self.assertRaisesRegex(ValueError, "not in the corpus"):
+            load_suite(path)
+
+
+class _Gateway(BaseHTTPRequestHandler):
+    """An MCP endpoint answering scos_remember/scos_recall/scos_forget over an
+    in-memory store, with one memory that predates the benchmark run."""
+    facts: dict = {}
+    forgotten: list = []
+
+    def do_POST(self):  # noqa: N802
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        name, args = request["params"]["name"], request["params"]["arguments"]
+        if name == "scos_remember":
+            content = args["content"]
+            existing = next((fid for fid, text in self.facts.items() if text.split(" [")[0] == content.split(" [")[0]), None)
+            if existing is None:
+                existing = f"fact-{len(self.facts) + 1}"
+                self.facts[existing] = content
+            payload = {"fact": {"id": existing, "content": self.facts[existing]}}
+        elif name == "scos_recall":
+            words = set(args["query"].lower().split())
+            ranked = sorted(((len(words & set(text.lower().split())), fid) for fid, text in self.facts.items()), reverse=True)
+            payload = {"recall": [{"memory_id": fid} for score, fid in ranked if score][: args["max_items"]]}
+        else:
+            self.forgotten.append(args["memory_id"])
+            self.facts.pop(args["memory_id"], None)
+            payload = {"forgotten": True}
+        body = json.dumps({"jsonrpc": "2.0", "id": request["id"],
+                           "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        return
+
+
+class GatewayMemoryAdapterTests(unittest.TestCase):
+    def setUp(self):
+        _Gateway.facts = {"user-1": "alpha beta preexisting"}
+        _Gateway.forgotten = []
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Gateway)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_port}/mcp"
+
+    def test_seeds_maps_recall_and_forgets_only_what_it_created(self):
+        corpus = {"a": "alpha beta preexisting", "b": "gamma delta", "c": "epsilon zeta"}
+        suite = BenchmarkSuite(name="s", version="1", corpus=corpus, cases=[
+            BenchmarkCase(id="t1", query="gamma delta", expected_ids=["b"], category="known_answer"),
+        ])
+        with GatewayMemoryAdapter(self.url, corpus) as adapter:
+            runner = BenchmarkRunner(suite)
+            runner.run(adapter)
+            recalled = adapter("alpha", {})
+            report = adapter.seed_report()
+        self.assertEqual(runner.results[0].retrieved_ids[0], "b")
+        self.assertTrue(runner.results[0].answer_correct)
+        # "a" merged into the user's existing memory: recalled under its corpus id, never forgotten.
+        self.assertEqual(recalled, ["a"])
+        self.assertIn("a", report["merged_on_save"])
+        self.assertEqual(sorted(_Gateway.forgotten), ["fact-2", "fact-3"])
+        self.assertIn("user-1", _Gateway.facts)
+
+    def test_unavailable_gateway_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            with GatewayMemoryAdapter("http://127.0.0.1:1/mcp", {"a": "alpha"}):
+                pass
 
 
 if __name__ == "__main__":

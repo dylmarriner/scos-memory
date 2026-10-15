@@ -231,6 +231,55 @@
     .marquee-track { overflow: hidden; white-space: nowrap; flex: 1; -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
     .marquee-scroll { display: inline-block; padding-left: 100%; animation: marquee 38s linear infinite; color: #9fe8b0; font-size: .74rem; letter-spacing: .01em; }
 
+
+    /* ── flow / telemetry deck ────────────────────────────────────────── */
+    .fx-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .7rem; margin-bottom: .9rem; }
+    .fx-title { font-family: 'Space Grotesk', sans-serif; font-weight: 700; letter-spacing: .14em; font-size: .82rem; color: var(--cyan); display: flex; align-items: center; gap: .6rem; text-shadow: 0 0 14px rgba(0,240,255,.45); }
+    .fx-sub { font-family: 'IBM Plex Mono', monospace; font-weight: 400; letter-spacing: .04em; color: var(--text-faint); font-size: .7rem; text-shadow: none; }
+    .fx-live { width: .55rem; height: .55rem; border-radius: 50%; background: var(--text-faint); display: inline-block; }
+    .fx-live.on { background: var(--green); animation: pulseDot 1.6s ease-in-out infinite; }
+    .fx-ranges { display: flex; gap: .3rem; flex-wrap: wrap; }
+    .fx-ranges button { font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; padding: .3rem .6rem; background: rgba(13,17,28,.6); }
+    .fx-ranges button[aria-pressed="true"] { color: #05070d; background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 14px -2px rgba(0,240,255,.7); }
+    .fx-kpis { margin-bottom: 1rem; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); }
+    .fx-kpis .stat-value { text-shadow: 0 0 18px rgba(0,240,255,.25); }
+    .fx-graph-wrap { min-height: 460px; background: radial-gradient(ellipse at 50% 50%, rgba(0,240,255,.07), transparent 70%), radial-gradient(circle at 15% 50%, rgba(124,58,237,.10), transparent 45%); }
+    .fx-graph-svg { width: 100%; height: 460px; display: block; position: relative; z-index: 1; }
+    .fx-edge { fill: none; stroke-linecap: round; transition: opacity .15s ease; }
+    .fx-edge-glow { fill: none; stroke-linecap: round; opacity: .18; filter: blur(3px); }
+    .fx-edge-hit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; }
+    .fx-particle { pointer-events: none; }
+    .fx-node { cursor: pointer; }
+    .fx-node .core { stroke-width: 1.6; }
+    .fx-node .halo { fill: none; stroke-width: 1; opacity: .35; animation: glowPulse 3.2s ease-in-out infinite; }
+    .fx-node .ring-bg { fill: none; stroke: rgba(255,255,255,.08); stroke-width: 3; }
+    .fx-node .ring { fill: none; stroke-width: 3; stroke-linecap: round; transform-origin: center; }
+    .fx-node text { fill: var(--text); font-size: 10px; text-anchor: middle; pointer-events: none; font-family: 'IBM Plex Mono', monospace; }
+    .fx-node text.sub { fill: var(--text-faint); font-size: 8.5px; }
+    .fx-node.focus .core { filter: drop-shadow(0 0 10px var(--cyan)); }
+    .fx-dim { opacity: .12; }
+    .fx-pulse { fill: none; stroke: var(--green); stroke-width: 2; pointer-events: none; }
+    .fx-swatch { display: inline-block; width: 1.1rem; height: 3px; border-radius: 2px; }
+    .fx-swatch-dot { width: .45rem; height: .45rem; border-radius: 50%; background: #e8fdff; box-shadow: 0 0 6px var(--cyan); }
+    .fx-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; margin-top: 1rem; align-items: start; }
+    .fx-chart { position: relative; height: 230px; }
+    .fx-chart-tall { height: 300px; }
+    .fx-chart svg { width: 100%; height: 100%; display: block; overflow: visible; }
+    .fx-axis { fill: var(--text-faint); font-size: 9px; font-family: 'IBM Plex Mono', monospace; }
+    .fx-grid { stroke: rgba(255,255,255,.05); stroke-width: 1; }
+    .fx-cross { stroke: rgba(0,240,255,.5); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+    .fx-tip { position: absolute; z-index: 6; pointer-events: none; background: rgba(5,7,13,.95); border: 1px solid rgba(0,240,255,.35); border-radius: .4rem; padding: .45rem .6rem; font-size: .7rem; line-height: 1.45; color: var(--text); box-shadow: 0 0 24px -6px rgba(0,240,255,.4); white-space: nowrap; display: none; }
+    .fx-tip b { color: var(--cyan); font-weight: 600; }
+    .fx-tip i { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; margin-right: .35rem; }
+    .fx-legend { display: flex; flex-wrap: wrap; gap: .25rem .8rem; font-size: .66rem; color: var(--text-dim); margin-top: .35rem; }
+    .fx-legend i { display: inline-block; width: .55rem; height: .55rem; border-radius: 2px; margin-right: .3rem; vertical-align: middle; }
+    .fx-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 1rem; color: var(--text-faint); font-size: .74rem; font-style: italic; }
+    .fx-explorer-controls { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .fx-explorer-controls select { font: inherit; font-size: .7rem; background: #05070d; color: var(--text); border: 1px solid rgba(255,255,255,.14); border-radius: .4rem; padding: .3rem .45rem; max-width: 22rem; }
+    .fx-spark { vertical-align: middle; }
+    .fx-bar { height: 4px; border-radius: 99px; background: linear-gradient(90deg, var(--cyan), var(--violet)); box-shadow: 0 0 8px rgba(0,240,255,.5); }
+    @media (max-width: 720px) { .fx-chart-grid { grid-template-columns: 1fr; } .fx-graph-svg { height: 380px; } }
+
     @media (max-width: 1100px) {
       .overview-grid { grid-template-columns: 1fr !important; }
       .memory-grid, .agents-grid, .flow-grid { grid-template-columns: 1fr !important; }
@@ -486,7 +535,73 @@
     </section>
 
     <section class="tab-panel" data-tab="flow" id="tab-flow" hidden>
-      <div class="flow-grid" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start">
+      <div class="fx-toolbar">
+        <div class="fx-title"><span class="fx-live" id="fx-live-dot"></span>FLOW // TELEMETRY DECK<span class="fx-sub" id="fx-window-label">&nbsp;</span></div>
+        <div class="fx-ranges" id="fx-ranges" role="group" aria-label="time range"></div>
+      </div>
+      <div class="stat-grid fx-kpis" id="fx-kpis"></div>
+
+      <div class="glass-card cyan fx-graph-card">
+        <span class="corner tl"></span><span class="corner br"></span>
+        <div class="card-head">
+          <div class="card-title cyan">NET &middot; Service flow graph</div>
+          <div class="card-meta" id="fx-graph-meta">&nbsp;</div>
+        </div>
+        <div class="graph-wrap fx-graph-wrap" id="fx-graph-mount"><div class="graph-sweep"></div></div>
+        <div class="graph-legend">
+          <span><i class="fx-swatch" style="background:var(--cyan)"></i>healthy edge</span>
+          <span><i class="fx-swatch" style="background:var(--amber)"></i>&ge;1% 5xx</span>
+          <span><i class="fx-swatch" style="background:var(--red)"></i>&ge;5% 5xx</span>
+          <span><i class="fx-swatch fx-swatch-dot"></i>particle rate &prop; requests/min</span>
+          <span class="graph-hint">hover edges &amp; nodes &middot; click a node to focus its history</span>
+        </div>
+      </div>
+
+      <div class="fx-chart-grid">
+        <div class="glass-card plain">
+          <div class="card-head"><div class="card-title cyan">THR &middot; Throughput by service</div><div class="card-meta" id="fx-thr-meta">&nbsp;</div></div>
+          <div class="fx-chart" id="fx-thr-chart"></div>
+        </div>
+        <div class="glass-card plain">
+          <div class="card-head"><div class="card-title violet">LAT &middot; Latency p50 / p95 / p99</div><div class="card-meta" id="fx-lat-meta">&nbsp;</div></div>
+          <div class="fx-chart" id="fx-lat-chart"></div>
+        </div>
+        <div class="glass-card plain">
+          <div class="card-head"><div class="card-title red">ERR &middot; 5xx error ratio</div><div class="card-meta" id="fx-err-meta">&nbsp;</div></div>
+          <div class="fx-chart" id="fx-err-chart"></div>
+        </div>
+        <div class="glass-card plain" style="grid-column:1 / -1">
+          <div class="card-head"><div class="card-title green">EDG &middot; Busiest edges</div><div class="card-meta" id="fx-edges-meta">&nbsp;</div></div>
+          <div class="panel-body" id="fx-edges-table"></div>
+        </div>
+      </div>
+
+      <div class="glass-card violet" style="margin-top:1rem">
+        <div class="card-head">
+          <div class="card-title violet">MTX &middot; Metric explorer</div>
+          <div class="fx-explorer-controls">
+            <select id="fx-metric-select" aria-label="metric"></select>
+            <select id="fx-metric-agg" aria-label="aggregate">
+              <option value="avg">avg</option><option value="max">max</option><option value="last">last</option><option value="sum">sum</option><option value="count">samples</option><option value="p95">p95</option>
+            </select>
+          </div>
+        </div>
+        <div class="fx-chart fx-chart-tall" id="fx-metric-chart"></div>
+        <div class="card-meta" id="fx-metric-meta" style="margin-top:.4rem">&nbsp;</div>
+      </div>
+
+      <div class="fx-chart-grid" style="grid-template-columns:minmax(0,1.4fr) minmax(0,1fr)">
+        <div class="glass-card green">
+          <div class="card-head"><div class="card-title green">BCH &middot; Benchmark history</div><div class="card-meta" id="fx-bench-meta">&nbsp;</div></div>
+          <div class="fx-chart" id="fx-bench-chart"></div>
+        </div>
+        <div class="glass-card plain">
+          <div class="card-head"><div class="card-title plain">Latest run per suite</div></div>
+          <div class="panel-body" id="fx-bench-table"></div>
+        </div>
+      </div>
+
+      <div class="flow-grid" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start;margin-top:1rem">
         <div class="glass-card green">
           <div class="card-title green" style="margin-bottom:.8rem">Token flow</div>
           <div class="panel-body" id="flow-tokens-mount"></div>
@@ -496,7 +611,7 @@
           <div class="panel-body" id="flow-costs-mount"></div>
         </div>
       </div>
-      <div style="margin-top:1rem;display:grid;grid-template-columns:320px minmax(0,1fr);gap:1rem;align-items:start">
+      <div class="flow-grid" style="margin-top:1rem;display:grid;grid-template-columns:320px minmax(0,1fr);gap:1rem;align-items:start">
         <div class="hud-panel" style="--hud-accent:var(--green)">
           <div class="hud-panel-head"><span class="hud-tag">TML</span><span class="hud-title">Timeline</span></div>
           <div class="panel-body" id="flow-timeline-mount"></div>
@@ -1701,6 +1816,694 @@
     mountPanel('costs', null, document.getElementById('flow-costs-mount'), defaultPaint);
     mountPanel('timeline', null, document.getElementById('flow-timeline-mount'), defaultPaint);
 
+    // ── Flow // telemetry deck ───────────────────────────────────────────
+    // Everything below is drawn from observability's durable history
+    // (rollups of the scos.http.server.request measure every service
+    // records, plus every §32 metric and recorded benchmark run), read
+    // through transparency-projection's whitelisted /history/* proxy. An
+    // empty window is drawn empty; nothing is interpolated or invented.
+    const FX = (function () {
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      const PALETTE = ['#00f0ff', '#a78bfa', '#22e0b0', '#f6ad55', '#ff6ad5', '#4d8dff', '#b4ff4d', '#ff8a3d', '#3dffd0', '#ff4d6d'];
+      const RANGES = ['5m', '15m', '1h', '6h', '24h', '7d', '30d', '90d'];
+      const LIVE_RANGES = new Set(['5m', '15m', '1h']);
+      let range = '15m';
+      try { range = localStorage.getItem('scos.fx.range') || range; } catch (e) { /* storage unavailable */ }
+      if (!RANGES.includes(range)) range = '15m';
+      let focusService = '';
+      let lastFlows = null;
+      let catalog = [];
+      let loading = false;
+      let refreshTimer = null;
+      const serviceColors = new Map();
+
+      function colorFor(name) {
+        if (!serviceColors.has(name)) serviceColors.set(name, PALETTE[serviceColors.size % PALETTE.length]);
+        return serviceColors.get(name);
+      }
+      function el(tag, attrs, parent) {
+        const node = document.createElementNS(SVG_NS, tag);
+        for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+        if (parent) parent.appendChild(node);
+        return node;
+      }
+      function fmtNum(n) {
+        if (n === null || n === undefined || !isFinite(n)) return '—';
+        const a = Math.abs(n);
+        if (Number.isInteger(n) && a < 1e4) return String(n);
+        if (a >= 1e9) return (n / 1e9).toFixed(2) + 'G';
+        if (a >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+        if (a >= 1e4) return (n / 1e3).toFixed(1) + 'k';
+        if (a >= 100) return n.toFixed(0);
+        if (a >= 10) return n.toFixed(1);
+        return n.toFixed(2);
+      }
+      function fmtMs(ms) {
+        if (ms === null || ms === undefined || !isFinite(ms)) return '—';
+        if (ms >= 60000) return (ms / 60000).toFixed(1) + 'm';
+        if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+        if (ms >= 10) return ms.toFixed(0) + 'ms';
+        return ms.toFixed(1) + 'ms';
+      }
+      function fmtPct(r) { return (r === null || r === undefined || !isFinite(r)) ? '—' : (r * 100 >= 10 ? (r * 100).toFixed(1) : (r * 100).toFixed(2)) + '%'; }
+      function fmtUnit(v, unit) { return unit === 'ms' ? fmtMs(v) : fmtNum(v) + (unit && unit !== 'count' ? ' ' + unit : ''); }
+      function fmtTime(t, spanMs) {
+        const d = new Date(t);
+        if (spanMs > 2 * 86400000) return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}h`;
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      }
+      function ago(iso) {
+        const s = (Date.now() - new Date(iso).getTime()) / 1000;
+        if (!isFinite(s)) return '—';
+        if (s < 90) return `${Math.max(0, Math.round(s))}s ago`;
+        if (s < 5400) return `${Math.round(s / 60)}m ago`;
+        if (s < 129600) return `${Math.round(s / 3600)}h ago`;
+        return `${Math.round(s / 86400)}d ago`;
+      }
+      function errorColor(ratio) { return ratio >= 0.05 ? 'var(--red)' : ratio >= 0.01 ? 'var(--amber)' : 'var(--cyan)'; }
+      function errorHex(ratio) { return ratio >= 0.05 ? '#ff4d6d' : ratio >= 0.01 ? '#f6ad55' : '#00f0ff'; }
+
+      async function getHistory(view, params) {
+        const qs = new URLSearchParams(params || {}).toString();
+        const resp = await fetch(`/v1/transparency/history/${view}${qs ? '?' + qs : ''}`, { credentials: 'same-origin' });
+        let body = null;
+        try { body = await resp.json(); } catch (e) { /* non-JSON error body */ }
+        if (!resp.ok) throw new Error((body && body.error) || `history ${view} returned ${resp.status}`);
+        return body;
+      }
+
+      function emptyState(mount, message) {
+        mount.innerHTML = '';
+        const div = document.createElement('div');
+        div.className = 'fx-empty';
+        div.textContent = message;
+        mount.appendChild(div);
+      }
+
+      // ── generic time chart: lines, optional stacked areas and min/max band,
+      // hover crosshair with per-series readout. series: [{label, color,
+      // values: [number|null], area?: bool}] aligned to `times`.
+      function timeChart(mount, cfg) {
+        mount.innerHTML = '';
+        const times = cfg.times;
+        const series = cfg.series.filter((sr) => sr.values.some((v) => v !== null && v !== undefined));
+        if (!times.length || !series.length) { emptyState(mount, cfg.empty || 'no samples recorded in this window'); return; }
+        const W = Math.max(mount.clientWidth || 600, 280);
+        const H = mount.clientHeight || 230;
+        const m = { l: 46, r: 12, t: 10, b: cfg.legend === false ? 22 : 40 };
+        const iw = W - m.l - m.r;
+        const ih = H - m.t - m.b;
+        const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none' }, mount);
+        const defs = el('defs', {}, svg);
+        const t0 = times[0], t1 = times[times.length - 1];
+        const span = Math.max(t1 - t0, 1);
+        const x = (t) => m.l + ((t - t0) / span) * iw;
+
+        let stackTotals = null;
+        if (cfg.stacked) {
+          stackTotals = times.map(() => 0);
+          for (const sr of series) {
+            sr.base = stackTotals.slice();
+            sr.top = sr.values.map((v, i) => (stackTotals[i] += (v || 0)));
+          }
+        }
+        let yMax = 0, yMin = 0;
+        for (const sr of series) {
+          const vals = cfg.stacked ? sr.top : sr.values;
+          for (const v of vals) if (v !== null && v !== undefined && isFinite(v)) yMax = Math.max(yMax, v);
+          if (sr.band) for (const b of sr.band) if (b) yMax = Math.max(yMax, b[1]);
+        }
+        if (cfg.yMax !== undefined) yMax = Math.max(yMax, cfg.yMax);
+        if (yMax <= yMin) yMax = yMin + 1;
+        yMax *= 1.08;
+        const y = (v) => m.t + ih - ((v - yMin) / (yMax - yMin)) * ih;
+
+        for (let i = 0; i <= 4; i++) {
+          const v = yMin + (yMax - yMin) * (i / 4);
+          el('line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), class: 'fx-grid' }, svg);
+          const label = el('text', { x: m.l - 6, y: y(v) + 3, 'text-anchor': 'end', class: 'fx-axis' }, svg);
+          label.textContent = cfg.yFormat ? cfg.yFormat(v) : fmtNum(v);
+        }
+        const ticks = Math.min(6, times.length);
+        for (let i = 0; i < ticks; i++) {
+          const t = t0 + span * (i / Math.max(ticks - 1, 1));
+          const label = el('text', { x: x(t), y: H - m.b + 14, 'text-anchor': i === 0 ? 'start' : i === ticks - 1 ? 'end' : 'middle', class: 'fx-axis' }, svg);
+          label.textContent = fmtTime(t, span);
+        }
+
+        series.forEach((sr, idx) => {
+          const gid = `fxg-${mount.id}-${idx}`;
+          const grad = el('linearGradient', { id: gid, x1: 0, x2: 0, y1: 0, y2: 1 }, defs);
+          el('stop', { offset: '0%', 'stop-color': sr.color, 'stop-opacity': cfg.stacked ? 0.55 : 0.28 }, grad);
+          el('stop', { offset: '100%', 'stop-color': sr.color, 'stop-opacity': cfg.stacked ? 0.12 : 0 }, grad);
+          if (sr.band) {
+            let d = '', back = '';
+            sr.band.forEach((b, i) => { if (b) { d += `${d ? 'L' : 'M'}${x(times[i])},${y(b[1])}`; back = `L${x(times[i])},${y(b[0])}` + back; } });
+            if (d) el('path', { d: d + back + 'Z', fill: sr.color, opacity: 0.12 }, svg);
+          }
+          // Split into contiguous segments so missing samples are gaps.
+          const top = cfg.stacked ? sr.top : sr.values;
+          let seg = [];
+          const segments = [];
+          top.forEach((v, i) => {
+            if (v === null || v === undefined || !isFinite(v)) { if (seg.length) segments.push(seg); seg = []; return; }
+            seg.push(i);
+          });
+          if (seg.length) segments.push(seg);
+          for (const s of segments) {
+            const line = s.map((i, k) => `${k ? 'L' : 'M'}${x(times[i])},${y(top[i])}`).join('');
+            if (cfg.stacked || sr.area) {
+              const baseLine = s.slice().reverse().map((i) => `L${x(times[i])},${y(cfg.stacked ? sr.base[i] : yMin)}`).join('');
+              el('path', { d: line + baseLine + 'Z', fill: `url(#${gid})` }, svg);
+            }
+            if (s.length === 1) el('circle', { cx: x(times[s[0]]), cy: y(top[s[0]]), r: 2.4, fill: sr.color }, svg);
+            el('path', { d: line, fill: 'none', stroke: sr.color, 'stroke-width': sr.width || 1.6, 'stroke-linejoin': 'round', style: `filter:drop-shadow(0 0 4px ${sr.color})`, 'stroke-dasharray': sr.dash || '' }, svg);
+          }
+        });
+
+        if (cfg.legend !== false) {
+          const legend = document.createElement('div');
+          legend.className = 'fx-legend';
+          legend.style.position = 'absolute';
+          legend.style.left = m.l + 'px';
+          legend.style.bottom = '0';
+          for (const sr of series.slice(0, 10)) {
+            const span2 = document.createElement('span');
+            span2.innerHTML = `<i style="background:${sr.color}"></i>${escapeHtml(sr.label)}`;
+            legend.appendChild(span2);
+          }
+          mount.appendChild(legend);
+        }
+
+        const cross = el('line', { y1: m.t, y2: m.t + ih, class: 'fx-cross', visibility: 'hidden' }, svg);
+        const tip = document.createElement('div');
+        tip.className = 'fx-tip';
+        mount.appendChild(tip);
+        const hit = el('rect', { x: m.l, y: m.t, width: iw, height: ih, fill: 'transparent' }, svg);
+        hit.addEventListener('mousemove', (ev) => {
+          const rect = svg.getBoundingClientRect();
+          const px = ((ev.clientX - rect.left) / rect.width) * W;
+          const t = t0 + ((px - m.l) / iw) * span;
+          let idx = 0, best = Infinity;
+          times.forEach((tt, i) => { const d = Math.abs(tt - t); if (d < best) { best = d; idx = i; } });
+          cross.setAttribute('x1', x(times[idx])); cross.setAttribute('x2', x(times[idx]));
+          cross.setAttribute('visibility', 'visible');
+          const rows = series.map((sr) => {
+            const v = sr.values[idx];
+            return `<div><i style="background:${sr.color}"></i>${escapeHtml(sr.label)}: <b>${v === null || v === undefined ? '—' : escapeHtml(cfg.yFormat ? cfg.yFormat(v) : fmtNum(v))}</b></div>`;
+          }).join('');
+          tip.innerHTML = `<div style="color:var(--text-faint)">${escapeHtml(new Date(times[idx]).toLocaleString())}</div>${rows}${cfg.tipExtra ? cfg.tipExtra(idx) : ''}`;
+          tip.style.display = 'block';
+          const left = ((x(times[idx])) / W) * rect.width;
+          tip.style.left = Math.min(Math.max(left + 12, 0), rect.width - tip.offsetWidth - 4) + 'px';
+          tip.style.top = '6px';
+        });
+        hit.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); tip.style.display = 'none'; });
+      }
+
+      function seriesTimes(resp) {
+        const first = resp.series && resp.series[0];
+        return first ? first.points.map((p) => new Date(p.t).getTime()) : [];
+      }
+
+      // ── service flow graph ────────────────────────────────────────────
+      let anim = null;
+      function layoutFlows(flows, W, H) {
+        const nodes = flows.nodes.map((n) => ({ ...n, traffic: n.inbound_requests + n.outbound_requests }));
+        const byId = new Map(nodes.map((n) => [n.id, n]));
+        const out = new Map(nodes.map((n) => [n.id, []]));
+        const indeg = new Map(nodes.map((n) => [n.id, 0]));
+        for (const e of flows.edges) {
+          if (!byId.has(e.source) || !byId.has(e.target) || e.source === e.target) continue;
+          out.get(e.source).push(e.target);
+          indeg.set(e.target, indeg.get(e.target) + 1);
+        }
+        // Longest-path layering from the roots (ingress first); cycles are
+        // broken by visiting each node once in BFS order.
+        const depth = new Map();
+        const roots = nodes.filter((n) => n.kind === 'ingress' || indeg.get(n.id) === 0).map((n) => n.id);
+        if (!roots.length && nodes.length) roots.push(nodes.slice().sort((a, b) => b.traffic - a.traffic)[0].id);
+        const queue = roots.map((id) => { depth.set(id, 0); return id; });
+        const settled = new Set();
+        while (queue.length) {
+          const id = queue.shift();
+          if (settled.has(id)) continue;
+          settled.add(id);
+          for (const next of out.get(id)) {
+            if (settled.has(next)) continue;
+            depth.set(next, Math.max(depth.get(next) || 0, depth.get(id) + 1));
+            queue.push(next);
+          }
+        }
+        for (const n of nodes) if (!depth.has(n.id)) depth.set(n.id, 0);
+        const maxDepth = Math.max(0, ...depth.values());
+        const columns = [];
+        for (const n of nodes) (columns[depth.get(n.id)] = columns[depth.get(n.id)] || []).push(n);
+        const padX = 80, padY = 44;
+        columns.forEach((col, c) => {
+          col.sort((a, b) => b.traffic - a.traffic || a.id.localeCompare(b.id));
+          col.forEach((n, i) => {
+            n.col = c;
+            n.x = maxDepth === 0 ? W / 2 : padX + (c / maxDepth) * (W - 2 * padX);
+            n.y = col.length === 1 ? H / 2 : padY + (i / (col.length - 1)) * (H - 2 * padY);
+          });
+        });
+        const maxTraffic = Math.max(1, ...nodes.map((n) => n.traffic));
+        for (const n of nodes) n.r = 9 + 13 * Math.sqrt(n.traffic / maxTraffic);
+        return { nodes, byId };
+      }
+
+      function edgeGeometry(a, b, offset) {
+        if (b.x > a.x + 1) {
+          const dx = (b.x - a.x) * 0.5;
+          return `M${a.x + a.r},${a.y} C${a.x + dx},${a.y + offset} ${b.x - dx},${b.y + offset} ${b.x - b.r},${b.y}`;
+        }
+        // Same column or back edge: arc above.
+        const lift = 60 + Math.abs(a.y - b.y) * 0.15 + Math.abs(offset);
+        const top = Math.min(a.y, b.y) - lift;
+        return `M${a.x},${a.y - a.r} C${a.x},${top} ${b.x},${top} ${b.x},${b.y - b.r}`;
+      }
+
+      function drawFlowGraph(flows) {
+        const mount = document.getElementById('fx-graph-mount');
+        if (anim) { cancelAnimationFrame(anim); anim = null; }
+        mount.querySelectorAll('svg, .fx-empty, .fx-tip').forEach((n) => n.remove());
+        const meta = document.getElementById('fx-graph-meta');
+        drawFlowGraph.pulseLayer = null;
+        drawFlowGraph.ingress = null;
+        if (!flows || !flows.nodes.length) {
+          meta.textContent = '';
+          const div = document.createElement('div');
+          div.className = 'fx-empty';
+          div.textContent = 'no inter-service requests recorded in this window — the graph draws from the request measure every service reports to observability';
+          mount.appendChild(div);
+          return;
+        }
+        meta.textContent = `${flows.nodes.length} nodes · ${flows.edges.length} edges · ${fmtNum(flows.requests)} requests`;
+        const W = Math.max(mount.clientWidth || 900, 320);
+        const H = 460;
+        const { nodes, byId } = layoutFlows(flows, W, H);
+        const svg = el('svg', { class: 'fx-graph-svg', viewBox: `0 0 ${W} ${H}` }, mount);
+        const defs = el('defs', {}, svg);
+        const pg = el('radialGradient', { id: 'fx-particle-grad' }, defs);
+        el('stop', { offset: '0%', 'stop-color': '#ffffff', 'stop-opacity': 1 }, pg);
+        el('stop', { offset: '60%', 'stop-color': '#9ff8ff', 'stop-opacity': 0.8 }, pg);
+        el('stop', { offset: '100%', 'stop-color': '#00f0ff', 'stop-opacity': 0 }, pg);
+        const edgeLayer = el('g', {}, svg);
+        const particleLayer = el('g', {}, svg);
+        const nodeLayer = el('g', {}, svg);
+        const tip = document.createElement('div');
+        tip.className = 'fx-tip';
+        mount.appendChild(tip);
+        const showTip = (ev, html) => {
+          tip.innerHTML = html;
+          tip.style.display = 'block';
+          const rect = mount.getBoundingClientRect();
+          tip.style.left = Math.min(ev.clientX - rect.left + 14, rect.width - tip.offsetWidth - 6) + 'px';
+          tip.style.top = Math.min(ev.clientY - rect.top + 14, rect.height - tip.offsetHeight - 6) + 'px';
+        };
+        const hideTip = () => { tip.style.display = 'none'; };
+
+        const maxReq = Math.max(1, ...flows.edges.map((e) => e.requests));
+        const pairSeen = new Map();
+        const edgeRecords = [];
+        for (const e of flows.edges) {
+          const a = byId.get(e.source), b = byId.get(e.target);
+          if (!a || !b || a === b) continue;
+          const key = [e.source, e.target].sort().join('|');
+          const n = pairSeen.get(key) || 0;
+          pairSeen.set(key, n + 1);
+          // Edges that skip a column bow away from the straight line so
+          // they never run through the intermediate nodes.
+          const skip = Math.max(0, b.col - a.col - 1);
+          const offset = n * 18 * (e.source < e.target ? 1 : -1) - skip * 70;
+          const d = edgeGeometry(a, b, offset);
+          const width = 1.2 + 5 * Math.sqrt(e.requests / maxReq);
+          const color = errorHex(e.error_ratio);
+          el('path', { d, class: 'fx-edge-glow', stroke: color, 'stroke-width': width * 3 }, edgeLayer);
+          const path = el('path', { d, class: 'fx-edge', stroke: color, 'stroke-width': width, opacity: 0.55 }, edgeLayer);
+          const hit = el('path', { d, class: 'fx-edge-hit' }, edgeLayer);
+          const routes = (e.routes || []).slice(0, 5).map((r) => `<div style="color:var(--text-dim)">${escapeHtml(r.route)} · ${fmtNum(r.requests)}${r.errors ? ` · <span style="color:var(--red)">${r.errors} err</span>` : ''} · ${r.avg_ms != null ? fmtMs(r.avg_ms) : ''}${r.streams ? `${r.avg_ms != null ? ' · ' : ''}${fmtNum(r.streams)} live stream${r.streams === 1 ? '' : 's'}` : ''}</div>`).join('');
+          hit.addEventListener('mousemove', (ev) => showTip(ev, `<div><b>${escapeHtml(e.source)}</b> → <b>${escapeHtml(e.target)}</b></div><div>${fmtNum(e.requests)} req · ${fmtNum(e.rate_per_min)}/min</div><div>avg ${fmtMs(e.avg_ms)} · p95 ${fmtMs(e.p95_ms)} · max ${fmtMs(e.max_ms)}</div><div style="color:${errorColor(e.error_ratio)}">5xx ${fmtPct(e.error_ratio)} (${e.errors})</div><div style="color:var(--text-faint)">last activity ${escapeHtml(ago(e.last_activity))}</div>${routes}`));
+          hit.addEventListener('mouseenter', () => path.setAttribute('opacity', '1'));
+          hit.addEventListener('mouseleave', () => { path.setAttribute('opacity', '0.55'); hideTip(); });
+          // Particle density follows the measured rate on a log scale so a
+          // 1 req/min edge visibly trickles and a 1k req/min edge streams.
+          const count = e.requests > 0 ? Math.max(1, Math.min(14, Math.round(1.6 * Math.log2(1 + e.rate_per_min)))) : 0;
+          const particles = [];
+          for (let i = 0; i < count; i++) {
+            particles.push(el('circle', { r: Math.min(3.2, 1.4 + width / 3), fill: e.error_ratio >= 0.01 ? color : 'url(#fx-particle-grad)', class: 'fx-particle' }, particleLayer));
+          }
+          edgeRecords.push({ e, path, particles, length: 0, speed: 0.12 + 0.2 * Math.min(1, Math.log10(1 + e.rate_per_min) / 3), source: e.source, target: e.target });
+        }
+        for (const rec of edgeRecords) rec.length = rec.path.getTotalLength();
+
+        const nodeEls = new Map();
+        for (const n of nodes) {
+          const g = el('g', { class: 'fx-node' + (n.id === focusService ? ' focus' : ''), transform: `translate(${n.x},${n.y})` }, nodeLayer);
+          const tint = n.kind === 'ingress' ? '#22e0b0' : colorFor(n.id);
+          el('circle', { r: n.r + 7, class: 'halo', stroke: tint }, g);
+          el('circle', { r: n.r + 3.5, class: 'ring-bg' }, g);
+          if (n.inbound_requests > 0) {
+            const circ = 2 * Math.PI * (n.r + 3.5);
+            const healthy = 1 - n.error_ratio;
+            el('circle', { r: n.r + 3.5, class: 'ring', stroke: n.error_ratio >= 0.01 ? errorHex(n.error_ratio) : tint, 'stroke-dasharray': `${circ * healthy} ${circ}`, transform: 'rotate(-90)' }, g);
+          }
+          el('circle', { r: n.r, class: 'core', fill: '#071019', stroke: tint, style: `filter:drop-shadow(0 0 7px ${tint})` }, g);
+          const label = el('text', { y: n.r + 18 }, g);
+          label.textContent = n.id;
+          const sub = el('text', { y: n.r + 29, class: 'sub' }, g);
+          sub.textContent = n.kind === 'ingress' ? `${fmtNum(n.outbound_requests)} out` : `${fmtNum(n.inbound_requests)} in · p95 ${fmtMs(n.p95_ms)}`;
+          const inner = el('text', { y: 3.5, style: 'font-size:9px;fill:' + tint }, g);
+          inner.textContent = n.kind === 'ingress' ? 'IN' : n.id.split('-').map((p) => p[0]).join('').slice(0, 3).toUpperCase();
+          g.addEventListener('mousemove', (ev) => showTip(ev, `<div><b>${escapeHtml(n.id)}</b> <span style="color:var(--text-faint)">${escapeHtml(n.kind)}</span></div><div>inbound ${fmtNum(n.inbound_requests)} · outbound ${fmtNum(n.outbound_requests)}</div><div>avg ${fmtMs(n.avg_ms)} · p95 ${fmtMs(n.p95_ms)}</div><div style="color:${errorColor(n.error_ratio)}">5xx ${fmtPct(n.error_ratio)} (${n.errors})</div>`));
+          g.addEventListener('mouseenter', () => {
+            for (const rec of edgeRecords) {
+              const on = rec.source === n.id || rec.target === n.id;
+              rec.path.classList.toggle('fx-dim', !on);
+              rec.particles.forEach((p) => p.classList.toggle('fx-dim', !on));
+            }
+          });
+          g.addEventListener('mouseleave', () => {
+            hideTip();
+            for (const rec of edgeRecords) { rec.path.classList.remove('fx-dim'); rec.particles.forEach((p) => p.classList.remove('fx-dim')); }
+          });
+          g.addEventListener('click', () => {
+            focusService = focusService === n.id || n.kind === 'ingress' ? '' : n.id;
+            nodeEls.forEach((ng, id) => ng.classList.toggle('focus', id === focusService));
+            loadCharts().catch((err) => setStatusError(`flow history unavailable: ${err.message}`));
+          });
+          nodeEls.set(n.id, g);
+        }
+        drawFlowGraph.ingress = byId.get('ingress');
+        drawFlowGraph.pulseLayer = nodeLayer;
+
+        const started = performance.now();
+        const step = (now) => {
+          if (currentTab !== 'flow' || document.hidden) { anim = requestAnimationFrame(step); return; }
+          const t = (now - started) / 1000;
+          for (const rec of edgeRecords) {
+            const n = rec.particles.length;
+            for (let i = 0; i < n; i++) {
+              const phase = ((t * rec.speed) + i / n) % 1;
+              const pt = rec.path.getPointAtLength(phase * rec.length);
+              rec.particles[i].setAttribute('cx', pt.x);
+              rec.particles[i].setAttribute('cy', pt.y);
+              rec.particles[i].setAttribute('opacity', String(Math.sin(Math.PI * phase) * 0.9 + 0.1));
+            }
+          }
+          anim = requestAnimationFrame(step);
+        };
+        anim = requestAnimationFrame(step);
+      }
+
+      // A live event from the transparency stream is a real arrival: ripple
+      // the ingress node (or the graph centre when no ingress is drawn).
+      function pulse() {
+        const layer = drawFlowGraph.pulseLayer;
+        if (!layer || currentTab !== 'flow') return;
+        const n = drawFlowGraph.ingress;
+        const svg = layer.ownerSVGElement;
+        const vb = svg.viewBox.baseVal;
+        const cx = n ? n.x : vb.width / 2, cy = n ? n.y : vb.height / 2;
+        const ring = el('circle', { cx, cy, r: n ? n.r : 10, class: 'fx-pulse' }, layer);
+        const born = performance.now();
+        const grow = (now) => {
+          const k = (now - born) / 1100;
+          if (k >= 1) { ring.remove(); return; }
+          ring.setAttribute('r', (n ? n.r : 10) + k * 46);
+          ring.setAttribute('opacity', String(1 - k));
+          requestAnimationFrame(grow);
+        };
+        requestAnimationFrame(grow);
+      }
+
+      function renderKpis(flows) {
+        const mount = document.getElementById('fx-kpis');
+        mount.innerHTML = '';
+        if (!flows) return;
+        const minutes = Math.max((new Date(flows.to) - new Date(flows.from)) / 60000, 1);
+        const services = flows.nodes.filter((n) => n.kind === 'service');
+        const p95s = services.map((n) => n.p95_ms).filter((v) => v !== null && v !== undefined);
+        const hottest = services.slice().sort((a, b) => b.inbound_requests - a.inbound_requests)[0];
+        const slowest = services.filter((n) => n.p95_ms !== undefined).sort((a, b) => b.p95_ms - a.p95_ms)[0];
+        const ratio = flows.requests ? flows.errors / flows.requests : 0;
+        mount.append(
+          statTile('requests', fmtNum(flows.requests), `in ${range}`, 'var(--cyan)'),
+          statTile('throughput', fmtNum(flows.requests / minutes) + '/min', 'mean over window', 'var(--cyan)'),
+          statTile('5xx ratio', flows.requests ? fmtPct(ratio) : '—', `${flows.errors} errors`, ratio >= 0.05 ? 'var(--red)' : ratio >= 0.01 ? 'var(--amber)' : 'var(--green)'),
+          statTile('worst p95', p95s.length ? fmtMs(Math.max(...p95s)) : '—', slowest ? slowest.id : 'no latency samples', 'var(--violet)'),
+          statTile('active services', String(services.length), `${flows.edges.length} live edges`, 'var(--violet)'),
+          statTile('hottest', hottest ? hottest.id : '—', hottest ? `${fmtNum(hottest.inbound_requests)} inbound` : 'no traffic', 'var(--amber)'),
+        );
+      }
+
+      function renderEdgeTable(flows) {
+        const mount = document.getElementById('fx-edges-table');
+        mount.innerHTML = '';
+        document.getElementById('fx-edges-meta').textContent = flows ? `${flows.edges.length} edges` : '';
+        if (!flows || !flows.edges.length) { mount.innerHTML = '<p class="hud-empty">no edges recorded in this window</p>'; return; }
+        const max = Math.max(1, ...flows.edges.map((e) => e.requests));
+        const table = document.createElement('table');
+        table.className = 'records';
+        table.innerHTML = '<thead><tr><th>edge</th><th>req</th><th>p95</th><th>5xx</th><th>trend</th></tr></thead>';
+        const body = document.createElement('tbody');
+        for (const e of flows.edges.slice(0, 40)) {
+          const tr = document.createElement('tr');
+          const spark = sparkline(e.sparkline || [], errorHex(e.error_ratio));
+          tr.innerHTML = `<td><div>${escapeHtml(e.source)} <span style="color:var(--text-faint)">→</span> ${escapeHtml(e.target)}</div><div class="fx-bar" style="width:${Math.max(3, (e.requests / max) * 100)}%"></div></td><td>${fmtNum(e.requests)}</td><td>${fmtMs(e.p95_ms)}</td><td style="color:${errorColor(e.error_ratio)}">${fmtPct(e.error_ratio)}</td><td></td>`;
+          tr.lastChild.appendChild(spark);
+          body.appendChild(tr);
+        }
+        table.appendChild(body);
+        mount.appendChild(table);
+      }
+
+      function sparkline(values, color) {
+        const w = 90, h = 22;
+        const svg = el('svg', { width: w, height: h, viewBox: `0 0 ${w} ${h}`, class: 'fx-spark' });
+        const max = Math.max(1, ...values);
+        const pts = values.map((v, i) => `${(i / Math.max(values.length - 1, 1)) * w},${h - 2 - (v / max) * (h - 4)}`);
+        if (pts.length) {
+          el('path', { d: `M${pts.join('L')}L${w},${h}L0,${h}Z`, fill: color, opacity: 0.15 }, svg);
+          el('path', { d: `M${pts.join('L')}`, fill: 'none', stroke: color, 'stroke-width': 1.3 }, svg);
+        }
+        return svg;
+      }
+
+      async function loadCharts() {
+        const filter = focusService ? { service: focusService } : {};
+        const scope = focusService ? ` · focus ${focusService}` : '';
+        const [thr, lat] = await Promise.all([
+          getHistory('series', { name: 'scos.http.server.request', range, group_by: focusService ? 'caller' : 'service', ...filter }),
+          getHistory('series', { name: 'scos.http.server.request', range, group_by: 'none', ...filter }),
+        ]);
+        const stepMin = Math.max(thr.step_seconds / 60, 1 / 60);
+        const thrTimes = seriesTimes(thr);
+        const top = thr.series.slice(0, 8);
+        const rest = thr.series.slice(8);
+        const thrSeries = top.map((sr) => {
+          const label = (focusService ? sr.group.caller : sr.group.service) || 'unlabelled';
+          return { label: focusService ? `from ${label}` : label, color: colorFor(label), values: sr.points.map((p) => p.count / stepMin) };
+        });
+        if (rest.length) {
+          thrSeries.push({ label: `${rest.length} more`, color: '#47536b', values: thrTimes.map((_, i) => rest.reduce((a, sr) => a + sr.points[i].count, 0) / stepMin) });
+        }
+        timeChart(document.getElementById('fx-thr-chart'), { times: thrTimes, series: thrSeries, stacked: true, yFormat: (v) => fmtNum(v) + '/m', empty: 'no requests recorded in this window' });
+        document.getElementById('fx-thr-meta').textContent = `${thr.resolution} rollups · step ${thr.step}${scope}`;
+
+        const total = lat.series[0];
+        const latTimes = seriesTimes(lat);
+        if (total) {
+          const pts = total.points;
+          timeChart(document.getElementById('fx-lat-chart'), {
+            times: latTimes,
+            series: [
+              { label: 'p99', color: '#ff6ad5', values: pts.map((p) => p.p99 ?? null), dash: '4 3', width: 1.2 },
+              { label: 'p95', color: '#a78bfa', values: pts.map((p) => p.p95 ?? null), area: true },
+              { label: 'p50', color: '#00f0ff', values: pts.map((p) => p.p50 ?? null) },
+            ],
+            yFormat: fmtMs,
+          });
+          timeChart(document.getElementById('fx-err-chart'), {
+            times: latTimes,
+            series: [{ label: '5xx ratio', color: '#ff4d6d', area: true, values: pts.map((p) => (p.count ? p.errors / p.count : null)) }],
+            yFormat: fmtPct,
+            yMax: 0.01,
+            tipExtra: (i) => `<div style="color:var(--text-faint)">${pts[i].errors} of ${pts[i].count} requests</div>`,
+          });
+          document.getElementById('fx-lat-meta').textContent = `p95 over window ${fmtMs(total.total.p95)}${scope}`;
+          document.getElementById('fx-err-meta').textContent = `${total.total.errors} errors / ${fmtNum(total.total.count)} requests${scope}`;
+        } else {
+          emptyState(document.getElementById('fx-lat-chart'), 'no latency samples recorded in this window');
+          emptyState(document.getElementById('fx-err-chart'), 'no requests recorded in this window');
+          document.getElementById('fx-lat-meta').textContent = scope;
+          document.getElementById('fx-err-meta').textContent = scope;
+        }
+      }
+
+      async function loadCatalog() {
+        const resp = await getHistory('catalog', { range: range === '5m' || range === '15m' || range === '1h' || range === '6h' ? '24h' : range });
+        catalog = resp.metrics || [];
+        const select = document.getElementById('fx-metric-select');
+        const previous = select.value;
+        select.innerHTML = '';
+        if (!catalog.length) {
+          const opt = document.createElement('option');
+          opt.textContent = 'no metrics recorded yet';
+          opt.value = '';
+          select.appendChild(opt);
+          select.disabled = true;
+        } else {
+          select.disabled = false;
+          for (const m of catalog) {
+            const opt = document.createElement('option');
+            opt.value = m.name;
+            opt.textContent = `${m.name} (${fmtNum(m.samples)})`;
+            select.appendChild(opt);
+          }
+          const preferred = ['scos.retrieval.latency', 'scos.journal.append_latency', 'scos.turn.completion_latency'];
+          select.value = catalog.some((m) => m.name === previous) ? previous : (preferred.find((p) => catalog.some((m) => m.name === p)) || catalog[0].name);
+        }
+        if (resp.dropped_samples) document.getElementById('fx-metric-meta').textContent = `${resp.dropped_samples} samples dropped by the series cardinality cap`;
+      }
+
+      async function loadExplorer() {
+        const select = document.getElementById('fx-metric-select');
+        const agg = document.getElementById('fx-metric-agg').value;
+        const mount = document.getElementById('fx-metric-chart');
+        const meta = document.getElementById('fx-metric-meta');
+        if (!select.value) { emptyState(mount, 'no §32 metrics have been recorded by any service yet'); meta.textContent = ''; return; }
+        const info = catalog.find((m) => m.name === select.value) || {};
+        const resp = await getHistory('series', { name: select.value, range, group_by: 'service', ...(focusService ? { service: focusService } : {}) });
+        const times = seriesTimes(resp);
+        const pick = (p) => {
+          if (!p.count) return null;
+          switch (agg) {
+            case 'max': return p.max;
+            case 'last': return p.last;
+            case 'sum': return p.sum;
+            case 'count': return p.count;
+            case 'p95': return p.p95 ?? null;
+            default: return p.avg;
+          }
+        };
+        const unit = agg === 'count' ? 'count' : (resp.series[0] && resp.series[0].unit) || info.unit || '';
+        timeChart(mount, {
+          times,
+          series: resp.series.slice(0, 10).map((sr) => ({ label: sr.group.service || 'unlabelled', color: colorFor(sr.group.service || 'unlabelled'), values: sr.points.map(pick), band: agg === 'avg' ? sr.points.map((p) => (p.count ? [p.min, p.max] : null)) : null })),
+          yFormat: (v) => fmtUnit(v, unit),
+          empty: `no ${select.value} samples in this window`,
+        });
+        meta.textContent = `${select.value} · ${agg}${unit ? ' (' + unit + ')' : ''} · ${resp.resolution} rollups · step ${resp.step}${info.last_seen ? ' · last sample ' + ago(info.last_seen) : ''}`;
+      }
+
+      async function loadBenchmarks() {
+        const resp = await getHistory('benchmarks', { limit: '200' });
+        const mount = document.getElementById('fx-bench-chart');
+        const table = document.getElementById('fx-bench-table');
+        const meta = document.getElementById('fx-bench-meta');
+        table.innerHTML = '';
+        if (!resp.history.length) {
+          emptyState(mount, 'no benchmark runs recorded — runs are published by benchmarks/run_deployed.py and benchmarks/run_acceptance.py when SCOS_BENCHMARK_PUBLISH_URL is set');
+          table.innerHTML = '<p class="hud-empty">no suites recorded</p>';
+          meta.textContent = '';
+          return;
+        }
+        const runs = resp.history.slice().reverse();
+        const times = [...new Set(runs.map((r) => new Date(r.recorded_at).getTime()))].sort((a, b) => a - b);
+        const suites = [...new Set(runs.map((r) => r.suite))];
+        timeChart(mount, {
+          times,
+          series: suites.map((suite) => {
+            const bySuite = new Map(runs.filter((r) => r.suite === suite).map((r) => [new Date(r.recorded_at).getTime(), r.pass_rate]));
+            return { label: suite, color: colorFor('bench:' + suite), values: times.map((t) => (bySuite.has(t) ? bySuite.get(t) : null)) };
+          }),
+          yFormat: fmtPct,
+          yMax: 1,
+        });
+        meta.textContent = `${resp.history.length} runs · ${suites.length} suite${suites.length === 1 ? '' : 's'}`;
+        const t = document.createElement('table');
+        t.className = 'records';
+        t.innerHTML = '<thead><tr><th>suite</th><th>pass</th><th>cases</th><th>avg latency</th><th>recorded</th></tr></thead>';
+        const body = document.createElement('tbody');
+        for (const st of resp.suites) {
+          const r = st.latest;
+          const tr = document.createElement('tr');
+          const color = r.pass_rate >= 0.999 ? 'var(--green)' : r.pass_rate >= 0.8 ? 'var(--amber)' : 'var(--red)';
+          tr.innerHTML = `<td>${escapeHtml(st.suite)}<div style="color:var(--text-faint);font-size:.68rem">${st.runs} run${st.runs === 1 ? '' : 's'}${r.source_sha ? ' · ' + escapeHtml(r.source_sha.slice(0, 8)) : ''}</div></td><td style="color:${color}">${fmtPct(r.pass_rate)}</td><td>${r.passed_cases}/${r.total_cases}</td><td>${fmtMs(r.avg_latency_ms)}</td><td title="${escapeHtml(r.recorded_at)}">${escapeHtml(ago(r.recorded_at))}</td>`;
+          body.appendChild(tr);
+        }
+        t.appendChild(body);
+        table.appendChild(t);
+      }
+
+      async function loadFlows() {
+        const flows = await getHistory('flows', { range });
+        lastFlows = flows;
+        renderKpis(flows);
+        drawFlowGraph(flows);
+        renderEdgeTable(flows);
+        document.getElementById('fx-window-label').textContent = `${new Date(flows.from).toLocaleString()} → ${new Date(flows.to).toLocaleTimeString()} · ${flows.resolution} rollups`;
+      }
+
+      async function loadAll() {
+        if (loading) return;
+        loading = true;
+        try {
+          const results = await Promise.allSettled([loadFlows(), loadCharts(), loadCatalog().then(loadExplorer), loadBenchmarks()]);
+          const failed = results.filter((r) => r.status === 'rejected');
+          if (failed.length) setStatusError(`flow history: ${failed[0].reason.message}`);
+          document.getElementById('fx-live-dot').classList.toggle('on', LIVE_RANGES.has(range) && !failed.length);
+        } finally {
+          loading = false;
+        }
+      }
+
+      function schedule() {
+        clearInterval(refreshTimer);
+        // Short windows are live views: refresh every 10s. Longer windows
+        // move slowly, so a minute is enough.
+        refreshTimer = setInterval(() => { if (currentTab === 'flow' && !document.hidden) loadAll(); }, LIVE_RANGES.has(range) ? 10000 : 60000);
+      }
+
+      function init() {
+        const bar = document.getElementById('fx-ranges');
+        for (const r of RANGES) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.textContent = r;
+          b.setAttribute('aria-pressed', String(r === range));
+          b.addEventListener('click', () => {
+            range = r;
+            try { localStorage.setItem('scos.fx.range', r); } catch (e) { /* storage unavailable */ }
+            bar.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x.textContent === r)));
+            schedule();
+            loadAll();
+          });
+          bar.appendChild(b);
+        }
+        document.getElementById('fx-metric-select').addEventListener('change', () => loadExplorer().catch((err) => setStatusError(`metric history: ${err.message}`)));
+        document.getElementById('fx-metric-agg').addEventListener('change', () => loadExplorer().catch((err) => setStatusError(`metric history: ${err.message}`)));
+        let resizeTimer = null;
+        window.addEventListener('resize', () => {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(() => { if (currentTab === 'flow') loadAll(); }, 250);
+        });
+        schedule();
+      }
+
+      return {
+        init,
+        activate: () => loadAll(),
+        pulse,
+        // The snapshot carries a 15m flow graph; use it for the KPI strip
+        // until the tab is opened and the selected range is fetched.
+        fromSnapshot: (flows) => { if (!lastFlows && range === '15m' && flows && flows.nodes) renderKpis(flows); },
+      };
+    })();
+    FX.init();
+
     // ── Connect tab: static catalog of the 14 local-agent bundles this repo
     // ships (kept in sync with integrations/agent-plugins/registry.json)
     // overlaid with a doctor --json report the user pastes in by hand --
@@ -1828,6 +2631,7 @@
         }
       }
       renderAgentTopology();
+      FX.fromSnapshot(views.service_flows);
       statusPill.classList.remove('error');
       statusText.textContent = `refreshed ${new Date().toISOString()}`;
       if (anyUnavailable) statusText.textContent += ' (partial)';
@@ -1863,6 +2667,7 @@
       // panel shows -- keep it in sync instead of waiting for the next
       // 15s poll.
       if (/fact/i.test(eventName)) refreshSnapshot().catch(() => {});
+      FX.pulse();
     }
 
     // The stream endpoint is public like every other transparency route
@@ -1955,7 +2760,25 @@
       }
     }
 
+    // null until /api/deployment answers; false on a self-hosted stack that
+    // runs without the cloud control plane (no accounts to sign in to).
+    let accountsEnabled = null;
+
     async function checkSession() {
+      if (accountsEnabled === null) {
+        try {
+          accountsEnabled = (await apiFetch('/api/deployment')).accounts_enabled !== false;
+        } catch (e) {
+          accountsEnabled = true;
+        }
+        const accountBtn = document.querySelector('.tab-btn[data-tab="account"]');
+        if (accountBtn) accountBtn.hidden = !accountsEnabled;
+      }
+      if (!accountsEnabled) {
+        session = null;
+        renderAccountState();
+        return;
+      }
       try {
         session = await apiFetch('/api/me');
       } catch (e) {
@@ -2276,6 +3099,7 @@
       originalSetTab(id);
       if (id === 'account' && session) loadAccountData();
       if (id === 'admin' && session && session.platform_role === 'creator') loadAdminData();
+      if (id === 'flow') FX.activate();
     };
 
     renderEditState();

@@ -15,7 +15,7 @@ Docker Compose). One shared memory backbone, many clients.
    ├──► hermes-provider        (kubuntux, :8088, TLS)  — 7 memory tools
    │      └──► memory-gateway (:8080) ── PostgreSQL + pgvector
    └──► code-intelligence     (kubuntux, :8084, TLS, control-plane)  — 3 code tools
-          └──► /v1/index, /v1/query, /v1/impact
+          └──► /v1/repos, /v2/code/scan, /v2/code/index, /v2/code/query, /v2/code/impact
 ```
 
 Every agent talks to the **same** bridge script, which talks to the **same**
@@ -121,10 +121,11 @@ whichever service actually owns it:
 | `scos_forget_all` | `memory-intelligence` `DELETE /v1/facts?confirm=true[&namespace_id=...]` — bulk soft-delete: one namespace, or (omitting `namespace_id`) every active fact for the tenant. Requires `confirm=true` |
 | `scos_code_repo_register` | `code-intelligence` `POST /v1/repos` — register a repository (canonical path, remote identity, branch, language set) and get back the `repository_id` to index/query/impact against |
 | `scos_code_repo_list` | `code-intelligence` `GET /v1/repos` — list repositories registered for the caller's tenant |
-| `scos_code_repo_get` | `code-intelligence` `GET /v1/repos/{id}` — a registered repository's details, incl. its current index generation |
-| `scos_code_index` | `code-intelligence` `POST /v1/index` — index (or re-index) files for a repository |
-| `scos_code_query` | `code-intelligence` `POST /v1/query` — query the code index by symbol/path/intent |
-| `scos_code_impact` | `code-intelligence` `POST /v1/impact` — change-impact set for modified symbols |
+| `scos_code_repo_get` | `code-intelligence` `GET /v1/repos/{id}` — a registered repository's details |
+| `scos_code_index` | `code-intelligence` `POST /v2/code/scan` (workspace repository) or `POST /v2/code/index` (uploaded files) — index a repository into a durable snapshot |
+| `scos_code_index_status` | `code-intelligence` `GET /v2/code/snapshots/{id}` — a snapshot's indexing status |
+| `scos_code_query` | `code-intelligence` `POST /v2/code/query` — exact path/name match, then lexical, dense and structural retrieval over the active snapshot |
+| `scos_code_impact` | `code-intelligence` `POST /v2/code/impact` — direct and transitive callers of a symbol from the snapshot's call graph |
 
 Deployed locally at `https://100.93.75.87:8098/mcp` (kubuntux, container
 `compose-mcp-gateway-1`) — this is the **full** governed tool surface (136

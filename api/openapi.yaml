@@ -215,7 +215,10 @@ paths:
         content:
           application/json: {schema: {type: object}}
       responses:
-        '200': {description: Explainable route decision}
+        '200': {description: Explainable route decision, executed and completed}
+        '202': {description: Decision requires confirmation; status awaiting_confirmation, nothing executed until /v1/control/confirm}
+        '403': {description: Execution blocked because tool governance did not authorise the operation}
+        '502': {description: Executed but not completed; body carries the lifecycle}
   /v1/control/ingest:
     post:
       operationId: controlIngest
@@ -224,7 +227,10 @@ paths:
         content:
           application/json: {schema: {type: object}}
       responses:
-        '200': {description: Persisted control-plane route decision}
+        '200': {description: Persisted control-plane route decision, executed and completed}
+        '202': {description: Decision requires confirmation; status awaiting_confirmation, nothing executed until /v1/control/confirm}
+        '403': {description: Execution blocked because tool governance did not authorise the operation}
+        '502': {description: Executed but not completed; body carries the lifecycle}
   /v1/control/decisions:
     get:
       operationId: listControlDecisions
@@ -255,7 +261,39 @@ paths:
         content:
           application/json: {schema: {type: object}}
       responses:
-        '202': {description: Recovery state transition accepted}
+        '200': {description: Running or interrupted run resumed from its persisted route request and re-executed; body carries the resulting status and lifecycle}
+        '403': {description: Resumed run was blocked by tool governance}
+        '404': {description: Interaction not found for the authenticated principal}
+        '409': {description: Run is not running or interrupted, or its execution-proxy stage was in flight so it now requires reconciliation (status reconciliation_required)}
+  /v1/control/confirm:
+    post:
+      operationId: controlConfirm
+      description: >-
+        Records the requesting principal's answer to a route decision that is
+        awaiting_confirmation. Only the principal that requested the action,
+        using its own non-delegated credential, may answer, and only for the
+        decision_id it was shown. A confirmation executes the request frozen at
+        ingress; a rejection ends the run without executing anything.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [interaction_id, decision_id, resolution]
+              properties:
+                tenant_id: {type: string}
+                actor_id: {type: string}
+                interaction_id: {type: string}
+                decision_id: {type: string}
+                resolution: {type: string, enum: [confirmed, rejected]}
+      responses:
+        '200': {description: Confirmed action executed and completed, or action rejected}
+        '403': {description: Caller is not the requesting principal, uses a delegated credential, or the confirmed run was blocked by tool governance}
+        '404': {description: Interaction not found for the authenticated principal}
+        '409': {description: Interaction is not awaiting confirmation for this decision_id}
+        '502': {description: Confirmed run executed but did not complete; body carries the lifecycle}
   /v1/control/status:
     get:
       operationId: getControlLifecycleStatus
@@ -322,7 +360,7 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Context invariant evaluation metrics}
-  /v1/code/index:
+  /v2/code/index:
     post:
       operationId: indexCode
       requestBody:
@@ -330,8 +368,8 @@ paths:
         content:
           application/json: {schema: {type: object}}
       responses:
-        '200': {description: Code index generation result}
-  /v1/code/query:
+        '200': {description: Durable code snapshot indexing result}
+  /v2/code/query:
     post:
       operationId: queryCode
       requestBody:
@@ -340,7 +378,7 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Permission-scoped code query results}
-  /v1/code/impact:
+  /v2/code/impact:
     post:
       operationId: analyseCodeImpact
       requestBody:
@@ -419,7 +457,7 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Secret reference created or updated}
-        '400': {description: Missing fields or unsupported provider}
+        '400': {description: Missing fields, unsupported provider, invalid scope selector, or unknown data_class}
   /v1/secrets/{id}:
     get:
       operationId: getSecretReference
@@ -436,9 +474,12 @@ paths:
       operationId: resolveSecretReference
       description: >-
         Resolves a securestore-provider SecretReference to its live value via
-        the Securestore platform. Fails closed (502/503) if Securestore is
-        unreachable, returns approval_required, or the integration is not
-        configured. Never caches or persists the resolved value.
+        the Securestore platform. The caller's signed claims must match the
+        reference's scope (tenant, principal:<id>, agent:<id>) and carry a
+        data_class:<class> scope at or above the reference's data_class.
+        Fails closed (502/503) if Securestore is unreachable, returns
+        approval_required, or the integration is not configured. Never caches
+        or persists the resolved value.
       parameters:
         - name: id
           in: path
@@ -447,6 +488,7 @@ paths:
       responses:
         '200': {description: Resolved secret value from Securestore}
         '400': {description: Secret reference provider is not securestore}
+        '403': {description: Caller is outside the reference scope, lacks a data_class claims scope covering the reference's data class, or presented no signed claims; the refusal is audited}
         '404': {description: Secret reference not found}
         '502': {description: Securestore unreachable or returned an error}
         '503': {description: Securestore integration not configured, or approval required}
@@ -475,15 +517,79 @@ paths:
         '200': {description: Retrieval result with source and timing metadata}
   /v1/benchmarks:
     get:
-      operationId: runBenchmarks
+      operationId: listBenchmarkHistory
+      description: Recorded benchmark runs published by the benchmark harnesses. Empty when nothing has been measured; the service never synthesises results.
+      parameters:
+        - {name: suite, in: query, required: false, schema: {type: string}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 500}}
       responses:
         '200':
-          description: Measured results from the frozen governance quality benchmark suite.
+          description: Per-suite latest run and newest-first run history.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BenchmarkSummary'
+                $ref: '#/components/schemas/BenchmarkHistory'
+        '400': {description: Invalid limit}
         '405': {description: Method not allowed}
+  /v1/benchmarks/runs:
+    post:
+      operationId: recordBenchmarkRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BenchmarkRun'
+      responses:
+        '201': {description: Run recorded; totals are derived from the submitted cases}
+        '200': {description: Run already recorded (idempotent on run_id)}
+        '400': {description: Invalid run}
+        '503': {description: Benchmark persistence unavailable}
+  /v1/benchmarks/runs/{run_id}:
+    get:
+      operationId: getBenchmarkRun
+      parameters: [{name: run_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200':
+          description: One recorded run with its cases.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BenchmarkRun'
+        '404': {description: Unknown run}
+  /v1/metrics/series:
+    get:
+      operationId: getMetricSeries
+      description: Bucketed history for one metric from durable 1m (48h) and 1h (90d) rollups.
+      parameters:
+        - {name: name, in: query, required: true, schema: {type: string}}
+        - {name: range, in: query, required: false, schema: {type: string, example: 24h}}
+        - {name: to, in: query, required: false, schema: {type: string, format: date-time}}
+        - {name: step, in: query, required: false, schema: {type: string, example: 5m}}
+        - {name: group_by, in: query, required: false, schema: {type: string, example: 'service,caller'}}
+        - {name: service, in: query, required: false, schema: {type: string}}
+        - {name: caller, in: query, required: false, schema: {type: string}}
+        - {name: route, in: query, required: false, schema: {type: string}}
+      responses:
+        '200': {description: 'Series of {t, count, sum, avg, min, max, last, errors, p50, p95, p99} points per group'}
+        '400': {description: Invalid query}
+  /v1/metrics/catalog:
+    get:
+      operationId: getMetricCatalog
+      parameters:
+        - {name: range, in: query, required: false, schema: {type: string, example: 24h}}
+      responses:
+        '200': {description: Metrics with recorded history in the window}
+  /v1/flows:
+    get:
+      operationId: getServiceFlows
+      description: Caller-to-service request graph built from the inbound request measure (scos.http.server.request) every service records.
+      parameters:
+        - {name: range, in: query, required: false, schema: {type: string, example: 15m}}
+        - {name: to, in: query, required: false, schema: {type: string, format: date-time}}
+      responses:
+        '200': {description: 'Nodes and edges with request counts, error ratio, average and p95 request latency, top routes and a sparkline. Event-stream connections (scos.http.server.stream) count as traffic on their edge and route (route.streams) but are excluded from latency figures'}
+        '400': {description: Invalid window}
   /v1/proxy/restore/{restorationHandle}:
     get:
       operationId: proxyRestore
@@ -584,6 +690,18 @@ paths:
       operationId: getTransparencySnapshot
       responses:
         '200': {description: System transparency snapshot}
+  /v1/transparency/history/{view}:
+    get:
+      operationId: getTransparencyHistory
+      description: Read-only dashboard history (flows, series, catalog, benchmarks) proxied from observability with a whitelisted query.
+      parameters:
+        - name: view
+          in: path
+          required: true
+          schema: {type: string, enum: [flows, series, catalog, benchmarks]}
+      responses:
+        '200': {description: Observability history payload}
+        '404': {description: Unknown history view}
   /v1/transparency/events:
     get:
       operationId: getTransparencyEvents
@@ -713,30 +831,51 @@ components:
       properties:
         operation_id: {type: string, format: uuid}
         status: {type: string, enum: [prepared]}
-    BenchmarkSummary:
+    BenchmarkCase:
       type: object
-      required: [suite, version, total_cases, average_scores, total_latency_ms, avg_latency_ms, results]
+      required: [case_id, latency_ms]
       properties:
+        case_id: {type: string}
+        passed: {type: boolean}
+        latency_ms: {type: number, minimum: 0}
+        scores:
+          type: object
+          additionalProperties: {type: number}
+    BenchmarkRun:
+      type: object
+      required: [suite, cases]
+      properties:
+        run_id: {type: string}
         suite: {type: string}
-        version: {type: string}
-        total_cases: {type: integer, minimum: 1}
+        schema_version: {type: string}
+        mode: {type: string}
+        source_sha: {type: string}
+        recorded_at: {type: string, format: date-time}
+        total_cases: {type: integer, readOnly: true}
+        passed_cases: {type: integer, readOnly: true}
+        pass_rate: {type: number, readOnly: true}
+        wall_time_ms: {type: number, minimum: 0}
+        avg_latency_ms: {type: number, readOnly: true}
         average_scores:
           type: object
-          additionalProperties: {type: number, minimum: 0, maximum: 1}
-        total_latency_ms: {type: number, minimum: 0}
-        avg_latency_ms: {type: number, minimum: 0}
-        results:
+          readOnly: true
+          additionalProperties: {type: number}
+        cases:
           type: array
           minItems: 1
+          items: {$ref: '#/components/schemas/BenchmarkCase'}
+    BenchmarkHistory:
+      type: object
+      required: [suites, history]
+      properties:
+        suites:
+          type: array
           items:
             type: object
-            required: [case_id, retrieved_ids, latency_ms, scores]
             properties:
-              case_id: {type: string}
-              retrieved_ids:
-                type: array
-                items: {type: string}
-              latency_ms: {type: number, minimum: 0}
-              scores:
-                type: object
-                additionalProperties: {type: number, minimum: 0, maximum: 1}
+              suite: {type: string}
+              runs: {type: integer}
+              latest: {$ref: '#/components/schemas/BenchmarkRun'}
+        history:
+          type: array
+          items: {type: object}

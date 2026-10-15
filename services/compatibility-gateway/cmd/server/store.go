@@ -29,6 +29,24 @@ type requestIdentity struct {
 	PrincipalID string
 }
 
+// withTenantRead runs fn in a read-only transaction carrying the tenant RLS
+// context. adapter_instances, agent_adapters and context_envelopes are under
+// FORCE RLS: queried on the pool without it, the runtime role sees no rows.
+func withTenantRead(ctx context.Context, db *sql.DB, tenantID string, fn func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true)`, tenantID); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func setPrincipalContext(ctx context.Context, tx *sql.Tx, id requestIdentity) error {
 	_, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true), set_config('scos.principal_id',$2,true)`, id.TenantID, id.PrincipalID)
 	return err
@@ -133,7 +151,17 @@ func scanAgentRegistration(row agentInstanceRow) (*AgentRegistration, error) {
 }
 
 func listAgentInstances(ctx context.Context, db *sql.DB, tenantID string) ([]*AgentRegistration, error) {
-	rows, err := db.QueryContext(ctx, `
+	var out []*AgentRegistration
+	err := withTenantRead(ctx, db, tenantID, func(tx *sql.Tx) error {
+		var err error
+		out, err = listAgentInstancesTx(ctx, tx, tenantID)
+		return err
+	})
+	return out, err
+}
+
+func listAgentInstancesTx(ctx context.Context, tx *sql.Tx, tenantID string) ([]*AgentRegistration, error) {
+	rows, err := tx.QueryContext(ctx, `
 		SELECT ai.instance_key, aa.boundary, ai.status, ai.last_seen_at, ai.metadata
 		FROM adapter_instances ai
 		JOIN agent_adapters aa ON aa.id = ai.adapter_id
@@ -161,12 +189,14 @@ func listAgentInstances(ctx context.Context, db *sql.DB, tenantID string) ([]*Ag
 
 func getAgentInstance(ctx context.Context, db *sql.DB, tenantID, agentID string) (*AgentRegistration, bool, error) {
 	var row agentInstanceRow
-	err := db.QueryRowContext(ctx, `
-		SELECT ai.instance_key, aa.boundary, ai.status, ai.last_seen_at, ai.metadata
-		FROM adapter_instances ai
-		JOIN agent_adapters aa ON aa.id = ai.adapter_id
-		WHERE ai.tenant_id = $1 AND ai.instance_key = $2
-	`, tenantID, agentID).Scan(&row.InstanceKey, &row.Boundary, &row.Status, &row.LastSeen, &row.Metadata)
+	err := withTenantRead(ctx, db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT ai.instance_key, aa.boundary, ai.status, ai.last_seen_at, ai.metadata
+			FROM adapter_instances ai
+			JOIN agent_adapters aa ON aa.id = ai.adapter_id
+			WHERE ai.tenant_id = $1 AND ai.instance_key = $2
+		`, tenantID, agentID).Scan(&row.InstanceKey, &row.Boundary, &row.Status, &row.LastSeen, &row.Metadata)
+	})
 	switch {
 	case err == sql.ErrNoRows:
 		return nil, false, nil
@@ -205,7 +235,9 @@ func upsertEnvelope(ctx context.Context, tx *sql.Tx, tenantID string, env Contex
 
 func getEnvelope(ctx context.Context, db *sql.DB, tenantID, sessionID string) (*ContextEnvelope, bool, error) {
 	var payload []byte
-	err := db.QueryRowContext(ctx, `SELECT envelope FROM context_envelopes WHERE tenant_id=$1 AND session_id=$2`, tenantID, sessionID).Scan(&payload)
+	err := withTenantRead(ctx, db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT envelope FROM context_envelopes WHERE tenant_id=$1 AND session_id=$2`, tenantID, sessionID).Scan(&payload)
+	})
 	switch {
 	case err == sql.ErrNoRows:
 		return nil, false, nil

@@ -117,8 +117,7 @@ func TestHandlePGEndToEndIndexAndQuery(t *testing.T) {
 }
 
 // A repository_id that exists but belongs to a different tenant must
-// behave exactly as if it didn't exist -- the same rule
-// TestHandleQueryPreventsCrossTenantLeakage enforces for the v1 store.
+// behave exactly as if it didn't exist.
 func TestHandlePGIndexRejectsCrossTenantRepository(t *testing.T) {
 	_, db := testPGStore(t)
 	srv := &server{pgStore: newPGCodeStore(db)}
@@ -752,7 +751,7 @@ func TestHandlePGQueryFusesStructuralAndPageRankSignals(t *testing.T) {
 	t.Setenv("SCOS_MODEL_CODE_DIMENSIONS", "3")
 	t.Setenv("SCOS_MODEL_CODE_GENERATION", "1")
 
-	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/query", tenant, map[string]any{"repository_id": repoID, "branch": "main", "query": "Target"})
+	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/query", tenant, map[string]any{"repository_id": repoID, "branch": "main", "query": "graph target"})
 	if resp.Code != http.StatusOK {
 		t.Fatalf("query: %d: %s", resp.Code, resp.Body.String())
 	}
@@ -776,5 +775,196 @@ func TestHandlePGQueryFusesStructuralAndPageRankSignals(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected structural/PageRank provenance in results: %+v", out.Results)
+	}
+}
+
+func TestHandlePGIndexRefusesAContentHashThatDoesNotMatchTheContent(t *testing.T) {
+	store, db := testPGStore(t)
+	tenant := testTenant(t, db)
+	repoID, err := store.EnsureRepository(t.Context(), tenant, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "package a\nfunc A() {}\n"
+	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": repoID, "branch": "main", "commit_id": "c1",
+		"files": []map[string]any{{"path": "a.go", "language": "go", "content": content, "content_hash": hashContent("something else")}},
+	})
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "does not match") {
+		t.Fatalf("mismatched hash must be refused, got %d %s", resp.Code, resp.Body.String())
+	}
+	resp = pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": repoID, "branch": "main", "commit_id": "c1",
+		"files": []map[string]any{{"path": "a.go", "language": "go", "content": content, "content_hash": hashContent(content)}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("matching hash must be indexed, got %d %s", resp.Code, resp.Body.String())
+	}
+}
+
+// Re-sending the same tree under the same snapshot key (a client retry)
+// returns the snapshot already built; different files under that key are
+// refused with 409 instead of failing on duplicate rows.
+func TestHandlePGIndexSameCommitIsIdempotent(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{"canonical_path": "/repo/" + t.Name()})
+	var repo struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	body := func(content string) map[string]any {
+		return map[string]any{
+			"repository_id": repo.RepositoryID, "branch": "main", "commit_id": "commit-1",
+			"files": []map[string]any{{"path": "pkg/a.go", "language": "go", "content_hash": hashContent(content), "content": content}},
+		}
+	}
+	type indexOut struct {
+		SnapshotID  string `json:"snapshot_id"`
+		Unchanged   bool   `json:"unchanged"`
+		SymbolCount int    `json:"symbol_count"`
+	}
+	decode := func(w *httptest.ResponseRecorder) indexOut {
+		t.Helper()
+		var out indexOut
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode %s: %v", w.Body.String(), err)
+		}
+		return out
+	}
+	src := "package pkg\n\nfunc A() {}\n"
+
+	first := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, body(src))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first index: %d: %s", first.Code, first.Body.String())
+	}
+	again := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, body(src))
+	if again.Code != http.StatusOK {
+		t.Fatalf("retry: %d: %s", again.Code, again.Body.String())
+	}
+	a, b := decode(first), decode(again)
+	if b.SnapshotID != a.SnapshotID || !b.Unchanged || b.SymbolCount != a.SymbolCount || a.Unchanged {
+		t.Fatalf("retry returned %+v, first %+v", b, a)
+	}
+
+	changed := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, body("package pkg\n\nfunc B() {}\n"))
+	if changed.Code != http.StatusConflict || !strings.Contains(changed.Body.String(), a.SnapshotID) {
+		t.Fatalf("different files under the same commit: %d: %s", changed.Code, changed.Body.String())
+	}
+}
+
+// A declaration named the way people write it -- bare, qualified by its
+// class, with a language keyword, or as a Go Type.Method -- anchors as an
+// exact match on the declaration the indexer recorded.
+func TestHandlePGQueryAnchorsDeclarationNames(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{"canonical_path": "/repo/" + t.Name()})
+	var repo struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	py := "class OutputReducer:\n    def reduce_output(self, text):\n        return text\n"
+	gosrc := "package proxy\n\ntype server struct{}\n\nfunc (s *server) handleRun() {}\n"
+	index := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": repo.RepositoryID, "branch": "main", "commit_id": "c1",
+		"files": []map[string]any{
+			{"path": "tools/reducer.py", "language": "python", "content_hash": hashContent(py), "content": py},
+			{"path": "proxy/run.go", "language": "go", "content_hash": hashContent(gosrc), "content": gosrc},
+		},
+	})
+	if index.Code != http.StatusOK {
+		t.Fatalf("index: %d: %s", index.Code, index.Body.String())
+	}
+
+	for query, wantSuffix := range map[string]string{
+		"OutputReducer":               ".OutputReducer",
+		"class OutputReducer":         ".OutputReducer",
+		"OutputReducer.reduce_output": ".OutputReducer.reduce_output",
+		"def reduce_output":           ".OutputReducer.reduce_output",
+		"server.handleRun":            ".(*server).handleRun",
+		"func handleRun()":            ".(*server).handleRun",
+	} {
+		resp := pgRequest(t, srv, http.MethodPost, "/v2/code/query", tenant, map[string]any{
+			"repository_id": repo.RepositoryID, "branch": "main", "query": query,
+		})
+		var out struct {
+			Results       []PGSymbolVersion `json:"results"`
+			RetrievalMode string            `json:"retrieval_mode"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+			t.Fatalf("%q: %v: %s", query, err, resp.Body.String())
+		}
+		if out.RetrievalMode != "exact" || len(out.Results) != 1 || !strings.HasSuffix(out.Results[0].FullyQualifiedName, wantSuffix) {
+			t.Errorf("%q: mode %q results %+v, want one exact match ending %q", query, out.RetrievalMode, out.Results, wantSuffix)
+		}
+	}
+}
+
+// Indexing a tree that an earlier snapshot already holds -- an edit was
+// reverted, a branch moved back -- makes that snapshot the served one
+// again; the snapshot that replaced it is never left serving.
+func TestHandlePGIndexReactivatesARevertedTree(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{"canonical_path": "/repo/" + t.Name()})
+	var repo struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	index := func(commit, path, src string) string {
+		t.Helper()
+		w := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+			"repository_id": repo.RepositoryID, "branch": "main", "commit_id": commit,
+			"files": []map[string]any{{"path": path, "language": "go", "content_hash": hashContent(src), "content": src}},
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("index %s: %d: %s", commit, w.Code, w.Body.String())
+		}
+		var out struct {
+			SnapshotID string `json:"snapshot_id"`
+			Status     string `json:"status"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.SnapshotID
+	}
+	served := func(query string) []PGSymbolVersion {
+		t.Helper()
+		w := pgRequest(t, srv, http.MethodPost, "/v2/code/query", tenant, map[string]any{"repository_id": repo.RepositoryID, "branch": "main", "query": query})
+		var out struct {
+			Results []PGSymbolVersion `json:"results"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Results
+	}
+
+	original := index("tree-a", "pkg/a.go", "package pkg\n\nfunc Original() {}\n")
+	edited := index("tree-b", "pkg/b.go", "package pkg\n\nfunc Edited() {}\n")
+	if got := served("Edited"); len(got) != 1 || got[0].SnapshotID != edited {
+		t.Fatalf("edit not served: %+v", got)
+	}
+	if again := index("tree-a", "pkg/a.go", "package pkg\n\nfunc Original() {}\n"); again != original {
+		t.Fatalf("reverted tree got snapshot %s, want the original %s", again, original)
+	}
+	if got := served("Original"); len(got) != 1 || got[0].SnapshotID != original {
+		t.Fatalf("reverted tree not served: %+v", got)
+	}
+	if got := served("Edited"); len(got) != 0 {
+		t.Fatalf("the reverted edit is still served: %+v", got)
 	}
 }

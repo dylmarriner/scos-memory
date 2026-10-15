@@ -46,7 +46,7 @@ class RunSynthesisCycleTests(unittest.TestCase):
     def test_writes_pattern_from_valid_response(self):
         namespace_id = uuid4()
         fact_a, fact_b = str(uuid4()), str(uuid4())
-        ns_row = {"namespace_id": namespace_id, "tenant_id": uuid4(), "owner_principal_id": uuid4(), "fact_count": 25}
+        ns_row = {"namespace_id": namespace_id, "tenant_id": uuid4(), "acting_principal_id": uuid4(), "fact_count": 25}
 
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-test"}, clear=False), \
              patch.object(synthesis, "_eligible_namespaces", return_value=[ns_row]), \
@@ -67,7 +67,7 @@ class RunSynthesisCycleTests(unittest.TestCase):
     def test_skips_pattern_with_fewer_than_two_known_sources(self):
         namespace_id = uuid4()
         fact_a = str(uuid4())
-        ns_row = {"namespace_id": namespace_id, "tenant_id": uuid4(), "owner_principal_id": uuid4(), "fact_count": 25}
+        ns_row = {"namespace_id": namespace_id, "tenant_id": uuid4(), "acting_principal_id": uuid4(), "fact_count": 25}
 
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-test"}, clear=False), \
              patch.object(synthesis, "_eligible_namespaces", return_value=[ns_row]), \
@@ -87,7 +87,7 @@ class RunSynthesisCycleTests(unittest.TestCase):
 
     def test_skips_namespace_not_due(self):
         namespace_id = uuid4()
-        ns_row = {"namespace_id": namespace_id, "tenant_id": uuid4(), "owner_principal_id": uuid4(), "fact_count": 25}
+        ns_row = {"namespace_id": namespace_id, "tenant_id": uuid4(), "acting_principal_id": uuid4(), "fact_count": 25}
 
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-test"}, clear=False), \
              patch.object(synthesis, "_eligible_namespaces", return_value=[ns_row]), \
@@ -102,7 +102,7 @@ class RunSynthesisCycleTests(unittest.TestCase):
 
     def test_deepseek_failure_does_not_raise(self):
         namespace_id = uuid4()
-        ns_row = {"namespace_id": namespace_id, "tenant_id": uuid4(), "owner_principal_id": uuid4(), "fact_count": 25}
+        ns_row = {"namespace_id": namespace_id, "tenant_id": uuid4(), "acting_principal_id": uuid4(), "fact_count": 25}
 
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-test"}, clear=False), \
              patch.object(synthesis, "_eligible_namespaces", return_value=[ns_row]), \

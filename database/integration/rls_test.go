@@ -309,6 +309,13 @@ func applySQL(t *testing.T, db *pgxpool.Pool, schema string) error {
 		}
 		sort.Strings(names)
 		for _, name := range names {
+			// 000011 provisions the deployment's scos_app role through psql
+			// meta-commands (:'app_password', \gexec) that only scos-migrate
+			// can execute; this fixture creates its own per-test restricted
+			// role instead (see newFixture).
+			if dir == "policies" && name == "000011_app_role.sql" {
+				continue
+			}
 			raw, err := os.ReadFile(filepath.Join(databaseDir, dir, name))
 			if err != nil {
 				return err

@@ -1,20 +1,49 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
-// v2 handlers expose pgCodeStore over HTTP, additive alongside every
-// existing /v1/* route, which keeps working unchanged against the
-// in-memory codeStore -- see pgstore.go's doc comment for why the /v1 wire
-// protocol (bare path strings, no content hash) can't drive rename
-// detection, and why migrating existing /v1 callers onto the durable store
-// is a separate, coordinated change rather than something to do here.
+// declarationName matches a declaration name, bare ("SignClaims") or
+// qualified by its enclosing type or module ("OutputReducer.reduce_output").
+var declarationName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+
+// declarationKeyword is a leading language keyword a query may name a
+// declaration with ("class OutputReducer", "func SignClaims").
+var declarationKeyword = regexp.MustCompile(`^(?:class|def|async def|func|function|fn|type|struct|interface|trait|enum)\s+`)
+
+// declarationPatterns are the qualified-name suffixes a declaration name
+// is tried against, most literal first: the name itself, then, for a Go
+// method written "Type.Method", the receiver forms Go's indexer records
+// ("pkg.(*Type).Method", "pkg.(Type).Method").
+func declarationPatterns(name string) []string {
+	patterns := []string{"%." + name}
+	if typeName, method, ok := strings.Cut(name, "."); ok && !strings.Contains(method, ".") {
+		patterns = append(patterns, "%.(*"+typeName+")."+method, "%.("+typeName+")."+method)
+	}
+	return patterns
+}
+
+// declarationQuery returns the declaration name a query anchors on, with
+// any leading declaration keyword removed, or "" when it names none.
+func declarationQuery(query string) string {
+	name := strings.TrimSpace(declarationKeyword.ReplaceAllString(strings.TrimSpace(query), ""))
+	name = strings.TrimSuffix(name, "()")
+	if !declarationName.MatchString(name) {
+		return ""
+	}
+	return name
+}
+
+// v2 handlers expose pgCodeStore over HTTP as /v2/code/*.
 //
 // The durable store itself always runs (DATABASE_URL is required at
 // startup, main.go), but an individual user can opt out of these routes
@@ -198,13 +227,23 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "every file requires a path and a content_hash", http.StatusBadRequest)
 			return
 		}
+		// The hash is the file's identity across snapshots (rename and
+		// unchanged-file detection key on it), so one that does not match
+		// the content sent with it is refused rather than stored.
+		if f.Content != "" {
+			sum := sha256.Sum256([]byte(f.Content))
+			if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimSpace(f.ContentHash)) {
+				http.Error(w, "content_hash for "+f.Path+" does not match its content (sha256 hex expected)", http.StatusBadRequest)
+				return
+			}
+		}
 	}
 	if req.ExtractorVersion == "" {
 		req.ExtractorVersion = "heuristic-v1"
 	}
 
-	// Ownership check mirrors handleIndex's: the repository must belong to
-	// the authenticated tenant. EnsureRepository is keyed on (tenant_id,
+	// Ownership check: the repository must belong to the authenticated
+	// tenant. EnsureRepository is keyed on (tenant_id,
 	// canonical_path), not on repository_id, so a repository_id supplied by
 	// one tenant that happens to belong to another is rejected here rather
 	// than silently indexing into it.
@@ -228,40 +267,16 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		files = append(files, PGFileInput{Path: f.Path, Language: f.Language, ContentHash: f.ContentHash, Content: f.Content})
 	}
 
-	snapshotID, err := s.pgStore.CreateSnapshot(r.Context(), req.RepositoryID, tenant, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)
+	result, err := s.indexDurableSnapshot(r.Context(), tenant, req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash, files)
+	if errors.Is(err, errSnapshotConflict) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	if err != nil {
-		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.pgStore.IndexSnapshot(r.Context(), snapshotID, req.RepositoryID, files); err != nil {
-		http.Error(w, "index snapshot: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	degradedModels := []string{}
-	if codeModelRuntimeConfigured() {
-		if err := s.embedCodeSnapshot(r.Context(), tenant, snapshotID); err != nil {
-			log.Printf("code embedding backfill degraded for snapshot %s: %v", snapshotID, err)
-			degradedModels = append(degradedModels, "code_embedding")
-		}
-	}
-	// The diff against whatever was previously active for this branch is
-	// returned inline rather than requiring a second round-trip: it's the
-	// cheapest possible way for a caller to confirm an incremental index
-	// actually stayed incremental (blueprint §35's completion gate -- "a
-	// one-line change in one file must not trigger a full repository
-	// re-index" -- is directly checkable from this response: Modified
-	// should have one entry, not len(files)).
-	diff, err := s.pgStore.DiffSnapshot(r.Context(), snapshotID)
-	if err != nil {
-		http.Error(w, "diff snapshot: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{
-		"snapshot_id":     snapshotID,
-		"file_count":      len(files),
-		"diff":            diff,
-		"degraded_models": degradedModels,
-	})
+	writeJSON(w, result)
 }
 
 func (s *server) handlePGSnapshotDiff(w http.ResponseWriter, r *http.Request) {
@@ -358,9 +373,25 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.RepositoryID == "" || req.Branch == "" || req.Query == "" {
-		http.Error(w, "repository_id, branch and query are required", http.StatusBadRequest)
+	if req.RepositoryID == "" || req.Query == "" {
+		http.Error(w, "repository_id and query are required", http.StatusBadRequest)
 		return
+	}
+	if req.Branch == "" {
+		branch, err := s.pgStore.LatestIndexedBranch(r.Context(), req.RepositoryID, tenant)
+		if err != nil {
+			http.Error(w, "resolve branch: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if branch == "" {
+			if building, err := s.pgStore.IndexingSnapshot(r.Context(), req.RepositoryID, tenant); err == nil && building != "" {
+				http.Error(w, "repository is still being indexed (snapshot "+building+"); check scos_code_index_status", http.StatusConflict)
+				return
+			}
+			http.Error(w, "repository has no indexed snapshot yet; run scos_code_index first", http.StatusNotFound)
+			return
+		}
+		req.Branch = branch
 	}
 	limit := req.MaxResults
 	if limit <= 0 {
@@ -371,7 +402,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The tenant scope always comes from the authenticated caller, never a
-	// client-supplied field -- same rule as handleQuery (§19.10) -- so a
+	// client-supplied field -- same rule as requireTenant (§19.10) -- so a
 	// query can never be widened to another tenant's repositories even if
 	// repository_id happens to collide.
 	var owningTenant string
@@ -393,6 +424,22 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// A declaration name ("SignClaims", "OutputReducer.reduce_output",
+	// "class OutputReducer") names a declaration as surely as its fully
+	// qualified name does, so it anchors the same way when it is exactly
+	// the trailing segments of a function, method, type, class or
+	// interface's qualified name.
+	if name := declarationQuery(req.Query); len(exact) == 0 && name != "" {
+		for _, pattern := range declarationPatterns(name) {
+			if exact, err = s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, pattern); err != nil {
+				http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(exact) > 0 {
+				break
+			}
+		}
 	}
 	// Exact path/FQN matches are precision anchors. Never bury one under
 	// learned or lexical ranking just because a model happens to like another
@@ -521,9 +568,25 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.RepositoryID == "" || req.Branch == "" || req.Query == "" {
-		http.Error(w, "repository_id, branch and query are required", http.StatusBadRequest)
+	if req.RepositoryID == "" || req.Query == "" {
+		http.Error(w, "repository_id and query are required", http.StatusBadRequest)
 		return
+	}
+	if req.Branch == "" {
+		branch, err := s.pgStore.LatestIndexedBranch(r.Context(), req.RepositoryID, tenant)
+		if err != nil {
+			http.Error(w, "resolve branch: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if branch == "" {
+			if building, err := s.pgStore.IndexingSnapshot(r.Context(), req.RepositoryID, tenant); err == nil && building != "" {
+				http.Error(w, "repository is still being indexed (snapshot "+building+"); check scos_code_index_status", http.StatusConflict)
+				return
+			}
+			http.Error(w, "repository has no indexed snapshot yet; run scos_code_index first", http.StatusNotFound)
+			return
+		}
+		req.Branch = branch
 	}
 
 	// Same tenant-ownership rule as handlePGQuery: a repository belonging

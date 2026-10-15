@@ -1,5 +1,7 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -17,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -63,6 +66,7 @@ type gatewayServer struct {
 	graphifyProviderURL       string
 	credentialVaultURL        string
 	controlPlaneToken         string
+	localBearer               localIdentityToken
 	client                    *http.Client
 	startTime                 time.Time
 }
@@ -119,6 +123,9 @@ func main() {
 
 	var handler http.Handler = mux
 	if isLocalAuthMode() {
+		if _, err := s.localBearer.token(); err != nil {
+			log.Fatalf("mcp-gateway: SCOS_AUTH_MODE=local needs SCOS_SECURITY_ISSUER_SECRET to present the local identity to the services behind it: %v", err)
+		}
 		log.Printf("mcp-gateway (%s): SCOS_AUTH_MODE=local -- no bearer token required, every caller resolves to the reserved local-mode tenant %s", version, localModeTenantID)
 	} else {
 		handler = auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
@@ -126,7 +133,7 @@ func main() {
 
 	log.Printf("mcp-gateway (%s) listening on %s, hermes=%s memory-intelligence=%s",
 		version, addr, s.hermesURL, s.memoryIntelligenceURL)
-	if err := tlsserve.ListenAndServe(addr, handler); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("mcp-gateway", handler)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -247,6 +254,17 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	// header still reaches the services behind this one.
 	r.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
 	r.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
+	if isLocalAuthMode() {
+		// A local-mode caller presents no token, so the services behind
+		// this gateway would see an anonymous request and answer 401 to
+		// every tool. Present the local identity to them as a signed claims
+		// token, exactly as an authenticated caller's token would be.
+		token, err := s.localBearer.token()
+		if err != nil {
+			return nil, fmt.Errorf("local identity token: %w", err)
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 	switch tool {
 	case "scos_status", "scos_recall":
 		return s.callHermesProvider(ctx, r, identity, tool, args)
@@ -276,6 +294,14 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/path", args)
 	case "scos_graphify_explain":
 		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/explain", args)
+	case "scos_graphify_ingest":
+		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/extract", args)
+	case "scos_graphify_ingest_status":
+		jobID := stringArg(args, "job_id")
+		if jobID == "" || strings.ContainsAny(jobID, "/?#") {
+			return nil, fmt.Errorf("job_id is required")
+		}
+		return s.forwardGET(ctx, r, s.graphifyProviderURL+"/v1/graphify/extract/"+url.PathEscape(jobID))
 	case "scos_code_repo_register":
 		legacy, err := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/repos", args)
 		if err != nil {
@@ -307,43 +333,86 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		}
 		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v1/repos/"+repoID)
 	case "scos_code_index":
-		if durableID := stringArg(args, "durable_repository_id"); durableID != "" {
-			branch := stringArg(args, "branch")
-			commitID := stringArg(args, "commit_id")
-			files, ok := args["files"].([]any)
-			if branch == "" || commitID == "" || !ok || len(files) == 0 {
-				return nil, fmt.Errorf("durable code index requires branch, commit_id, and structured files")
+		repositoryID, err := s.durableRepositoryID(ctx, r, args)
+		if err != nil {
+			return nil, err
+		}
+		files, hasFiles := args["files"].([]any)
+		if !hasFiles || len(files) == 0 {
+			// The repository is read from the mounted workspace by
+			// code-intelligence itself: nothing has to be uploaded.
+			return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/scan", map[string]any{"repository_id": repositoryID})
+		}
+		branch, commitID := stringArg(args, "branch"), stringArg(args, "commit_id")
+		if branch == "" || commitID == "" {
+			return nil, fmt.Errorf("uploading files requires branch and commit_id; omit files to index the repository from the workspace")
+		}
+		for _, file := range files {
+			if _, ok := file.(map[string]any); !ok {
+				return nil, fmt.Errorf("uploaded files must be objects with path, content_hash and content")
 			}
-			for _, file := range files {
-				if _, ok := file.(map[string]any); !ok {
-					return nil, fmt.Errorf("durable code index files must be objects with path and content_hash")
+		}
+		payload := map[string]any{"repository_id": repositoryID, "branch": branch, "commit_id": commitID, "files": files}
+		for _, key := range []string{"extractor_version", "configuration_hash"} {
+			if value := stringArg(args, key); value != "" {
+				payload[key] = value
+			}
+		}
+		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/index", payload)
+	case "scos_code_index_status":
+		snapshotID := stringArg(args, "snapshot_id")
+		if snapshotID == "" {
+			return nil, fmt.Errorf("snapshot_id is required (from scos_code_index)")
+		}
+		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v2/code/snapshots/"+url.PathEscape(snapshotID))
+	case "scos_code_query":
+		repositoryID, err := s.durableRepositoryID(ctx, r, args)
+		if err != nil {
+			return nil, err
+		}
+		payload := map[string]any{"repository_id": repositoryID, "query": stringArg(args, "query")}
+		if branch := stringArg(args, "branch"); branch != "" {
+			payload["branch"] = branch
+		}
+		if maxResults, ok := args["max_results"]; ok {
+			payload["max_results"] = maxResults
+		}
+		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/query", payload)
+	case "scos_code_impact":
+		repositoryID, err := s.durableRepositoryID(ctx, r, args)
+		if err != nil {
+			return nil, err
+		}
+		symbols := []string{}
+		if symbol := stringArg(args, "symbol"); symbol != "" {
+			symbols = append(symbols, symbol)
+		}
+		if list, ok := args["modified_symbols"].([]any); ok {
+			for _, item := range list {
+				if symbol, ok := item.(string); ok && symbol != "" {
+					symbols = append(symbols, symbol)
 				}
 			}
-			payload := map[string]any{"repository_id": durableID, "branch": branch, "commit_id": commitID, "files": files}
-			if value := stringArg(args, "extractor_version"); value != "" {
-				payload["extractor_version"] = value
-			}
-			if value := stringArg(args, "configuration_hash"); value != "" {
-				payload["configuration_hash"] = value
-			}
-			return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/index", payload)
 		}
-		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/index", args)
-	case "scos_code_query":
-		if durableID := stringArg(args, "durable_repository_id"); durableID != "" {
-			branch := stringArg(args, "branch")
-			if branch == "" {
-				return nil, fmt.Errorf("branch is required with durable_repository_id")
-			}
-			payload := map[string]any{"repository_id": durableID, "branch": branch, "query": stringArg(args, "query")}
-			if maxResults, ok := args["max_results"]; ok {
-				payload["max_results"] = maxResults
-			}
-			return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/query", payload)
+		if len(symbols) == 0 {
+			return nil, fmt.Errorf("symbol (or modified_symbols) is required")
 		}
-		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/query", args)
-	case "scos_code_impact":
-		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/impact", args)
+		impacts := make([]any, 0, len(symbols))
+		for _, symbol := range symbols {
+			payload := map[string]any{"repository_id": repositoryID, "query": symbol}
+			if branch := stringArg(args, "branch"); branch != "" {
+				payload["branch"] = branch
+			}
+			if depth, ok := args["max_depth"]; ok {
+				payload["max_depth"] = depth
+			}
+			impact, err := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/impact", payload)
+			if err != nil {
+				return nil, fmt.Errorf("impact of %s: %w", symbol, err)
+			}
+			impacts = append(impacts, map[string]any{"symbol": symbol, "impact": impact})
+		}
+		return map[string]any{"repository_id": repositoryID, "impacts": impacts}, nil
 	case "scos_link_evidence":
 		factID := stringArg(args, "fact_id")
 		symbolVersionID := stringArg(args, "code_symbol_version_id")
@@ -356,6 +425,36 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			"link_type":              stringArg(args, "link_type"),
 			"confidence":             args["confidence"],
 		})
+	case "scos_remember":
+		content := strings.TrimSpace(stringArg(args, "content"))
+		if content == "" {
+			return nil, fmt.Errorf("content is required")
+		}
+		fact := map[string]any{"content": content, "source": "explicit"}
+		for _, key := range []string{"network", "namespace_id", "scope", "valid_until"} {
+			if value := strings.TrimSpace(stringArg(args, key)); value != "" {
+				fact[key] = value
+			}
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts", fact)
+	case "scos_memory_review_list":
+		status := stringArg(args, "status")
+		if status == "" {
+			status = "pending_review"
+		}
+		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/candidates?status="+url.QueryEscape(status))
+	case "scos_memory_review":
+		candidateID := stringArg(args, "candidate_id")
+		if candidateID == "" {
+			return nil, fmt.Errorf("candidate_id is required")
+		}
+		body := map[string]any{"decision": stringArg(args, "decision")}
+		for _, key := range []string{"rationale", "content", "network"} {
+			if value := stringArg(args, key); value != "" {
+				body[key] = value
+			}
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/candidates/"+url.PathEscape(candidateID)+"/review", body)
 	case "scos_correct":
 		memoryID := stringArg(args, "memory_id")
 		if memoryID == "" {
@@ -439,6 +538,8 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/control/replay", args)
 	case "scos_control_recover":
 		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/control/recover", args)
+	case "scos_control_confirm":
+		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/control/confirm", args)
 	case "scos_control_status_get":
 		return s.forwardGET(ctx, r, s.controlPlaneURL+"/v1/control/status/"+stringArg(args, "interaction_id"))
 	case "scos_control_trigger":
@@ -487,6 +588,12 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.compatGatewayURL+"/v1/envelope/render", args)
 	case "scos_translate":
 		return s.forwardPOST(ctx, r, s.compatGatewayURL+"/v1/translate", args)
+	case "scos_compat_conformance":
+		u := s.compatGatewayURL + "/v1/compatibility/conformance"
+		if boundary := stringArg(args, "boundary"); boundary != "" {
+			u += "?boundary=" + url.QueryEscape(boundary)
+		}
+		return s.forwardGET(ctx, r, u)
 
 	// ── context-optimisation ─────────────────────────────────────────────
 	case "scos_context_optimize_input":
@@ -504,6 +611,14 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_exec_plan":
 		return s.forwardPOST(ctx, r, s.executionProxyURL+"/v1/plan", args)
 	case "scos_exec_execute":
+		// The proxy runs a destructive command only when its caller asserts
+		// confirmation. A tool argument is the agent's own claim, not the
+		// principal's confirmation, so this route never carries one: a
+		// command that needs confirmation goes through scos_control_route and
+		// runs after the principal answers with scos_control_confirm.
+		if confirmed, _ := args["confirmed"].(bool); confirmed {
+			return nil, fmt.Errorf("scos_exec_execute cannot assert confirmation; route the command with scos_control_route and confirm it with scos_control_confirm")
+		}
 		return s.forwardPOST(ctx, r, s.executionProxyURL+"/v1/execute", args)
 	case "scos_exec_results_list":
 		return s.forwardGET(ctx, r, s.executionProxyURL+"/v1/results")
@@ -603,8 +718,6 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	// ── security-gate ────────────────────────────────────────────────────
 	case "scos_auth_validate":
 		return s.forwardPOST(ctx, r, s.securityGateURL+"/v1/auth/validate", args)
-	case "scos_auth_issue":
-		return s.forwardPOST(ctx, r, s.securityGateURL+"/v1/auth/issue", args)
 	case "scos_auth_revoke":
 		return s.forwardPOST(ctx, r, s.securityGateURL+"/v1/auth/revoke", args)
 	case "scos_permission_check":
@@ -637,9 +750,18 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/operations")
 	case "scos_operation_get":
 		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/operations/"+stringArg(args, "id"))
-	case "scos_operation_start":
-		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/start", args)
-	case "scos_operation_prepare":
+	case "scos_operation_start", "scos_operation_prepare":
+		// Governance acts on the confirmation recorded with the operation,
+		// and every service reaches it with the same control-plane
+		// credential, so the agent boundary is where a self-asserted one is
+		// stopped: confirmation comes only from the principal's answer to
+		// scos_control_confirm, which the control plane carries itself.
+		if confirmed, _ := args["confirmed"].(bool); confirmed {
+			return nil, fmt.Errorf("%s cannot assert confirmation; route the operation with scos_control_route and confirm it with scos_control_confirm", tool)
+		}
+		if tool == "scos_operation_start" {
+			return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/start", args)
+		}
 		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/prepare", args)
 	case "scos_operation_complete":
 		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/complete", args)
@@ -688,7 +810,18 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_observability_export_status":
 		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/export/status")
 	case "scos_benchmarks":
-		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/benchmarks")
+		q := url.Values{}
+		if suite := stringArg(args, "suite"); suite != "" {
+			q.Set("suite", suite)
+		}
+		if limit, ok := args["limit"].(float64); ok {
+			q.Set("limit", fmt.Sprintf("%d", int(limit)))
+		}
+		u := s.observabilityURL + "/v1/benchmarks"
+		if encoded := q.Encode(); encoded != "" {
+			u += "?" + encoded
+		}
+		return s.forwardGET(ctx, r, u)
 	}
 	return nil, errUnreachable("unhandled tool: " + tool)
 }
@@ -701,11 +834,16 @@ func (s *gatewayServer) callHermesProvider(ctx context.Context, r *http.Request,
 		"arguments":    args,
 	}
 	if tool == "scos_recall" {
-		sessionID, _ := args["session_id"].(string)
-		if sessionID == "" {
-			sessionID = deriveSessionID(identity.TenantID, identity.PrincipalID)
+		// A caller-named session scopes the recall's session lane to that
+		// session (hermes-provider asks retrieval for include_session). With
+		// no session named, recall is long-term memory only: no session is
+		// invented for the caller.
+		if sessionID := strings.TrimSpace(stringArg(args, "session_id")); sessionID != "" {
+			if !isUUID(sessionID) {
+				return nil, fmt.Errorf("session_id must be a session UUID")
+			}
+			body["session_id"] = sessionID
 		}
-		body["session_id"] = sessionID
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -744,7 +882,7 @@ func (s *gatewayServer) forwardGET(ctx context.Context, r *http.Request, url str
 	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
+		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -752,7 +890,7 @@ func (s *gatewayServer) forwardGET(ctx context.Context, r *http.Request, url str
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errUnreachable("memory-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+		return nil, errUnreachable(upstreamName(url) + " returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -783,7 +921,7 @@ func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url st
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, errUnreachable("code-intelligence unavailable: " + err.Error())
+		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -791,7 +929,7 @@ func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url st
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errUnreachable("code-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+		return nil, errUnreachable(upstreamName(url) + " returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -812,7 +950,7 @@ func (s *gatewayServer) forwardDELETE(ctx context.Context, r *http.Request, url 
 	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
+		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -820,7 +958,7 @@ func (s *gatewayServer) forwardDELETE(ctx context.Context, r *http.Request, url 
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errUnreachable("memory-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+		return nil, errUnreachable(upstreamName(url) + " returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -842,7 +980,7 @@ func (s *gatewayServer) forwardWithBody(ctx context.Context, r *http.Request, me
 	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
+		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -850,13 +988,67 @@ func (s *gatewayServer) forwardWithBody(ctx context.Context, r *http.Request, me
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errUnreachable("memory-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+		return nil, errUnreachable(upstreamName(url) + " returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+// durableRepositoryID resolves the repository a code tool names to its
+// durable (snapshot) repository id. scos_code_repo_register returns both a
+// legacy id and the durable id; either is accepted, the legacy one being
+// resolved through its canonical path.
+func (s *gatewayServer) durableRepositoryID(ctx context.Context, r *http.Request, args map[string]any) (string, error) {
+	id := stringArg(args, "durable_repository_id")
+	if id == "" {
+		id = stringArg(args, "repository_id")
+	}
+	if id == "" {
+		return "", fmt.Errorf("repository_id is required (from scos_code_repo_register)")
+	}
+	if isUUID(id) {
+		return id, nil
+	}
+	legacy, err := s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v1/repos/"+url.PathEscape(id))
+	if err != nil {
+		return "", err
+	}
+	repo, _ := legacy.(map[string]any)
+	path, _ := repo["canonical_path"].(string)
+	if path == "" {
+		return "", fmt.Errorf("repository %s has no canonical path", id)
+	}
+	durable, err := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/repos", map[string]any{"canonical_path": path})
+	if err != nil {
+		return "", err
+	}
+	dm, _ := durable.(map[string]any)
+	durableID, _ := dm["repository_id"].(string)
+	if durableID == "" {
+		return "", fmt.Errorf("code-intelligence returned no durable repository for %s", path)
+	}
+	return durableID, nil
+}
+
+func isUUID(v string) bool {
+	if len(v) != 36 {
+		return false
+	}
+	for i, c := range v {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return false
+		}
+	}
+	return true
 }
 
 func stringArg(args map[string]any, key string) string {
@@ -872,6 +1064,15 @@ func queryFromArgs(args map[string]any, keys ...string) string {
 		}
 	}
 	return values.Encode()
+}
+
+// upstreamName names the service a forwarded call went to, from its URL
+// host, so a failure is attributed to the service that produced it.
+func upstreamName(target string) string {
+	if u, err := url.Parse(target); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return "upstream"
 }
 
 type errUnreachable string
@@ -914,6 +1115,41 @@ const (
 	localModePrincipalID = "00000000-0000-0000-0000-000000000001"
 )
 
+// localIdentityToken mints and caches the claims token that carries the
+// local-mode identity to downstream services. The local user owns the
+// whole installation, so the token also carries the operator scopes the
+// backup and recovery routes and tool-governance's tool registration and
+// authorisation routes require.
+type localIdentityToken struct {
+	mu      sync.Mutex
+	value   string
+	expires time.Time
+}
+
+const localTokenTTL = time.Hour
+
+func (l *localIdentityToken) token() (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.value != "" && time.Until(l.expires) > 5*time.Minute {
+		return l.value, nil
+	}
+	expires := time.Now().Add(localTokenTTL)
+	value, err := auth.SignClaims(auth.Claims{
+		TenantID:    localModeTenantID,
+		PrincipalID: localModePrincipalID,
+		Subject:     localModePrincipalID,
+		AgentID:     "mcp-gateway-local",
+		ExpiresAt:   expires,
+		Scopes:      []string{"backups:admin", "recovery:admin", "tools:admin"},
+	}, os.Getenv("SCOS_SECURITY_ISSUER_SECRET"))
+	if err != nil {
+		return "", err
+	}
+	l.value, l.expires = value, expires
+	return value, nil
+}
+
 func isLocalAuthMode() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_AUTH_MODE")), "local")
 }
@@ -950,17 +1186,6 @@ func resolveIdentity(r *http.Request) (requestIdentity, int, string) {
 	return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
 }
 
-// deriveSessionID gives scos_recall a stable UUID-shaped session bucket per
-// (tenant, principal) when the caller supplies none -- MCP tool calls have
-// no notion of a session the way the hermes stdio bridge's per-agent name
-// does. Deterministic, not random: repeat calls from the same identity land
-// in the same bucket.
-func deriveSessionID(tenantID, principalID string) string {
-	sum := sha256.Sum256([]byte("scos-mcp-gateway|" + tenantID + "|" + principalID))
-	hexed := hex.EncodeToString(sum[:16])
-	return hexed[0:8] + "-" + hexed[8:12] + "-" + hexed[12:16] + "-" + hexed[16:20] + "-" + hexed[20:32]
-}
-
 func writeRPCResult(w http.ResponseWriter, id any, result any) {
 	writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 }
@@ -991,16 +1216,21 @@ func governedToolNames() map[string]bool {
 // none of mcp-gateway's code-intelligence, agent-registry, or governance
 // tooling, which those bundles never mention and are not built to drive.
 var memoryTierToolNames = map[string]bool{
-	"scos_recall":           true,
-	"scos_status":           true,
-	"scos_explain":          true,
-	"scos_user_model":       true,
-	"scos_memory_graph":     true,
-	"scos_correct":          true,
-	"scos_forget":           true,
-	"scos_graphify_query":   true,
-	"scos_graphify_path":    true,
-	"scos_graphify_explain": true,
+	"scos_recall":                 true,
+	"scos_status":                 true,
+	"scos_explain":                true,
+	"scos_user_model":             true,
+	"scos_memory_graph":           true,
+	"scos_remember":               true,
+	"scos_memory_review_list":     true,
+	"scos_memory_review":          true,
+	"scos_correct":                true,
+	"scos_forget":                 true,
+	"scos_graphify_query":         true,
+	"scos_graphify_path":          true,
+	"scos_graphify_explain":       true,
+	"scos_graphify_ingest":        true,
+	"scos_graphify_ingest_status": true,
 }
 
 // desktopAgentToolNames maps X-SCOS-Agent-Name values (set by the shared
@@ -1072,8 +1302,9 @@ func governedTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"query":     map[string]any{"type": "string", "description": "Search query"},
-					"max_items": map[string]any{"type": "integer", "description": "Max results"},
+					"query":      map[string]any{"type": "string", "description": "Search query"},
+					"max_items":  map[string]any{"type": "integer", "description": "Max results"},
+					"session_id": map[string]any{"type": "string", "description": "Session UUID; when given, the session's working and episodic memories are recalled alongside long-term memory"},
 				},
 				"required": []string{"query"},
 			},
@@ -1120,7 +1351,7 @@ func governedTools() []map[string]any {
 				"type": "object",
 				"properties": map[string]any{
 					"q":         map[string]any{"type": "string", "description": "The question to ask the graph"},
-					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo. The first question about a repository (or the first after it changes) builds its graph in the background; until it is ready the call returns status \"building\" with retry_after_seconds, and the same call should be repeated after that delay."},
 				},
 				"required": []string{"q"},
 			},
@@ -1133,7 +1364,7 @@ func governedTools() []map[string]any {
 				"properties": map[string]any{
 					"from":      map[string]any{"type": "string", "description": "Starting node name"},
 					"to":        map[string]any{"type": "string", "description": "Target node name"},
-					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo. The first question about a repository (or the first after it changes) builds its graph in the background; until it is ready the call returns status \"building\" with retry_after_seconds, and the same call should be repeated after that delay."},
 				},
 				"required": []string{"from", "to"},
 			},
@@ -1145,9 +1376,31 @@ func governedTools() []map[string]any {
 				"type": "object",
 				"properties": map[string]any{
 					"node":      map[string]any{"type": "string", "description": "Node name to explain"},
-					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo. The first question about a repository (or the first after it changes) builds its graph in the background; until it is ready the call returns status \"building\" with retry_after_seconds, and the same call should be repeated after that delay."},
 				},
 				"required": []string{"node"},
+			},
+		},
+		{
+			"name":        "scos_graphify_ingest",
+			"description": "Ingest a repository's graphify knowledge graph into memory as the caller: every code entity becomes an entity memory (with its source location) and every edge a relation. Runs in the background; returns a job_id to poll with scos_graphify_ingest_status, or status \"building\" with retry_after_seconds while the graph itself is still being built.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"repo_path":    map[string]any{"type": "string", "description": "Absolute path of the repo to ingest. Omit to use the provider's default repo."},
+					"namespace_id": map[string]any{"type": "string", "description": "Namespace to write the memories into. Omit to use the deployment default or the caller's own writable namespace."},
+				},
+			},
+		},
+		{
+			"name":        "scos_graphify_ingest_status",
+			"description": "Report the progress of a graph ingestion started with scos_graphify_ingest: nodes and edges ingested so far, errors, and whether it has finished",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"job_id": map[string]any{"type": "string", "description": "The job_id scos_graphify_ingest returned"},
+				},
+				"required": []string{"job_id"},
 			},
 		},
 		{
@@ -1185,58 +1438,59 @@ func governedTools() []map[string]any {
 		},
 		{
 			"name":        "scos_code_index",
-			"description": "Index (or re-index) files in a repository for code intelligence search",
+			"description": "Index a registered repository so it can be queried. Returns at once with a snapshot_id; follow it with scos_code_index_status. With just repository_id, code-intelligence reads the repository from the mounted workspace itself (Go AST and Tree-sitter for Python/TypeScript/JavaScript/Rust), records the branch and commit from its git checkout, and indexes only what changed since the last snapshot. Uploading files is only needed for repositories outside the workspace",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"repository_id":         map[string]any{"type": "string", "description": "Legacy repository identifier"},
-					"durable_repository_id": map[string]any{"type": "string", "description": "Durable repository UUID returned by scos_code_repo_register; supplying it activates P4 snapshot indexing"},
-					"branch":                map[string]any{"type": "string", "description": "Branch for durable snapshot indexing"},
-					"commit_id":             map[string]any{"type": "string", "description": "Commit SHA being indexed"},
-					"extractor_version":     map[string]any{"type": "string", "description": "Extractor version for durable snapshot identity"},
-					"configuration_hash":    map[string]any{"type": "string", "description": "Indexer configuration hash"},
-					"files": map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{
-						map[string]any{"type": "string"},
-						map[string]any{"type": "object", "properties": map[string]any{
-							"path": map[string]any{"type": "string"}, "language": map[string]any{"type": "string"},
-							"content_hash": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"},
-						}, "required": []string{"path", "content_hash"}},
-					}}, "description": "Legacy path strings, or structured files for durable P4 indexing"},
+					"repository_id": map[string]any{"type": "string", "description": "Repository id from scos_code_repo_register (either id it returns)"},
+					"branch":        map[string]any{"type": "string", "description": "Upload mode only: branch the files belong to"},
+					"commit_id":     map[string]any{"type": "string", "description": "Upload mode only: commit the files belong to"},
+					"files": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+						"path": map[string]any{"type": "string"}, "language": map[string]any{"type": "string"},
+						"content_hash": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"},
+					}, "required": []string{"path", "content_hash"}}, "description": "Upload mode only: files to index instead of reading the workspace"},
 				},
-				"required": []string{"repository_id", "files"},
+				"required": []string{"repository_id"},
+			},
+		},
+		{
+			"name":        "scos_code_index_status",
+			"description": "Progress of a repository index started by scos_code_index: indexing, ready (with file and symbol counts) or failed (with the reason)",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"snapshot_id": map[string]any{"type": "string", "description": "snapshot_id returned by scos_code_index"},
+				},
+				"required": []string{"snapshot_id"},
 			},
 		},
 		{
 			"name":        "scos_code_query",
-			"description": "Query indexed code by symbol, path, or natural-language intent",
+			"description": "Search an indexed repository by symbol name, qualified name, path or natural-language description; returns ranked symbols with their file, kind and signature",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"intent":                map[string]any{"type": "string", "description": "Query intent, e.g. \"definition\", \"references\", \"search\""},
-					"query":                 map[string]any{"type": "string", "description": "Search text"},
-					"repository_id":         map[string]any{"type": "string", "description": "Legacy repository identifier"},
-					"durable_repository_id": map[string]any{"type": "string", "description": "Durable repository UUID; with branch, activates P4 lexical+dense+structural+PageRank retrieval"},
-					"path":                  map[string]any{"type": "string", "description": "File path filter"},
-					"symbol_name":           map[string]any{"type": "string", "description": "Symbol name filter"},
-					"language":              map[string]any{"type": "string", "description": "Language filter"},
-					"branch":                map[string]any{"type": "string", "description": "Branch filter"},
-					"max_results":           map[string]any{"type": "integer", "description": "Max results"},
-					"include_docs":          map[string]any{"type": "boolean", "description": "Include doc comments in results"},
+					"repository_id": map[string]any{"type": "string", "description": "Repository id from scos_code_repo_register"},
+					"query":         map[string]any{"type": "string", "description": "Symbol, path or description to search for"},
+					"branch":        map[string]any{"type": "string", "description": "Defaults to the most recently indexed branch"},
+					"max_results":   map[string]any{"type": "integer", "description": "Max results"},
 				},
-				"required": []string{"intent", "query"},
+				"required": []string{"repository_id", "query"},
 			},
 		},
 		{
 			"name":        "scos_code_impact",
-			"description": "Compute the change-impact set for modified symbols in a repository",
+			"description": "What depends on a symbol: its callers and transitive dependants in the indexed call graph, and the tests that reach it. Use before changing a function or type",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"repository_id":    map[string]any{"type": "string", "description": "Repository identifier"},
-					"commit_id":        map[string]any{"type": "string", "description": "Commit SHA"},
-					"modified_symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Symbols that were modified"},
+					"repository_id":    map[string]any{"type": "string", "description": "Repository id from scos_code_repo_register"},
+					"symbol":           map[string]any{"type": "string", "description": "Symbol name or qualified name being changed"},
+					"modified_symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Several symbols at once"},
+					"branch":           map[string]any{"type": "string", "description": "Defaults to the most recently indexed branch"},
+					"max_depth":        map[string]any{"type": "integer", "description": "How far to follow dependants"},
 				},
-				"required": []string{"repository_id", "modified_symbols"},
+				"required": []string{"repository_id"},
 			},
 		},
 		{
@@ -1251,6 +1505,45 @@ func governedTools() []map[string]any {
 					"confidence":             map[string]any{"type": "number", "description": "0-1, defaults to 1.0"},
 				},
 				"required": []string{"fact_id", "code_symbol_version_id"},
+			},
+		},
+		{
+			"name":        "scos_remember",
+			"description": "Save a fact to long-term memory now. Use when the user states something to remember or a durable decision is made. Duplicates merge into the existing memory and contradictions are flagged; the stored fact is returned with its id for later scos_correct/scos_forget",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"content":      map[string]any{"type": "string", "description": "The fact, stated as a standalone sentence"},
+					"network":      map[string]any{"type": "string", "enum": []string{"world", "experience", "entity", "belief", "procedure", "negative"}, "description": "Kind of memory; defaults to world (facts about the world/project)"},
+					"namespace_id": map[string]any{"type": "string", "description": "Namespace to store in; defaults to the caller's own namespace"},
+					"valid_until":  map[string]any{"type": "string", "description": "RFC 3339 time after which the fact no longer holds"},
+				},
+				"required": []string{"content"},
+			},
+		},
+		{
+			"name":        "scos_memory_review_list",
+			"description": "List memories held back for a person's approval (high-impact, governing, sensitive or conflicting content extracted from conversations). They are not recalled until approved",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"status": map[string]any{"type": "string", "enum": []string{"pending_review", "promoted", "rejected"}, "description": "Defaults to pending_review"},
+				},
+			},
+		},
+		{
+			"name":        "scos_memory_review",
+			"description": "Approve a held-back memory into long-term memory (optionally with corrected wording) or reject it with a reason. Only do this on the user's explicit instruction",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"candidate_id": map[string]any{"type": "string", "description": "Candidate id from scos_memory_review_list"},
+					"decision":     map[string]any{"type": "string", "enum": []string{"approve", "reject"}},
+					"rationale":    map[string]any{"type": "string", "description": "Why; required to reject"},
+					"content":      map[string]any{"type": "string", "description": "Approve only: corrected wording to store instead of the extracted text"},
+					"network":      map[string]any{"type": "string", "enum": []string{"world", "experience", "entity", "belief", "procedure", "negative"}, "description": "Approve only: kind of memory, if the proposed one is wrong"},
+				},
+				"required": []string{"candidate_id", "decision"},
 			},
 		},
 		{
@@ -1359,8 +1652,8 @@ func governedTools() []map[string]any {
 			"capabilities":       arrField(strField(""), "Capabilities"),
 			"inputs":             arrField(strField(""), "Accepted inputs"),
 			"outputs":            arrField(strField(""), "Produced outputs"),
-			"tool_permissions":   arrField(strField(""), "Granted tool permissions"),
-			"memory_permissions": arrField(strField(""), "Granted memory permissions"),
+			"tool_permissions":   arrField(strField(""), "Tool permissions this agent declares; a handoff requiring a tool not covered here is refused. Exact names, \"*\", or a prefix ending in *"),
+			"memory_permissions": arrField(strField(""), "Memory namespaces this agent declares; a handoff authorising a namespace not covered here is refused. Exact names, \"*\", or a prefix ending in *"),
 			"max_classification": strField("Max data classification"),
 			"model_provider":     strField("Model provider"),
 			"cost_policy":        strField("Cost policy"),
@@ -1373,22 +1666,24 @@ func governedTools() []map[string]any {
 		tool("scos_handoff_list", "List handoff packets for the caller's tenant", map[string]any{}),
 		tool("scos_handoff_get", "Get a handoff packet by ID", map[string]any{"id": strField("Handoff UUID")}, "id"),
 		tool("scos_handoff_initiate", "Initiate an agent-to-agent handoff", map[string]any{
-			"from_agent":            strField("Originating agent"),
-			"to_agent":              strField("Receiving agent"),
-			"objective":             strField("Handoff objective"),
-			"constraints":           arrField(strField(""), "Constraints"),
-			"authorised_namespaces": arrField(strField(""), "Authorised namespaces"),
-			"memory_references":     arrField(strField(""), "Memory references"),
-			"artifact_references":   arrField(strField(""), "Artifact references"),
-			"completed_work":        arrField(strField(""), "Completed work"),
-			"open_work":             arrField(strField(""), "Open work"),
-			"known_failures":        arrField(strField(""), "Known failures"),
-			"acceptance_criteria":   strField("Acceptance criteria"),
-			"expires_at":            strField("Expiry timestamp"),
-		}, "from_agent", "to_agent", "objective"),
-		tool("scos_handoff_respond", "Accept or reject a handoff", map[string]any{
+			"from_agent":                strField("Originating agent (defaults to, and must match, the caller's agent claim when it has one)"),
+			"to_agent":                  strField("Registration UUID of the receiving agent"),
+			"objective":                 strField("Handoff objective"),
+			"constraints":               arrField(strField(""), "Constraints"),
+			"authorised_namespaces":     arrField(strField(""), "Authorised namespaces"),
+			"memory_references":         arrField(strField(""), "Memory references"),
+			"artifact_references":       arrField(strField(""), "Artifact references"),
+			"completed_work":            arrField(strField(""), "Completed work"),
+			"open_work":                 arrField(strField(""), "Open work"),
+			"known_failures":            arrField(strField(""), "Known failures"),
+			"acceptance_criteria":       strField("Acceptance criteria"),
+			"expires_at":                strField("RFC 3339 expiry; after it the handoff can no longer be answered"),
+			"required_tool_permissions": arrField(strField(""), "Tool permissions the receiving agent must declare"),
+		}, "to_agent", "objective"),
+		tool("scos_handoff_respond", "Accept or reject a handoff. Only the addressed agent, or the principal that registered it, may answer; a handoff is answered once and an expired one is refused", map[string]any{
 			"handoff_id": strField("Handoff UUID"),
 			"response":   strField("accepted or rejected"),
+			"reason":     strField("Optional reason recorded with the answer"),
 		}, "handoff_id", "response"),
 	)
 
@@ -1397,7 +1692,7 @@ func governedTools() []map[string]any {
 		tool("scos_control_decision_get", "Get the route decision for an interaction", map[string]any{
 			"interaction_id": strField("Interaction ID"),
 		}, "interaction_id"),
-		tool("scos_control_route", "Route an interaction through the autonomous control plane", map[string]any{
+		tool("scos_control_route", "Route an interaction through the autonomous control plane. A decision that requires confirmation returns status awaiting_confirmation and runs nothing until scos_control_confirm", map[string]any{
 			"interaction_id":      strField("Interaction ID"),
 			"actor_id":            strField("Actor ID"),
 			"agent_id":            strField("Agent ID"),
@@ -1427,9 +1722,14 @@ func governedTools() []map[string]any {
 			"interaction_id": strField("Interaction ID"),
 			"decision_id":    strField("Decision ID"),
 		}, "interaction_id"),
-		tool("scos_control_recover", "Begin recovery for an interrupted interaction", map[string]any{
+		tool("scos_control_recover", "Resume an interrupted interaction from its persisted state; reports reconciliation_required when its command may already have run", map[string]any{
 			"interaction_id": strField("Interaction ID"),
 		}, "interaction_id"),
+		tool("scos_control_confirm", "Confirm or reject a routed action that is awaiting_confirmation. Only the principal that requested it may answer, and only for the exact decision_id it was shown; a confirmation runs the action", map[string]any{
+			"interaction_id": strField("Interaction ID"),
+			"decision_id":    strField("Decision ID returned with the awaiting_confirmation route"),
+			"resolution":     strField("confirmed or rejected"),
+		}, "interaction_id", "decision_id", "resolution"),
 		tool("scos_control_status_get", "Get lifecycle status for an interaction", map[string]any{
 			"interaction_id": strField("Interaction ID"),
 		}, "interaction_id"),
@@ -1443,20 +1743,20 @@ func governedTools() []map[string]any {
 	tools = append(tools,
 		tool("scos_backup_list", "List backups", map[string]any{}),
 		tool("scos_backup_get", "Get a backup by ID", map[string]any{"id": strField("Backup ID")}, "id"),
-		tool("scos_backup_start", "Start a new backup", map[string]any{"type": strField("Backup type")}),
-		tool("scos_backup_complete", "Verify and complete a backup", map[string]any{
+		tool("scos_backup_start", "Take a base backup (pg_dump archive plus a data fingerprint of the same snapshot), verify it as stored, then apply retention; requires backups:admin", map[string]any{"type": strField("Backup type; only base_backup is implemented")}),
+		tool("scos_backup_complete", "Re-verify a stored backup against its manifest (backups are completed when taken); requires backups:admin", map[string]any{
 			"backup_id": strField("Backup ID"),
 		}, "backup_id"),
 		tool("scos_restore_test_list", "List restore-test results", map[string]any{}),
-		tool("scos_restore_test_start", "Start a restore drill", map[string]any{
-			"test_type": strField("Restore test type"),
-			"backup_id": strField("Backup ID"),
-		}, "test_type", "backup_id"),
-		tool("scos_restore_test_complete", "Complete a restore drill", map[string]any{
+		tool("scos_restore_test_start", "Run a restore drill to completion: automated_integrity (archive and table of contents), monthly_restore (restore and validate key tables) or quarterly_full_recovery (restore and validate every table and the schema); requires backups:admin", map[string]any{
+			"test_type": strField("automated_integrity, monthly_restore or quarterly_full_recovery"),
+			"backup_id": strField("Backup ID; defaults to the newest verified backup"),
+		}, "test_type"),
+		tool("scos_restore_test_complete", "Return a recorded restore drill result (drills run to completion when started); requires backups:admin", map[string]any{
 			"test_id": strField("Restore test ID"),
 		}, "test_id"),
-		tool("scos_restore_cadence", "Check restore-test cadence status against §31 targets", map[string]any{}),
-		tool("scos_backup_plan", "Get the backup coverage plan", map[string]any{}),
+		tool("scos_restore_cadence", "Check restore-test cadence status against §31 targets, each from passing drills of its own type", map[string]any{}),
+		tool("scos_backup_plan", "Get §31 backup coverage, each item derived from current evidence with the reason when not covered", map[string]any{}),
 		tool("scos_backup_retention", "Get the retention policy", map[string]any{}),
 	)
 
@@ -1491,19 +1791,22 @@ func governedTools() []map[string]any {
 			"artifacts":              arrField(strField(""), "Artifacts"),
 			"sources":                arrField(strField(""), "Sources"),
 			"restoration_references": arrField(strField(""), "Restoration references"),
-			"format":                 strField("native, markdown, json, or text"),
+			"format":                 strField("markdown, json, or text (default json)"),
 		}, "agent_id", "session_id"),
-		tool("scos_envelope_render", "Render a stored context envelope in a target format", map[string]any{
+		tool("scos_envelope_render", "Render a stored context envelope in a target format. The response's format is the format actually produced; an unsupported format is refused", map[string]any{
 			"session_id":    strField("Session ID"),
-			"target_format": strField("markdown, text, or json"),
+			"target_format": strField("markdown, text, or json (omit to use the envelope's stored format)"),
 			"agent_id":      strField("Agent ID"),
-		}, "session_id", "target_format"),
-		tool("scos_translate", "Translate a native event into the SCOS common event model", map[string]any{
-			"event_type":    strField("Event type"),
-			"source_data":   objField("Source event payload"),
-			"source_format": strField("Source format"),
-			"target_format": strField("Target format"),
-		}, "event_type"),
+		}, "session_id"),
+		tool("scos_translate", "Translate one event between wire formats through the SCOS common event model. Unsupported formats are refused; an event the target format cannot express is refused rather than approximated", map[string]any{
+			"event_type":    strField("Optional: message, tool_call, or tool_result; must match the source event"),
+			"source_data":   objField("Source event: an OpenAI chat message, an Anthropic message, an MCP tools/call request or result frame, or a scos_common event"),
+			"source_format": strField("openai, anthropic, mcp, or scos_common"),
+			"target_format": strField("openai, anthropic, mcp, or scos_common (default scos_common)"),
+		}, "source_format", "source_data"),
+		tool("scos_compat_conformance", "Report the conformance run each adapter boundary's tested flag is derived from", map[string]any{
+			"boundary": strField("Optional adapter boundary"),
+		}),
 	)
 
 	// ── context-optimisation ─────────────────────────────────────────────
@@ -1513,34 +1816,32 @@ func governedTools() []map[string]any {
 			"task_type":           strField("Task type"),
 			"sensitivity":         strField("Sensitivity level"),
 			"risk_class":          strField("Risk class"),
-			"model":               strField("Target model"),
-			"profile":             strField("Compression profile"),
-			"token_budget":        intField("Token budget"),
+			"profile":             strField("Compression profile: exact, conservative, balanced, aggressive or adaptive"),
+			"token_budget":        intField("Token budget (0 selects 8000)"),
 			"non_droppable_hints": arrField(strField(""), "Hints that must not be dropped"),
-			"code_symbols":        arrField(strField(""), "Referenced code symbols"),
-			"memory_references":   arrField(strField(""), "Referenced memory IDs"),
+			"code_symbols":        arrField(strField(""), "Code symbols that occur in the input and must be kept verbatim"),
+			"memory_references":   arrField(strField(""), "Memory IDs that occur in the input and must be kept verbatim"),
 		}, "input"),
 		tool("scos_context_optimize_output", "Compress and optimise a raw model output", map[string]any{
-			"raw_output":     strField("Raw output text"),
-			"request_intent": strField("Original request intent"),
-			"format":         strField("Target format"),
-			"max_tokens":     intField("Max tokens"),
+			"raw_output": strField("Raw output text"),
+			"format":     strField("Output format: standard or compact"),
+			"max_tokens": intField("Max tokens (0 selects 2000)"),
 		}, "raw_output"),
 		tool("scos_context_compile", "Compile input context into a capsule (alias of scos_context_optimize_input)", map[string]any{
 			"input":               strField("Raw input text"),
 			"task_type":           strField("Task type"),
 			"sensitivity":         strField("Sensitivity level"),
 			"risk_class":          strField("Risk class"),
-			"model":               strField("Target model"),
-			"profile":             strField("Compression profile"),
-			"token_budget":        intField("Token budget"),
+			"profile":             strField("Compression profile: exact, conservative, balanced, aggressive or adaptive"),
+			"token_budget":        intField("Token budget (0 selects 8000)"),
 			"non_droppable_hints": arrField(strField(""), "Hints that must not be dropped"),
-			"code_symbols":        arrField(strField(""), "Referenced code symbols"),
-			"memory_references":   arrField(strField(""), "Referenced memory IDs"),
+			"code_symbols":        arrField(strField(""), "Code symbols that occur in the input and must be kept verbatim"),
+			"memory_references":   arrField(strField(""), "Memory IDs that occur in the input and must be kept verbatim"),
 		}, "input"),
-		tool("scos_context_restore", "Restore full content from a context capsule's source objects", map[string]any{
-			"capsule": objField("Context capsule (as returned by scos_context_optimize_input)"),
-		}, "capsule"),
+		tool("scos_context_restore", "Restore the authoritative source of a context capsule by its capsule_id", map[string]any{
+			"capsule_id": strField("Capsule id returned by scos_context_compile or scos_context_optimize_output"),
+			"capsule":    objField("Full context capsule; its source objects must match the recorded capsule"),
+		}),
 		tool("scos_context_evaluate", "Validate that a compiled context is faithful to its source", map[string]any{
 			"input":               strField("Original input text"),
 			"compiled_text":       strField("Compiled/compressed text"),
@@ -1565,7 +1866,7 @@ func governedTools() []map[string]any {
 			"explain":           boolField("Include rule explanations"),
 			"confirmed":         boolField("Caller has confirmed execution"),
 		}, "command"),
-		tool("scos_exec_execute", "Execute a governed command through the execution proxy", map[string]any{
+		tool("scos_exec_execute", "Execute a governed command through the execution proxy. Commands that need confirmation (destructive commands) are refused here: route them with scos_control_route and answer with scos_control_confirm", map[string]any{
 			"tenant_id":         strField("Tenant ID"),
 			"principal_id":      strField("Principal ID"),
 			"agent_id":          strField("Agent ID"),
@@ -1577,7 +1878,6 @@ func governedTools() []map[string]any {
 			"mode":              strField("bypass, observe, safe, adaptive, or forensic"),
 			"dry_run":           boolField("Dry run"),
 			"explain":           boolField("Include rule explanations"),
-			"confirmed":         boolField("Caller has confirmed execution"),
 		}, "command"),
 		tool("scos_exec_results_list", "List recent execution results", map[string]any{}),
 		tool("scos_exec_result_get", "Get an execution result by operation ID", map[string]any{
@@ -1605,7 +1905,7 @@ func governedTools() []map[string]any {
 	tools = append(tools,
 		tool("scos_extension_list", "List installed extensions", map[string]any{}),
 		tool("scos_extension_get", "Get an installed extension by package ID", map[string]any{"id": strField("Package ID")}, "id"),
-		tool("scos_skill_list", "List registered skills", map[string]any{}),
+		tool("scos_skill_list", "List available skills (an extension's skills are available only while it is enabled)", map[string]any{}),
 		tool("scos_skill_create", "Register a skill", map[string]any{
 			"name":                  strField("Skill name"),
 			"version":               strField("Skill version"),
@@ -1619,11 +1919,15 @@ func governedTools() []map[string]any {
 		}, "name"),
 		tool("scos_skill_get", "Get a skill by ID", map[string]any{"id": strField("Skill ID")}, "id"),
 		tool("scos_hook_list", "List registered hooks", map[string]any{}),
-		tool("scos_hook_dispatch", "Dispatch a hook event to subscribed extensions", map[string]any{
+		tool("scos_hook_dispatch", "Dispatch a hook event to the enabled extensions subscribed to it; a package with an active canary is routed to the candidate version for callers in its cohort", map[string]any{
 			"event":        strField("Hook event name"),
 			"tenant_id":    strField("Tenant ID"),
 			"principal_id": strField("Principal ID"),
 			"payload":      objField("Event payload"),
+			"agent_id":     strField("Caller agent for canary routing (an agent token's own id is used and cannot be overridden)"),
+			"profile_id":   strField("Caller profile for canary routing"),
+			"workspace_id": strField("Caller workspace for canary routing"),
+			"project_id":   strField("Caller project for canary routing"),
 		}, "event"),
 		tool("scos_hook_get", "List hooks subscribed to an event", map[string]any{"event": strField("Hook event name")}, "event"),
 		tool("scos_extension_install", "Install an extension from its manifest", map[string]any{
@@ -1637,19 +1941,36 @@ func governedTools() []map[string]any {
 			"supported_platforms":   arrField(strField(""), "Supported platforms"),
 			"required_core_version": strField("Required core version"),
 			"dependencies":          arrField(objField(""), "Package dependencies"),
-			"isolation":             strField("Isolation mode"),
+			"isolation":             strField("Must be remote_endpoint: the extension manager never runs extension code, hooks are delivered to the extension's own endpoint"),
 			"capabilities_provided": arrField(strField(""), "Capabilities provided"),
 			"capabilities_consumed": arrField(strField(""), "Capabilities consumed"),
 			"hooks_subscribed":      arrField(strField(""), "Hooks subscribed"),
 			"skills_exported":       arrField(strField(""), "Skills exported"),
 			"permissions":           arrField(strField(""), "Permissions"),
 			"rollback_plan":         strField("Rollback plan"),
-			"content_hash":          strField("Manifest content hash"),
+			"content_hash":          strField("sha256:<hex> of the manifest JSON with content_hash and signature empty; verified on install and enable"),
 			"signature":             strField("Manifest signature"),
 		}, "package_id", "version"),
-		tool("scos_extension_install_dryrun", "Dry-run an extension install without applying it", map[string]any{
-			"package_id": strField("Package ID"),
-			"version":    strField("Extension version"),
+		tool("scos_extension_install_dryrun", "Validate an extension manifest and report whether installing it would be accepted, without applying it", map[string]any{
+			"schema_version":        strField("Manifest schema version"),
+			"package_id":            strField("Package ID"),
+			"name":                  strField("Extension name"),
+			"version":               strField("Extension version"),
+			"publisher":             strField("Publisher"),
+			"license":               strField("License"),
+			"extension_types":       arrField(strField(""), "plugin, skill, hook, agent_adapter, provider, ui_extension"),
+			"supported_platforms":   arrField(strField(""), "Supported platforms"),
+			"required_core_version": strField("Required core version"),
+			"dependencies":          arrField(objField(""), "Package dependencies"),
+			"isolation":             strField("Must be remote_endpoint: the extension manager never runs extension code, hooks are delivered to the extension's own endpoint"),
+			"capabilities_provided": arrField(strField(""), "Capabilities provided"),
+			"capabilities_consumed": arrField(strField(""), "Capabilities consumed"),
+			"hooks_subscribed":      arrField(strField(""), "Hooks subscribed"),
+			"skills_exported":       arrField(strField(""), "Skills exported"),
+			"permissions":           arrField(strField(""), "Permissions"),
+			"rollback_plan":         strField("Rollback plan"),
+			"content_hash":          strField("sha256:<hex> of the manifest JSON with content_hash and signature empty; verified on install and enable"),
+			"signature":             strField("Manifest signature"),
 		}, "package_id", "version"),
 		tool("scos_extension_receipts", "List extension installation receipts", map[string]any{}),
 		tool("scos_extension_capabilities", "List capabilities exposed by installed extensions", map[string]any{}),
@@ -1700,18 +2021,18 @@ func governedTools() []map[string]any {
 		tool("scos_okf_projections", "List OKF index projections", map[string]any{}),
 		tool("scos_okf_divergence", "List OKF documents that have diverged from their source", map[string]any{}),
 		tool("scos_okf_proposal_list", "List OKF change proposals", map[string]any{}),
-		tool("scos_okf_proposal_create", "Create an OKF change proposal", map[string]any{
-			"Path":     strField("Document path"),
-			"Content":  strField("Proposed content"),
-			"Proposer": strField("Proposer identity"),
-			"Reviewer": strField("Requested reviewer"),
-		}, "Path", "Content", "Proposer"),
-		tool("scos_okf_proposal_action", "Act on an OKF proposal: validate, diff, review, approve, reject, or merge", map[string]any{
-			"id":       strField("Proposal ID"),
-			"action":   strField("validate, diff, review, approve, reject, or merge"),
-			"Reviewer": strField("Reviewer identity (for review/approve/reject)"),
-			"Role":     strField("Reviewer role (for review/approve/reject)"),
-			"Reason":   strField("Reason (for review/approve/reject)"),
+		// okf-synchroniser takes proposer and reviewer identity from the
+		// forwarded bearer token's claims only, so neither is a tool argument;
+		// Role merely selects among governance roles the caller already holds.
+		tool("scos_okf_proposal_create", "Create an OKF change proposal; the authenticated caller is the proposer", map[string]any{
+			"Path":    strField("Document path"),
+			"Content": strField("Proposed content"),
+		}, "Path", "Content"),
+		tool("scos_okf_proposal_action", "Act on an OKF proposal: validate, diff, review, approve, or reject (as the authenticated caller, who must not be the proposer), or merge", map[string]any{
+			"id":     strField("Proposal ID"),
+			"action": strField("validate, diff, review, approve, reject, or merge"),
+			"Role":   strField("Governance role to act under, which the caller must hold (optional, for review/approve/reject)"),
+			"Reason": strField("Reason (for review/approve/reject)"),
 		}, "id", "action"),
 	)
 
@@ -1746,14 +2067,13 @@ func governedTools() []map[string]any {
 			"session_id":      strField("Session ID"),
 			"turn_id":         strField("Turn ID"),
 			"namespaces":      arrField(strField(""), "Namespaces to search"),
-			"memory_classes":  arrField(strField(""), "Memory classes to include"),
-			"sensitivity_max": strField("Max sensitivity to include"),
+			"memory_classes":  arrField(strField(""), "Only return memories of these classes (semantic, episodic, working, procedural, governing, ...)"),
+			"sensitivity_max": strField("Max sensitivity to include (default internal)"),
 			"max_results":     intField("Max results"),
 			"token_budget":    intField("Token budget"),
-			"include_recent":  boolField("Include recent items"),
-			"include_session": boolField("Include session context"),
-			"include_state":   boolField("Include task state"),
-			"filters":         objField("Additional filters"),
+			"include_recent":  boolField("Also include memories recorded in the last 7 days, whatever the query"),
+			"include_session": boolField("Also include working and episodic memories of session_id"),
+			"include_state":   boolField("Also include active working memories (task state)"),
 			"repository_id":   strField("Durable code repository UUID; with branch, enables P4 code retrieval alongside memory"),
 			"branch":          strField("Branch for durable code retrieval"),
 		}, "tenant_id", "principal_id", "query"),
@@ -1762,23 +2082,20 @@ func governedTools() []map[string]any {
 	// ── security-gate ────────────────────────────────────────────────────
 	tools = append(tools,
 		tool("scos_auth_validate", "Validate an auth token", map[string]any{"token": strField("Bearer token")}, "token"),
-		tool("scos_auth_issue", "Issue an auth token (requires issuer secret header)", map[string]any{
-			"principal":          strField("Principal UUID"),
-			"agent_id":           strField("Agent ID"),
-			"tenant":             strField("Tenant UUID"),
-			"session_id":         strField("Session ID"),
-			"max_data_class":     strField("Max data classification"),
-			"expires_in_seconds": intField("Token lifetime in seconds"),
-		}, "principal", "tenant"),
+		// Token issuance (security-gate /v1/auth/issue) is deliberately not a
+		// tool: it is authorised by the fabric's issuer secret, which mints
+		// any identity, and an MCP tool argument lands in agent transcripts
+		// and model context. Tokens are issued by the operator or the cloud
+		// control plane, never through this gateway.
 		tool("scos_auth_revoke", "Revoke an auth token", map[string]any{"token": strField("Bearer token")}, "token"),
-		tool("scos_permission_check", "Check whether a principal may perform an action on a resource", map[string]any{
+		tool("scos_permission_check", "Check whether a principal may perform an action on a resource; decided against the principal's grants (or a delegation and its delegator's grants), denying unknown data classes", map[string]any{
 			"principal":           strField("Principal"),
 			"action":              strField("Action"),
 			"resource":            strField("Resource"),
-			"data_class":          strField("Data classification"),
+			"data_class":          strField("Data classification: public, internal, confidential, restricted or secret"),
 			"tenant":              strField("Tenant"),
-			"delegated_authority": strField("Delegated authority"),
-			"expires_at":          strField("Expiry timestamp"),
+			"delegated_authority": strField("Delegation UUID issued to the principal; the check is then decided against that delegation and its delegator's grants"),
+			"expires_at":          strField("RFC3339 time until which the permission is needed; the covering grant must remain valid that long"),
 			"trace_id":            strField("Trace ID"),
 		}, "principal", "action", "resource", "tenant"),
 		tool("scos_permission_classify", "Classify content's data sensitivity", map[string]any{
@@ -1786,25 +2103,26 @@ func governedTools() []map[string]any {
 		}, "content"),
 		tool("scos_audit_list", "List audit log entries visible to the caller", map[string]any{}),
 		tool("scos_audit_get", "Get an audit log entry by ID", map[string]any{"id": strField("Audit entry ID")}, "id"),
-		tool("scos_audit_record", "Record an audit log entry", map[string]any{
-			"action":     strField("Action"),
-			"principal":  strField("Principal"),
-			"agent_id":   strField("Agent ID"),
-			"tenant":     strField("Tenant"),
-			"session_id": strField("Session ID"),
-			"resource":   strField("Resource"),
-			"result":     strField("allowed, denied, or error"),
-			"data_class": strField("Data classification"),
-			"reason":     strField("Reason"),
-			"trace_id":   strField("Trace ID"),
-		}, "action", "principal", "tenant", "resource", "result"),
+		tool("scos_audit_record", "Append a caller annotation to the audit log. The entry is attributed to the authenticated caller and stored as action caller_annotation / decision recorded; the fields below are kept under caller_annotation as unverified assertions, never as audited facts", map[string]any{
+			"action":     strField("Action the caller reports (stored as caller_annotation.action)"),
+			"principal":  strField("Optional; must equal the authenticated principal or the call is refused"),
+			"agent_id":   strField("Optional; must equal the authenticated agent or the call is refused"),
+			"tenant":     strField("Optional; must equal the authenticated tenant or the call is refused"),
+			"session_id": strField("Session ID the caller reports"),
+			"resource":   strField("Resource the annotation is about"),
+			"result":     strField("Outcome the caller reports (stored as caller_annotation.result)"),
+			"data_class": strField("Data classification the caller reports"),
+			"reason":     strField("Reason the caller reports"),
+			"trace_id":   strField("Trace ID the caller reports"),
+		}, "action", "resource"),
 		tool("scos_secret_list", "List secret references (values are never returned)", map[string]any{}),
 		tool("scos_secret_create", "Create or update a secret reference (values are never returned)", map[string]any{
-			"id":       strField("Secret reference ID"),
-			"name":     strField("Secret name"),
-			"provider": strField("env, vault, aws-secrets, gcp-sm, or securestore"),
-			"ref":      strField("Provider-specific reference"),
-			"scope":    strField("Scope"),
+			"id":         strField("Secret reference ID"),
+			"name":       strField("Secret name"),
+			"provider":   strField("env, vault, aws-secrets, gcp-sm, or securestore"),
+			"ref":        strField("Provider-specific reference"),
+			"scope":      strField("Who may resolve the value: comma-separated tenant, principal:<id> and agent:<id> selectors; empty means never resolvable"),
+			"data_class": strField("Sensitivity of the value: public, internal, confidential, restricted or secret (default secret); resolving requires a data_class:<class> claims scope at or above it"),
 		}, "id", "name", "provider", "ref"),
 		tool("scos_secret_get", "Get a secret reference by ID (value is never returned)", map[string]any{
 			"id": strField("Secret reference ID"),
@@ -1815,25 +2133,32 @@ func governedTools() []map[string]any {
 	tools = append(tools,
 		tool("scos_tool_list", "List governed tool definitions", map[string]any{}),
 		tool("scos_tool_get", "Get a governed tool definition by ID", map[string]any{"id": strField("Tool ID")}, "id"),
-		tool("scos_tool_register", "Register a governed tool (requires Idempotency-Key header)", map[string]any{
+		tool("scos_tool_register", "Register a governed tool in state proposed; requires the tools:admin scope (requires Idempotency-Key header)", map[string]any{
 			"name":        strField("Tool name"),
 			"description": strField("Tool description"),
 			"version":     strField("Tool version"),
 			"properties":  objField("Tool properties (read_only, destructive, idempotent, externally_side_effecting, confirmation_gated, dry_run_capable, reconcilable)"),
 		}, "name"),
-		tool("scos_tool_transition", "Transition a governed tool's lifecycle state (requires Idempotency-Key header)", map[string]any{
+		tool("scos_tool_transition", "Transition a governed tool's lifecycle state (proposed -> prepared -> authorised); requires the tools:admin scope (requires Idempotency-Key header)", map[string]any{
 			"tool_id":   strField("Tool ID"),
 			"new_state": strField("New lifecycle state"),
 		}, "tool_id", "new_state"),
 		tool("scos_operation_list", "List governed tool operations", map[string]any{}),
 		tool("scos_operation_get", "Get a governed tool operation by ID", map[string]any{"id": strField("Operation ID")}, "id"),
-		tool("scos_operation_start", "Start a governed operation for an already-registered tool (requires Idempotency-Key header)", map[string]any{
-			"tool_id": strField("Tool ID"),
-			"input":   objField("Operation input"),
-		}, "tool_id"),
-		tool("scos_operation_prepare", "Prepare a governed operation, auto-registering the tool if unknown (requires Idempotency-Key header)", map[string]any{
-			"tool_name": strField("Tool name"),
-			"input":     objField("Operation input"),
+		tool("scos_operation_start", "Start a governed operation for a registered, authorised tool, named by tool_id or tool_name; the risk and plan are checked against the tool's declared properties (requires Idempotency-Key header). A destructive or confirmation-gated operation is refused here; route it with scos_control_route and confirm it with scos_control_confirm", map[string]any{
+			"tool_id":      strField("Tool ID (or give tool_name)"),
+			"tool_name":    strField("Tool name (or give tool_id)"),
+			"operation_id": strField("Operation ID (UUID); required for a side-effecting operation on a non-idempotent tool"),
+			"input":        objField("Operation input"),
+			"risk":         strField("Declared risk: read, test, write, or destructive (required unless the plan names a command)"),
+			"plan":         objField("Operation plan (original_request, executed_request, working_directory, risk_level, mode, dry_run)"),
+		}),
+		tool("scos_operation_prepare", "Prepare a governed operation for a registered, authorised tool or a built-in tool; unknown tools are refused, and the risk and plan are checked against the tool's declared properties (requires Idempotency-Key header). A destructive or confirmation-gated operation is refused here; route it with scos_control_route and confirm it with scos_control_confirm", map[string]any{
+			"tool_name":    strField("Tool name"),
+			"operation_id": strField("Operation ID (UUID); required for a side-effecting operation on a non-idempotent tool"),
+			"input":        objField("Operation input"),
+			"risk":         strField("Declared risk: read, test, write, or destructive (required unless the plan names a command)"),
+			"plan":         objField("Operation plan (original_request, executed_request, working_directory, risk_level, mode, dry_run)"),
 		}, "tool_name"),
 		tool("scos_operation_complete", "Complete a governed operation (requires Idempotency-Key header)", map[string]any{
 			"operation_id": strField("Operation ID"),
@@ -1905,7 +2230,10 @@ func governedTools() []map[string]any {
 		}, "entries"),
 		tool("scos_observability_targets", "Get observability SLO targets", map[string]any{}),
 		tool("scos_observability_export_status", "Get OTLP export configuration status", map[string]any{}),
-		tool("scos_benchmarks", "Run and report frozen retrieval benchmark cases", map[string]any{}),
+		tool("scos_benchmarks", "Report recorded benchmark runs: the latest run per suite and a newest-first run history, as published to observability by the benchmark harnesses (benchmarks/run_deployed.py, benchmarks/run_acceptance.py). This tool does not run benchmarks; it returns an empty history when none has been published.", map[string]any{
+			"suite": strField("Only runs of this suite"),
+			"limit": intField("Maximum history entries, 1-500 (default 100)"),
+		}),
 	)
 
 	return tools

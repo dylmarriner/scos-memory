@@ -425,6 +425,22 @@ func (s *server) handlePGIndexSCIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A SCIP index for a key that is already indexed cannot be compared
+	// with what was stored, so it is refused rather than written over it.
+	existing, status, err := s.pgStore.SnapshotByKey(r.Context(), req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)
+	if err != nil {
+		http.Error(w, "look up snapshot: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if existing != "" && status == "failed" {
+		if err := s.pgStore.DeleteFailedSnapshot(r.Context(), existing); err != nil {
+			http.Error(w, "clear failed snapshot: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if existing != "" {
+		http.Error(w, fmt.Sprintf("snapshot %s already exists for this commit, extractor and configuration (status %s)", existing, status), http.StatusConflict)
+		return
+	}
 	snapshotID, err := s.pgStore.CreateSnapshot(r.Context(), req.RepositoryID, tenant, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)
 	if err != nil {
 		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)

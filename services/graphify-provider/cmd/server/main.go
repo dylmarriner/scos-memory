@@ -1,4 +1,6 @@
 package main
+
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -7,6 +9,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -35,12 +38,22 @@ type graphifyServer struct {
 	allowedRoot           string
 	cacheDir              string
 	namespaceID           string
-	tenantID              string
-	principalID           string
 	backend               string
 
 	extractorVersionOnce   sync.Once
 	extractorVersionCached string
+
+	// buildWait is how long a query waits for a graph build before
+	// answering that the graph is still being built.
+	buildWait time.Duration
+	// extract builds a graph for workDir into outDir; nil runs graphify.
+	extract   func(ctx context.Context, workDir, outDir string) error
+	buildsMu  sync.Mutex
+	builds    map[string]*graphBuild
+	buildSlot sync.Mutex
+
+	jobsMu sync.Mutex
+	jobs   map[string]*extractJob
 }
 
 // extractorVersion identifies which graphify build this process will run,
@@ -91,7 +104,15 @@ func (s *graphifyServer) resolveWorkDir(requested string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("configured allowed root is unavailable")
 	}
-	clean, err := filepath.EvalSymlinks(filepath.Clean(requested))
+	// Agents name repositories by their host path; the workspace that holds
+	// them (SCOS_WORKSPACE_HOST_PATH) is mounted at the allowed root.
+	requested = filepath.Clean(requested)
+	if host := strings.TrimSpace(os.Getenv("SCOS_WORKSPACE_HOST_PATH")); host != "" {
+		if rel, err := filepath.Rel(filepath.Clean(host), requested); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			requested = filepath.Join(s.allowedRoot, rel)
+		}
+	}
+	clean, err := filepath.EvalSymlinks(requested)
 	if err != nil {
 		return "", fmt.Errorf("repo_path %s is not an accessible directory", filepath.Clean(requested))
 	}
@@ -150,9 +171,8 @@ func main() {
 		srv.cacheDir = "/var/lib/graphify-cache"
 	}
 	srv.namespaceID = strings.TrimSpace(os.Getenv("GRAPHIFY_NAMESPACE_ID"))
-	srv.tenantID = strings.TrimSpace(os.Getenv("GRAPHIFY_TENANT_ID"))
-	srv.principalID = strings.TrimSpace(os.Getenv("GRAPHIFY_PRINCIPAL_ID"))
 	srv.backend = strings.TrimSpace(os.Getenv("GRAPHIFY_BACKEND"))
+	srv.buildWait = 10 * time.Second
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -161,6 +181,7 @@ func main() {
 		return srv.readinessCheck()
 	}))
 	mux.HandleFunc("/v1/graphify/extract", srv.handleExtract)
+	mux.HandleFunc("/v1/graphify/extract/", srv.handleExtractStatus)
 	mux.HandleFunc("/v1/graphify/query", srv.handleQuery)
 	mux.HandleFunc("/v1/graphify/path", srv.handlePath)
 	mux.HandleFunc("/v1/graphify/explain", srv.handleExplain)
@@ -170,7 +191,7 @@ func main() {
 		addr = ":8099"
 	}
 	log.Printf("graphify provider (%s) listening on %s", providerName, addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("graphify-provider", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -189,60 +210,6 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // ── extraction / ingestion ──────────────────────────────────────────────
 
-func (s *graphifyServer) handleExtract(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.namespaceID == "" || s.tenantID == "" || s.principalID == "" {
-		http.Error(w, "GRAPHIFY_NAMESPACE_ID, GRAPHIFY_TENANT_ID and GRAPHIFY_PRINCIPAL_ID must be configured", http.StatusPreconditionFailed)
-		return
-	}
-
-	graphPath, err := runExtract(r.Context(), s.repoPath, s.backend)
-	if err != nil {
-		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	graph, err := loadGraph(graphPath)
-	if err != nil {
-		http.Error(w, "load graph.json: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	summary := ingestSummary{}
-	memoryIDByNode := make(map[string]string, len(graph.Nodes))
-	for _, node := range graph.Nodes {
-		memoryID, err := s.ingestNode(r.Context(), node)
-		if err != nil {
-			summary.Errors = append(summary.Errors, "node "+node.ID+": "+err.Error())
-			continue
-		}
-		memoryIDByNode[node.ID] = memoryID
-		summary.NodesIngested++
-	}
-	for _, edge := range graph.Edges {
-		sourceID, sourceOK := memoryIDByNode[edge.Source]
-		targetID, targetOK := memoryIDByNode[edge.Target]
-		if !sourceOK || !targetOK {
-			summary.Errors = append(summary.Errors, "edge "+edge.Source+"->"+edge.Target+": unmapped node")
-			continue
-		}
-		if err := s.ingestEdge(r.Context(), sourceID, targetID, edge); err != nil {
-			summary.Errors = append(summary.Errors, "edge "+edge.Source+"->"+edge.Target+": "+err.Error())
-			continue
-		}
-		summary.EdgesIngested++
-	}
-	writeJSON(w, summary)
-}
-
-type ingestSummary struct {
-	NodesIngested int      `json:"nodes_ingested"`
-	EdgesIngested int      `json:"edges_ingested"`
-	Errors        []string `json:"errors,omitempty"`
-}
-
 // relationTypeFor maps graphify's edge confidence tag onto a
 // memory_relations relation_type; graphify's own EXTRACTED/INFERRED/
 // AMBIGUOUS vocabulary is preserved (lowercased) rather than collapsed,
@@ -260,28 +227,33 @@ func relationTypeFor(confidenceTag string) string {
 // ingestNode writes a graphify node as a Fact. Nodes are always AST-observed
 // (graphify only tags *edges* with EXTRACTED/INFERRED/AMBIGUOUS confidence,
 // not nodes -- a node either exists in the parsed source or isn't emitted at
-// all), so every node maps to Fact.Source "explicit".
-func (s *graphifyServer) ingestNode(ctx context.Context, node graphNode) (string, error) {
+// all), so every node maps to Fact.Source "explicit". The content names the
+// node's source location as well as its label: a repository has many
+// distinct main() and init() declarations, and a bare label would make
+// memory-intelligence merge them all into one fact.
+func (s *graphifyServer) ingestNode(ctx context.Context, bearer, namespaceID string, node graphNode) (string, error) {
 	evidence := []string(nil)
+	content := node.Label
 	if node.SourceFile != "" {
 		ref := node.SourceFile
 		if node.SourceLocation != "" {
 			ref = ref + ":" + node.SourceLocation
 		}
 		evidence = []string{ref}
+		content = node.Label + " (" + ref + ")"
 	}
 	fact := map[string]any{
-		"network":      "entity",
-		"content":      node.Label,
-		"source":       "explicit",
-		"confidence":   1.0,
-		"scope":        "namespace",
-		"derivation":   "graphify:node:" + node.ID,
-		"evidence":     evidence,
-		"inferred":     false,
-		"namespace_id": s.namespaceID,
-		"tenant_id":    s.tenantID,
-		"principal_id": s.principalID,
+		"network":    "entity",
+		"content":    content,
+		"source":     "explicit",
+		"confidence": 1.0,
+		"scope":      "namespace",
+		"derivation": "graphify:node:" + node.ID,
+		"evidence":   evidence,
+		"inferred":   false,
+	}
+	if namespaceID != "" {
+		fact["namespace_id"] = namespaceID
 	}
 	// memory-intelligence's POST /v1/facts nests the created (or merged)
 	// fact under "fact" in both response branches -- see handleFacts.
@@ -291,7 +263,7 @@ func (s *graphifyServer) ingestNode(ctx context.Context, node graphNode) (string
 		} `json:"fact"`
 		CanonicalFactID string `json:"canonical_fact_id,omitempty"`
 	}
-	if err := s.postJSON(ctx, s.memoryIntelligenceURL+"/v1/facts", fact, &resp); err != nil {
+	if err := s.postJSON(ctx, bearer, s.memoryIntelligenceURL+"/v1/facts", fact, &resp); err != nil {
 		return "", err
 	}
 	if resp.CanonicalFactID != "" {
@@ -300,18 +272,47 @@ func (s *graphifyServer) ingestNode(ctx context.Context, node graphNode) (string
 	return resp.Fact.ID, nil
 }
 
-func (s *graphifyServer) ingestEdge(ctx context.Context, sourceMemoryID, targetMemoryID string, edge graphEdge) error {
+func (s *graphifyServer) ingestEdge(ctx context.Context, bearer, sourceMemoryID, targetMemoryID string, edge graphEdge) error {
 	relation := map[string]any{
 		"source_memory_id": sourceMemoryID,
 		"target_memory_id": targetMemoryID,
 		"relation_type":    relationTypeFor(edge.Confidence),
-		"tenant_id":        s.tenantID,
-		"principal_id":     s.principalID,
 	}
-	return s.postJSON(ctx, s.memoryIntelligenceURL+"/v1/relations", relation, nil)
+	// graphify scores each edge; that measured score is the relation's
+	// confidence. Without one, memory-intelligence derives it from the two
+	// facts the edge connects.
+	if edge.ConfidenceScore > 0 && edge.ConfidenceScore <= 1 {
+		relation["confidence"] = edge.ConfidenceScore
+	}
+	return s.postJSON(ctx, bearer, s.memoryIntelligenceURL+"/v1/relations", relation, nil)
 }
 
 // ── read-side: query / path / explain ───────────────────────────────────
+
+// cachedGraphOrRespond returns workDir's graph, or answers the request
+// itself: 202 with a retry hint while the graph is still being built (the
+// first question about a repository, or the first after it changed), or the
+// build's error.
+func (s *graphifyServer) cachedGraphOrRespond(w http.ResponseWriter, r *http.Request, workDir string) (string, bool) {
+	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
+	if errors.Is(err, errGraphBuilding) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "15")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":              "building",
+			"repo_path":           workDir,
+			"retry_after_seconds": 15,
+			"message":             "The code graph for this repository is being built (first use, or the repository changed since the last build). Ask again in about 15 seconds.",
+		})
+		return "", false
+	}
+	if err != nil {
+		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+		return "", false
+	}
+	return graphPath, true
+}
 
 func (s *graphifyServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -335,9 +336,8 @@ func (s *graphifyServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
-	if err != nil {
-		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+	graphPath, ok := s.cachedGraphOrRespond(w, r, workDir)
+	if !ok {
 		return
 	}
 	out, err := runGraphify(r.Context(), workDir, "query", req.Q, "--graph", graphPath)
@@ -375,9 +375,8 @@ func (s *graphifyServer) handlePath(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
-	if err != nil {
-		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+	graphPath, ok := s.cachedGraphOrRespond(w, r, workDir)
+	if !ok {
 		return
 	}
 	out, err := runGraphify(r.Context(), workDir, "path", req.From, req.To, "--graph", graphPath)
@@ -410,9 +409,8 @@ func (s *graphifyServer) handleExplain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
-	if err != nil {
-		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+	graphPath, ok := s.cachedGraphOrRespond(w, r, workDir)
+	if !ok {
 		return
 	}
 	out, err := runGraphify(r.Context(), workDir, "explain", req.Node, "--graph", graphPath)

@@ -70,6 +70,10 @@ x-service-runtime-environment: &service-runtime-environment
   # services that are idle. max_connections is sized against the sum.
   SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS:-3}
   SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS:-1}
+  # Every service ships its §32 metrics and inbound request-flow points to the
+  # observability collector. The collector serves TLS only (SCOS_TLS_REQUIRED),
+  # so the default is https; packages/telemetry trusts SCOS_TLS_CA_FILE.
+  SCOS_OBSERVABILITY_URL: ${SCOS_OBSERVABILITY_URL:-https://observability:8096}
 
 # Docker's default json-file driver keeps every line a container has ever
 # logged, forever, on the root device. Twenty chatty services will quietly fill
@@ -328,7 +332,6 @@ services:
     command: ["memory-gateway"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       # Above the shared default: the write path -- every memory ingest lands here.
       SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
@@ -360,7 +363,6 @@ services:
     command: ["autonomous-control-plane"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CONTROL_HTTP_ADDR: ${SCOS_CONTROL_HTTP_ADDR:-:8081}
       SCOS_CONTROL_PLANE_STATE_PATH: ${SCOS_CONTROL_PLANE_STATE_PATH:-/var/lib/scos/control-plane/state.json}
@@ -492,7 +494,6 @@ services:
     command: ["retrieval-orchestrator"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       # Above the shared default: the read path, and queryResults holds two connections per request.
       SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
@@ -525,7 +526,6 @@ services:
     command: ["context-optimisation"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CONTEXT_HTTP_ADDR: ${SCOS_CONTEXT_HTTP_ADDR:-:8083}
       SCOS_CONTEXT_SOURCE_STORE: ${SCOS_CONTEXT_SOURCE_STORE:-/var/lib/scos/context/sources}
@@ -549,19 +549,26 @@ services:
     command: ["code-intelligence"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CODE_INTELLIGENCE_HTTP_ADDR: ${SCOS_CODE_INTELLIGENCE_HTTP_ADDR:-:8084}
       SCOS_CODE_INTELLIGENCE_STORE_PATH: ${SCOS_CODE_INTELLIGENCE_STORE_PATH:-/var/lib/scos/code-intelligence/state.json}
+      # Repositories agents ask to index live under this host directory,
+      # mounted read-only at SCOS_WORKSPACE_ROOT; code-intelligence reads,
+      # hashes and parses them itself (POST /v2/code/scan). Host paths under
+      # it are translated to the mount; nothing outside it is ever read.
+      SCOS_WORKSPACE_HOST_PATH: ${SCOS_WORKSPACE_HOST_PATH:-}
+      SCOS_WORKSPACE_ROOT: /workspace
       # Durable, snapshot-based /v2/code/* store (pgstore.go) -- required at
-      # startup like every other Postgres-backed service, not opt-in. The
-      # /v1/* routes above are unaffected either way; an individual user can
-      # still disable /v2 for themselves from the dashboard settings tab
-      # (POST /v2/code/settings) without this being unset.
+      # startup like every other Postgres-backed service, not opt-in. An
+      # individual user can still disable /v2 for themselves from the
+      # dashboard settings tab (/v2/code/settings) without this being
+      # unset. SCOS_CODE_INTELLIGENCE_STORE_PATH above holds only the
+      # /v1/repos registration records.
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - code-intelligence-data:/var/lib/scos/code-intelligence
+      - ${SCOS_WORKSPACE_HOST_PATH:-../..}:/workspace:ro
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8084:8084"
     depends_on:
@@ -578,30 +585,73 @@ services:
       start_period: 30s
       retries: 10
 
+  # Governed commands act on the operator's repositories, so the execution
+  # proxy runs as the workspace owner (SCOS_WORKSPACE_UID/GID, set by
+  # scripts/local_quickstart.sh to the operator's own ids; unset, the image's
+  # scos user). That user needs its own copy of the service TLS key, which is
+  # readable only by scos, and ownership of the proxy's state volumes.
+  execution-proxy-init:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - execution-proxy-tls:/etc/scos/execution-proxy-tls
+      - execution-proxy-raw:/var/lib/scos/execution-proxy/raw
+      - execution-proxy-state:/var/lib/scos/execution-proxy/state
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        owner="${SCOS_WORKSPACE_UID:-100}:${SCOS_WORKSPACE_GID:-101}"
+        cp /etc/scos/tls/tls.crt /etc/scos/tls/tls.key /etc/scos/execution-proxy-tls/
+        chown "$$owner" /etc/scos/execution-proxy-tls/tls.crt /etc/scos/execution-proxy-tls/tls.key
+        chmod 644 /etc/scos/execution-proxy-tls/tls.crt
+        chmod 600 /etc/scos/execution-proxy-tls/tls.key
+        chown -R "$$owner" /var/lib/scos/execution-proxy/raw /var/lib/scos/execution-proxy/state
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+
   execution-proxy:
     <<: [*service-limits, *fabric-image]
+    user: "${SCOS_WORKSPACE_UID:-100}:${SCOS_WORKSPACE_GID:-101}"
     command: ["execution-proxy"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_EXECUTION_PROXY_HTTP_ADDR: ${SCOS_EXECUTION_PROXY_HTTP_ADDR:-:8085}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_EXECUTION_PROXY_STORE_PATH: ${SCOS_EXECUTION_PROXY_STORE_PATH:-/var/lib/scos/execution-proxy/state.json}
       SCOS_PROXY_RAW_DIR: ${SCOS_PROXY_RAW_DIR:-/var/lib/scos/execution-proxy/raw}
+      # Every execution is prepared, authorised and reconciled by tool
+      # governance; without it the proxy refuses to run anything.
+      SCOS_TOOL_GOVERNANCE_URL: ${SCOS_TOOL_GOVERNANCE_URL:-https://tool-governance:8092}
+      # Commands run only inside the shared workspace; agents name host
+      # paths under SCOS_WORKSPACE_HOST_PATH, translated to /workspace.
+      SCOS_WORKSPACE_HOST_PATH: ${SCOS_WORKSPACE_HOST_PATH:-}
+      SCOS_WORKSPACE_ROOT: /workspace
+      SCOS_TLS_CERT_FILE: /etc/scos/execution-proxy-tls/tls.crt
+      SCOS_TLS_KEY_FILE: /etc/scos/execution-proxy-tls/tls.key
     volumes:
       - tls-certs:/etc/scos/tls:ro
+      - execution-proxy-tls:/etc/scos/execution-proxy-tls:ro
       - execution-proxy-raw:/var/lib/scos/execution-proxy/raw
       - execution-proxy-state:/var/lib/scos/execution-proxy/state
+      # Read-write: governed commands act on the operator's repositories.
+      - ${SCOS_WORKSPACE_HOST_PATH:-../..}:/workspace:rw
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8085:8085"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
+      execution-proxy-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrations:
         condition: service_completed_successfully
+      tool-governance:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8085/health/ready"]
       interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
@@ -614,7 +664,6 @@ services:
     command: ["extension-manager"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_EXTENSION_MANAGER_HTTP_ADDR: ${SCOS_EXTENSION_MANAGER_HTTP_ADDR:-:8086}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -641,7 +690,6 @@ services:
     command: ["compatibility-gateway"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR: ${SCOS_COMPATIBILITY_GATEWAY_HTTP_ADDR:-:8087}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -673,6 +721,8 @@ services:
       SCOS_DB_MAX_CONNS: ${SCOS_DB_MAX_CONNS_HOT:-8}
       SCOS_DB_MAX_IDLE_CONNS: ${SCOS_DB_MAX_IDLE_CONNS_HOT:-2}
       SCOS_HERMES_PROVIDER_HTTP_ADDR: ${SCOS_HERMES_PROVIDER_HTTP_ADDR:-:8088}
+      SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
+      SCOS_RETRIEVAL_ORCHESTRATOR_URL: ${SCOS_RETRIEVAL_ORCHESTRATOR_URL:-https://retrieval-orchestrator:8082}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
@@ -696,21 +746,25 @@ services:
     <<: [*service-limits, *fabric-image]
     command: ["graphify-provider"]
     restart: unless-stopped
+    # Override the shared 160m cap: graphify's Python extractor holds a parse
+    # of the whole repository while it builds a graph, which measured ~156MiB
+    # on this ~900-file repository alone and was OOM-killed under 160m.
+    mem_limit: ${GRAPHIFY_SERVICE_MEM_LIMIT:-1536m}
+    memswap_limit: ${GRAPHIFY_SERVICE_MEM_LIMIT:-1536m}
     environment:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR: ${SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR:-:8099}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
       GRAPHIFY_REPO_PATH: ${GRAPHIFY_REPO_PATH:-/repo}
-      # Left optional rather than compose-required: these must be a real
-      # tenant/principal/namespace already provisioned with a
-      # namespace_memberships row (can_write_candidates=true) for ingestion
-      # to succeed, which isn't something this file can invent. Unset, the
-      # service still starts and serves /health and the read-side
-      # query/path/explain tools -- handleExtract (main.go) itself returns
-      # 412 for POST /v1/graphify/extract until these are set.
+      # repo_path arguments must resolve inside the shared workspace mount;
+      # host paths under SCOS_WORKSPACE_HOST_PATH are translated to it.
+      GRAPHIFY_ALLOWED_ROOT: /workspace
+      SCOS_WORKSPACE_HOST_PATH: ${SCOS_WORKSPACE_HOST_PATH:-}
+      # Extraction writes memories as the principal who requested it, into
+      # the namespace the request names; this is only the default namespace
+      # for requests that name none (unset: the principal's own writable
+      # namespace).
       GRAPHIFY_NAMESPACE_ID: ${GRAPHIFY_NAMESPACE_ID:-}
-      GRAPHIFY_TENANT_ID: ${GRAPHIFY_TENANT_ID:-}
-      GRAPHIFY_PRINCIPAL_ID: ${GRAPHIFY_PRINCIPAL_ID:-}
       GRAPHIFY_BACKEND: ${GRAPHIFY_BACKEND:-}
     volumes:
       - tls-certs:/etc/scos/tls:ro
@@ -727,6 +781,9 @@ services:
       # writable mount here the process can't create it under /var/lib
       # (owned by root, not the container's non-root scos user) at all.
       - graphify-cache:/var/lib/graphify-cache
+      # Read-only: graphs of workspace repositories are built into
+      # /var/lib/graphify-cache, never into the repository itself.
+      - ${SCOS_WORKSPACE_HOST_PATH:-../..}:/workspace:ro
     depends_on:
       tls-certs:
         condition: service_completed_successfully
@@ -796,7 +853,6 @@ services:
     command: ["memory-intelligence"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment, *deepseek-environment]
       SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR: ${SCOS_MEMORY_INTELLIGENCE_HTTP_ADDR:-:8089}
       SCOS_MEMORY_GATEWAY_URL: ${SCOS_MEMORY_GATEWAY_URL:-https://memory-gateway:8080}
@@ -958,7 +1014,6 @@ services:
     command: ["security-gate"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_SECURITY_GATE_HTTP_ADDR: ${SCOS_SECURITY_GATE_HTTP_ADDR:-:8091}
       SCOS_SECURITY_ISSUER_SECRET: ${SCOS_SECURITY_ISSUER_SECRET:?SCOS_SECURITY_ISSUER_SECRET must be set}
@@ -1047,7 +1102,6 @@ services:
     command: ["recovery-orchestrator"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR: ${SCOS_RECOVERY_ORCHESTRATOR_HTTP_ADDR:-:8094}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
@@ -1074,23 +1128,26 @@ services:
     command: ["backup-manager"]
     restart: unless-stopped
     environment:
-      SCOS_OBSERVABILITY_URL: http://observability:8096
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_BACKUP_MANAGER_HTTP_ADDR: ${SCOS_BACKUP_MANAGER_HTTP_ADDR:-:8095}
       SCOS_BACKUP_PROVIDER: ${SCOS_BACKUP_PROVIDER:-disabled}
       SCOS_BACKUP_DESTINATION: ${SCOS_BACKUP_DESTINATION:-}
-      SCOS_BACKUP_PROVIDER_VERIFIED: ${SCOS_BACKUP_PROVIDER_VERIFIED:-false}
-      SCOS_BACKUP_OFF_HOST_VERIFIED: ${SCOS_BACKUP_OFF_HOST_VERIFIED:-false}
+      # Coverage is derived from evidence (docs/runbooks/backup-recovery.md);
+      # there are no "verified" flags to set. The secret-manager settings
+      # only label where the encryption key is kept.
       SCOS_SECRET_MANAGER: ${SCOS_SECRET_MANAGER:-}
       SCOS_BACKUP_ENCRYPTION_KEY_REF: ${SCOS_BACKUP_ENCRYPTION_KEY_REF:-}
-      SCOS_PITR_ENABLED: ${SCOS_PITR_ENABLED:-false}
       SCOS_BACKUP_DATABASE_URL: ${SCOS_BACKUP_DATABASE_URL:-}
       SCOS_BACKUP_RESTORE_DATABASE_URL: ${SCOS_BACKUP_RESTORE_DATABASE_URL:-}
       SCOS_BACKUP_DIR: ${SCOS_BACKUP_DIR:-/var/lib/scos/backups}
       SCOS_WAL_ARCHIVE_DESTINATION: "${SCOS_WAL_ARCHIVE_DESTINATION:-file:///var/lib/scos/wal-archive}"
+      SCOS_OKF_GIT_REPO: ${SCOS_OKF_GIT_REPO:-}
+      SCOS_OKF_GIT_MIRROR_REMOTE: ${SCOS_OKF_GIT_MIRROR_REMOTE:-}
+      SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED: ${SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED:-false}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - backup-data:/var/lib/scos/backups
+      # Read-write: WAL retention removes segments older than 35 days.
       - postgres-wal-archive:/var/lib/scos/wal-archive
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8095:8095"
@@ -1153,7 +1210,6 @@ services:
       SCOS_AUTONOMOUS_CONTROL_PLANE_URL: ${SCOS_AUTONOMOUS_CONTROL_PLANE_URL:-https://autonomous-control-plane:8081}
       SCOS_RECOVERY_ORCHESTRATOR_URL: ${SCOS_RECOVERY_ORCHESTRATOR_URL:-https://recovery-orchestrator:8094}
       SCOS_SECURITY_GATE_URL: ${SCOS_SECURITY_GATE_URL:-https://security-gate:8091}
-      SCOS_OBSERVABILITY_URL: ${SCOS_OBSERVABILITY_URL:-https://observability:8096}
       SCOS_CREDENTIAL_VAULT_URL: ${SCOS_CREDENTIAL_VAULT_URL:-https://credential-vault:8100}
       SCOS_OKF_SYNCHRONISER_URL: ${SCOS_OKF_SYNCHRONISER_URL:-https://okf-synchroniser:8090}
       SCOS_GRAPHIFY_PROVIDER_URL: ${SCOS_GRAPHIFY_PROVIDER_URL:-https://graphify-provider:8099}
@@ -1200,6 +1256,8 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CREDENTIAL_VAULT_HTTP_ADDR: ${SCOS_CREDENTIAL_VAULT_HTTP_ADDR:-:8100}
       SCOS_CREDENTIAL_VAULT_MASTER_KEY: ${SCOS_CREDENTIAL_VAULT_MASTER_KEY:?SCOS_CREDENTIAL_VAULT_MASTER_KEY must be a base64-encoded 32-byte AES-256 key}
+      SCOS_CREDENTIAL_VAULT_KEY_VERSION: ${SCOS_CREDENTIAL_VAULT_KEY_VERSION:-1}
+      SCOS_CREDENTIAL_VAULT_PREVIOUS_KEYS: ${SCOS_CREDENTIAL_VAULT_PREVIOUS_KEYS:-}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
@@ -1226,6 +1284,7 @@ volumes:
   postgres-data:
   execution-proxy-raw:
   execution-proxy-state:
+  execution-proxy-tls:
   agent-registry-state:
   autonomous-control-plane-state:
   security-gate-data:

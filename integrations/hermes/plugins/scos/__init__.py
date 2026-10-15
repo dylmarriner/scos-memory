@@ -16,6 +16,7 @@ import queue
 import ssl
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -67,6 +68,10 @@ class ScosMemoryProvider(MemoryProvider):
         self._write_queue: queue.Queue = queue.Queue(maxsize=_PERSISTENCE_QUEUE_LIMIT)
         self._worker: Optional[threading.Thread] = None
         self._worker_lock = threading.Lock()
+        # Tool calls executed through this provider since the last synced
+        # turn; sync_turn attaches and clears them.
+        self._tool_calls: List[Dict[str, Any]] = []
+        self._tool_calls_lock = threading.Lock()
         self._closed = False
 
     @property
@@ -519,17 +524,30 @@ class ScosMemoryProvider(MemoryProvider):
         session_id: str,
         turn_id: str,
         messages: List[Dict[str, Any]],
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         payload = self._session_payload(session_id)
         payload.update(
             {
                 "turn_id": turn_id,
                 "messages": messages,
-                "tool_calls": [],
+                "tool_calls": tool_calls or [],
                 "profile_path": str(self._hermes_home or ""),
             }
         )
         return payload
+
+    def _take_tool_calls(self) -> List[Dict[str, Any]]:
+        with self._tool_calls_lock:
+            calls, self._tool_calls = self._tool_calls, []
+        return calls
+
+    def _record_tool_call(self, entry: Dict[str, Any]) -> None:
+        with self._tool_calls_lock:
+            self._tool_calls.append(entry)
+            # Bound memory if turns are never synced (persistence disabled).
+            if len(self._tool_calls) > 200:
+                del self._tool_calls[: len(self._tool_calls) - 200]
 
     def _provider_post(
         self, path: str, payload: Dict[str, Any], timeout: float = 8
@@ -627,8 +645,11 @@ class ScosMemoryProvider(MemoryProvider):
         ``messages`` is intentionally not re-persisted here because Hermes supplies the
         entire transcript-so-far. Persisting it on every turn duplicates old messages;
         the v2 pre-compress checkpoint is the explicit full-evidence archival boundary.
+        The tool calls of this exchange are extracted from it, together with
+        the SCOS tools executed through this provider since the last turn.
         """
-        del messages
+        transcript_calls = _turn_tool_calls(messages or [])
+        executed_calls = self._take_tool_calls()
         if not self._write_enabled or not user_content or not assistant_content:
             return
         if not self._persistence_configured():
@@ -656,7 +677,7 @@ class ScosMemoryProvider(MemoryProvider):
         ).hexdigest()
         self._enqueue_provider_post(
             "/v1/provider/sync_turn",
-            self._turn_payload(sid, turn_id, turn_messages),
+            self._turn_payload(sid, turn_id, turn_messages, transcript_calls + executed_calls),
         )
 
     # -- explicit tools -----------------------------------------------------
@@ -686,8 +707,19 @@ class ScosMemoryProvider(MemoryProvider):
         self, tool_name: str, args: Dict[str, Any], **kwargs
     ) -> str:
         del kwargs
+        started = time.monotonic()
         response = self._gateway_rpc(
             "tools/call", {"name": tool_name, "arguments": args or {}}
+        )
+        failed = "error" in response or bool((response.get("result") or {}).get("isError"))
+        self._record_tool_call(
+            {
+                "source": "scos_provider",
+                "name": tool_name,
+                "arguments": args or {},
+                "status": "error" if failed else "ok",
+                "duration_ms": round((time.monotonic() - started) * 1000, 3),
+            }
         )
         if "error" in response:
             return json.dumps({"error": response["error"]})
@@ -700,6 +732,49 @@ class ScosMemoryProvider(MemoryProvider):
                 except (KeyError, json.JSONDecodeError):
                     return json.dumps({"text": block.get("text")})
         return json.dumps(result)
+
+
+def _turn_tool_calls(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Tool calls made in the latest exchange of a Hermes transcript.
+
+    The exchange is everything after the last user message. Assistant
+    ``tool_calls`` (OpenAI-style) are paired with their ``tool`` result
+    messages by ``tool_call_id``.
+    """
+    last_user = -1
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            last_user = index
+    exchange = [m for m in messages[last_user + 1:] if isinstance(m, dict)]
+    results = {
+        m.get("tool_call_id"): m.get("content")
+        for m in exchange
+        if m.get("role") == "tool" and m.get("tool_call_id")
+    }
+    calls: List[Dict[str, Any]] = []
+    for message in exchange:
+        if message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            arguments = function.get("arguments", call.get("arguments"))
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {"raw": arguments}
+            entry: Dict[str, Any] = {
+                "source": "transcript",
+                "id": call.get("id", ""),
+                "name": function.get("name") or call.get("name", ""),
+                "arguments": arguments if arguments is not None else {},
+            }
+            if call.get("id") in results:
+                entry["result"] = results[call.get("id")]
+            calls.append(entry)
+    return calls
 
 
 def _stable_session_uuid(session_id: str, tenant_id: str, principal_id: str) -> str:

@@ -262,6 +262,60 @@ class ShutdownAndBackupTests(ProviderTestCase):
         self.assertGreaterEqual(result["drained"], 1)
         self.assertFalse(p.is_available())
 
+    def test_flush_without_ingester_keeps_turns_queued_and_reports_them(self):
+        p = self.provider()
+        p.sync_turn("s1", "t1", ["hello"])
+        result = p.flush()
+        self.assertEqual(result.delivered, 0)
+        self.assertEqual(result.pending, 1)
+        self.assertEqual(result.undelivered[0]["kind"], "ingest_turn")
+        self.assertIn("no ingestion backend", result.undelivered[0]["error"])
+        self.assertEqual([w.kind for w in p.pending_work()], ["ingest_turn"])
+
+    def test_flush_delivers_turns_to_the_ingester(self):
+        delivered = []
+        p = self.provider(ingester=delivered.append)
+        p.sync_turn("s1", "t1", ["hello"], tool_calls=[{"name": "grep"}])
+        result = p.flush()
+        self.assertEqual(result.delivered, 1)
+        self.assertEqual(result.undelivered, [])
+        self.assertEqual(p.pending_work(), [])
+        self.assertEqual(delivered[0].turn_id, "t1")
+        self.assertEqual(delivered[0].tool_calls, [{"name": "grep"}])
+
+    def test_failed_ingestion_stays_queued_and_replays_after_restart(self):
+        def failing(turn):
+            raise ConnectionError("backend down")
+
+        p = self.provider(ingester=failing)
+        p.sync_turn("s1", "t1", ["hello"])
+        report = p.shutdown()
+        self.assertEqual(report["drained"], 0)
+        self.assertEqual(report["pending"], 1)
+        self.assertIn("backend down", report["undelivered"][0]["error"])
+
+        delivered = []
+        replacement = self.provider(ingester=delivered.append)
+        self.assertEqual(replacement.flush().delivered, 1)
+        self.assertEqual([t.turn_id for t in delivered], ["t1"])
+        self.assertEqual(replacement.pending_work(), [])
+
+    def test_drained_prefetch_is_served_from_the_warm_result(self):
+        calls = []
+
+        def recaller(query, max_items):
+            calls.append(query)
+            return [f"recalled:{query}"]
+
+        p = self.provider(recaller=recaller)
+        p.queue_prefetch("deploy", max_items=5)
+        self.assertEqual(p.flush().delivered, 1)
+        self.assertEqual(calls, ["deploy"])
+        self.assertEqual(p.prefetch("deploy", max_items=5), ["recalled:deploy"])
+        self.assertEqual(calls, ["deploy"], "warm result must be served without a second recall")
+        p.prefetch("deploy", max_items=5)
+        self.assertEqual(calls, ["deploy", "deploy"], "a warm result is served once")
+
     def test_backup_paths_point_at_the_store(self):
         p = self.provider()
         paths = p.backup_paths()

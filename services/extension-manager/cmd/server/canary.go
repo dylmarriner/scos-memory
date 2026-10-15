@@ -17,6 +17,14 @@ import (
 // resolved to one of them by activation scope. Promotion makes the candidate
 // the installed version; rollback discards it. Neither ever leaves the package
 // without an active version.
+//
+// The split is enforced where extension code is reached: hook dispatch
+// (dispatchHooks in main.go) delivers an event to the candidate version's
+// hook endpoint for callers in the canary's cohort and to the stable
+// version's endpoint for everyone else, using the agent, profile, workspace
+// and project the dispatch request carries (an agent token's own agent id
+// for agent callers). POST .../canary/resolve answers the same question for
+// a caller without dispatching.
 
 // CanaryScope declares which callers receive the candidate version. §22.3
 // requires per-agent, per-profile, per-workspace, per-project and
@@ -63,9 +71,12 @@ type CanaryDeployment struct {
 	CanaryManifest ExtensionManifest `json:"canary_manifest"`
 	Scope          CanaryScope       `json:"scope"`
 	Isolation      string            `json:"isolation"`
-	Status         string            `json:"status"` // active, promoted, rolled_back
-	CreatedAt      string            `json:"created_at"`
-	UpdatedAt      string            `json:"updated_at"`
+	// Hooks are the candidate version's subscriptions, delivered to callers
+	// in the cohort in place of the stable version's.
+	Hooks     map[string]*Hook `json:"hooks,omitempty"`
+	Status    string           `json:"status"` // active, promoted, rolled_back
+	CreatedAt string           `json:"created_at"`
+	UpdatedAt string           `json:"updated_at"`
 }
 
 // CanaryContext identifies the caller a version must be resolved for.
@@ -240,7 +251,8 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 		CanaryVersion:  req.Manifest.Version,
 		CanaryManifest: req.Manifest,
 		Scope:          req.Scope,
-		Isolation:      s.determineIsolation(req.Manifest),
+		Isolation:      isolationRemoteEndpoint,
+		Hooks:          canaryHooks(req.Manifest),
 		Status:         "active",
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -299,14 +311,20 @@ func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, package
 	previousHistory := append([]ExtensionManifest(nil), s.history[packageID]...)
 
 	if promote {
+		if err := s.verifyManifestIntegrity(deployment.CanaryManifest); err != nil {
+			s.mu.Unlock()
+			http.Error(w, "canary manifest failed verification: "+err.Error(), http.StatusConflict)
+			return
+		}
 		// The superseded manifest joins the undo stack so a promoted canary
 		// remains rollback-able like any other update (§22.3).
 		s.history[packageID] = append(s.history[packageID], ext.Manifest)
 		s.removeExtensionRegistrationsLocked(packageID)
 		ext.Manifest = deployment.CanaryManifest
-		ext.Isolation = s.determineIsolation(ext.Manifest)
+		ext.Isolation = isolationRemoteEndpoint
 		s.registerExtensionLocked(ext.Manifest)
 		ext.Status = "enabled"
+		ext.StatusReason = ""
 		ext.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		deployment.Status = "promoted"
 	} else {

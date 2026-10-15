@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/release"
@@ -89,6 +90,11 @@ type RetrieveResponse struct {
 	Code           *codeQueryResponse `json:"code,omitempty"`
 	TotalTokens    int                `json:"total_tokens"`
 	LatencyMs      int                `json:"latency_ms"`
+	// DegradedSources names every retrieval lane that failed for this
+	// request, so a database or service failure never reads as "no
+	// matches"; DegradedModels names models that were unavailable.
+	DegradedSources []string `json:"degraded_sources"`
+	DegradedModels  []string `json:"degraded_models"`
 }
 
 // ── server state ─────────────────────────────────────────────────────────
@@ -225,7 +231,7 @@ func main() {
 		addr = ":8082"
 	}
 	log.Printf("retrieval orchestrator listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("retrieval-orchestrator", auth.ControlPlaneHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -334,6 +340,10 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		tokenBudget = defaultTokenBudget
 	}
 
+	if len(req.Filters) > 0 {
+		http.Error(w, "filters are not supported; narrow a retrieval with namespaces, memory_classes or sensitivity_max", http.StatusBadRequest)
+		return
+	}
 	ctx := r.Context()
 	plan := planRetrieval(req, maxResults)
 	meta := retrievalExecutionMeta{TextSpace: s.textSpace, PlannerMode: plan.Mode}
@@ -419,6 +429,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		exactResults, err = s.exactSearch(ctx, req, namespaces, sensitivityFilter, plan.ExactLimit)
 		if err != nil {
 			log.Printf("exact search error: %v", err)
+			meta.DegradedSources = append(meta.DegradedSources, "exact")
 		}
 	}
 
@@ -428,6 +439,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		ftsResults, err = s.fullTextSearch(ctx, req, namespaces, sensitivityFilter, tsQuery, plan.FullTextLimit)
 		if err != nil {
 			log.Printf("full-text search error: %v", err)
+			meta.DegradedSources = append(meta.DegradedSources, "fulltext")
 		}
 	}
 
@@ -467,20 +479,43 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		relationResults, err = s.relationExpansion(ctx, req, namespaces, sensitivityFilter, append(append(exactResults, ftsResults...), vectorResults...), plan.RelationLimit)
 		if err != nil {
 			log.Printf("relation expansion error: %v", err)
+			meta.DegradedSources = append(meta.DegradedSources, "relation")
 		}
 	}
 
 	// ── 8. Recent session state ─────────────────────────────────────
 	var sessionResults []RetrievalResult
 	if plan.SessionLimit > 0 {
-		sessionResults, _ = s.recentSessionState(ctx, req, namespaces, plan.SessionLimit)
+		sessionResults, err = s.recentSessionState(ctx, req, namespaces, plan.SessionLimit)
+		if err != nil {
+			log.Printf("session state error: %v", err)
+			meta.DegradedSources = append(meta.DegradedSources, "session_state")
+		}
+	}
+
+	// ── 8.5. Recent memories and active task state ──────────────────
+	var recentResults []RetrievalResult
+	if req.IncludeRecent && len(namespaces) > 0 {
+		recentResults, err = s.recentMemories(ctx, req, namespaces, sensitivityFilter, recentWindow, plan.recentLimit(maxResults))
+		if err != nil {
+			log.Printf("recent memories error: %v", err)
+			meta.DegradedSources = append(meta.DegradedSources, "recent")
+		}
+	}
+	var stateResults []RetrievalResult
+	if req.IncludeState && len(namespaces) > 0 {
+		stateResults, err = s.activeTaskState(ctx, req, namespaces, sensitivityFilter, plan.recentLimit(maxResults))
+		if err != nil {
+			log.Printf("task state error: %v", err)
+			meta.DegradedSources = append(meta.DegradedSources, "task_state")
+		}
 	}
 
 	// ── 9. Fusion via RRF ───────────────────────────────────────────
-	fused := fuseResults(rrfK, exactResults, ftsResults, vectorResults, relationResults, sessionResults)
+	fused := fuseResults(rrfK, exactResults, ftsResults, vectorResults, relationResults, sessionResults, recentResults, stateResults)
 
-	// ── 10. Dedup by memory_id ──────────────────────────────────────
-	deduped := deduplicateResults(fused)
+	// ── 10. Dedup by memory_id, then restrict to requested classes ──
+	deduped := filterMemoryClasses(deduplicateResults(fused), req.MemoryClasses)
 
 	// ── 10.5. Query-aware rerank, then governance weighting ─────────
 	modelRanked := deduped
@@ -508,7 +543,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, codeResponse, map[string]int{
 		"exact": len(exactResults), "fulltext": len(ftsResults), "vector": len(vectorResults), "session_state": len(sessionResults),
-		"relation": len(relationResults), "code": codeCount,
+		"relation": len(relationResults), "code": codeCount, "recent": len(recentResults), "task_state": len(stateResults),
 	}, int(time.Since(start).Milliseconds()), meta)
 	if err != nil {
 		log.Printf("record retrieval run: %v", err)
@@ -522,12 +557,14 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := RetrieveResponse{
-		RetrievalRunID: retrievalRunID,
-		QueryHash:      queryHash,
-		Sections:       sections,
-		Code:           codeResponse,
-		TotalTokens:    totalTokens,
-		LatencyMs:      int(time.Since(start).Milliseconds()),
+		RetrievalRunID:  retrievalRunID,
+		QueryHash:       queryHash,
+		Sections:        sections,
+		Code:            codeResponse,
+		TotalTokens:     totalTokens,
+		LatencyMs:       int(time.Since(start).Milliseconds()),
+		DegradedSources: nonNil(meta.DegradedSources),
+		DegradedModels:  nonNil(meta.DegradedModels),
 	}
 
 	// §32 retrieval latency. Staleness is not emitted here: nothing in the
@@ -820,10 +857,13 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 	var results []RetrievalResult
 	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
 		rows, err := q.Query(ctx, `
-			SELECT DISTINCT mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
+			SELECT id, title, canonical_summary, content, type, authority_level, confidence_score, sensitivity, namespace_id, evidence, conflicts
+			FROM (
+			SELECT DISTINCT ON (mi.id) mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
 			       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
-			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb),
-			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb)
+			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb) AS evidence,
+			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb) AS conflicts,
+			       array_position($3::uuid[], rel.source_memory_id) AS seed_pos
 			FROM memory_relations rel
 			JOIN memory_items mi ON mi.id=rel.target_memory_id
 			LEFT JOIN memory_versions mv ON mv.id=mi.current_version_id
@@ -832,7 +872,15 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 			WHERE mi.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
 			  AND mi.sensitivity <= $4 AND (mi.valid_from IS NULL OR mi.valid_from <= now())
 			  AND (mi.valid_until IS NULL OR mi.valid_until > now()) AND (mi.expires_at IS NULL OR mi.expires_at > now())
-			  AND n.canonical_name=ANY($5::text[]) LIMIT $6`, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit)
+			  AND n.canonical_name=ANY($5::text[])
+			  -- Expansion reaches memories the direct lanes missed. A direct
+			  -- hit re-found as its neighbour's neighbour would count twice,
+			  -- so mutually related weak matches outranked a strong one.
+			  AND NOT (mi.id = ANY($3::uuid[]))
+			ORDER BY mi.id, seed_pos
+			) expanded
+			ORDER BY seed_pos, authority_level DESC
+			LIMIT $6`, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit)
 		if err != nil {
 			return err
 		}
@@ -981,7 +1029,7 @@ func rerankResults(results []RetrievalResult) []RetrievalResult {
 
 func fuseResults(k float64, sets ...[]RetrievalResult) []RetrievalResult {
 	seen := make(map[string]*scoredResult)
-	allSources := []string{"exact", "fulltext", "semantic", "relation", "session_state"}
+	allSources := []string{"exact", "fulltext", "semantic", "relation", "session_state", "recent", "task_state"}
 
 	for sourceIdx, results := range sets {
 		if sourceIdx >= len(allSources) {
@@ -1008,12 +1056,35 @@ func fuseResults(k float64, sets ...[]RetrievalResult) []RetrievalResult {
 		}
 	}
 
+	// Rank fusion keeps only order, so the first and second full-text hits
+	// differ by under 2% however much better the first one matched, and the
+	// governance weighting applied after fusion could then put a memory
+	// that shares one query word above one that answers the question. A
+	// bounded lexical-strength term -- at most one top rank's worth, scaled
+	// by how strongly a memory matched relative to the best match -- keeps
+	// that magnitude.
+	var maxLexical float64
+	for _, sr := range seen {
+		if sr.result.RawLexicalScore > maxLexical {
+			maxLexical = sr.result.RawLexicalScore
+		}
+	}
 	var fused []RetrievalResult
 	for _, sr := range seen {
 		var total float64
-		for _, score := range sr.rankScores {
-			total += score
+		if maxLexical > 0 {
+			total += (sr.result.RawLexicalScore / maxLexical) / k
 		}
+		var lanes []string
+		for _, name := range allSources {
+			if score, ok := sr.rankScores[name]; ok {
+				total += score
+				lanes = append(lanes, name)
+			}
+		}
+		// Provenance is the lanes that actually found this memory, in a
+		// fixed order; the section a result lands in says what class it is.
+		sr.result.Provenance = strings.Join(lanes, "+")
 		sr.result.RRFScore = total
 		sr.result.FusedScore = total
 		fused = append(fused, sr.result)
@@ -1081,25 +1152,20 @@ func assembleSections(results []RetrievalResult) []ContextSection {
 	for _, r := range results {
 		switch r.MemoryClass {
 		case "governing":
-			r.Provenance = "governance"
 			sections[0].Items = append(sections[0].Items, r)
 		case "working":
-			r.Provenance = "working_state"
 			sections[1].Items = append(sections[1].Items, r)
 		case "episodic":
-			r.Provenance = "episodic"
 			sections[3].Items = append(sections[3].Items, r)
 		case "procedural":
-			r.Provenance = "procedural"
 			sections[4].Items = append(sections[4].Items, r)
 		default:
-			r.Provenance = "semantic"
 			sections[2].Items = append(sections[2].Items, r)
 		}
 	}
 
 	// Remove empty sections
-	var nonEmpty []ContextSection
+	nonEmpty := []ContextSection{}
 	for _, sec := range sections {
 		if len(sec.Items) > 0 {
 			nonEmpty = append(nonEmpty, sec)
@@ -1157,7 +1223,7 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 			RETURNING id
 		`, req.TenantID, req.PrincipalID, nullIfBlank(req.AgentID), nullIfBlank(req.SessionID), nullIfBlank(req.TurnID),
-			queryHash, toJSONB(namespaces), toJSONB(req.Filters), rankingConfig, selectedJSON, selectedCodeJSON, latencyMs,
+			queryHash, toJSONB(namespaces), toJSONB(appliedRestrictions(req)), rankingConfig, selectedJSON, selectedCodeJSON, latencyMs,
 			toJSONB(candidateCounts), estimateSectionsTokens(sections), modelVersions).Scan(&runID); err != nil {
 			return err
 		}
@@ -1242,17 +1308,26 @@ func (s *server) lookupStandingAnswer(ctx context.Context, tenantID, principalID
 	return answer, err
 }
 
+// toTSQuery turns a natural-language query into a prefix-matching tsquery
+// that matches any of its terms. Requiring every word ("which database do
+// we use") vetoed relevant memories over filler words; ts_rank still orders
+// memories that match more of the terms first. Terms are split on anything
+// but letters and digits, so tsquery operators in user text ("c++", "a:b",
+// "x|y") can never make the query invalid.
 func toTSQuery(input string) string {
-	words := strings.Fields(strings.ToLower(input))
+	words := strings.FieldsFunc(strings.ToLower(input), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	seen := make(map[string]bool, len(words))
 	var parts []string
 	for _, w := range words {
-		w = strings.Trim(w, ".,!?;:'\"()[]{}")
-		if w == "" || len(w) > 50 {
+		if len(w) > 50 || seen[w] {
 			continue
 		}
+		seen[w] = true
 		parts = append(parts, w+":*")
 	}
-	return strings.Join(parts, " & ")
+	return strings.Join(parts, " | ")
 }
 
 func estimateTokens(text string) int {
@@ -1302,4 +1377,117 @@ func min(a, b int) int {
 func init() {
 	// Override math.Min for ints
 
+}
+
+// recentWindow is how far back include_recent looks.
+const recentWindow = "7 days"
+
+// recentLimit sizes the include_recent and include_state lanes: a third of
+// the requested results, at least one.
+func (p retrievalPlan) recentLimit(maxResults int) int {
+	if n := maxResults / 3; n > 0 {
+		return n
+	}
+	return 1
+}
+
+// recentMemories is the include_recent lane: the caller's active memories
+// recorded in the last window, newest first, whatever the query says.
+func (s *server) recentMemories(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax, window string, limit int) ([]RetrievalResult, error) {
+	query := `
+		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
+		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
+		       mi.namespace_id,
+		       0::double precision AS lexical_score,
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
+		FROM memory_items mi
+		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
+		WHERE mi.tenant_id = $1
+		  AND mi.status = 'active'
+		  AND mi.namespace_id = ANY($2::uuid[])
+		  AND mi.sensitivity <= $3
+		  AND (mi.valid_from IS NULL OR mi.valid_from <= now())
+		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
+		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
+		  AND mi.created_at >= now() - $4::interval
+		ORDER BY mi.created_at DESC
+		LIMIT $5
+	`
+	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, window, "recent")
+}
+
+// activeTaskState is the include_state lane: the caller's active working
+// memories -- the state of tasks in progress -- most recent first.
+func (s *server) activeTaskState(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {
+	query := `
+		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
+		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
+		       mi.namespace_id,
+		       0::double precision AS lexical_score,
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
+		FROM memory_items mi
+		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
+		WHERE mi.tenant_id = $1
+		  AND mi.status = 'active'
+		  AND mi.namespace_id = ANY($2::uuid[])
+		  AND mi.sensitivity <= $3
+		  AND (mi.valid_from IS NULL OR mi.valid_from <= now())
+		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
+		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
+		  AND mi.type::text = $4
+		ORDER BY mi.created_at DESC
+		LIMIT $5
+	`
+	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, "working", "task_state")
+}
+
+// filterMemoryClasses keeps only results of the requested memory classes;
+// no classes requested keeps everything.
+func filterMemoryClasses(results []RetrievalResult, classes []string) []RetrievalResult {
+	if len(classes) == 0 {
+		return results
+	}
+	want := make(map[string]bool, len(classes))
+	for _, c := range classes {
+		want[strings.ToLower(strings.TrimSpace(c))] = true
+	}
+	out := results[:0:0]
+	for _, r := range results {
+		if want[strings.ToLower(r.MemoryClass)] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// appliedRestrictions is what retrieval_runs records as the run's filters:
+// the restrictions this run actually applied, never fields it ignored.
+func appliedRestrictions(req RetrieveRequest) map[string]any {
+	sensitivity := req.SensitivityMax
+	if sensitivity == "" {
+		sensitivity = "internal"
+	}
+	out := map[string]any{"sensitivity_max": sensitivity}
+	if len(req.MemoryClasses) > 0 {
+		out["memory_classes"] = req.MemoryClasses
+	}
+	if req.IncludeRecent {
+		out["include_recent"] = recentWindow
+	}
+	if req.IncludeState {
+		out["include_state"] = true
+	}
+	if req.IncludeSession && req.SessionID != "" {
+		out["session_id"] = req.SessionID
+	}
+	return out
+}
+
+func nonNil(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }

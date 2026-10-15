@@ -10,7 +10,10 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -92,13 +95,43 @@ func New(service, endpoint string, client *http.Client) *Emitter {
 		stop:     make(chan struct{}),
 	}
 	if e.client == nil {
-		e.client = &http.Client{Timeout: flushTimeout}
+		e.client = collectorClient()
 	}
 	if e.Enabled() {
 		e.wg.Add(1)
 		go e.loop()
 	}
 	return e
+}
+
+// collectorClient builds the delivery client. The collector is an internal
+// TLS service, so when SCOS_TLS_CA_FILE names the deployment CA it is the
+// trust anchor, exactly as packages/tlsserve.TrustedClient does for every
+// other internal call (that package imports this one, so the few lines are
+// repeated here rather than imported). An unreadable CA file is logged and
+// emission falls back to the system pool, which fails delivery visibly via
+// requeue/drop counters rather than crashing the host service.
+func collectorClient() *http.Client {
+	client := &http.Client{Timeout: flushTimeout}
+	caFile := strings.TrimSpace(os.Getenv("SCOS_TLS_CA_FILE"))
+	if caFile == "" {
+		return client
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		log.Printf("telemetry: read SCOS_TLS_CA_FILE: %v", err)
+		return client
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		log.Printf("telemetry: SCOS_TLS_CA_FILE contains no PEM certificate")
+		return client
+	}
+	client.Transport = &http.Transport{
+		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}
+	return client
 }
 
 // Enabled reports whether a collector is configured.
@@ -251,6 +284,7 @@ func (e *Emitter) send(ctx context.Context, points []MetricPoint) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(CallerHeader, e.service)
 	if token := strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN")); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

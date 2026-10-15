@@ -65,6 +65,53 @@ unreachable or returns a non-2xx response, `503` if Securestore reports
 `Action: restricted_retrieval`, matching the audit trail security-gate keeps
 for all other restricted reads.
 
+Resolution is authorised against the reference before Securestore is
+contacted. Each reference stores a `scope` and a `data_class`:
+
+- `scope` is a comma- or space-separated list of `tenant` (any authenticated
+  principal of the owning tenant), `principal:<id>` and `agent:<id>`
+  selectors, matched against the caller's signed claims (`principal_id`,
+  `agent_id`). An empty scope makes the reference unresolvable; any other
+  selector is rejected with `400` when the reference is written.
+- `data_class` is one of `public`, `internal`, `confidential`, `restricted`,
+  `secret` and defaults to `secret` (migration 000049 gives existing
+  references `secret`). The caller's claims must carry a
+  `data_class:<class>` scope at or above it; the `admin` scope clears every
+  class.
+
+A caller outside the scope, under-cleared, or without signed claims gets
+`403` and the refusal is audited (`Result: denied`, with the reference's data
+class and the caller's agent and trace id from its claims).
+
+`POST /v1/audit/record` cannot assert audited facts: the entry is attributed
+to the authenticated caller and stored as action `caller_annotation`,
+decision `recorded`. The caller's `action`, `result`, `data_class`, `reason`,
+`session_id` and `trace_id` are stored and returned only under
+`caller_annotation`; a `tenant`, `principal` or `agent_id` in the body that
+differs from the authenticated identity is refused with `403`.
+
+### Credential vault key versioning
+
+`credential-vault` seals every value with AES-256-GCM and records the
+`key_version` it was sealed under. Its keyring is configured with:
+
+- `SCOS_CREDENTIAL_VAULT_MASTER_KEY` — current key, base64 of 32 bytes
+- `SCOS_CREDENTIAL_VAULT_KEY_VERSION` — version of the current key
+  (default `1`, matching values stored before versioning existed)
+- `SCOS_CREDENTIAL_VAULT_PREVIOUS_KEYS` — retired keys still needed for
+  reading, as comma-separated `<version>:<base64 key>` entries
+
+To rotate: move the current key into `SCOS_CREDENTIAL_VAULT_PREVIOUS_KEYS`,
+set a new master key with a higher version, restart the service, then call
+`POST /v1/admin/keys/rotate` once per tenant with a claims token carrying the
+`credentials:admin` (or `admin`) scope. Every value is opened with the key for
+its recorded version and re-sealed under the current one in a single
+transaction; each re-seal is audited as `credential_key_rotated`. If any
+stored version has no configured key, nothing is re-sealed and the call
+returns `409` naming the missing version. `GET /v1/admin/keys` reports the
+per-version counts; remove a previous key only after every tenant reports
+`pending_rotation: 0`.
+
 Generate a high-entropy value with a local secret generator, for example:
 
 ```sh

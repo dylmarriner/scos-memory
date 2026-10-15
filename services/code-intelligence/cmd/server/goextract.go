@@ -75,11 +75,12 @@ func extractGoDeclarations(path, content string) (pkgName string, decls []GoDecl
 	}
 	pkgName = file.Name.Name
 	src := []byte(content)
+	imports := importAliases(file)
 
 	for _, d := range file.Decls {
 		switch decl := d.(type) {
 		case *ast.FuncDecl:
-			decls = append(decls, funcDeclaration(fset, src, decl))
+			decls = append(decls, funcDeclaration(fset, src, decl, imports))
 		case *ast.GenDecl:
 			decls = append(decls, genDeclarations(fset, src, decl)...)
 		}
@@ -123,7 +124,7 @@ func docText(doc *ast.CommentGroup) string {
 	return strings.TrimSpace(doc.Text())
 }
 
-func funcDeclaration(fset *token.FileSet, src []byte, decl *ast.FuncDecl) GoDeclaration {
+func funcDeclaration(fset *token.FileSet, src []byte, decl *ast.FuncDecl, imports map[string]string) GoDeclaration {
 	text, startLine, endLine := sourceSpan(fset, src, decl.Pos(), decl.End())
 	receiver := ""
 	kind := "function"
@@ -149,7 +150,7 @@ func funcDeclaration(fset *token.FileSet, src []byte, decl *ast.FuncDecl) GoDecl
 		EndLine:     endLine,
 		ContentHash: spanHash(text),
 		DocComment:  docText(decl.Doc),
-		CalledNames: calledNames(decl.Body),
+		CalledNames: calledNames(decl.Body, imports),
 	}
 }
 
@@ -161,7 +162,7 @@ func funcDeclaration(fset *token.FileSet, src []byte, decl *ast.FuncDecl) GoDecl
 // exists in the indexed package, so an unresolvable or wrong-looking name
 // simply produces no edge rather than a wrong one). A nil body (an
 // external/assembly function declared but not defined) yields nil.
-func calledNames(body *ast.BlockStmt) []string {
+func calledNames(body *ast.BlockStmt, imports map[string]string) []string {
 	if body == nil {
 		return nil
 	}
@@ -178,6 +179,14 @@ func calledNames(body *ast.BlockStmt) []string {
 			name = fn.Name
 		case *ast.SelectorExpr:
 			name = fn.Sel.Name
+			// A call through an imported package's name ("auth.Sign()")
+			// is recorded against the import path, so the edge pass can
+			// resolve it to that package's declaration across directories.
+			if x, ok := fn.X.(*ast.Ident); ok {
+				if path, imported := imports[x.Name]; imported {
+					name = path + qualifiedCallSeparator + fn.Sel.Name
+				}
+			}
 		}
 		if name != "" && !seen[name] {
 			seen[name] = true
@@ -186,6 +195,44 @@ func calledNames(body *ast.BlockStmt) []string {
 		return true
 	})
 	return names
+}
+
+// qualifiedCallSeparator joins an import path and a function name in a
+// CalledNames entry for a call through an imported package.
+const qualifiedCallSeparator = ":"
+
+// importAliases maps the name each import is referred to by in this file
+// to its import path. Dot and blank imports name nothing to select from.
+func importAliases(file *ast.File) map[string]string {
+	out := make(map[string]string, len(file.Imports))
+	for _, spec := range file.Imports {
+		path := strings.Trim(spec.Path.Value, "`\"")
+		name := ""
+		if spec.Name != nil {
+			name = spec.Name.Name
+		} else {
+			name = defaultImportName(path)
+		}
+		if name == "" || name == "_" || name == "." {
+			continue
+		}
+		out[name] = path
+	}
+	return out
+}
+
+// defaultImportName is the identifier an unaliased import is used by: the
+// last path element, skipping a major-version suffix ("…/v2") and a
+// "go-" prefix or ".go"/"-go" suffix that package names drop.
+func defaultImportName(path string) string {
+	parts := strings.Split(path, "/")
+	name := parts[len(parts)-1]
+	if len(parts) > 1 && len(name) > 1 && name[0] == 'v' && strings.Trim(name[1:], "0123456789") == "" {
+		name = parts[len(parts)-2]
+	}
+	name = strings.TrimPrefix(name, "go-")
+	name = strings.TrimSuffix(strings.TrimSuffix(name, ".go"), "-go")
+	return strings.ReplaceAll(name, "-", "_")
 }
 
 // genDeclarations handles `type`/`const`/`var` blocks, which can each

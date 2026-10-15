@@ -1,4 +1,6 @@
 package main
+
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -41,7 +43,6 @@ type PrefetchRequest struct {
 	NamespaceID string `json:"namespace_id"`
 	SessionID   string `json:"session_id"`
 	ProfilePath string `json:"profile_path"`
-	LastCapsule string `json:"last_capsule_id,omitempty"`
 }
 
 type SyncTurnRequest struct {
@@ -88,8 +89,14 @@ type StoredTurn struct {
 type hermesServer struct {
 	startTime time.Time
 	db        *sql.DB
-	// prefetchQueue holds bounded pre-warm work for queue_prefetch (§24.3).
+	// prefetchQueue holds bounded pre-warm work for queue_prefetch (§24.3);
+	// runPrefetchWorker consumes it into warm.
 	prefetchQueue prefetchQueue
+	warm          warmCache
+	// memoryIntelligence executes the inspection/correction tools.
+	memoryIntelligence *memoryIntelligence
+	// retrieval executes scos_recall through governed hybrid retrieval.
+	retrieval *retrievalOrchestrator
 }
 
 func (s *hermesServer) readinessCheck() error {
@@ -152,11 +159,25 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	database.TuneSQLDB(db)
 	defer db.Close()
 
 	srv := newHermesServer()
 	srv.db = db
+	mi, err := memoryIntelligenceFromEnvironment()
+	if err != nil {
+		log.Fatalf("configure memory-intelligence client: %v", err)
+	}
+	srv.memoryIntelligence = mi
+	ro, err := retrievalOrchestratorFromEnvironment()
+	if err != nil {
+		log.Fatalf("configure retrieval-orchestrator client: %v", err)
+	}
+	srv.retrieval = ro
+	go srv.runPrefetchWorker(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -190,7 +211,7 @@ func main() {
 		addr = ":8088"
 	}
 	log.Printf("hermes memory provider (%s) listening on %s", providerName, addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("hermes-provider", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -213,27 +234,56 @@ func (s *hermesServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleInit binds the provider to the caller's Hermes profile (§24.6): the
+// profile path is recorded for the principal and profile scope, and the
+// setup saved for that scope through save_config is returned, so Hermes
+// learns whether the provider is configured and ready.
 func (s *hermesServer) handleInit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		ProfilePath string `json:"profile_path"`
-		TenantID    string `json:"tenant_id"`
-		Workspace   string `json:"workspace,omitempty"`
+		ProfilePath  string `json:"profile_path"`
+		ProfileScope string `json:"profile_scope,omitempty"`
+		TenantID     string `json:"tenant_id,omitempty"`
+		PrincipalID  string `json:"principal_id,omitempty"`
+		Workspace    string `json:"workspace,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
+	if strings.TrimSpace(req.ProfilePath) == "" {
+		http.Error(w, "profile_path is required", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	if err := s.readinessCheck(); err != nil {
+		http.Error(w, "provider unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	bound, err := bindProviderProfile(r.Context(), s.db, identity, strings.TrimSpace(req.ProfileScope), req.ProfilePath, strings.TrimSpace(req.Workspace))
+	if err != nil {
+		http.Error(w, "bind profile: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{
-		"status":       "initialized",
-		"provider":     providerName,
-		"version":      version,
-		"profile_path": req.ProfilePath,
-		"tenant_id":    req.TenantID,
+		"status":         "initialized",
+		"provider":       providerName,
+		"version":        version,
+		"tenant_id":      identity.TenantID,
+		"principal_id":   identity.PrincipalID,
+		"profile_path":   bound.ProfilePath,
+		"profile_scope":  bound.ProfileScope,
+		"workspace":      bound.Workspace,
+		"initialized_at": bound.InitializedAt,
+		"configured":     len(bound.Config) > 0,
+		"config":         bound.Config,
 	})
 }
 
@@ -284,7 +334,7 @@ func (s *hermesServer) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
-		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "ensure session: "+err.Error(), sessionErrorStatus(err))
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -308,18 +358,34 @@ func (s *hermesServer) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	sequence, err := sessionSequence(ctx, readTx, identity.TenantID, req.SessionID)
+	if err != nil {
+		http.Error(w, "load session: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	response := map[string]any{"prefetched": true, "session_id": req.SessionID}
+	// A result warmed from queue_prefetch is served only while the session
+	// has no newer turn; cache_hit says whether this answer came from it.
+	key := warmKey{tenantID: identity.TenantID, principalID: identity.PrincipalID, sessionID: req.SessionID}
+	if entry, ok := s.warm.current(key, sequence, time.Now()); ok {
+		response["recall"] = entry.turns
+		response["cache_hit"] = true
+		response["warmed_at"] = entry.warmedAt.UTC().Format(time.RFC3339Nano)
+		if entry.recall != nil {
+			response["warm_query"] = entry.query
+			response["warm_recall"] = entry.recall.Memories
+		}
+		writeJSON(w, response)
+		return
+	}
 	recall, err := recentTurns(ctx, readTx, identity.TenantID, req.SessionID, recallLimit)
 	if err != nil {
 		http.Error(w, "load recall: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	writeJSON(w, map[string]any{
-		"prefetched": true,
-		"session_id": req.SessionID,
-		"recall":     recall,
-		"cache_hit":  req.LastCapsule != "",
-	})
+	response["recall"] = recall
+	response["cache_hit"] = false
+	writeJSON(w, response)
 }
 
 func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +443,7 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
-		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "ensure session: "+err.Error(), sessionErrorStatus(err))
 		return
 	}
 	generatedTurnID, err := newID()
@@ -385,17 +451,22 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "generate turn id: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages); err != nil {
+	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages, req.ToolCalls); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// turn_id is the id the turn is stored under, which recall and prefetch
+	// return; client_turn_id is the caller's id, which keys idempotency.
 	result := map[string]any{
-		"synced":     true,
-		"session_id": req.SessionID,
-		"turn_id":    req.TurnID,
-		"async":      false,
-		"duplicate":  false,
+		"synced":         true,
+		"session_id":     req.SessionID,
+		"turn_id":        generatedTurnID,
+		"client_turn_id": req.TurnID,
+		"messages":       len(req.Messages),
+		"tool_calls":     len(req.ToolCalls),
+		"async":          false,
+		"duplicate":      false,
 	}
 	if err := recordIdempotent(ctx, tx, identity, idemKey, "hermes_sync_turn", requestHash, result); err != nil {
 		http.Error(w, "record idempotency: "+err.Error(), http.StatusInternalServerError)
@@ -527,7 +598,7 @@ func (s *hermesServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.ensureSession(ctx, tx, identity, req.ToSessionID, req.NamespaceID); err != nil {
-		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "ensure session: "+err.Error(), sessionErrorStatus(err))
 		return
 	}
 	if req.FromSessionID != "" {
@@ -591,7 +662,7 @@ func (s *hermesServer) handlePreCompress(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
-		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "ensure session: "+err.Error(), sessionErrorStatus(err))
 		return
 	}
 	generatedTurnID, err := newID()
@@ -599,7 +670,7 @@ func (s *hermesServer) handlePreCompress(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "generate turn id: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages); err != nil {
+	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages, nil); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -730,17 +801,46 @@ func (s *hermesServer) handleDelegation(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleShutdown ends the caller's use of the provider (§24.3). Every
+// durable write was committed before it was acknowledged, so the only work
+// still held for the caller is pre-warm work: it is cancelled and reported.
+// flushed says the committed writes are reachable in PostgreSQL now;
+// replayable says everything the caller handed the provider can be
+// recovered after shutdown, which is true only when nothing was dropped and
+// the store is reachable.
 func (s *hermesServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	var req struct {
+		TenantID    string `json:"tenant_id,omitempty"`
+		PrincipalID string `json:"principal_id,omitempty"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	mine := func(tenantID, principalID string) bool {
+		return tenantID == identity.TenantID && principalID == identity.PrincipalID
+	}
+	dropped := s.prefetchQueue.cancel(func(item queuedPrefetch) bool { return mine(item.TenantID, item.PrincipalID) })
+	evicted := s.warm.evict(func(key warmKey) bool { return mine(key.tenantID, key.principalID) })
 	flushed := s.readinessCheck() == nil
 	writeJSON(w, map[string]any{
-		"status":     "shutting_down",
-		"provider":   providerName,
-		"flushed":    flushed,
-		"replayable": true,
+		"status":           "shutting_down",
+		"provider":         providerName,
+		"flushed":          flushed,
+		"dropped_prefetch": dropped,
+		"evicted_warm":     evicted,
+		"replayable":       flushed && dropped == 0,
 	})
 }
 

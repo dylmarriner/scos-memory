@@ -5,7 +5,9 @@ import test from "node:test";
 import {
   deriveDeterministicUuid,
   extractLastCompletedTurn,
+  filterByMinScore,
   formatRecallContext,
+  normalizeRecallResult,
   resolveScosConfig,
 } from "../dist/core.js";
 import { ScosClient } from "../dist/scos-client.js";
@@ -72,6 +74,25 @@ test("formatRecallContext bounds injected memory and labels it untrusted histori
   );
   assert.match(text, /untrusted historical data/i);
   assert.ok(text.length <= 180);
+});
+
+test("filterByMinScore drops memories below the threshold and unscored memories", () => {
+  const memories = normalizeRecallResult({
+    memories: [
+      { memory_id: "strong", content: "a", fused_score: 0.9, rank: 1 },
+      { memory_id: "edge", content: "b", fused_score: 0.5, rank: 2 },
+      { memory_id: "weak", content: "c", fused_score: 0.1, rank: 3 },
+      { memory_id: "unscored", content: "d", rank: 4 },
+    ],
+  });
+  assert.equal(memories[0].score, 0.9);
+  assert.equal(memories[3].score, null);
+  assert.deepEqual(filterByMinScore(memories, 0.5).map((m) => m.memoryId), ["strong", "edge"]);
+  assert.deepEqual(
+    filterByMinScore(memories, undefined).map((m) => m.memoryId),
+    ["strong", "edge", "weak", "unscored"],
+  );
+  assert.deepEqual(filterByMinScore(memories, 2), []);
 });
 
 test("ScosClient sends authenticated gateway calls and unwraps MCP text JSON", async (t) => {

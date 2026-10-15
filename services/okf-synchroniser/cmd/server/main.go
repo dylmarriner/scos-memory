@@ -1,4 +1,6 @@
 package main
+
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -68,6 +70,10 @@ type okfServer struct {
 	okfRoot     string
 	statePath   string
 	db          *pgxpool.Pool
+	// governanceRoles, when set, replaces the okf_governance_roles query in
+	// activeGovernanceRoles; tests use it to supply role assignments
+	// without Postgres. Production leaves it nil.
+	governanceRoles func(ctx context.Context, principal string) ([]string, error)
 }
 
 func (s *okfServer) readinessCheck() error {
@@ -133,6 +139,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
+	if err := database.RequireNoBypassRLS(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	defer db.Close()
 	srv.db = db
 	if err := srv.loadConceptsFromDB(context.Background()); err != nil {
@@ -162,7 +171,7 @@ func main() {
 		addr = ":8090"
 	}
 	log.Printf("okf synchroniser listening on %s (root: %s)", addr, srv.okfRoot)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("okf-synchroniser", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -171,7 +180,7 @@ func (s *okfServer) loadProposalsFromDB(ctx context.Context) error {
 	if s.db == nil {
 		return nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT id,path,base_commit,base_hash,content,diff,status,proposer,COALESCE(reviewer,''),COALESCE(review_role,''),COALESCE(decision,''),reason,created_at,COALESCE(reviewed_at,'epoch'),COALESCE(merged_commit,''),COALESCE(indexed_at,'epoch'),diverged FROM okf_proposals`)
+	rows, err := s.db.Query(ctx, `SELECT id,path,base_commit,base_hash,content,diff,status,proposer,COALESCE(reviewer,''),COALESCE(review_role,''),COALESCE(decision,''),reason,created_at,COALESCE(reviewed_at,'epoch'),COALESCE(merged_commit,''),COALESCE(indexed_at,'epoch'),diverged,COALESCE(merged_by,''),COALESCE(merge_role,'') FROM okf_proposals`)
 	if err != nil {
 		return err
 	}
@@ -179,7 +188,7 @@ func (s *okfServer) loadProposalsFromDB(ctx context.Context) error {
 	for rows.Next() {
 		var p OKFProposal
 		var created, reviewed, indexed time.Time
-		if err := rows.Scan(&p.ID, &p.Path, &p.BaseCommit, &p.BaseHash, &p.Content, &p.Diff, &p.Status, &p.Proposer, &p.Reviewer, &p.ReviewRole, &p.Decision, &p.Reason, &created, &reviewed, &p.MergedCommit, &indexed, &p.Diverged); err != nil {
+		if err := rows.Scan(&p.ID, &p.Path, &p.BaseCommit, &p.BaseHash, &p.Content, &p.Diff, &p.Status, &p.Proposer, &p.Reviewer, &p.ReviewRole, &p.Decision, &p.Reason, &created, &reviewed, &p.MergedCommit, &indexed, &p.Diverged, &p.MergedBy, &p.MergeRole); err != nil {
 			return err
 		}
 		p.CreatedAt = created.UTC().Format(time.RFC3339)
@@ -264,7 +273,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 				ImportStatus: "synced",
 			}
 			result.Added = append(result.Added, file)
-		} else if doc := s.documentForPath(file); doc != nil && doc.ContentHash != existing.ContentHash {
+		} else if doc := s.documentForPath(file); doc != nil && indexedContentHash(doc) != existing.ContentHash {
 			// The indexed document changed independently of its last imported projection.
 			// Keep both versions and require an explicit review.
 			doc.Status = "diverged"
@@ -316,10 +325,11 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 		}
 	}
 
-	// Detect divergence between DB and filesystem
+	// Detect divergence between the indexed (DB) content and the projection
+	// of what was last imported from the repository.
 	for _, doc := range s.documents {
 		proj, ok := s.projections[doc.Path]
-		if ok && doc.ContentHash != proj.ContentHash {
+		if ok && indexedContentHash(doc) != proj.ContentHash {
 			doc.Status = "diverged"
 			proj.ImportStatus = "diverged"
 			result.Diverged = appendUnique(result.Diverged, doc.Path)
@@ -395,6 +405,16 @@ func (s *okfServer) handleDivergence(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
+
+// indexedContentHash hashes the content actually held in the index. The
+// divergence checks must use this rather than doc.ContentHash: that field is
+// loaded from the same okf_concepts.content_hash column as the projection's
+// ContentHash (loadConceptsFromDB) and is assigned alongside it on every
+// import, so comparing the two compared a value with itself and an indexed
+// document edited out of band was never reported as diverged.
+func indexedContentHash(doc *OKFDocument) string {
+	return sha256Hex([]byte(doc.Content))
+}
 
 func (s *okfServer) documentForPath(path string) *OKFDocument {
 	for _, doc := range s.documents {

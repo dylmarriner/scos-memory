@@ -6,14 +6,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // runGraphify execs the graphify CLI with args passed as a slice (never
@@ -27,19 +31,6 @@ func runGraphify(ctx context.Context, workDir string, args ...string) (string, e
 		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// runExtract runs graphify's headless build (`graphify extract --code-only`,
-// no API key required) and returns the path to the resulting graph.json.
-func runExtract(ctx context.Context, workDir, backend string) (string, error) {
-	args := []string{"extract", workDir, "--code-only"}
-	if backend != "" {
-		args = []string{"extract", workDir, "--backend", backend}
-	}
-	if _, err := runGraphify(ctx, workDir, args...); err != nil {
-		return "", err
-	}
-	return filepath.Join(workDir, "graphify-out", "graph.json"), nil
 }
 
 // cacheKey turns a repo's identity plus everything that can change what
@@ -205,16 +196,42 @@ func rejectFlagLike(field, value string) error {
 	return nil
 }
 
+// errGraphBuilding reports that workDir's graph is being built in the
+// background and is not ready yet; the caller should ask again shortly.
+var errGraphBuilding = errors.New("graph is being built")
+
+// graphBuild is one in-flight or recently failed extraction for a cache key.
+type graphBuild struct {
+	done     chan struct{}
+	err      error
+	finished time.Time
+}
+
+// graphBuildRetryAfter is how long a failed build's error is reported before
+// the next request is allowed to try the extraction again.
+const graphBuildRetryAfter = time.Minute
+
+// graphBuildTimeout bounds one extraction of a very large repository.
+const graphBuildTimeout = 30 * time.Minute
+
 // ensureCachedGraph returns workDir's graph.json, building it under
 // cacheDir if no cache entry exists for the repo's *current* state -- so
 // query/path/explain work against any repo without a separate manual
-// extract call, and without needing write access to workDir itself, which
-// this service only ever mounts read-only. The cache key folds in a content
-// fingerprint of workDir (see repoSnapshotID), the graphify binary's own
-// version, and the backend flag, so a repo that has changed since its last
-// extract -- even by an uncommitted edit -- misses the cache and triggers a
-// fresh extraction instead of silently serving stale graph data. Returns
-// the path to the resulting graph.json.
+// extract call, and without needing write access to workDir itself. The
+// cache key folds in a content fingerprint of workDir (see repoSnapshotID),
+// the graphify binary's own version, and the backend flag, so a repo that
+// has changed since its last extract -- even by an uncommitted edit --
+// misses the cache and triggers a fresh extraction instead of silently
+// serving stale graph data.
+//
+// Extracting a large repository takes far longer than an MCP tool call may
+// block, so the build runs detached from the request: the caller waits up to
+// buildWait for it and otherwise gets errGraphBuilding, and the next call
+// finds the finished graph (or joins the same build -- one extraction per
+// cache key, and one extraction at a time, since each holds a full parse of
+// the repository in memory). A build writes into a temporary directory that
+// is renamed into place only when complete, so an interrupted extraction
+// can never be served as a graph.
 func (s *graphifyServer) ensureCachedGraph(ctx context.Context, workDir string) (string, error) {
 	snapshotID, err := repoSnapshotID(ctx, workDir)
 	if err != nil {
@@ -225,31 +242,110 @@ func (s *graphifyServer) ensureCachedGraph(ctx context.Context, workDir string) 
 	if _, err := os.Stat(graphPath); err == nil {
 		return graphPath, nil
 	}
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return "", fmt.Errorf("create cache dir: %w", err)
+
+	s.buildsMu.Lock()
+	if s.builds == nil {
+		s.builds = make(map[string]*graphBuild)
 	}
-	// --max-workers 1: this service's container is sized for a Go binary's
-	// footprint (GOMEMLIMIT=96MiB, matching every other fabric service), not
-	// for graphify's default cpu_count-worker AST extraction -- against a
-	// repo with thousands of files, unbounded workers OOM-killed the
-	// container even with the memory limit raised. One worker is slower but
-	// bounded regardless of repo size or host core count.
-	//
-	// --no-cluster: even with AST extraction itself bounded, the default
-	// post-extraction community-detection pass over a several-thousand-node
-	// graph OOM-killed the container on its own (verified against paperclip:
-	// AST extraction reached 100% then the process was killed during
-	// clustering). query/path/explain traverse the raw node/edge graph and
-	// don't read community labels, so skipping clustering costs nothing
-	// those handlers use.
+	build := s.builds[outDir]
+	if build != nil && !build.finished.IsZero() && time.Since(build.finished) > graphBuildRetryAfter {
+		build = nil
+	}
+	if build == nil {
+		build = &graphBuild{done: make(chan struct{})}
+		s.builds[outDir] = build
+		go s.runBuild(build, workDir, outDir)
+	}
+	s.buildsMu.Unlock()
+
+	wait := s.buildWait
+	if wait <= 0 {
+		wait = 10 * time.Second
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-build.done:
+		if build.err != nil {
+			return "", build.err
+		}
+		return graphPath, nil
+	case <-timer.C:
+		return "", errGraphBuilding
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func (s *graphifyServer) runBuild(build *graphBuild, workDir, outDir string) {
+	ctx, cancel := context.WithTimeout(context.Background(), graphBuildTimeout)
+	defer cancel()
+	s.buildSlot.Lock()
+	err := s.buildInto(ctx, workDir, outDir)
+	s.buildSlot.Unlock()
+	s.buildsMu.Lock()
+	build.err = err
+	build.finished = time.Now()
+	if err == nil {
+		delete(s.builds, outDir)
+	} else {
+		log.Printf("graphify build for %s failed: %v", workDir, err)
+	}
+	s.buildsMu.Unlock()
+	close(build.done)
+}
+
+func (s *graphifyServer) buildInto(ctx context.Context, workDir, outDir string) error {
+	if err := os.MkdirAll(s.cacheDir, 0o755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+	tmp, err := os.MkdirTemp(s.cacheDir, ".build-")
+	if err != nil {
+		return fmt.Errorf("create build dir: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+	extract := s.extract
+	if extract == nil {
+		extract = s.extractWithGraphify
+	}
+	if err := extract(ctx, workDir, tmp); err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "graphify-out", "graph.json")); err != nil {
+		return fmt.Errorf("graphify extract produced no graph.json: %w", err)
+	}
+	if err := os.Rename(tmp, outDir); err != nil {
+		if _, statErr := os.Stat(filepath.Join(outDir, "graphify-out", "graph.json")); statErr == nil {
+			return nil
+		}
+		// A directory without a graph is what an extraction killed mid-way
+		// leaves behind; it is never servable, so replace it.
+		if err := os.RemoveAll(outDir); err != nil {
+			return fmt.Errorf("remove incomplete graph: %w", err)
+		}
+		if err := os.Rename(tmp, outDir); err != nil {
+			return fmt.Errorf("publish graph: %w", err)
+		}
+	}
+	return nil
+}
+
+// extractWithGraphify runs graphify's headless, code-only extraction.
+//
+// --max-workers 1 keeps AST extraction to one parse at a time, so peak memory
+// is bounded by the largest file rather than by the host's core count.
+//
+// --no-cluster: the post-extraction community-detection pass over a
+// several-thousand-node graph is the most memory-hungry step and
+// query/path/explain traverse the raw node/edge graph without reading
+// community labels, so skipping it costs nothing those handlers use.
+func (s *graphifyServer) extractWithGraphify(ctx context.Context, workDir, outDir string) error {
 	args := []string{"extract", workDir, "--code-only", "--max-workers", "1", "--no-cluster", "--out", outDir}
 	if s.backend != "" {
 		args = append(args, "--backend", s.backend)
 	}
-	if _, err := runGraphify(ctx, outDir, args...); err != nil {
-		return "", err
-	}
-	return graphPath, nil
+	_, err := runGraphify(ctx, outDir, args...)
+	return err
 }
 
 // graphNode/graphEdge/graphDocument mirror graphify's actual networkx
@@ -329,11 +425,11 @@ func loadGraph(path string) (*graphDocument, error) {
 	return &doc, nil
 }
 
-// postJSON POSTs a JSON body to an internal SCOS peer, sending the tenant/
-// principal identity headers this service was configured with, matching
-// the copyIdentityHeaders convention used elsewhere (mcp-gateway, hermes
-// adapter). out is optional; pass nil to discard the response body.
-func (s *graphifyServer) postJSON(ctx context.Context, url string, body, out any) error {
+// postJSON POSTs a JSON body to an internal SCOS peer as the caller whose
+// bearer token is given: memories written during an extraction belong to
+// the principal who asked for it, and memory-intelligence decides what that
+// principal may write. out is optional; pass nil to discard the response.
+func (s *graphifyServer) postJSON(ctx context.Context, bearer, url string, body, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -343,15 +439,15 @@ func (s *graphifyServer) postJSON(ctx context.Context, url string, body, out any
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-SCOS-Tenant-ID", s.tenantID)
-	req.Header.Set("X-SCOS-Principal-ID", s.principalID)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("upstream returned %s", resp.Status)
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("upstream returned %s: %s", resp.Status, strings.TrimSpace(string(detail)))
 	}
 	if out == nil {
 		return nil

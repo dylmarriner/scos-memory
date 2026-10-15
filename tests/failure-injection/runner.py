@@ -259,7 +259,10 @@ class FailureInjector:
             "infrastructure": ("memory-gateway", "/health/ready", None),
             "security": ("security-gate", "/v1/auth/validate", {"token": "invalid-probe-token"}),
             "compression": ("context-optimisation", "/v1/context/evaluate", {"input": "MUST retain exact value 42", "compiled_text": "MUST retain exact value 42", "non_droppable_hints": ["MUST retain exact value 42"]}),
-            "code_intel": ("code-intelligence", "/v1/query", {"intent": "symbol", "query": "malformed ("}),
+            # A well-formed repository ID that was never indexed exercises the
+            # durable store's real tenant and snapshot lookup, which must
+            # answer 404 rather than fail or fabricate results.
+            "code_intel": ("code-intelligence", "/v2/code/query", {"repository_id": "00000000-0000-0000-0000-0000000000fe", "query": "malformed ("}),
             # execution-proxy's /v1/plan validates that the body's tenant_id/
             # principal_id match the X-SCOS-Tenant-ID/X-SCOS-Principal-ID
             # headers exactly (services/execution-proxy/cmd/server/main.go
@@ -279,7 +282,10 @@ class FailureInjector:
             # lookup path and should 404, which is the correct/expected
             # outcome for an interaction that was never created.
             "autonomy": ("autonomous-control-plane", "/v1/control/status?interaction_id=00000000-0000-0000-0000-0000000000ff", None),
-            "extension": ("extension-manager", "/v1/install/dryrun", {"manifest": {"name": "probe", "version": "1.0.0", "permissions": ["filesystem.root"]}}),
+            # The dry-run body is the manifest itself (the same contract as
+            # /v1/install). An unsigned manifest asking for root filesystem
+            # access must never be reported as installable.
+            "extension": ("extension-manager", "/v1/install/dryrun", {"package_id": "failure-probe", "name": "probe", "version": "1.0.0", "extension_types": ["plugin"], "permissions": ["filesystem.root", "secrets.read"]}),
             "hermes": ("hermes-provider", "/v1/provider/status", None),
         }
         service, path, body = routes[category]
@@ -288,8 +294,10 @@ class FailureInjector:
             predicate = lambda status, payload: status == 200 and payload.get("valid") is False
         if category == "compression":
             predicate = lambda status, payload: status == 200 and payload.get("valid") is True
-        if category == "code_intel" and test_name == "malformed syntax":
-            predicate = lambda status, payload: status in {200, 400, 422}
+        if category == "code_intel":
+            predicate = lambda status, payload: status == 404
+        if category == "extension":
+            predicate = lambda status, payload: status == 200 and isinstance(payload, dict) and payload.get("would_be_accepted") is False and bool(payload.get("rejection"))
         if category == "autonomy":
             predicate = lambda status, payload: status == 404 and isinstance(payload, dict)
         return self._http_probe(category, test_name, service, path, body, predicate)

@@ -138,6 +138,13 @@ func TestToTSQueryBuildsValidQuery(t *testing.T) {
 	}
 }
 
+func TestToTSQueryMatchesAnyTermAndNeutralisesOperators(t *testing.T) {
+	q := toTSQuery("Which database do we use? c++ a:b x|y (test) test")
+	if q != "which:* | database:* | do:* | we:* | use:* | c:* | a:* | b:* | x:* | y:* | test:*" {
+		t.Fatalf("tsquery = %q", q)
+	}
+}
+
 func TestToTSQueryEmptyInput(t *testing.T) {
 	q := toTSQuery("")
 	if q != "" {
@@ -327,5 +334,69 @@ func TestRetrieveRequiresPrincipalContext(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "principal_id is required") {
 		t.Fatalf("expected principal context error, got %q", recorder.Body.String())
+	}
+}
+
+func TestFusionRecordsTheLanesThatFoundEachMemory(t *testing.T) {
+	a := RetrievalResult{MemoryID: "a", MemoryClass: "working"}
+	b := RetrievalResult{MemoryID: "b", MemoryClass: "semantic"}
+	fused := fuseResults(rrfK, []RetrievalResult{a}, []RetrievalResult{a, b}, nil, nil, nil, []RetrievalResult{b}, nil)
+	got := map[string]string{}
+	for _, r := range fused {
+		got[r.MemoryID] = r.Provenance
+	}
+	if got["a"] != "exact+fulltext" || got["b"] != "fulltext+recent" {
+		t.Fatalf("provenance = %v", got)
+	}
+	for _, sec := range assembleSections(fused) {
+		for _, item := range sec.Items {
+			if item.Provenance != got[item.MemoryID] {
+				t.Fatalf("section assembly must keep lane provenance, %s became %q", item.MemoryID, item.Provenance)
+			}
+		}
+	}
+}
+
+func TestFilterMemoryClassesKeepsOnlyRequestedClasses(t *testing.T) {
+	in := []RetrievalResult{{MemoryID: "a", MemoryClass: "semantic"}, {MemoryID: "b", MemoryClass: "procedural"}}
+	if out := filterMemoryClasses(in, []string{"Procedural"}); len(out) != 1 || out[0].MemoryID != "b" {
+		t.Fatalf("filtered = %+v", out)
+	}
+	if out := filterMemoryClasses(in, nil); len(out) != 2 {
+		t.Fatal("no classes requested must keep everything")
+	}
+}
+
+func TestRetrieveRejectsUnsupportedFilters(t *testing.T) {
+	s := &server{}
+	body := `{"tenant_id":"00000000-0000-0000-0000-000000000001","principal_id":"00000000-0000-0000-0000-000000000001","query":"x","filters":{"repo":"y"}}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(body))
+	r = r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "00000000-0000-0000-0000-000000000001", PrincipalID: "00000000-0000-0000-0000-000000000001"}))
+	w := httptest.NewRecorder()
+	s.handleRetrieve(w, r)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "filters are not supported") {
+		t.Fatalf("filters must be refused rather than silently ignored, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAssembleSectionsIsAnEmptyListWhenNothingMatched(t *testing.T) {
+	if got := assembleSections(nil); got == nil || len(got) != 0 {
+		t.Fatalf("sections = %#v, want an empty list", got)
+	}
+}
+
+func TestFusionKeepsAStrongerLexicalMatchAboveAWeakerOneWithMoreAuthority(t *testing.T) {
+	weak := RetrievalResult{MemoryID: "weak", RawLexicalScore: 0.025, Authority: 90, Confidence: 0.95}
+	strong := RetrievalResult{MemoryID: "strong", RawLexicalScore: 0.076, Authority: 70, Confidence: 0.75}
+	ranked := applyGovernanceWeighting(fuseResults(rrfK, nil, []RetrievalResult{weak, strong}))
+	if ranked[0].MemoryID != "strong" {
+		t.Fatalf("a memory matching three times as strongly must lead, got %s first", ranked[0].MemoryID)
+	}
+	equal := applyGovernanceWeighting(fuseResults(rrfK, nil, []RetrievalResult{
+		{MemoryID: "low", RawLexicalScore: 0.05, Authority: 40, Confidence: 0.5},
+		{MemoryID: "high", RawLexicalScore: 0.05, Authority: 90, Confidence: 0.95},
+	}))
+	if equal[0].MemoryID != "high" {
+		t.Fatalf("equally relevant memories are ordered by governance, got %s first", equal[0].MemoryID)
 	}
 }

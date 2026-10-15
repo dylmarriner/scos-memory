@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 # ── public API ────────────────────────────────────────────────────────────
 
+# The tables a conflict subject can live in: memory_candidates for an
+# incoming or pending candidate, memory_items for an active memory.
+SUBJECT_KINDS = frozenset({"candidate", "memory"})
+
 
 class ConflictSet:
     """A detectable contradiction between two or more candidates/items.
@@ -27,7 +31,13 @@ class ConflictSet:
     conflict_id:
         Unique identifier for this conflict set.
     subjects:
-        Memory IDs / candidate IDs involved.
+        The ids of the records involved: the incoming candidate's
+        ``candidate_id`` and the existing memory item's or pending
+        candidate's id. Each is the primary key of the row the conflict is
+        recorded on.
+    subject_refs:
+        The same subjects with the table each lives in:
+        ``{"kind": "candidate" | "memory", "id": ...}``.
     statements:
         The contradictory statements.
     detected_at:
@@ -39,21 +49,25 @@ class ConflictSet:
     """
 
     __slots__ = (
-        "conflict_id", "subjects", "statements",
+        "conflict_id", "subjects", "subject_refs", "statements",
         "detected_at", "evidence", "resolved",
     )
 
     def __init__(
         self,
         conflict_id: UUID,
-        subjects: list[str],
+        subject_refs: list[dict[str, str]],
         statements: list[str],
         detected_at: datetime,
         evidence: list[dict[str, Any]],
         resolved: bool = False,
     ) -> None:
+        for ref in subject_refs:
+            if ref.get("kind") not in SUBJECT_KINDS or not ref.get("id"):
+                raise ValueError(f"conflict subject must be a candidate or memory id, got {ref!r}")
         self.conflict_id = conflict_id
-        self.subjects = subjects
+        self.subject_refs = subject_refs
+        self.subjects = [ref["id"] for ref in subject_refs]
         self.statements = statements
         self.detected_at = detected_at
         self.evidence = evidence
@@ -63,6 +77,7 @@ class ConflictSet:
         return {
             "conflict_id": str(self.conflict_id),
             "subjects": self.subjects,
+            "subject_refs": self.subject_refs,
             "statements": self.statements,
             "detected_at": self.detected_at.isoformat(),
             "evidence": self.evidence,
@@ -125,16 +140,22 @@ def detect_conflicts(
                     f"existing={existing_authority} for subject '{subject}'"
                 )
 
-            if conflict_statements:
+            existing_id = str(row.get("id") or "")
+            if conflict_statements and existing_id:
+                existing_kind = row.get("kind") or "memory"
                 conflicts.append(
                     ConflictSet(
                         conflict_id=uuid4(),
-                        subjects=[str(c.source_event_id), str(row.get("id", ""))],
+                        subject_refs=[
+                            {"kind": "candidate", "id": str(c.candidate_id)},
+                            {"kind": existing_kind, "id": existing_id},
+                        ],
                         statements=conflict_statements,
                         detected_at=datetime.now(timezone.utc),
                         evidence=[
-                            {"source": "candidate", "event_id": str(c.source_event_id)},
-                            {"source": "existing", "memory_id": str(row.get("id", ""))},
+                            {"source": "candidate", "candidate_id": str(c.candidate_id),
+                             "event_id": str(c.source_event_id)},
+                            {"source": "existing", "kind": existing_kind, "id": existing_id},
                         ],
                     )
                 )

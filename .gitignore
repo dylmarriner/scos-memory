@@ -32,6 +32,7 @@ backups/
 dist/
 build/
 /server
+services/*/server
 
 # Node
 node_modules/
@@ -45,3 +46,7 @@ tls-external/
 
 # Built Claude Desktop extension bundle (build with `mcpb pack`, see integrations/claude/desktop-extension/README.md)
 integrations/claude/desktop-extension/*.mcpb
+
+# `go build .` inside a service entrypoint writes a binary named after the
+# directory; it is a local build artifact, never source.
+services/*/cmd/server/server

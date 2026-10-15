@@ -97,8 +97,7 @@ func TestPGExactSymbolResolution(t *testing.T) {
 	}
 }
 
-// TestPGRenamePreservesSymbolIdentity is the fix for
-// TestBaselineRenameLosesSymbolLineage: a file's stable identity is keyed
+// TestPGRenamePreservesSymbolIdentity: a file's stable identity is keyed
 // on its content hash, so renaming it without changing its content
 // resolves to the *same* code_symbols.id under the new path, and the
 // query result reports where it was renamed from.
@@ -158,8 +157,7 @@ func TestPGRenamePreservesSymbolIdentity(t *testing.T) {
 	}
 }
 
-// TestPGBranchesCoexistIndependently is the fix for
-// TestBaselineReindexDestroysPriorCommitState: indexing a second commit on
+// TestPGBranchesCoexistIndependently: indexing a second commit on
 // a different branch does not disturb the first branch's active snapshot.
 func TestPGBranchesCoexistIndependently(t *testing.T) {
 	store, db := testPGStore(t)
@@ -255,6 +253,58 @@ func TestPGSameBranchReindexSupersedesPriorCommit(t *testing.T) {
 	}
 	if len(stale) != 0 {
 		t.Fatalf("expected commit-a's file to no longer resolve once commit-b is active, got %v", stale)
+	}
+}
+
+// A file dropped from the next commit's file list must stop resolving on
+// that branch, while a file present in both commits keeps resolving: the
+// new active snapshot is the complete file set, never an accumulation.
+func TestPGDeletedFileRemovesItsSymbols(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap1, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 1: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+		{Path: "pkg/a.go", Language: "go", ContentHash: hashContent("a")},
+		{Path: "pkg/b.go", Language: "go", ContentHash: hashContent("b")},
+	}); err != nil {
+		t.Fatalf("index snapshot 1: %v", err)
+	}
+	if got, err := store.QueryByPathOrFQN(ctx, repoID, "main", "pkg/b.go"); err != nil || len(got) != 1 {
+		t.Fatalf("expected pkg/b.go to resolve before it is deleted, got %v (err %v)", got, err)
+	}
+
+	snap2, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-2", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 2: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+		{Path: "pkg/a.go", Language: "go", ContentHash: hashContent("a")},
+	}); err != nil {
+		t.Fatalf("index snapshot 2: %v", err)
+	}
+
+	deleted, err := store.QueryByPathOrFQN(ctx, repoID, "main", "pkg/b.go")
+	if err != nil {
+		t.Fatalf("query deleted file: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("expected pkg/b.go to stop resolving once it left the file list, got %v", deleted)
+	}
+	kept, err := store.QueryByPathOrFQN(ctx, repoID, "main", "pkg/a.go")
+	if err != nil || len(kept) != 1 {
+		t.Fatalf("expected pkg/a.go to keep resolving, got %v (err %v)", kept, err)
+	}
+	if kept[0].CommitID != "commit-2" {
+		t.Fatalf("expected pkg/a.go to resolve from commit-2, got %q", kept[0].CommitID)
 	}
 }
 
@@ -1470,5 +1520,170 @@ func TestPGStructuralRetrievalUsesActiveSnapshotReferenceEdges(t *testing.T) {
 	}
 	if ranks[aID] <= 0 || ranks[bID] <= 0 {
 		t.Fatalf("expected PageRank for both visited nodes: %#v", ranks)
+	}
+}
+
+// Byte-identical files (duplicated config, copied helpers) and identical
+// declarations used to collide on one content-keyed symbol identity and
+// abort the whole snapshot with a unique-constraint error. Each occurrence
+// must index; re-indexing the same tree must reuse the same identities.
+func TestPGIndexSnapshotIndexesDuplicateFilesAndDeclarations(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	const config = `{"mcpServers":{}}`
+	const helper = `package sample
+
+func noop() {}
+`
+	files := []PGFileInput{
+		{Path: "a/.mcp.json", Language: "configuration", ContentHash: hashContent(config), Content: config},
+		{Path: "b/.mcp.json", Language: "configuration", ContentHash: hashContent(config), Content: config},
+		{Path: "x/helper.go", Language: "go", ContentHash: hashContent(helper), Content: helper},
+		{Path: "y/helper.go", Language: "go", ContentHash: hashContent(helper), Content: helper},
+	}
+	index := func(commit string) string {
+		snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", commit, "heuristic-v1", "")
+		if err != nil {
+			t.Fatalf("create snapshot: %v", err)
+		}
+		if err := store.IndexSnapshot(ctx, snap, repoID, files); err != nil {
+			t.Fatalf("index snapshot with duplicates: %v", err)
+		}
+		return snap
+	}
+	snap1 := index("commit-1")
+	var versions, distinct, symbolCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*), count(DISTINCT symbol_id) FROM code_symbol_versions WHERE snapshot_id = $1`, snap1).Scan(&versions, &distinct); err != nil {
+		t.Fatal(err)
+	}
+	// 4 file symbols + 2 noop declarations, each its own identity.
+	if versions != 6 || distinct != 6 {
+		t.Fatalf("snapshot holds %d versions over %d identities, want 6/6", versions, distinct)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT symbol_count FROM code_repository_snapshots WHERE id = $1`, snap1).Scan(&symbolCount); err != nil || symbolCount != 6 {
+		t.Fatalf("snapshot symbol_count = %d (%v), want the real symbol count 6", symbolCount, err)
+	}
+
+	snap2 := index("commit-2")
+	var reused int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM code_symbol_versions v2
+		  JOIN code_symbol_versions v1 ON v1.symbol_id = v2.symbol_id AND v1.path = v2.path AND v1.snapshot_id = $1
+		 WHERE v2.snapshot_id = $2`, snap1, snap2).Scan(&reused); err != nil {
+		t.Fatal(err)
+	}
+	if reused != 6 {
+		t.Fatalf("re-indexing an unchanged tree reused %d of 6 identities", reused)
+	}
+}
+
+// A call through an imported package ("auth.Sign()") must become a CALLS
+// edge to that package's function, so impact analysis of an exported
+// function finds its callers in other packages. A same-named function in a
+// different package must not capture the edge.
+func TestPGIndexSnapshotResolvesCallsAcrossPackages(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	const auth = "package auth\n\nfunc Sign() string { return \"t\" }\n"
+	const decoy = "package other\n\nfunc Sign() string { return \"decoy\" }\n"
+	const gateway = "package main\n\nimport (\n\t\"example.com/svc/packages/auth\"\n\tx \"example.com/svc/packages/other\"\n)\n\nfunc handle() string { return auth.Sign() }\n\nfunc unrelated() string { return x.Sign() }\n"
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "c1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "packages/auth/sign.go", Language: "go", ContentHash: hashContent(auth), Content: auth},
+		{Path: "packages/other/sign.go", Language: "go", ContentHash: hashContent(decoy), Content: decoy},
+		{Path: "cmd/gateway/main.go", Language: "go", ContentHash: hashContent(gateway), Content: gateway},
+	}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	impact, err := store.ChangeImpact(ctx, repoID, "main", "auth.Sign", 3)
+	if err != nil {
+		t.Fatalf("impact: %v", err)
+	}
+	var callers []string
+	for _, d := range impact.DirectDependents {
+		callers = append(callers, d.FullyQualifiedName)
+	}
+	if len(callers) != 1 || callers[0] != "main.handle" {
+		t.Fatalf("auth.Sign callers = %v, want [main.handle]", callers)
+	}
+
+	// A bare name matches every declaration of it, each listed.
+	byName, err := store.ChangeImpact(ctx, repoID, "main", "Sign", 3)
+	if err != nil {
+		t.Fatalf("impact by bare name: %v", err)
+	}
+	var matched []string
+	for _, m := range byName.MatchedSymbols {
+		matched = append(matched, m.FullyQualifiedName)
+	}
+	if strings.Join(matched, ",") != "auth.Sign,other.Sign" || len(byName.DirectDependents) != 2 {
+		t.Fatalf("bare-name impact matched %v with %d dependants", matched, len(byName.DirectDependents))
+	}
+	if _, err := store.ChangeImpact(ctx, repoID, "main", "Sig_", 3); err == nil {
+		t.Fatal("LIKE wildcards in a bare name must match literally")
+	}
+}
+
+// A question in prose must find a symbol whose name, signature or doc
+// comment carries its words (camelCase split, English stemming), and name
+// matches must still outrank mentions in prose.
+func TestPGQueryLexicalAnswersNaturalLanguageQuestions(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	const src = `package gateway
+
+// resolveIdentity authenticates the caller from its bearer token.
+func resolveIdentity(token string) string { return token }
+
+// renderPage writes HTML.
+func renderPage() string { return "" }
+`
+	snap, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "c1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, snap, repoID, []PGFileInput{
+		{Path: "gateway/identity.go", Language: "go", ContentHash: hashContent(src), Content: src},
+	}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	for query, want := range map[string]string{
+		"how does the gateway authenticate callers": "gateway.resolveIdentity",
+		"resolve identity":                          "gateway.resolveIdentity",
+		"resolveIdentity":                           "gateway.resolveIdentity",
+		"bearer tokens":                             "gateway.resolveIdentity",
+	} {
+		results, err := store.QueryLexical(ctx, repoID, "main", query, 5)
+		if err != nil {
+			t.Fatalf("%q: %v", query, err)
+		}
+		if len(results) == 0 || results[0].FullyQualifiedName != want {
+			var got []string
+			for _, r := range results {
+				got = append(got, r.FullyQualifiedName)
+			}
+			t.Fatalf("%q ranked %v first, want %s", query, got, want)
+		}
+	}
+	if results, err := store.QueryLexical(ctx, repoID, "main", "the of & | !(", 5); err != nil || len(results) != 0 {
+		t.Fatalf("stop words and operators must yield no query and no error, got %v %v", results, err)
 	}
 }

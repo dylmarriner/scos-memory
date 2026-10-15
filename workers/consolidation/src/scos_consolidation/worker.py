@@ -92,49 +92,47 @@ def main() -> None:
 
 
 def _process_cycle(conn: psycopg.Connection) -> None:
-    """Claim and process up to MAX_JOBS_PER_CYCLE outbox jobs."""
-    jobs = _claim_jobs(conn)
-    if not jobs:
-        return
+    """Claim and process up to MAX_JOBS_PER_CYCLE outbox jobs.
 
+    Claiming is fabric-wide (scos_worker_claim_outbox_jobs); each job is then
+    processed in its own transaction acting as the job's tenant and
+    principal, so every read and write goes through the ordinary RLS
+    policies.
+    """
+    jobs = _claim_jobs(conn)
+    conn.commit()
     for job in jobs:
         try:
+            _act_as(conn, job["tenant_id"], job.get("principal_id"))
             _process_job(conn, job)
+            conn.commit()
         except Exception:
             logger.exception("job %s failed", job["id"])
-            _mark_failed(conn, job)
+            conn.rollback()
+            try:
+                _act_as(conn, job["tenant_id"], job.get("principal_id"))
+                _mark_failed(conn, job)
+                conn.commit()
+            except Exception:
+                logger.exception("job %s could not be marked failed", job["id"])
+                conn.rollback()
 
-    conn.commit()
+
+def _act_as(conn: psycopg.Connection, tenant_id: Any, principal_id: Any) -> None:
+    """Set the transaction-local RLS identity for the current transaction."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT set_config('scos.tenant_id', %s, true), set_config('scos.principal_id', %s, true)",
+            (str(tenant_id), str(principal_id) if principal_id else ""),
+        )
 
 
 def _claim_jobs(conn: psycopg.Connection) -> list[dict[str, Any]]:
-    """Claim pending outbox_jobs for turn.completed events."""
-    now = datetime.now(timezone.utc)
-    lease_until = now + timedelta(seconds=LEASE_SECONDS)
-
+    """Claim pending turn jobs across tenants, with the principal each runs as."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            """
-            UPDATE outbox_jobs
-            SET status = 'processing',
-                lease_owner = 'consolidation-worker',
-                lease_expires_at = %s,
-                attempts = attempts + 1,
-                updated_at = %s
-            WHERE id IN (
-                SELECT id FROM outbox_jobs
-                WHERE status IN ('pending', 'retryable')
-                  AND job_type IN ('turn.completed', 'turn.accepted')
-                  AND available_at <= %s
-                  AND (lease_expires_at IS NULL OR lease_expires_at < %s)
-                ORDER BY available_at ASC
-                LIMIT %s
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING id, tenant_id, operation_id, job_type, payload, attempts,
-                      lease_expires_at
-            """,
-            (lease_until, now, now, now, MAX_JOBS_PER_CYCLE),
+            "SELECT * FROM scos_worker_claim_outbox_jobs(%s, %s, %s, %s)",
+            ("consolidation-worker", ["turn.completed", "turn.accepted"], MAX_JOBS_PER_CYCLE, LEASE_SECONDS),
         )
         return cur.fetchall()
 
@@ -142,12 +140,19 @@ def _claim_jobs(conn: psycopg.Connection) -> list[dict[str, Any]]:
 def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
     """Process one outbox job end-to-end."""
     job_id = job["id"]
-    tenant_id = UUID(job["tenant_id"])
+    tenant_id = UUID(str(job["tenant_id"]))
     payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
 
     turn_id = payload.get("turn_id")
     if not turn_id:
         logger.warning("job %s: no turn_id in payload", job_id)
+        return
+
+    if job.get("job_type") == "turn.accepted":
+        # Acceptance is already journalled by memory-gateway; memories are
+        # extracted once per turn, from its completion. Extracting here too
+        # produced a second candidate for every turn.
+        _mark_completed(conn, job_id)
         return
 
     logger.info("processing turn %s", turn_id)
@@ -158,6 +163,16 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
         logger.error("job %s: no completion event for turn %s", job_id, turn_id)
         _mark_failed(conn, job)
         return
+
+    # The completion event is keyed by turn; its session and namespace come
+    # from the turn row, without which neither messages nor the memory's
+    # namespace can be resolved.
+    scope = _load_turn_scope(conn, tenant_id, turn_id)
+    if not scope:
+        logger.error("job %s: turn %s has no session", job_id, turn_id)
+        _mark_failed(conn, job)
+        return
+    event["session_id"], event["namespace_id"] = scope
 
     messages = _load_session_messages(conn, tenant_id, event.get("session_id"), event.get("aggregate_id"))
 
@@ -192,12 +207,20 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
 
     # ── 6. Evaluate promotion for each candidate ─────────────────────
     for result in dedup_results:
-        if result.action == "superseded" or not result.candidate:
+        if not result.candidate:
             continue
-
         candidate = result.candidate
+
+        if result.action == "merged" and result.merged_into:
+            # Already stored (or already awaiting review): keep the single
+            # record and attach this turn's evidence to it. Never a second
+            # active memory or a second review item.
+            _merge_into_existing(conn, candidate, result.merged_into)
+            logger.info("candidate %s: merged into %s %s", candidate.candidate_id,
+                        result.merged_into.get("kind", "memory"), result.merged_into.get("id"))
+            continue
         candidate_conflicts = [c for c in conflicts
-                               if str(candidate.source_event_id) in c.subjects]
+                               if str(candidate.candidate_id) in c.subjects]
 
         promotion = evaluate_promotion(candidate, candidate_conflicts)
 
@@ -225,10 +248,8 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
             _promote_candidate(conn, candidate, promotion)
             logger.info("candidate %s: promoted to %s",
                         candidate.candidate_id, promotion.target_status)
-
-        # Write dedup results for merged candidates
-        if result.action == "merged" and result.merged_into:
-            _record_merge(conn, candidate, result.merged_into)
+            if result.action == "supersedes" and result.supersedes and result.supersedes.get("kind") == "memory":
+                _supersede_memory(conn, result.supersedes["id"], candidate.candidate_id)
 
     # ── 9. Persist conflict sets ──────────────────────────────────────
     for conflict in conflicts:
@@ -260,6 +281,26 @@ def _load_event_for_turn(
             (tenant_id, turn_id),
         )
         return cur.fetchone()
+
+
+def _load_turn_scope(
+    conn: psycopg.Connection, tenant_id: UUID, turn_id: str
+) -> tuple[str, str] | None:
+    """(session_id, namespace_id) of a turn, or None when unknown."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT t.session_id::text AS session_id, s.namespace_id::text AS namespace_id
+            FROM turns t
+            JOIN sessions s ON s.id = t.session_id
+            WHERE t.id::text = %s AND s.tenant_id = %s
+            """,
+            (str(turn_id), tenant_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return row["session_id"], row["namespace_id"]
 
 
 def _load_session_messages(
@@ -298,18 +339,35 @@ def _load_existing_memory(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT id, title, content, authority_level, confidence_score,
-                   sensitivity, status, metadata
-            FROM memory_items
-            WHERE tenant_id = %s
-              AND namespace_id = %s
-              AND status = 'active'
-            ORDER BY authority_level DESC, confidence_score DESC
+            SELECT 'memory' AS kind, mi.id, mi.title, COALESCE(mv.content, mi.canonical_summary) AS content,
+                   mi.authority_level, mi.confidence_score, mi.sensitivity, mi.status, mi.metadata
+            FROM memory_items mi
+            LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
+            WHERE mi.tenant_id = %s
+              AND mi.namespace_id = %s
+              AND mi.status = 'active'
+            ORDER BY mi.authority_level DESC, mi.confidence_score DESC
             LIMIT 100
             """,
             (tenant_id, namespace_id),
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+        # Candidates already waiting for review count as existing too, so a
+        # repeated statement does not queue a second review item.
+        cur.execute(
+            """
+            SELECT 'candidate' AS kind, c.id, c.title, c.content, c.authority_level,
+                   c.confidence_score, c.sensitivity, c.status, '{}'::jsonb AS metadata
+            FROM memory_candidates c
+            WHERE c.tenant_id = %s
+              AND c.namespace_id = %s
+              AND c.status = 'pending_review'
+            ORDER BY c.created_at DESC
+            LIMIT 100
+            """,
+            (tenant_id, namespace_id),
+        )
+        return rows + cur.fetchall()
 
 
 def _write_candidate(
@@ -442,6 +500,44 @@ def _promote_candidate(
         )
 
 
+def _merge_into_existing(
+    conn: psycopg.Connection,
+    candidate: MemoryCandidate,
+    existing: dict[str, Any],
+) -> None:
+    """Attach a duplicate's evidence to the record it duplicates."""
+    _write_candidate(conn, candidate, status="merged")
+    if existing.get("kind", "memory") == "memory":
+        with conn.cursor() as cur:
+            for evidence in candidate.evidence:
+                cur.execute(
+                    """
+                    INSERT INTO memory_evidence (memory_id, evidence_kind, reference_id, content_hash)
+                    SELECT %s, %s, %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM memory_evidence
+                         WHERE memory_id = %s AND evidence_kind = %s AND reference_id = %s)
+                    """,
+                    (existing["id"], evidence.kind, evidence.reference_id, evidence.content_hash,
+                     existing["id"], evidence.kind, evidence.reference_id),
+                )
+    _record_merge(conn, candidate, existing)
+
+
+def _supersede_memory(conn: psycopg.Connection, memory_id: Any, superseded_by: Any) -> None:
+    """Retire an active memory replaced by a higher-authority statement of it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE memory_items
+               SET status = 'superseded',
+                   metadata = metadata || jsonb_build_object('superseded_by', %s::text)
+             WHERE id = %s AND status = 'active'
+            """,
+            (str(superseded_by), memory_id),
+        )
+
+
 def _record_merge(
     conn: psycopg.Connection,
     candidate: MemoryCandidate,
@@ -467,22 +563,41 @@ def _record_merge(
         )
 
 
+# Where a conflict is recorded for each kind of subject: a candidate's
+# conflict_assessment (shown by the review queue) or an active memory's
+# metadata. Both keep a list under "conflicts", so a record involved in
+# several conflicts keeps them all.
+_CONFLICT_TARGETS = {
+    "candidate": pysql.SQL(
+        "UPDATE memory_candidates SET conflict_assessment = jsonb_set("
+        "conflict_assessment, '{conflicts}', "
+        "COALESCE(conflict_assessment->'conflicts', '[]'::jsonb) || jsonb_build_array(%s::jsonb)) "
+        "WHERE id = %s"
+    ),
+    "memory": pysql.SQL(
+        "UPDATE memory_items SET metadata = jsonb_set("
+        "metadata, '{conflicts}', "
+        "COALESCE(metadata->'conflicts', '[]'::jsonb) || jsonb_build_array(%s::jsonb)) "
+        "WHERE id = %s"
+    ),
+}
+
+
 def _write_conflict(conn: psycopg.Connection, conflict: ConflictSet) -> None:
-    """Record a conflict set as structured metadata on affected candidates."""
-    conflict_data = conflict.to_dict()
-    for subject in conflict.subjects:
+    """Record a conflict set on every record it involves.
+
+    Each subject is the primary key of a memory_candidates or memory_items
+    row. A subject that matches no row would leave the conflict recorded
+    nowhere, so it fails the job instead of being silently dropped.
+    """
+    conflict_data = json.dumps(conflict.to_dict())
+    for ref in conflict.subject_refs:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE memory_candidates
-                SET conflict_assessment = conflict_assessment || %s
-                WHERE id = %s
-                """,
-                (
-                    json.dumps({"conflict": conflict_data}),
-                    subject,
-                ),
-            )
+            cur.execute(_CONFLICT_TARGETS[ref["kind"]], (conflict_data, ref["id"]))
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"conflict {conflict.conflict_id}: {ref['kind']} {ref['id']} is not a visible record"
+                )
 
 
 def _mark_completed(conn: psycopg.Connection, job_id: UUID) -> None:

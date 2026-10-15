@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -62,12 +63,30 @@ func (s *hermesServer) ensureSession(ctx context.Context, tx *sql.Tx, id request
 	if exists {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, tenant_id, namespace_id, created_by) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING`,
-		sessionID, id.TenantID, namespaceID, id.PrincipalID)
+	// The id is not this tenant's. If the insert does nothing, another
+	// tenant already holds it (row security hides it from the check above):
+	// report that, rather than succeed and let the turn write fail later.
+	var created string
+	err := tx.QueryRowContext(ctx, `INSERT INTO sessions (id, tenant_id, namespace_id, created_by) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING RETURNING id`,
+		sessionID, id.TenantID, namespaceID, id.PrincipalID).Scan(&created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errSessionTaken
+	}
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
 	return nil
+}
+
+// errSessionTaken reports a session id already used by another tenant.
+var errSessionTaken = errors.New("session id is already in use; choose another session id")
+
+// sessionErrorStatus maps an ensureSession failure to its HTTP status.
+func sessionErrorStatus(err error) int {
+	if errors.Is(err, errSessionTaken) {
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
 }
 
 // idempotentReplay looks up a previously recorded response for key. found is
@@ -162,16 +181,24 @@ func resolveMessage(raw any) resolvedMessage {
 	return resolvedMessage{Role: "assistant", Content: string(b)}
 }
 
-// insertTurnWithMessages inserts one turn row plus one message row per
-// resolved message, advancing the session's sequence counter.
-func insertTurnWithMessages(ctx context.Context, tx *sql.Tx, id requestIdentity, sessionID, turnID string, messages []any) error {
+// insertTurnWithMessages inserts one turn row, carrying the turn's tool
+// calls, plus one message row per resolved message, advancing the session's
+// sequence counter.
+func insertTurnWithMessages(ctx context.Context, tx *sql.Tx, id requestIdentity, sessionID, turnID string, messages, toolCalls []any) error {
+	if toolCalls == nil {
+		toolCalls = []any{}
+	}
+	encodedCalls, err := json.Marshal(toolCalls)
+	if err != nil {
+		return fmt.Errorf("encode tool calls: %w", err)
+	}
 	var sequence int64
 	if err := tx.QueryRowContext(ctx, `UPDATE sessions SET last_sequence = last_sequence + 1, updated_at = now() WHERE id=$1 AND tenant_id=$2 RETURNING last_sequence`,
 		sessionID, id.TenantID).Scan(&sequence); err != nil {
 		return fmt.Errorf("advance session sequence: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO turns (id, session_id, sequence, actor_id, status, started_at, completed_at) VALUES ($1,$2,$3,$4,'completed',now(),now())`,
-		turnID, sessionID, sequence, id.PrincipalID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO turns (id, session_id, sequence, actor_id, status, started_at, completed_at, tool_calls) VALUES ($1,$2,$3,$4,'completed',now(),now(),$5)`,
+		turnID, sessionID, sequence, id.PrincipalID, string(encodedCalls)); err != nil {
 		return fmt.Errorf("insert turn: %w", err)
 	}
 	for _, raw := range messages {
@@ -194,7 +221,7 @@ func insertTurnWithMessages(ctx context.Context, tx *sql.Tx, id requestIdentity,
 // session, newest first, bounded by limit.
 func recentTurns(ctx context.Context, db *sql.Tx, tenantID, sessionID string, limit int) ([]StoredTurn, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT t.id, t.accepted_at
+		SELECT t.id, t.accepted_at, t.tool_calls
 		FROM turns t
 		JOIN sessions s ON s.id = t.session_id
 		WHERE s.id = $1 AND s.tenant_id = $2
@@ -209,12 +236,17 @@ func recentTurns(ctx context.Context, db *sql.Tx, tenantID, sessionID string, li
 	type turnMeta struct {
 		id        string
 		createdAt time.Time
+		toolCalls []any
 	}
 	var metas []turnMeta
 	for rows.Next() {
 		var m turnMeta
-		if err := rows.Scan(&m.id, &m.createdAt); err != nil {
+		var rawCalls []byte
+		if err := rows.Scan(&m.id, &m.createdAt, &rawCalls); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal(rawCalls, &m.toolCalls); err != nil {
+			return nil, fmt.Errorf("decode tool calls of turn %s: %w", m.id, err)
 		}
 		metas = append(metas, m)
 	}
@@ -250,134 +282,104 @@ func recentTurns(ctx context.Context, db *sql.Tx, tenantID, sessionID string, li
 			SessionID: sessionID,
 			TurnID:    m.id,
 			Messages:  messages,
+			ToolCalls: m.toolCalls,
 			CreatedAt: m.createdAt.UTC().Format(time.RFC3339),
 		})
 	}
 	return turns, nil
 }
 
-// SearchedMemory is one ranked hit returned by searchMemories.
-type SearchedMemory struct {
-	MemoryID        string  `json:"memory_id"`
-	Title           string  `json:"title"`
-	Content         string  `json:"content"`
-	Type            string  `json:"type"`
-	ConfidenceScore float64 `json:"confidence_score"`
-	AuthorityLevel  int     `json:"authority_level"`
-	Rank            float64 `json:"rank"`
-	CreatedAt       string  `json:"created_at"`
+// providerConfig is a principal's saved Hermes setup for one profile scope
+// and the profile the provider was last initialised against.
+type providerConfig struct {
+	ProfileScope    string         `json:"profile_scope"`
+	Config          map[string]any `json:"config"`
+	ProfilePath     string         `json:"profile_path,omitempty"`
+	Workspace       string         `json:"workspace,omitempty"`
+	InitializedAt   string         `json:"initialized_at,omitempty"`
+	ConfigUpdatedAt string         `json:"config_updated_at,omitempty"`
 }
 
-// searchMemories performs lexical retrieval over active memory_items for
-// tenantID: full-text ranked search over title, canonical_summary and the
-// current version's content, falling back to a substring match when the
-// tsquery has no hits (e.g. code identifiers and other tokens the English
-// text-search parser doesn't stem well). This is the implementation behind
-// the scos_recall tool (§3.1.4's "hybrid ... retrieval" requirement covers
-// lexical, semantic, relational, metadata and temporal; only the lexical
-// leg is implemented here -- semantic search needs a query-embedding
-// pipeline this fleet does not yet have).
-func searchMemories(ctx context.Context, db *sql.Tx, tenantID, query string, limit int) ([]SearchedMemory, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 10
+func formatOptionalTime(t sql.NullTime) string {
+	if !t.Valid {
+		return ""
 	}
-	words := queryWords(query)
-	if len(words) == 0 {
-		return []SearchedMemory{}, nil
-	}
-
-	tsExpr := make([]string, len(words))
-	args := make([]any, 0, len(words)+3)
-	args = append(args, tenantID)
-	for i, w := range words {
-		args = append(args, w)
-		tsExpr[i] = fmt.Sprintf("plainto_tsquery('english', $%d)", i+2)
-	}
-	tsQuery := strings.Join(tsExpr, " || ")
-	limitArg := len(args) + 1
-	args = append(args, limit)
-
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT mi.id, mi.title, mv.content, mi.type::text, mi.confidence_score, mi.authority_level, mi.created_at,
-		       ts_rank_cd(to_tsvector('english', mi.title || ' ' || mi.canonical_summary || ' ' || mv.content), %s) AS rank
-		FROM memory_items mi
-		JOIN memory_versions mv ON mv.id = mi.current_version_id
-		WHERE mi.tenant_id = $1
-		  AND mi.status = 'active'
-		  AND to_tsvector('english', mi.title || ' ' || mi.canonical_summary || ' ' || mv.content) @@ (%s)
-		ORDER BY rank DESC, mi.authority_level DESC, mi.created_at DESC
-		LIMIT $%d
-	`, tsQuery, tsQuery, limitArg), args...)
-	if err != nil {
-		return nil, fmt.Errorf("full-text search: %w", err)
-	}
-	results, err := scanSearchedMemories(rows)
-	if err != nil {
-		return nil, err
-	}
-	if len(results) > 0 {
-		return results, nil
-	}
-
-	ilikeExpr := make([]string, len(words))
-	args = args[:0]
-	args = append(args, tenantID)
-	for i, w := range words {
-		args = append(args, "%"+w+"%")
-		p := fmt.Sprintf("$%d", i+2)
-		ilikeExpr[i] = fmt.Sprintf("(mi.title ILIKE %s OR mi.canonical_summary ILIKE %s OR mv.content ILIKE %s)", p, p, p)
-	}
-	limitArg = len(args) + 1
-	args = append(args, limit)
-
-	rows, err = db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT mi.id, mi.title, mv.content, mi.type::text, mi.confidence_score, mi.authority_level, mi.created_at,
-		       0.0 AS rank
-		FROM memory_items mi
-		JOIN memory_versions mv ON mv.id = mi.current_version_id
-		WHERE mi.tenant_id = $1
-		  AND mi.status = 'active'
-		  AND (%s)
-		ORDER BY mi.authority_level DESC, mi.created_at DESC
-		LIMIT $%d
-	`, strings.Join(ilikeExpr, " OR "), limitArg), args...)
-	if err != nil {
-		return nil, fmt.Errorf("substring search: %w", err)
-	}
-	return scanSearchedMemories(rows)
+	return t.Time.UTC().Format(time.RFC3339Nano)
 }
 
-func queryWords(query string) []string {
-	fields := strings.Fields(query)
-	seen := make(map[string]bool, len(fields))
-	words := make([]string, 0, len(fields))
-	for _, f := range fields {
-		w := strings.ToLower(f)
-		if w == "" || seen[w] {
-			continue
-		}
-		seen[w] = true
-		words = append(words, w)
+// withPrincipalTx runs fn in a transaction scoped to id for RLS.
+func withPrincipalTx(ctx context.Context, db *sql.DB, id requestIdentity, fn func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return words
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func scanSearchedMemories(rows *sql.Rows) ([]SearchedMemory, error) {
-	defer rows.Close()
-	results := make([]SearchedMemory, 0)
-	for rows.Next() {
-		var m SearchedMemory
-		var createdAt time.Time
-		if err := rows.Scan(&m.MemoryID, &m.Title, &m.Content, &m.Type, &m.ConfidenceScore, &m.AuthorityLevel, &createdAt, &m.Rank); err != nil {
-			return nil, err
-		}
-		m.CreatedAt = createdAt.UTC().Format(time.RFC3339)
-		results = append(results, m)
+func scanProviderConfig(row *sql.Row) (providerConfig, error) {
+	var out providerConfig
+	var rawConfig []byte
+	var profilePath, workspace sql.NullString
+	var initializedAt, configUpdatedAt sql.NullTime
+	if err := row.Scan(&out.ProfileScope, &rawConfig, &profilePath, &workspace, &initializedAt, &configUpdatedAt); err != nil {
+		return providerConfig{}, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if err := json.Unmarshal(rawConfig, &out.Config); err != nil {
+		return providerConfig{}, fmt.Errorf("decode stored config: %w", err)
 	}
-	return results, nil
+	out.ProfilePath, out.Workspace = profilePath.String, workspace.String
+	out.InitializedAt, out.ConfigUpdatedAt = formatOptionalTime(initializedAt), formatOptionalTime(configUpdatedAt)
+	return out, nil
+}
+
+const providerConfigColumns = `profile_scope, config, profile_path, workspace, initialized_at, config_updated_at`
+
+// saveProviderConfig stores config as id's setup for scope, replacing any
+// earlier one and keeping the profile binding.
+func saveProviderConfig(ctx context.Context, db *sql.DB, id requestIdentity, scope string, config map[string]any) (providerConfig, error) {
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return providerConfig{}, err
+	}
+	var out providerConfig
+	err = withPrincipalTx(ctx, db, id, func(tx *sql.Tx) error {
+		var scanErr error
+		out, scanErr = scanProviderConfig(tx.QueryRowContext(ctx, `
+			INSERT INTO hermes_provider_configs (tenant_id, principal_id, profile_scope, config, config_updated_at, updated_at)
+			VALUES ($1, $2, $3, $4, now(), now())
+			ON CONFLICT (tenant_id, principal_id, profile_scope) DO UPDATE
+			SET config = EXCLUDED.config, config_updated_at = now(), updated_at = now()
+			RETURNING `+providerConfigColumns,
+			id.TenantID, id.PrincipalID, scope, string(encoded)))
+		return scanErr
+	})
+	return out, err
+}
+
+// bindProviderProfile records that the provider was initialised for id and
+// scope against profilePath, and returns the setup saved for that scope.
+func bindProviderProfile(ctx context.Context, db *sql.DB, id requestIdentity, scope, profilePath, workspace string) (providerConfig, error) {
+	var out providerConfig
+	err := withPrincipalTx(ctx, db, id, func(tx *sql.Tx) error {
+		var scanErr error
+		out, scanErr = scanProviderConfig(tx.QueryRowContext(ctx, `
+			INSERT INTO hermes_provider_configs (tenant_id, principal_id, profile_scope, profile_path, workspace, initialized_at, updated_at)
+			VALUES ($1, $2, $3, $4, NULLIF($5, ''), now(), now())
+			ON CONFLICT (tenant_id, principal_id, profile_scope) DO UPDATE
+			SET profile_path = EXCLUDED.profile_path, workspace = EXCLUDED.workspace,
+			    initialized_at = now(), updated_at = now()
+			RETURNING `+providerConfigColumns,
+			id.TenantID, id.PrincipalID, scope, profilePath, workspace))
+		return scanErr
+	})
+	return out, err
 }
 
 // mirroredMemoryTransition decodes the state transition encoded by the Hermes

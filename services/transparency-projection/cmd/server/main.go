@@ -33,6 +33,7 @@ type projectionServer struct {
 	upstream             string // primary dependency (memory-intelligence), used for readiness
 	upstreams            map[string]string
 	cloudControlPlaneURL string       // same-origin browser API proxy for account/admin views
+	accountsDisabled     bool         // SCOS_CLOUD_CONTROL_PLANE_URL=disabled: this deployment runs without accounts
 	controlPlaneToken    string       // forwarded to control-plane-protected upstreams (code-intelligence etc.)
 	client               *http.Client // fast client for health probes and event streaming
 	snapshotClient       *http.Client // slow client for snapshot assembly (heavyweight views)
@@ -96,6 +97,7 @@ func main() {
 		upstream:             upstreams["memory_intelligence"],
 		upstreams:            upstreams,
 		cloudControlPlaneURL: upstreams["cloud_control_plane"],
+		accountsDisabled:     strings.EqualFold(upstreams["cloud_control_plane"], "disabled"),
 		controlPlaneToken:    strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		client:               client,
 		editPassphrase:       strings.TrimSpace(os.Getenv("SCOS_DASHBOARD_EDIT_PASSPHRASE")),
@@ -114,6 +116,7 @@ func main() {
 	mux.HandleFunc("/v1/transparency/login", s.login)
 	mux.HandleFunc("/v1/transparency/facts/", s.factByID)
 	mux.HandleFunc("/v1/transparency/graphify/", s.graphify)
+	mux.HandleFunc("/v1/transparency/history/", s.history)
 	authenticated := auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
 
 	// The dashboard shell carries no authoritative data of its own: every
@@ -142,6 +145,10 @@ func main() {
 		// requests same-origin from the browser and proxy only the cloud API
 		// namespace; the cloud service remains responsible for authentication
 		// and authorization on every endpoint.
+		if r.URL.Path == "/api/deployment" {
+			s.deploymentInfo(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			s.cloudAPI(w, r)
 			return
@@ -166,7 +173,7 @@ func main() {
 		addr = ":8097"
 	}
 	log.Printf("transparency projection listening on %s, upstream=%s", addr, s.upstream)
-	if err := tlsserve.ListenAndServe(addr, handler); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("transparency-projection", handler)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -207,28 +214,30 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	views := map[string]viewSource{
-		"system":               {s.upstream, "/v1/dashboard/system"},
-		"memory":               {s.upstream, "/v1/dashboard/memory-graph"},
-		"user_model":           {s.upstream, "/v1/dashboard/user-model"},
-		"timeline":             {s.upstream, "/v1/dashboard/timeline"},
-		"learnings":            {s.upstream, "/v1/dashboard/learnings"},
-		"contradictions":       {s.upstream, "/v1/dashboard/contradictions"},
-		"facts":                {s.upstream, "/v1/dashboard/facts"},
-		"diary":                {s.upstream, "/v1/diary"},
-		"agents":               {s.upstreams["agent_registry"], "/v1/agents"},
-		"tool_operations":      {s.upstreams["tool_governance"], "/v1/operations"},
-		"plugins":              {s.upstreams["extension_manager"], "/v1/extensions"},
-		"skills":               {s.upstreams["extension_manager"], "/v1/skills"},
-		"hooks":                {s.upstreams["extension_manager"], "/v1/hooks"},
-		"code_intelligence":    {s.upstreams["code_intelligence"], "/v1/index/status"},
-		"routing":              {s.upstreams["autonomous_control_plane"], "/v1/control/decisions"},
-		"recovery":             {s.upstreams["recovery_orchestrator"], "/v1/recovery/status"},
-		"security":             {s.upstreams["security_gate"], "/v1/audit"},
-		"token_flow":           {s.upstreams["observability"], "/v1/metrics?metric=token"},
-		"costs":                {s.upstreams["observability"], "/v1/metrics?metric=cost"},
-		"costs_and_token_flow": {s.upstreams["observability"], "/v1/metrics"},
-		"memory_summary":       {s.upstream, "/v1/dashboard/summary"},
-		"code_repos":           {s.upstreams["code_intelligence"], "/v1/repos"},
+		"system":            {s.upstream, "/v1/dashboard/system"},
+		"memory":            {s.upstream, "/v1/dashboard/memory-graph"},
+		"user_model":        {s.upstream, "/v1/dashboard/user-model"},
+		"timeline":          {s.upstream, "/v1/dashboard/timeline"},
+		"learnings":         {s.upstream, "/v1/dashboard/learnings"},
+		"contradictions":    {s.upstream, "/v1/dashboard/contradictions"},
+		"facts":             {s.upstream, "/v1/dashboard/facts"},
+		"diary":             {s.upstream, "/v1/diary"},
+		"agents":            {s.upstreams["agent_registry"], "/v1/agents"},
+		"tool_operations":   {s.upstreams["tool_governance"], "/v1/operations"},
+		"plugins":           {s.upstreams["extension_manager"], "/v1/extensions"},
+		"skills":            {s.upstreams["extension_manager"], "/v1/skills"},
+		"hooks":             {s.upstreams["extension_manager"], "/v1/hooks"},
+		"code_intelligence": {s.upstreams["code_intelligence"], "/v2/code/snapshots"},
+		"routing":           {s.upstreams["autonomous_control_plane"], "/v1/control/decisions"},
+		"recovery":          {s.upstreams["recovery_orchestrator"], "/v1/recovery/status"},
+		"security":          {s.upstreams["security_gate"], "/v1/audit"},
+		"token_flow":        {s.upstreams["observability"], "/v1/metrics?metric=token&limit=500"},
+		"costs":             {s.upstreams["observability"], "/v1/metrics?metric=cost&limit=500"},
+		"service_flows":     {s.upstreams["observability"], "/v1/flows?range=15m"},
+		"benchmarks":        {s.upstreams["observability"], "/v1/benchmarks?limit=50"},
+		"metric_catalog":    {s.upstreams["observability"], "/v1/metrics/catalog?range=24h"},
+		"memory_summary":    {s.upstream, "/v1/dashboard/summary"},
+		"code_repos":        {s.upstreams["code_intelligence"], "/v1/repos"},
 		// credential-vault's list route returns metadata only (name,
 		// key_version, created_by, timestamps) -- never a decrypted secret
 		// value -- so it's safe to surface on this otherwise-unauthenticated
@@ -253,26 +262,10 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				// The routing view has no list endpoint: the control plane
-				// requires an interaction_id per decision, which a system-level
-				// dashboard does not carry. Its "required" response is a valid
-				// empty state, not a broken view.
-				if name == "routing" && strings.Contains(err.Error(), "required") {
-					result[name] = json.RawMessage("[]")
-					return
-				}
 				errored[name] = err.Error()
 				return
 			}
 			if status/100 != 2 {
-				// The routing view has no list endpoint: the control plane
-				// requires an interaction_id per decision, which a system-level
-				// dashboard does not carry. Its 401 "required" response is a
-				// valid empty state, not a broken view.
-				if name == "routing" && status == http.StatusUnauthorized && strings.Contains(string(body), "required") {
-					result[name] = json.RawMessage("[]")
-					return
-				}
 				errored[name] = fmt.Sprintf("upstream returned status %d", status)
 				return
 			}
@@ -430,6 +423,91 @@ func (s *projectionServer) factByID(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// historyRoutes maps the public history kinds onto observability's
+// read-only aggregate routes, with the query parameters each accepts. Only
+// these are forwarded: the dashboard is an unauthenticated surface, so it
+// must not become a general proxy into the collector.
+var historyRoutes = map[string]struct {
+	path   string
+	params []string
+}{
+	"flows":      {"/v1/flows", []string{"range", "to"}},
+	"series":     {"/v1/metrics/series", []string{"name", "range", "to", "step", "group_by", "service", "caller", "route"}},
+	"catalog":    {"/v1/metrics/catalog", []string{"range"}},
+	"benchmarks": {"/v1/benchmarks", []string{"suite", "limit"}},
+}
+
+// history serves the dashboard's historic charts and flow graph:
+//
+//	GET /v1/transparency/history/{flows|series|catalog|benchmarks}
+//	GET /v1/transparency/history/benchmark-runs/{run_id}
+func (s *projectionServer) history(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	kind := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/transparency/history/"), "/")
+	var upstreamPath string
+	query := url.Values{}
+	if runID, ok := strings.CutPrefix(kind, "benchmark-runs/"); ok {
+		if runID == "" || strings.ContainsAny(runID, "/?#%") || len(runID) > 128 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid run id"})
+			return
+		}
+		upstreamPath = "/v1/benchmarks/runs/" + url.PathEscape(runID)
+	} else {
+		route, ok := historyRoutes[kind]
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown history view"})
+			return
+		}
+		upstreamPath = route.path
+		for _, name := range route.params {
+			if value := strings.TrimSpace(r.URL.Query().Get(name)); value != "" {
+				if len(value) > 256 {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": name + " is too long"})
+					return
+				}
+				query.Set(name, value)
+			}
+		}
+	}
+	target := s.upstreams["observability"] + upstreamPath
+	if encoded := query.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	// Identity only: the query was rebuilt from the whitelist above and
+	// must not be overwritten with the raw browser query.
+	s.copyIdentityHeaders(&http.Request{Header: r.Header, URL: &url.URL{}}, req)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "observability unavailable"})
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if resp.StatusCode/100 == 2 && !json.Valid(body) {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "observability returned invalid JSON"})
+		return
+	}
+	if resp.StatusCode/100 != 2 {
+		writeJSON(w, resp.StatusCode, map[string]string{"error": strings.TrimSpace(string(body))})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(body)
+}
+
 // graphify proxies the dashboard's interactive "ask" / "explain" / "path"
 // box straight through to graphify-provider. Unlike the snapshot's passive
 // views, these take a caller-supplied question, so there's no polling list
@@ -463,7 +541,22 @@ func (s *projectionServer) graphify(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// deploymentInfo tells the dashboard which optional features this
+// deployment runs, so it never offers account forms a self-hosted stack
+// without the cloud control plane could not serve.
+func (s *projectionServer) deploymentInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"accounts_enabled": !s.accountsDisabled})
+}
+
 func (s *projectionServer) cloudAPI(w http.ResponseWriter, r *http.Request) {
+	if s.accountsDisabled {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "accounts are not enabled on this deployment"})
+		return
+	}
 	if s.cloudControlPlaneURL == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "cloud control plane is not configured"})
 		return
@@ -481,7 +574,7 @@ func (s *projectionServer) cloudAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	client := s.client
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Transport: telemetry.ProcessTransport(nil)}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -618,20 +711,18 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 // mintServiceToken creates a claims-bearing JWT for this service so the
 // dashboard can render without the caller supplying a bearer token. The
 // projection itself holds the issuer secret, so it can authenticate its own
-// upstream fetches. Env overrides allow a deployment to pin the identity;
-// the fallbacks are the standard local fabric tenant/principal.
+// upstream fetches. The identity is the deployment's: an invented fallback
+// tenant owns no data, so a dashboard minted for it renders empty panels
+// that look like a working system with nothing in it.
 func mintServiceToken() (string, error) {
 	secret := strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET"))
 	if secret == "" {
 		return "", errors.New("SCOS_SECURITY_ISSUER_SECRET must be configured")
 	}
 	tenantID := strings.TrimSpace(os.Getenv("SCOS_SERVICE_TENANT_ID"))
-	if tenantID == "" {
-		tenantID = "11111111-2222-3333-4444-555555555555"
-	}
 	principalID := strings.TrimSpace(os.Getenv("SCOS_SERVICE_PRINCIPAL_ID"))
-	if principalID == "" {
-		principalID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	if tenantID == "" || principalID == "" {
+		return "", errors.New("SCOS_SERVICE_TENANT_ID and SCOS_SERVICE_PRINCIPAL_ID must name the identity the dashboard shows")
 	}
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payload, err := json.Marshal(map[string]any{

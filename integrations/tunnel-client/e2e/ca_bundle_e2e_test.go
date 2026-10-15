@@ -1,10 +1,15 @@
 package e2e_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"embed"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,13 +22,81 @@ import (
 	tctransport "github.com/openai/tunnel-client/pkg/transport"
 )
 
-//go:embed testdata/test_server_cert.pem testdata/test_server_key.pem testdata/test_ca_bundle.pem
-var tlsFixtures embed.FS
+// tlsFixtures is a throwaway PKI generated per test run: two unrelated CAs
+// in one PEM bundle and a 127.0.0.1 server certificate issued by the first.
+// Generating it keeps private keys out of the repository and means the
+// fixture can never expire.
+type tlsFixtures struct {
+	serverCertPEM []byte
+	serverKeyPEM  []byte
+	caBundlePEM   []byte
+}
+
+func newTLSFixtures(t *testing.T) tlsFixtures {
+	t.Helper()
+	newKey := func() *ecdsa.PrivateKey {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("generate key: %v", err)
+		}
+		return key
+	}
+	certPEM := func(der []byte) []byte {
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	}
+	newCA := func(serial int64, name string) (*x509.Certificate, *ecdsa.PrivateKey, []byte) {
+		key := newKey()
+		tmpl := &x509.Certificate{
+			SerialNumber:          big.NewInt(serial),
+			Subject:               pkix.Name{CommonName: name},
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().Add(24 * time.Hour),
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			BasicConstraintsValid: true,
+			IsCA:                  true,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatalf("create CA %s: %v", name, err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatalf("parse CA %s: %v", name, err)
+		}
+		return cert, key, certPEM(der)
+	}
+	issuer, issuerKey, issuerPEM := newCA(1, "tunnel-client e2e root A")
+	_, _, otherPEM := newCA(2, "tunnel-client e2e root B")
+
+	serverKey := newKey()
+	serverTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback},
+		DNSNames:     []string{"localhost"},
+	}
+	serverDER, err := x509.CreateCertificate(rand.Reader, serverTmpl, issuer, &serverKey.PublicKey, issuerKey)
+	if err != nil {
+		t.Fatalf("create server certificate: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(serverKey)
+	if err != nil {
+		t.Fatalf("marshal server key: %v", err)
+	}
+	return tlsFixtures{
+		serverCertPEM: certPEM(serverDER),
+		serverKeyPEM:  pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		caBundlePEM:   append(issuerPEM, otherPEM...),
+	}
+}
 
 func TestCABundleControlsTLSHandshake(t *testing.T) {
-	certPEM := mustReadFixture(t, "testdata/test_server_cert.pem")
-	keyPEM := mustReadFixture(t, "testdata/test_server_key.pem")
-	caPEM := mustReadFixture(t, "testdata/test_ca_bundle.pem")
+	fixtures := newTLSFixtures(t)
+	certPEM, keyPEM, caPEM := fixtures.serverCertPEM, fixtures.serverKeyPEM, fixtures.caBundlePEM
 
 	serverCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
@@ -57,7 +130,7 @@ func TestCABundleControlsTLSHandshake(t *testing.T) {
 }
 
 func TestCABundleParsesMultipleCertificates(t *testing.T) {
-	caPEM := mustReadFixture(t, "testdata/test_ca_bundle.pem")
+	caPEM := newTLSFixtures(t).caBundlePEM
 	certs := mustParsePEMCerts(t, caPEM)
 	if len(certs) < 2 {
 		t.Fatalf("expected multiple certificates in CA bundle, found %d", len(certs))
@@ -117,15 +190,6 @@ func writeTempFile(t *testing.T, name string, data []byte) string {
 		t.Fatalf("write temp file: %v", err)
 	}
 	return path
-}
-
-func mustReadFixture(t *testing.T, name string) []byte {
-	t.Helper()
-	data, err := tlsFixtures.ReadFile(name)
-	if err != nil {
-		t.Fatalf("read fixture %s: %v", name, err)
-	}
-	return data
 }
 
 func mustParsePEMCerts(t *testing.T, data []byte) []*x509.Certificate {

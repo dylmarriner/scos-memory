@@ -23,6 +23,8 @@ export interface RecalledMemory {
   confidenceScore: number | null;
   authorityLevel: number | null;
   rank: number | null;
+  /** SCOS fused relevance score: the score recall ranked this memory by. */
+  score: number | null;
   createdAt: string;
 }
 
@@ -192,9 +194,26 @@ export function normalizeRecallResult(value: unknown): RecalledMemory[] {
       confidenceScore: typeof item.confidence_score === "number" ? item.confidence_score : null,
       authorityLevel: typeof item.authority_level === "number" ? item.authority_level : null,
       rank: typeof item.rank === "number" ? item.rank : null,
+      score: typeof item.fused_score === "number"
+        ? item.fused_score
+        : typeof item.score === "number" ? item.score : null,
       createdAt: stringValue(item.created_at) || stringValue(item.createdAt),
     }];
   });
+}
+
+/**
+ * Keep only memories whose relevance score is at least minScore. A memory
+ * SCOS returned without a score cannot be shown to meet the threshold, so it
+ * is dropped. With no threshold (undefined or not a finite number) every
+ * memory is kept.
+ */
+export function filterByMinScore(
+  memories: RecalledMemory[],
+  minScore: number | undefined,
+): RecalledMemory[] {
+  if (typeof minScore !== "number" || !Number.isFinite(minScore)) return memories;
+  return memories.filter((memory) => memory.score !== null && memory.score >= minScore);
 }
 
 function truncateUtf16Safe(text: string, maxChars: number): string {

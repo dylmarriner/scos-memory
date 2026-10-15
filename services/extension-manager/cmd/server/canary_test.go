@@ -33,12 +33,11 @@ func canaryManifest(t *testing.T, key ed25519.PrivateKey, version string) Extens
 	m := ExtensionManifest{
 		SchemaVersion: "1.0", PackageID: "canary.ext", Name: "Canary", Version: version,
 		Publisher: "Test", License: "MIT", ExtensionTypes: []string{"plugin"},
-		RequiredCoreVersion: "^0.1.0", ContentHash: "hash-" + version,
-		Isolation:    "separate_process",
-		RollbackPlan: "uninstall and restore previous package version",
+		RequiredCoreVersion: "^0.1.0",
+		Isolation:           "remote_endpoint",
+		RollbackPlan:        "uninstall and restore previous package version",
 	}
-	m.Signature = signManifest(t, m, key)
-	return m
+	return sealManifest(t, m, key)
 }
 
 // startCanary posts a canary deployment and returns the recorder.

@@ -80,10 +80,19 @@ def recommend_action(evaluation: str) -> str:
 
 
 def list_tenant_ids(conn: psycopg.Connection) -> list[Any]:
-    rows = conn.execute(
-        "SELECT DISTINCT tenant_id FROM orchestration_runs WHERE tenant_id IS NOT NULL"
-    ).fetchall()
+    """Tenants with orchestration history.
+
+    orchestration_runs is under FORCE RLS keyed on the tenant context, so the
+    cross-tenant listing goes through the SECURITY DEFINER function
+    (migration 000043); everything after it runs inside one tenant.
+    """
+    rows = conn.execute("SELECT scos_worker_policy_tenants()").fetchall()
     return [r[0] for r in rows]
+
+
+def set_tenant(conn: psycopg.Connection, tenant_id: Any) -> None:
+    """Bind the current transaction to one tenant for the RLS policies."""
+    conn.execute("SELECT set_config('scos.tenant_id', %s, true)", (str(tenant_id),))
 
 
 def list_policy_versions(conn: psycopg.Connection, tenant_id: Any) -> list[str]:
@@ -106,12 +115,12 @@ def fetch_policy_outcomes(
 ) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT rd.outcome
+        SELECT rd.actual_outcome
           FROM routing_decisions rd
           JOIN orchestration_runs orr ON orr.id = rd.orchestration_run_id
          WHERE orr.tenant_id = %s
            AND orr.policy_version = %s
-           AND rd.outcome IS NOT NULL
+           AND rd.actual_outcome ? 'success'
          ORDER BY rd.created_at DESC
          LIMIT %s
         """,
@@ -173,19 +182,21 @@ def evaluate_policy_candidate(
 def run_evaluation_cycle(conn: psycopg.Connection) -> list[dict[str, Any]]:
     results = []
     for tenant_id in list_tenant_ids(conn):
-        versions = list_policy_versions(conn, tenant_id)
-        if len(versions) < 2:
-            continue
-        baseline_version, candidate_version = versions[-2], versions[-1]
-        logger.info(
-            "evaluating policy %s against baseline %s for tenant %s",
-            candidate_version,
-            baseline_version,
-            tenant_id,
-        )
-        results.append(
-            evaluate_policy_candidate(conn, tenant_id, candidate_version, baseline_version)
-        )
+        with conn.transaction():
+            set_tenant(conn, tenant_id)
+            versions = list_policy_versions(conn, tenant_id)
+            if len(versions) < 2:
+                continue
+            baseline_version, candidate_version = versions[-2], versions[-1]
+            logger.info(
+                "evaluating policy %s against baseline %s for tenant %s",
+                candidate_version,
+                baseline_version,
+                tenant_id,
+            )
+            results.append(
+                evaluate_policy_candidate(conn, tenant_id, candidate_version, baseline_version)
+            )
     return results
 
 

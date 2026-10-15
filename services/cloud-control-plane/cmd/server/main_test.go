@@ -84,8 +84,17 @@ func TestUserSearchFilterPlanOnly(t *testing.T) {
 }
 
 func TestValidPerks(t *testing.T) {
-	if err := validPerks(nil); err == nil {
-		t.Fatal("expected error for empty perks")
+	// Perks are the free-text lines after the generated quota and feature
+	// lines, so a plan may have none.
+	if err := validPerks(nil); err != nil {
+		t.Fatalf("expected no free-text perks to be valid, got %v", err)
+	}
+	// A hand-written line restating a quota or a feature could only drift
+	// from what is enforced.
+	for _, restated := range []string{"10,000 MCP requests/month", "1 GB memory storage", "Advanced retrieval and graphify", "Extended retention"} {
+		if err := validPerks([]string{restated}); err == nil {
+			t.Fatalf("expected %q to be refused as a restated quota/feature", restated)
+		}
 	}
 	if err := validPerks([]string{""}); err == nil {
 		t.Fatal("expected error for blank perk")
@@ -106,7 +115,7 @@ func TestValidPerks(t *testing.T) {
 }
 
 func TestValidPlanUpdate(t *testing.T) {
-	valid := planUpdateInput{ID: "pro", Name: "Pro", Price: "$29/month", Perks: []string{"Advanced retrieval"}}
+	valid := planUpdateInput{ID: "pro", Name: "Pro", Price: "$29/month", Perks: []string{"Email support"}}
 	if err := validPlanUpdate(valid); err != nil {
 		t.Fatalf("expected valid input to pass, got %v", err)
 	}
@@ -125,10 +134,15 @@ func TestValidPlanUpdate(t *testing.T) {
 	if err := validPlanUpdate(missingPrice); err == nil {
 		t.Fatal("expected error for missing price")
 	}
-	noPerks := valid
-	noPerks.Perks = nil
-	if err := validPlanUpdate(noPerks); err == nil {
-		t.Fatal("expected error for missing perks")
+	restated := valid
+	restated.Perks = []string{"1,000,000 MCP requests/month"}
+	if err := validPlanUpdate(restated); err == nil {
+		t.Fatal("expected error for a perk restating a quota")
+	}
+	badLimits := valid
+	badLimits.Limits = &planLimitsInput{StorageBytes: int64p(-5)}
+	if err := validPlanUpdate(badLimits); err == nil {
+		t.Fatal("expected error for a negative storage quota")
 	}
 }
 

@@ -76,6 +76,23 @@ class PendingWork:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+@dataclass
+class FlushResult:
+    """What a flush actually did.
+
+    ``delivered`` counts items that were processed and removed from the queue.
+    Everything else stays queued (and persisted), so it is replayable, and is
+    listed in ``undelivered`` with the reason it could not be delivered.
+    """
+
+    delivered: int = 0
+    undelivered: list = field(default_factory=list)
+
+    @property
+    def pending(self) -> int:
+        return len(self.undelivered)
+
+
 class ProviderUnavailable(RuntimeError):
     """Raised when an operation needs a backend that is not reachable."""
 
@@ -94,12 +111,19 @@ class HermesMemoryProvider:
         store_path: Optional[str] = None,
         config: Optional[dict] = None,
         recaller: Optional[Callable[[str, int], list]] = None,
+        ingester: Optional[Callable[[Turn], None]] = None,
     ):
         self.profile_id = profile_id
         self.agent_id = agent_id
         self._memories: dict[str, MemoryEntry] = {}
         self._turns: list[Turn] = []
         self._queue: list[PendingWork] = []
+        # Results of drained ``prefetch`` work, keyed by (query, max_items) and
+        # consumed by the next matching ``prefetch`` call.
+        self._prefetched: dict[tuple[str, int], list] = {}
+        # Delivers a stored turn to the full-ingestion backend; raises on
+        # failure. Without one, ``ingest_turn`` work stays queued.
+        self._ingester = ingester
         self._lineage: list[dict] = []
         self._store_path = store_path or os.getenv("SCOS_HERMES_MEMORY_STORE_PATH")
         self._config = dict(config or {})
@@ -148,14 +172,24 @@ class HermesMemoryProvider:
     # ---- Hermes lifecycle: recall and persistence (§24.3) ----
 
     def prefetch(self, query: str = "", max_items: int = 20) -> list[Turn]:
-        """Return authorised cached recall before the model call."""
+        """Return authorised cached recall before the model call.
+
+        A result pre-warmed by draining ``queue_prefetch`` work is served once;
+        otherwise recall runs now.
+        """
+        cached = self._prefetched.pop((query, max_items), None)
+        if cached is not None:
+            return cached
+        return self._run_recall(query, max_items)
+
+    def queue_prefetch(self, query: str, max_items: int = 20) -> bool:
+        """Queue a pre-warm of likely next-turn context; ``flush`` runs it."""
+        return self._enqueue("prefetch", {"query": query, "max_items": max_items})
+
+    def _run_recall(self, query: str, max_items: int) -> list:
         if self._recaller is not None:
             return self._recaller(query, max_items)
         return self.recall(query, max_items)
-
-    def queue_prefetch(self, query: str, max_items: int = 20) -> bool:
-        """Pre-warm likely next-turn context without blocking the caller."""
-        return self._enqueue("prefetch", {"query": query, "max_items": max_items})
 
     def sync_turn(
         self,
@@ -173,6 +207,8 @@ class HermesMemoryProvider:
         if any(t.session_id == session_id and t.turn_id == turn_id for t in self._turns):
             return False
         self._turns.append(Turn(session_id, turn_id, messages, tool_calls or [], context))
+        # Pre-warmed recall predates this turn and would omit it.
+        self._prefetched.clear()
         self._enqueue("ingest_turn", {"session_id": session_id, "turn_id": turn_id})
         self._persist()
         return True
@@ -192,8 +228,8 @@ class HermesMemoryProvider:
         self._session_id = session_id
         return self.prefetch("", max_items=10)
 
-    def on_session_end(self, session_id: str) -> int:
-        """Flush queued work belonging to a finished session."""
+    def on_session_end(self, session_id: str) -> FlushResult:
+        """Flush queued work, reporting anything that could not be delivered."""
         return self.flush()
 
     def on_session_switch(self, from_session: Optional[str], to_session: str, reason: str = "resume") -> dict:
@@ -242,11 +278,18 @@ class HermesMemoryProvider:
         )
 
     def shutdown(self) -> dict:
-        """Flush bounded queues and report replayable pending work (§24.3)."""
-        drained = self.flush()
-        self._persist()
+        """Flush bounded queues and report replayable pending work (§24.3).
+
+        Undelivered work stays in the persisted queue, so a replacement
+        provider on the same profile replays it.
+        """
+        result = self.flush()
         self._initialized = False
-        return {"drained": drained, "pending": len(self._queue)}
+        return {
+            "drained": result.delivered,
+            "pending": len(self._queue),
+            "undelivered": list(result.undelivered),
+        }
 
     # ---- Hermes lifecycle: tools (§24.5) ----
 
@@ -445,12 +488,54 @@ class HermesMemoryProvider:
     def pending_work(self) -> list[PendingWork]:
         return list(self._queue)
 
-    def flush(self) -> int:
-        """Drain the queue, returning how many items were processed."""
-        drained = len(self._queue)
-        self._queue.clear()
+    def flush(self) -> FlushResult:
+        """Process queued work, keeping anything that could not be delivered.
+
+        ``prefetch`` work runs recall and holds the result for the next
+        matching ``prefetch`` call. ``ingest_turn`` work hands the stored turn
+        to the ingester. An item is removed only once it has been processed;
+        a failed or undeliverable item stays queued and is reported.
+        """
+        result = FlushResult()
+        remaining: list[PendingWork] = []
+        for item in self._queue:
+            error = self._deliver(item)
+            if error is None:
+                result.delivered += 1
+                continue
+            remaining.append(item)
+            result.undelivered.append({"kind": item.kind, "payload": dict(item.payload), "error": error})
+        self._queue = remaining
         self._persist()
-        return drained
+        return result
+
+    def _deliver(self, item: PendingWork) -> Optional[str]:
+        """Process one queued item. Returns None on success, else the reason."""
+        if item.kind == "prefetch":
+            query = str(item.payload.get("query", ""))
+            max_items = int(item.payload.get("max_items", 20))
+            try:
+                self._prefetched[(query, max_items)] = self._run_recall(query, max_items)
+            except Exception as exc:  # recaller is caller-supplied
+                return f"prefetch failed: {exc}"
+            return None
+        if item.kind == "ingest_turn":
+            if self._ingester is None:
+                return "no ingestion backend configured"
+            session_id = item.payload.get("session_id")
+            turn_id = item.payload.get("turn_id")
+            turn = next(
+                (t for t in self._turns if t.session_id == session_id and t.turn_id == turn_id),
+                None,
+            )
+            if turn is None:
+                return f"turn {session_id}/{turn_id} is not in the store"
+            try:
+                self._ingester(turn)
+            except Exception as exc:  # ingester is caller-supplied
+                return f"ingestion failed: {exc}"
+            return None
+        return f"unknown work kind: {item.kind}"
 
     def _enqueue(self, kind: str, payload: dict) -> bool:
         """Append bounded work. Returns False when the queue is saturated."""

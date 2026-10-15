@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTreeSitterExtractsPythonDeclarations(t *testing.T) {
 	symbols, err := extractTreeSitterSymbols("models.py", "python", `class User:
@@ -126,5 +129,30 @@ func TestTreeSitterDoesNotCollectCalledNamesForNonCallableKinds(t *testing.T) {
 	}
 	if iface.CalledNames != nil {
 		t.Fatalf("expected no CalledNames for an interface, got %+v", iface.CalledNames)
+	}
+}
+
+func TestTreeSitterExtractsPythonClassAttributes(t *testing.T) {
+	src := "from dataclasses import dataclass\n\nLIMIT = 3\n\n@dataclass\nclass CommandRewrite:\n    original_command: str\n    is_rewritten: bool\n    reason: str = \"\"\n    retries = 2\n\n    def apply(self):\n        local = 1\n        self.cached = local\n"
+	symbols, err := extractTreeSitterSymbols("reducer.py", "python", src, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]string{}
+	for _, s := range symbols {
+		kinds[s.FullyQualifiedName] = s.Kind
+	}
+	for _, name := range []string{"reducer.CommandRewrite.original_command", "reducer.CommandRewrite.is_rewritten", "reducer.CommandRewrite.reason", "reducer.CommandRewrite.retries"} {
+		if kinds[name] != "field" {
+			t.Errorf("%s: kind %q, want field (symbols %v)", name, kinds[name], kinds)
+		}
+	}
+	for name, kind := range kinds {
+		if kind == "field" && (strings.HasSuffix(name, ".LIMIT") || strings.HasSuffix(name, ".local") || strings.HasSuffix(name, ".cached")) {
+			t.Errorf("%s is not a class attribute but was indexed as one", name)
+		}
+	}
+	if kinds["reducer.CommandRewrite.apply"] != "method" {
+		t.Errorf("method lost: %v", kinds)
 	}
 }

@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -8,10 +9,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -48,11 +51,23 @@ type Adapter struct {
 	Supported    []string `json:"supported_operations"`
 	Unsupported  []string `json:"unsupported_operations"`
 	HealthStatus string   `json:"health_status"`
+	// Support is "implemented" when the gateway serves this boundary and
+	// "unsupported" when it has no implementation for it.
+	Support string `json:"support"`
 	// Tested records whether this boundary has passing conformance evidence
-	// (ss23.7). Boundaries without conformance evidence SHALL be labelled
+	// (ss23.7). It is never declared: it is true only when the in-process
+	// conformance suite (conformance.go) ran every check for the boundary
+	// and all of them passed. Boundaries without that evidence are labelled
 	// experimental rather than presented as tested compatibility.
 	Tested bool `json:"tested"`
+	// Conformance is the suite result the Tested flag is derived from.
+	Conformance *AdapterConformance `json:"conformance,omitempty"`
 }
+
+const (
+	supportImplemented = "implemented"
+	supportUnsupported = "unsupported"
+)
 
 // requiredAdapterOperations is the full agent adapter contract from
 // governance ss23.4. Every registered adapter must classify each of these
@@ -95,7 +110,7 @@ type ContextEnvelope struct {
 	Artifacts            []string `json:"artifacts,omitempty"`
 	Sources              []string `json:"sources,omitempty"`
 	RestorationRefs      []string `json:"restoration_references,omitempty"`
-	Format               string   `json:"format"` // native, markdown, json, text
+	Format               string   `json:"format"` // markdown, json, text
 }
 
 type AdapterContract struct {
@@ -129,7 +144,25 @@ func (s *compatServer) readinessCheck() error {
 func newCompatServer() *compatServer {
 	s := &compatServer{adapters: make(map[string]*Adapter)}
 	s.registerDefaultAdapters()
+	s.applyConformance(runConformance(s.adapters, time.Now()))
 	return s
+}
+
+// applyConformance derives each boundary's support and tested state from a
+// conformance run. A boundary with no gateway implementation is
+// unsupported; an implemented boundary is tested only if its run passed.
+func (s *compatServer) applyConformance(results map[string]*AdapterConformance) {
+	for boundary, adapter := range s.adapters {
+		if _, implemented := boundaryProfiles[boundary]; !implemented {
+			adapter.Support = supportUnsupported
+			adapter.Tested = false
+			adapter.Conformance = nil
+			continue
+		}
+		adapter.Support = supportImplemented
+		adapter.Conformance = results[boundary]
+		adapter.Tested = adapter.Conformance != nil && adapter.Conformance.Passed
+	}
 }
 
 func (s *compatServer) registerDefaultAdapters() {
@@ -142,7 +175,6 @@ func (s *compatServer) registerDefaultAdapters() {
 			"identify_session", "capture_ingress", "inject_context", "observe_model_request",
 			"observe_model_response", "observe_tool_call", "observe_tool_result", "commit_turn",
 			"checkpoint", "resume", "shutdown", "uninstall"},
-		Tested: true,
 	}
 
 	s.adapters["http_sidecar"] = &Adapter{
@@ -155,7 +187,6 @@ func (s *compatServer) registerDefaultAdapters() {
 			"shutdown", "uninstall"},
 		Unsupported: []string{"observe_model_request", "observe_model_response", "observe_tool_call",
 			"observe_tool_result", "resume"},
-		Tested: true,
 	}
 
 	s.adapters["mcp_server"] = &Adapter{
@@ -167,7 +198,6 @@ func (s *compatServer) registerDefaultAdapters() {
 			"identify_session", "capture_ingress", "inject_context", "observe_tool_call",
 			"observe_tool_result", "commit_turn", "shutdown", "uninstall"},
 		Unsupported: []string{"observe_model_request", "observe_model_response", "checkpoint", "resume"},
-		Tested:      true,
 	}
 
 	s.adapters["cli_wrapper"] = &Adapter{
@@ -179,18 +209,20 @@ func (s *compatServer) registerDefaultAdapters() {
 			"identify_session", "capture_ingress", "inject_context", "commit_turn", "shutdown", "uninstall"},
 		Unsupported: []string{"observe_model_request", "observe_model_response", "observe_tool_call",
 			"observe_tool_result", "checkpoint", "resume"},
-		Tested: true,
 	}
 
+	// The session/file watcher boundary is part of the governance catalog
+	// (ss23) but nothing in this fabric implements it: no watcher reads
+	// session files and the gateway has no ingestion path for one. It is
+	// listed so the matrix is complete, with every operation unsupported,
+	// and agents cannot register against it.
 	s.adapters["session_watcher"] = &Adapter{
 		Boundary:     "session_watcher",
 		Name:         "Session/File Watcher",
 		Tier:         "D",
-		Capabilities: []string{"passive_transcript_ingestion", "next_session_context"},
-		Supported:    []string{"detect", "install", "configure", "health", "capture_ingress", "inject_context", "shutdown", "uninstall"},
-		Unsupported: []string{"identify_user", "identify_agent", "identify_session", "observe_model_request",
-			"observe_model_response", "observe_tool_call", "observe_tool_result", "commit_turn", "checkpoint", "resume"},
-		Tested: true,
+		Capabilities: []string{},
+		Supported:    []string{},
+		Unsupported:  append([]string(nil), requiredAdapterOperations...),
 	}
 
 	s.adapters["model_api_proxy"] = &Adapter{
@@ -203,7 +235,6 @@ func (s *compatServer) registerDefaultAdapters() {
 			"shutdown", "uninstall"},
 		Unsupported: []string{"identify_user", "identify_agent", "identify_session",
 			"observe_tool_call", "observe_tool_result", "checkpoint", "resume"},
-		Tested: false, // experimental: no conformance evidence yet, ss23.7
 	}
 
 	s.adapters["provider_plugin"] = &Adapter{
@@ -215,7 +246,6 @@ func (s *compatServer) registerDefaultAdapters() {
 			"identify_session", "capture_ingress", "inject_context", "commit_turn", "shutdown", "uninstall"},
 		Unsupported: []string{"observe_model_request", "observe_model_response", "observe_tool_call",
 			"observe_tool_result", "checkpoint", "resume"},
-		Tested: false, // experimental: no conformance evidence yet, ss23.7
 	}
 
 	s.adapters["lifecycle_hooks"] = &Adapter{
@@ -228,7 +258,6 @@ func (s *compatServer) registerDefaultAdapters() {
 			"commit_turn", "shutdown", "uninstall"},
 		Unsupported: []string{"identify_user", "identify_agent", "observe_model_request",
 			"observe_model_response", "checkpoint", "resume"},
-		Tested: false, // experimental: no conformance evidence yet, ss23.7
 	}
 
 	s.adapters["event_bridge"] = &Adapter{
@@ -239,7 +268,6 @@ func (s *compatServer) registerDefaultAdapters() {
 		Supported:    []string{"detect", "install", "configure", "health", "capture_ingress", "inject_context", "commit_turn", "shutdown", "uninstall"},
 		Unsupported: []string{"identify_user", "identify_agent", "identify_session", "observe_model_request",
 			"observe_model_response", "observe_tool_call", "observe_tool_result", "checkpoint", "resume"},
-		Tested: false, // experimental: no conformance evidence yet, ss23.7
 	}
 
 	s.adapters["a2a_adapter"] = &Adapter{
@@ -251,7 +279,6 @@ func (s *compatServer) registerDefaultAdapters() {
 			"identify_session", "capture_ingress", "inject_context", "commit_turn", "shutdown", "uninstall"},
 		Unsupported: []string{"identify_user", "observe_model_request", "observe_model_response",
 			"observe_tool_call", "observe_tool_result", "checkpoint", "resume"},
-		Tested: false, // experimental: no conformance evidence yet, ss23.7
 	}
 }
 
@@ -301,6 +328,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	database.TuneSQLDB(db)
 	defer db.Close()
 
@@ -319,6 +349,7 @@ func main() {
 	mux.HandleFunc("/v1/adapters", srv.handleAdapters)
 	mux.HandleFunc("/v1/adapters/", srv.handleAdapterByBoundary)
 	mux.HandleFunc("/v1/compatibility", srv.handleCompatibility)
+	mux.HandleFunc("/v1/compatibility/conformance", srv.handleConformance)
 
 	// Agents
 	mux.HandleFunc("/v1/agents", srv.handleAgents)
@@ -336,7 +367,7 @@ func main() {
 		addr = ":8087"
 	}
 	log.Printf("compatibility gateway listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("compatibility-gateway", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -357,17 +388,23 @@ func healthOK(w http.ResponseWriter, _ *http.Request) {
 // unconditionally "healthy".
 const adapterHealthWindow = 24 * time.Hour
 
-func (s *compatServer) adapterHealthStatus(ctx context.Context, tenantID, boundary string, tested bool) string {
-	if !tested {
+func (s *compatServer) adapterHealthStatus(ctx context.Context, tenantID string, a *Adapter) string {
+	if a.Support == supportUnsupported {
+		return "unsupported"
+	}
+	if !a.Tested {
 		return "experimental_untested"
 	}
+	boundary := a.Boundary
 	var lastSeen sql.NullTime
-	err := s.db.QueryRowContext(ctx, `
-		SELECT MAX(ai.last_seen_at)
-		FROM adapter_instances ai
-		JOIN agent_adapters aa ON aa.id = ai.adapter_id
-		WHERE ai.tenant_id = $1 AND aa.boundary = $2 AND ai.status = 'active'
-	`, tenantID, boundary).Scan(&lastSeen)
+	err := withTenantRead(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT MAX(ai.last_seen_at)
+			FROM adapter_instances ai
+			JOIN agent_adapters aa ON aa.id = ai.adapter_id
+			WHERE ai.tenant_id = $1 AND aa.boundary = $2 AND ai.status = 'active'
+		`, tenantID, boundary).Scan(&lastSeen)
+	})
 	if err != nil || !lastSeen.Valid {
 		return "no_recent_traffic"
 	}
@@ -381,7 +418,7 @@ func (s *compatServer) adapterHealthStatus(ctx context.Context, tenantID, bounda
 // from current real agent activity for the caller's tenant.
 func (s *compatServer) snapshotAdapter(ctx context.Context, tenantID string, a *Adapter) *Adapter {
 	snap := *a
-	snap.HealthStatus = s.adapterHealthStatus(ctx, tenantID, a.Boundary, a.Tested)
+	snap.HealthStatus = s.adapterHealthStatus(ctx, tenantID, a)
 	return &snap
 }
 
@@ -448,6 +485,45 @@ func (s *compatServer) handleCompatibility(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// handleConformance reports the conformance run each boundary's tested
+// state is derived from. ?boundary= narrows it to one boundary.
+func (s *compatServer) handleConformance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, status, msg := resolveIdentity(r, "", ""); status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	only := r.URL.Query().Get("boundary")
+	if only != "" {
+		if _, ok := s.adapters[only]; !ok {
+			http.Error(w, "adapter not found", http.StatusNotFound)
+			return
+		}
+	}
+	type entry struct {
+		Boundary    string              `json:"boundary"`
+		Support     string              `json:"support"`
+		Tested      bool                `json:"tested"`
+		Conformance *AdapterConformance `json:"conformance,omitempty"`
+	}
+	boundaries := make([]string, 0, len(s.adapters))
+	for boundary := range s.adapters {
+		if only == "" || boundary == only {
+			boundaries = append(boundaries, boundary)
+		}
+	}
+	sort.Strings(boundaries)
+	out := make([]entry, 0, len(boundaries))
+	for _, boundary := range boundaries {
+		a := s.adapters[boundary]
+		out = append(out, entry{Boundary: boundary, Support: a.Support, Tested: a.Tested, Conformance: a.Conformance})
+	}
+	writeJSON(w, out)
+}
+
 // ── agents ───────────────────────────────────────────────────────────────
 
 func (s *compatServer) handleAgents(w http.ResponseWriter, r *http.Request) {
@@ -492,6 +568,10 @@ func (s *compatServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		if adapter == nil {
 			http.Error(w, "boundary must reference a known adapter", http.StatusBadRequest)
+			return
+		}
+		if adapter.Support != supportImplemented {
+			http.Error(w, "boundary "+adapter.Boundary+" has no implementation in this gateway", http.StatusBadRequest)
 			return
 		}
 		if reg.Status == "" {
@@ -564,7 +644,11 @@ func (s *compatServer) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if env.Format == "" {
-			env.Format = "json"
+			env.Format = formatJSONRender
+		}
+		if !isRenderFormat(env.Format) {
+			http.Error(w, "format must be one of "+strings.Join(renderFormats, ", "), http.StatusBadRequest)
+			return
 		}
 		identity, status, msg := resolveIdentity(r, env.TenantID, env.PrincipalID)
 		if status != 0 {
@@ -632,7 +716,7 @@ func (s *compatServer) handleRender(w http.ResponseWriter, r *http.Request) {
 		TenantID     string `json:"tenant_id,omitempty"`
 		PrincipalID  string `json:"principal_id,omitempty"`
 		SessionID    string `json:"session_id"`
-		TargetFormat string `json:"target_format"` // markdown, text, json
+		TargetFormat string `json:"target_format"` // markdown, text, json; empty renders the envelope's stored format
 		AgentID      string `json:"agent_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -656,9 +740,17 @@ func (s *compatServer) handleRender(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rendered := renderEnvelope(env, req.TargetFormat)
+	target := req.TargetFormat
+	if target == "" {
+		target = env.Format
+	}
+	produced, rendered, err := renderEnvelope(env, target)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	writeJSON(w, map[string]string{
-		"format":  req.TargetFormat,
+		"format":  produced,
 		"content": rendered,
 	})
 }
@@ -672,35 +764,82 @@ func (s *compatServer) handleTranslate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		EventType    string `json:"event_type"`
-		SourceData   any    `json:"source_data"`
-		SourceFormat string `json:"source_format"`
-		TargetFormat string `json:"target_format"`
+		EventType    string          `json:"event_type"`
+		SourceData   json.RawMessage `json:"source_data"`
+		SourceFormat string          `json:"source_format"`
+		TargetFormat string          `json:"target_format"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	// Translate native event to SCOS common event model
-	translated := translateEvent(req.EventType, req.SourceData, req.SourceFormat)
+	if req.SourceFormat == "" {
+		http.Error(w, "source_format is required (supported: "+strings.Join(supportedTranslationFormats(), ", ")+")", http.StatusBadRequest)
+		return
+	}
+	if req.TargetFormat == "" {
+		req.TargetFormat = formatSCOSCommon
+	}
+	if len(req.SourceData) == 0 {
+		http.Error(w, "source_data is required", http.StatusBadRequest)
+		return
+	}
+	event, translated, err := translateEvent(req.SourceData, req.SourceFormat, req.TargetFormat)
+	switch {
+	case errors.Is(err, errUnsupportedFormat):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case errors.Is(err, errUnrepresentable):
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.EventType != "" && req.EventType != event.EventType {
+		http.Error(w, fmt.Sprintf("event_type %q does not match the source event, which is a %s", req.EventType, event.EventType), http.StatusBadRequest)
+		return
+	}
 	writeJSON(w, map[string]any{
-		"event_type":    req.EventType,
+		"event_type":    event.EventType,
+		"source_format": req.SourceFormat,
+		"target_format": req.TargetFormat,
 		"translated":    translated,
-		"target_format": "scos_common",
 	})
 }
 
 // ── envelope rendering ───────────────────────────────────────────────────
 
-func renderEnvelope(env *ContextEnvelope, format string) string {
+const (
+	formatJSONRender     = "json"
+	formatMarkdownRender = "markdown"
+	formatTextRender     = "text"
+)
+
+var renderFormats = []string{formatJSONRender, formatMarkdownRender, formatTextRender}
+
+func isRenderFormat(format string) bool {
+	for _, f := range renderFormats {
+		if f == format {
+			return true
+		}
+	}
+	return false
+}
+
+// renderEnvelope renders env in format and returns the format it produced.
+// An unknown format is an error: nothing is rendered under a name it does
+// not have.
+func renderEnvelope(env *ContextEnvelope, format string) (string, string, error) {
 	switch format {
-	case "markdown":
-		return renderMarkdown(env)
-	case "text":
-		return renderText(env)
+	case formatMarkdownRender:
+		return format, renderMarkdown(env), nil
+	case formatTextRender:
+		return format, renderText(env), nil
+	case formatJSONRender:
+		return format, renderJSON(env), nil
 	default:
-		return renderJSON(env)
+		return "", "", fmt.Errorf("target_format %q is not supported (supported: %s)", format, strings.Join(renderFormats, ", "))
 	}
 }
 
@@ -781,6 +920,9 @@ func renderText(env *ContextEnvelope) string {
 	if env.GoverningConstraints != "" {
 		b.WriteString("GOVERNING CONSTRAINTS:\n" + env.GoverningConstraints + "\n\n")
 	}
+	if env.UserModel != "" {
+		b.WriteString("USER MODEL:\n" + env.UserModel + "\n\n")
+	}
 	if len(env.Facts) > 0 {
 		b.WriteString("FACTS:\n")
 		for _, f := range env.Facts {
@@ -846,37 +988,6 @@ func renderText(env *ContextEnvelope) string {
 func renderJSON(env *ContextEnvelope) string {
 	data, _ := json.MarshalIndent(env, "", "  ")
 	return string(data)
-}
-
-// ── event translation ────────────────────────────────────────────────────
-
-func translateEvent(eventType string, sourceData any, sourceFormat string) map[string]any {
-	translated := map[string]any{
-		"event_type":    eventType,
-		"source_format": sourceFormat,
-		"scos_version":  version,
-		"translated_at": time.Now().UTC().Format(time.RFC3339),
-	}
-
-	switch sourceFormat {
-	case "openai":
-		if data, ok := sourceData.(map[string]any); ok {
-			translated["content"] = data
-			translated["role"] = data["role"]
-			translated["provenance"] = "openai_compatible"
-		}
-	case "anthropic":
-		translated["provenance"] = "anthropic"
-		translated["content"] = sourceData
-	case "mcp":
-		translated["provenance"] = "mcp"
-		translated["tool_call"] = sourceData
-	default:
-		translated["provenance"] = sourceFormat
-		translated["content"] = sourceData
-	}
-
-	return translated
 }
 
 // ── utility ──────────────────────────────────────────────────────────────

@@ -2,10 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 )
 
 // Remaining Hermes MemoryProvider lifecycle surface (GOVERNANCE.md §24.2).
@@ -32,53 +32,9 @@ var configKeys = []string{
 // configuration rather than provider JSON.
 var secretKeys = []string{"token", "password", "secret", "api_key", "auth_token"}
 
-// maxPrefetchQueueDepth bounds the pre-warm queue so an unreachable backend
-// cannot grow it without limit (§24.3 requires bounded queues).
-const maxPrefetchQueueDepth = 256
-
-// prefetchQueue holds pre-warm requests until they are drained. Entries are
-// retained rather than dropped so shutdown can report replayable pending work.
-type prefetchQueue struct {
-	mu    sync.Mutex
-	items []queuedPrefetch
-}
-
-type queuedPrefetch struct {
-	TenantID    string `json:"tenant_id"`
-	PrincipalID string `json:"principal_id"`
-	SessionID   string `json:"session_id"`
-	Query       string `json:"query,omitempty"`
-	MaxItems    int    `json:"max_items,omitempty"`
-}
-
-// enqueue appends work, reporting false once the bound is reached.
-func (q *prefetchQueue) enqueue(item queuedPrefetch) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.items) >= maxPrefetchQueueDepth {
-		return false
-	}
-	q.items = append(q.items, item)
-	return true
-}
-
-func (q *prefetchQueue) depth() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.items)
-}
-
-// drain removes and returns all queued work.
-func (q *prefetchQueue) drain() []queuedPrefetch {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	drained := q.items
-	q.items = nil
-	return drained
-}
-
 // handleQueuePrefetch pre-warms likely next-turn context without blocking the
-// caller: the request is queued and acknowledged immediately (§24.3).
+// caller: the request is queued and acknowledged immediately, and the
+// prefetch worker (prefetch.go) consumes it (§24.3).
 func (s *hermesServer) handleQueuePrefetch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -115,6 +71,8 @@ func (s *hermesServer) handleQueuePrefetch(w http.ResponseWriter, r *http.Reques
 		SessionID:   req.SessionID,
 		Query:       req.Query,
 		MaxItems:    req.MaxItems,
+		// Governed recall for the query runs later on the caller's behalf.
+		authorization: r.Header.Get("Authorization"),
 	})
 	if !queued {
 		// Saturation is reported rather than hidden: the caller learns the
@@ -173,7 +131,10 @@ func (s *hermesServer) handleTurnStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"session_id": req.SessionID, "recall": recall})
 }
 
-// handleSessionEnd flushes queued work belonging to a finished session.
+// handleSessionEnd cancels the finished session's pending pre-warm work and
+// drops its warmed results: there is no next turn for them to serve. Every
+// durable write (sync_turn, memory_write, pre_compress) was committed before
+// it was acknowledged, so nothing else is pending for the session.
 func (s *hermesServer) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -192,26 +153,25 @@ func (s *hermesServer) handleSessionEnd(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "session_id must be a UUID", http.StatusBadRequest)
 		return
 	}
-	if _, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID); status != 0 {
+	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
+	if status != 0 {
 		http.Error(w, msg, status)
 		return
 	}
 
-	// Only this session's queued work is drained; other sessions' pre-warm
-	// requests stay queued and replayable.
-	var retained, drained []queuedPrefetch
-	for _, item := range s.prefetchQueue.drain() {
-		if item.SessionID == req.SessionID {
-			drained = append(drained, item)
-			continue
-		}
-		retained = append(retained, item)
-	}
-	for _, item := range retained {
-		s.prefetchQueue.enqueue(item)
-	}
+	// Only the caller's work for this session is touched; other sessions and
+	// other principals' pre-warm requests stay queued.
+	cancelled := s.prefetchQueue.cancel(func(item queuedPrefetch) bool {
+		return item.TenantID == identity.TenantID && item.PrincipalID == identity.PrincipalID && item.SessionID == req.SessionID
+	})
+	evicted := s.warm.evict(func(key warmKey) bool {
+		return key.tenantID == identity.TenantID && key.principalID == identity.PrincipalID && key.sessionID == req.SessionID
+	})
 	writeJSON(w, map[string]any{
-		"session_id": req.SessionID, "drained": len(drained), "pending": s.prefetchQueue.depth(),
+		"session_id":         req.SessionID,
+		"cancelled_prefetch": cancelled,
+		"evicted_warm":       evicted,
+		"pending":            s.prefetchQueue.depth(),
 	})
 }
 
@@ -248,7 +208,8 @@ func (s *hermesServer) handleConfigSchema(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// handleSaveConfig validates configuration against the governed contract.
+// handleSaveConfig validates configuration against the governed contract and
+// stores it for the authenticated principal and profile scope.
 func (s *hermesServer) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -288,7 +249,43 @@ func (s *hermesServer) handleSaveConfig(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	writeJSON(w, map[string]any{"saved": true, "config": config})
+	for _, key := range configKeys {
+		if value, present := config[key]; present {
+			if _, isString := value.(string); !isString {
+				http.Error(w, key+" must be a string", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	// The configuration names the identity it is for; it must be the
+	// authenticated caller's.
+	tenantID, _ := config["tenant_id"].(string)
+	principalID, _ := config["principal_id"].(string)
+	identity, status, msg := resolveIdentity(r, strings.TrimSpace(tenantID), strings.TrimSpace(principalID))
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	if strings.TrimSpace(tenantID) != identity.TenantID || strings.TrimSpace(principalID) != identity.PrincipalID {
+		http.Error(w, "configuration identity does not match the authenticated identity", http.StatusForbidden)
+		return
+	}
+	if s.db == nil {
+		http.Error(w, "postgres dependency is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	scope, _ := config["profile_scope"].(string)
+	saved, err := saveProviderConfig(r.Context(), s.db, identity, strings.TrimSpace(scope), config)
+	if err != nil {
+		http.Error(w, "save config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"saved":         true,
+		"profile_scope": saved.ProfileScope,
+		"config":        saved.Config,
+		"updated_at":    saved.ConfigUpdatedAt,
+	})
 }
 
 // handleToolCall dispatches the supplemental §24.5 tools. These are
@@ -322,11 +319,10 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Tool {
 	case "scos_status":
-		writeJSON(w, map[string]any{
-			"tool":        req.Tool,
-			"provider":    "scos-nexus",
-			"queue_depth": s.prefetchQueue.depth(),
-		})
+		status := s.prefetchQueue.stats()
+		status["tool"] = req.Tool
+		status["provider"] = providerName
+		writeJSON(w, status)
 	case "scos_recall":
 		query, _ := req.Arguments["query"].(string)
 		if strings.TrimSpace(query) == "" {
@@ -342,34 +338,47 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 				maxItems = int(n)
 			}
 		}
-		ctx := r.Context()
-		tx, err := s.db.BeginTx(ctx, nil)
+		// The session a recall is scoped to is the one the caller named
+		// (request field, or the tool argument); none named means
+		// long-term memory only.
+		sessionID := strings.TrimSpace(req.SessionID)
+		if sessionID == "" {
+			sessionID, _ = req.Arguments["session_id"].(string)
+			sessionID = strings.TrimSpace(sessionID)
+		}
+		if sessionID != "" && !isUUID(sessionID) {
+			http.Error(w, "session_id must be a session UUID", http.StatusBadRequest)
+			return
+		}
+		if s.retrieval == nil {
+			http.Error(w, "retrieval-orchestrator is not configured for scos_recall", http.StatusServiceUnavailable)
+			return
+		}
+		result, err := s.retrieval.recall(r.Context(), r, identity, query, maxItems, sessionID)
 		if err != nil {
-			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			status := http.StatusBadGateway
+			var ue *upstreamError
+			if errors.As(err, &ue) {
+				status = ue.status
+			}
+			http.Error(w, "recall: "+err.Error(), status)
 			return
 		}
-		defer tx.Rollback()
-		if err := setPrincipalContext(ctx, tx, identity); err != nil {
-			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		memories, err := searchMemories(ctx, tx, identity.TenantID, query, maxItems)
-		if err != nil {
-			http.Error(w, "search memories: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, map[string]any{"tool": req.Tool, "recall": memories})
+		writeJSON(w, map[string]any{"tool": req.Tool, "served_by": "retrieval-orchestrator", "retrieval_run_id": result.RetrievalRunID, "recall": result.Memories,
+			"degraded_sources": result.DegradedSources, "degraded_models": result.DegradedModels})
 	default:
-		// The remaining inspection and correction tools are served by
-		// memory-intelligence, which owns the user model, graph and
-		// correction paths. Report the boundary rather than fabricating a
-		// local answer (§42).
-		writeJSON(w, map[string]any{
-			"tool":             req.Tool,
-			"delegated_to":     "memory-intelligence",
-			"delegated_path":   governedToolPaths()[req.Tool],
-			"requires_routing": true,
-		})
+		// The inspection and correction tools are owned by
+		// memory-intelligence; execute them there and return its answer.
+		if s.memoryIntelligence == nil {
+			http.Error(w, "memory-intelligence is not configured for "+req.Tool, http.StatusServiceUnavailable)
+			return
+		}
+		result, status, err := s.memoryIntelligence.executeDelegatedTool(r.Context(), r, identity, req.Tool, req.Arguments)
+		if err != nil {
+			http.Error(w, err.Error(), status)
+			return
+		}
+		writeJSON(w, map[string]any{"tool": req.Tool, "served_by": "memory-intelligence", "result": result})
 	}
 }
 

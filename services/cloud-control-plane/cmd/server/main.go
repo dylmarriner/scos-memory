@@ -1,8 +1,11 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -37,13 +41,34 @@ type credentials struct {
 	Password    string `json:"password"`
 	DisplayName string `json:"display_name"`
 }
-type identity struct{ UserID, TenantID, PrincipalID, DisplayName, Email, PlatformRole string }
 
+// identity is the signed-in account; its JSON shape matches the session
+// response issueSession writes and the dashboard's account views read.
+type identity struct {
+	UserID       string `json:"user_id"`
+	TenantID     string `json:"tenant_id"`
+	PrincipalID  string `json:"principal_id"`
+	DisplayName  string `json:"display_name"`
+	Email        string `json:"email"`
+	PlatformRole string `json:"platform_role"`
+}
+
+// planDefinition is a plan as the pricing page shows it. Perks begins with
+// the quota and feature lines generated from Limits (what is enforced),
+// followed by the plan's free-text perks.
 type planDefinition struct {
-	ID    string   `json:"id"`
-	Name  string   `json:"name"`
-	Price string   `json:"price"`
-	Perks []string `json:"perks"`
+	ID     string     `json:"id"`
+	Name   string     `json:"name"`
+	Price  string     `json:"price"`
+	Perks  []string   `json:"perks"`
+	Limits planLimits `json:"limits"`
+}
+
+// planLimits are a plan's enforced limits; a null limit is unlimited.
+type planLimits struct {
+	MonthlyMCPRequests *int64   `json:"monthly_mcp_requests"`
+	StorageBytes       *int64   `json:"storage_bytes"`
+	Features           []string `json:"features"`
 }
 
 func main() {
@@ -54,6 +79,9 @@ func main() {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
 	}
 	database.TuneSQLDB(db)
 	defer db.Close()
@@ -153,7 +181,7 @@ func main() {
 		addr = ":8079"
 	}
 	log.Printf("cloud-control-plane listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("cloud-control-plane", mux)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -228,12 +256,18 @@ func userSearchFilter(q, plan, role string) (string, []any) {
 	return strings.Join(clauses, " AND "), args
 }
 
-// validPerks rejects the empty/oversized inputs a creator-console form could
-// submit; the DB column has no such constraint so the API is the only gate.
+// enforcedPerkTerms mark free-text perk lines that would restate a quota or a
+// gated feature. Those lines are generated from the plan's enforced limits
+// (planLines), so a hand-written one could only ever drift from what is
+// enforced; "retrieval" and "retention" name capabilities no plan gates.
+var enforcedPerkTerms = []string{"request", "storage", "graphify", "retrieval", "retention", "quota"}
+
+// validPerks rejects the blank/oversized inputs a creator-console form could
+// submit, and any line that restates a quota or feature; the DB column has
+// no such constraint so the API is the only gate. Perks are the free-text
+// lines shown after the generated quota and feature lines, so a plan may
+// have none.
 func validPerks(perks []string) error {
-	if len(perks) == 0 {
-		return errors.New("at least one perk is required")
-	}
 	if len(perks) > 20 {
 		return errors.New("no more than 20 perks are allowed")
 	}
@@ -242,15 +276,52 @@ func validPerks(perks []string) error {
 		if p == "" || len(p) > 160 {
 			return errors.New("each perk must be 1-160 characters")
 		}
+		lower := strings.ToLower(p)
+		for _, term := range enforcedPerkTerms {
+			if strings.Contains(lower, term) {
+				return fmt.Errorf("perk %q restates a quota or feature; set the plan's limits instead, its quota and feature lines are generated from them", p)
+			}
+		}
 	}
 	return nil
 }
 
+// planLimitsInput sets a plan's enforced limits. A null limit is unlimited.
+type planLimitsInput struct {
+	MonthlyMCPRequests *int64   `json:"monthly_mcp_requests"`
+	StorageBytes       *int64   `json:"storage_bytes"`
+	Features           []string `json:"features"`
+}
+
 type planUpdateInput struct {
-	ID    string   `json:"id"`
-	Name  string   `json:"name"`
-	Price string   `json:"price"`
-	Perks []string `json:"perks"`
+	ID     string           `json:"id"`
+	Name   string           `json:"name"`
+	Price  string           `json:"price"`
+	Perks  []string         `json:"perks"`
+	Limits *planLimitsInput `json:"limits,omitempty"`
+}
+
+func validLimits(in *planLimitsInput) error {
+	if in == nil {
+		return nil
+	}
+	if in.MonthlyMCPRequests != nil && *in.MonthlyMCPRequests < 0 {
+		return errors.New("monthly_mcp_requests must be non-negative or null for unlimited")
+	}
+	if in.StorageBytes != nil && *in.StorageBytes < 0 {
+		return errors.New("storage_bytes must be non-negative or null for unlimited")
+	}
+	seen := map[string]bool{}
+	for _, f := range in.Features {
+		if _, ok := knownFeatures[f]; !ok {
+			return fmt.Errorf("unknown feature %q", f)
+		}
+		if seen[f] {
+			return fmt.Errorf("duplicate feature %q", f)
+		}
+		seen[f] = true
+	}
+	return nil
 }
 
 func validPlanUpdate(in planUpdateInput) error {
@@ -262,6 +333,9 @@ func validPlanUpdate(in planUpdateInput) error {
 	}
 	if strings.TrimSpace(in.Price) == "" || len(in.Price) > 40 {
 		return errors.New("price must be 1-40 characters")
+	}
+	if err := validLimits(in.Limits); err != nil {
+		return err
 	}
 	return validPerks(in.Perks)
 }
@@ -294,10 +368,16 @@ func (s *server) signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == nil {
-		err = tx.QueryRowContext(r.Context(), `INSERT INTO tenants(name) VALUES($1) RETURNING id`, strings.TrimSpace(in.DisplayName)+"'s workspace").Scan(&tid)
+		tid, err = createTenant(r.Context(), tx, strings.TrimSpace(in.DisplayName)+"'s workspace")
+	}
+	if err == nil {
+		err = actAs(r.Context(), tx, tid, "")
 	}
 	if err == nil {
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES($1,'human',$2,$3) RETURNING id`, tid, uid, in.DisplayName).Scan(&pid)
+	}
+	if err == nil {
+		err = actAs(r.Context(), tx, tid, pid)
 	}
 	if err == nil {
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO workspaces(tenant_id,name) VALUES($1,$2) RETURNING id`, tid, "Memory workspace").Scan(&wid)
@@ -321,6 +401,21 @@ func (s *server) signup(w http.ResponseWriter, r *http.Request) {
 	s.issueSession(w, r, identity{UserID: uid, TenantID: tid, PrincipalID: pid, DisplayName: in.DisplayName, Email: in.Email, PlatformRole: "user"})
 }
 
+// createTenant creates a tenant row through scos_cloud_create_tenant: the
+// runtime role has no INSERT policy on tenants (migrations/000042).
+func createTenant(ctx context.Context, tx *sql.Tx, name string) (string, error) {
+	var id string
+	err := tx.QueryRowContext(ctx, `SELECT scos_cloud_create_tenant($1)::text`, name).Scan(&id)
+	return id, err
+}
+
+// actAs sets the transaction-local RLS identity, so the remaining
+// provisioning writes pass the ordinary tenant and namespace policies.
+func actAs(ctx context.Context, tx *sql.Tx, tenantID, principalID string) error {
+	_, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true), set_config('scos.principal_id',$2,true)`, tenantID, principalID)
+	return err
+}
+
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -333,7 +428,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	var id identity
 	var pw, status string
-	err := s.db.QueryRowContext(r.Context(), `SELECT u.id,u.password_hash,u.display_name,u.email,u.status,u.platform_role,p.id,p.tenant_id FROM cloud_users u JOIN principals p ON p.external_id=u.id::text JOIN tenants t ON t.id=p.tenant_id WHERE lower(u.email)=lower($1) LIMIT 1`, in.Email).Scan(&id.UserID, &pw, &id.DisplayName, &id.Email, &status, &id.PlatformRole, &id.PrincipalID, &id.TenantID)
+	err := s.db.QueryRowContext(r.Context(), `SELECT u.id,u.password_hash,u.display_name,u.email,u.status,u.platform_role,p.principal_id,p.tenant_id FROM cloud_users u CROSS JOIN LATERAL scos_cloud_user_principal(u.id::text) p WHERE lower(u.email)=lower($1) LIMIT 1`, in.Email).Scan(&id.UserID, &pw, &id.DisplayName, &id.Email, &status, &id.PlatformRole, &id.PrincipalID, &id.TenantID)
 	if err != nil || status != "active" || bcrypt.CompareHashAndPassword([]byte(pw), []byte(in.Password)) != nil {
 		http.Error(w, "invalid email or password", 401)
 		return
@@ -361,7 +456,7 @@ func (s *server) current(r *http.Request) (identity, error) {
 		return identity{}, err
 	}
 	var id identity
-	err = s.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.platform_role,p.tenant_id,p.id FROM cloud_sessions cs JOIN cloud_users u ON u.id=cs.user_id JOIN principals p ON p.external_id=u.id::text WHERE cs.token_hash=$1 AND cs.revoked_at IS NULL AND cs.expires_at>now() AND u.status='active' LIMIT 1`, hash(c.Value)).Scan(&id.UserID, &id.Email, &id.DisplayName, &id.PlatformRole, &id.TenantID, &id.PrincipalID)
+	err = s.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.platform_role,p.tenant_id,p.principal_id FROM cloud_sessions cs JOIN cloud_users u ON u.id=cs.user_id CROSS JOIN LATERAL scos_cloud_user_principal(u.id::text) p WHERE cs.token_hash=$1 AND cs.revoked_at IS NULL AND cs.expires_at>now() AND u.status='active' LIMIT 1`, hash(c.Value)).Scan(&id.UserID, &id.Email, &id.DisplayName, &id.PlatformRole, &id.TenantID, &id.PrincipalID)
 	if err == nil {
 		_, _ = s.db.ExecContext(r.Context(), `UPDATE cloud_sessions SET last_seen_at=now() WHERE token_hash=$1`, hash(c.Value))
 	}
@@ -573,8 +668,14 @@ func (s *server) usage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication required", 401)
 		return
 	}
-	var requests, reads, writes, bytesStored int64
-	err = s.db.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(api_requests),0),COALESCE(SUM(memory_reads),0),COALESCE(SUM(memory_writes),0),COALESCE(SUM(bytes_stored),0) FROM cloud_usage_daily WHERE tenant_id=$1`, id.TenantID).Scan(&requests, &reads, &writes, &bytesStored)
+	var requests, reads, writes int64
+	err = s.db.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(api_requests),0),COALESCE(SUM(memory_reads),0),COALESCE(SUM(memory_writes),0) FROM cloud_usage_daily WHERE tenant_id=$1`, id.TenantID).Scan(&requests, &reads, &writes)
+	if err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
+	// Storage is a stock: measure it now rather than summing daily rows.
+	bytesStored, err := s.measureBytesStored(r.Context(), id.TenantID, id.PrincipalID)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
@@ -600,7 +701,7 @@ func (s *server) billing(w http.ResponseWriter, r *http.Request) {
 // plans is public: pricing copy is read by anonymous visitors on the portal
 // as well as by the logged-in dashboard.
 func (s *server) plans(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,price,perks FROM cloud_plan_definitions ORDER BY sort_order`)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,price,perks,monthly_mcp_requests,storage_bytes,features FROM cloud_plan_definitions ORDER BY sort_order`)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
@@ -608,14 +709,47 @@ func (s *server) plans(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []planDefinition{}
 	for rows.Next() {
-		var p planDefinition
-		var perks []byte
-		if rows.Scan(&p.ID, &p.Name, &p.Price, &perks) == nil {
-			p.Perks = decodePerks(perks)
-			out = append(out, p)
+		p, err := scanPlanDefinition(rows)
+		if err != nil {
+			http.Error(w, "database unavailable", 503)
+			return
 		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
 	}
 	jsonWrite(w, 200, out)
+}
+
+type rowScanner interface{ Scan(dest ...any) error }
+
+// scanPlanDefinition reads id,name,price,perks,monthly_mcp_requests,
+// storage_bytes,features and renders the advertised lines from the limits.
+func scanPlanDefinition(row rowScanner) (planDefinition, error) {
+	var p planDefinition
+	var perks, features []byte
+	var requests, storage sql.NullInt64
+	if err := row.Scan(&p.ID, &p.Name, &p.Price, &perks, &requests, &storage, &features); err != nil {
+		return p, err
+	}
+	if requests.Valid {
+		v := requests.Int64
+		p.Limits.MonthlyMCPRequests = &v
+	}
+	if storage.Valid {
+		v := storage.Int64
+		p.Limits.StorageBytes = &v
+	}
+	p.Limits.Features = []string{}
+	if len(features) > 0 {
+		if err := json.Unmarshal(features, &p.Limits.Features); err != nil {
+			return p, err
+		}
+	}
+	p.Perks = append(planLines(p.Limits.MonthlyMCPRequests, p.Limits.StorageBytes, p.Limits.Features), decodePerks(perks)...)
+	return p, nil
 }
 
 func (s *server) validPlanID(ctx context.Context, id string) bool {
@@ -676,7 +810,10 @@ func (s *server) adminOverview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	_ = s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM tenants`).Scan(&tenants)
+	if err := s.db.QueryRowContext(r.Context(), `SELECT scos_cloud_tenant_count()`).Scan(&tenants); err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
 	_ = s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM cloud_api_keys WHERE revoked_at IS NULL`).Scan(&keys)
 	jsonWrite(w, 200, map[string]int{"users": users, "tenants": tenants, "active_api_keys": keys})
 }
@@ -689,7 +826,7 @@ func (s *server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	where, args := userSearchFilter(r.URL.Query().Get("q"), r.URL.Query().Get("plan"), r.URL.Query().Get("role"))
 	limit, offset := paginationParams(r.URL.Query())
 	args = append(args, limit, offset)
-	query := `SELECT u.id,u.email,u.display_name,u.platform_role,u.status,cs.plan,p.tenant_id FROM cloud_users u JOIN principals p ON p.external_id=u.id::text JOIN cloud_subscriptions cs ON cs.tenant_id=p.tenant_id WHERE ` + where +
+	query := `SELECT u.id,u.email,u.display_name,u.platform_role,u.status,cs.plan,p.tenant_id FROM cloud_users u CROSS JOIN LATERAL scos_cloud_user_principal(u.id::text) p JOIN cloud_subscriptions cs ON cs.tenant_id=p.tenant_id WHERE ` + where +
 		` ORDER BY u.created_at DESC LIMIT $` + strconv.Itoa(len(args)-1) + ` OFFSET $` + strconv.Itoa(len(args))
 	rows, err := s.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
@@ -788,28 +925,48 @@ func (s *server) adminPlanUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	if in.Perks == nil {
+		in.Perks = []string{}
+	}
 	perksJSON, err := json.Marshal(in.Perks)
 	if err != nil {
 		http.Error(w, "invalid perks", 400)
 		return
 	}
-	var before planDefinition
-	var beforePerks []byte
-	_ = s.db.QueryRowContext(r.Context(), `SELECT name,price,perks FROM cloud_plan_definitions WHERE id=$1`, in.ID).Scan(&before.Name, &before.Price, &beforePerks)
-	before.ID, before.Perks = in.ID, decodePerks(beforePerks)
-	res, err := s.db.ExecContext(r.Context(), `UPDATE cloud_plan_definitions SET name=$1,price=$2,perks=$3,updated_at=now() WHERE id=$4`, strings.TrimSpace(in.Name), strings.TrimSpace(in.Price), perksJSON, in.ID)
+	const planColumns = `id,name,price,perks,monthly_mcp_requests,storage_bytes,features`
+	before, err := scanPlanDefinition(s.db.QueryRowContext(r.Context(), `SELECT `+planColumns+` FROM cloud_plan_definitions WHERE id=$1`, in.ID))
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "plan not found", 404)
+		return
+	}
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	limits := before.Limits
+	if in.Limits != nil {
+		limits = planLimits{MonthlyMCPRequests: in.Limits.MonthlyMCPRequests, StorageBytes: in.Limits.StorageBytes, Features: in.Limits.Features}
+		if limits.Features == nil {
+			limits.Features = []string{}
+		}
+	}
+	featuresJSON, err := json.Marshal(limits.Features)
+	if err != nil {
+		http.Error(w, "invalid features", 400)
+		return
+	}
+	after, err := scanPlanDefinition(s.db.QueryRowContext(r.Context(), `UPDATE cloud_plan_definitions SET name=$1,price=$2,perks=$3,monthly_mcp_requests=$4,storage_bytes=$5,features=$6,updated_at=now() WHERE id=$7 RETURNING `+planColumns,
+		strings.TrimSpace(in.Name), strings.TrimSpace(in.Price), perksJSON, limits.MonthlyMCPRequests, limits.StorageBytes, featuresJSON, in.ID))
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "plan not found", 404)
 		return
 	}
-	after := planDefinition{ID: in.ID, Name: strings.TrimSpace(in.Name), Price: strings.TrimSpace(in.Price), Perks: in.Perks}
+	if err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
 	s.recordAudit(r.Context(), actor.UserID, "plan.updated", in.ID, map[string]any{"before": before, "after": after})
-	jsonWrite(w, 200, map[string]any{"ok": true, "id": in.ID})
+	jsonWrite(w, 200, map[string]any{"ok": true, "id": in.ID, "plan": after})
 }
 
 func (s *server) auditLog(w http.ResponseWriter, r *http.Request) {
@@ -869,15 +1026,65 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "API key required", 401)
 		return
 	}
+	// The key must belong to an active account; the account's platform role
+	// decides whether the call carries the fabric operator scopes.
 	var id identity
-	err := s.db.QueryRowContext(r.Context(), `SELECT user_id,tenant_id,principal_id FROM cloud_api_keys WHERE key_hash=$1 AND revoked_at IS NULL`, hash(h)).Scan(&id.UserID, &id.TenantID, &id.PrincipalID)
+	err := s.db.QueryRowContext(r.Context(), `SELECT k.user_id,k.tenant_id,k.principal_id,u.platform_role FROM cloud_api_keys k JOIN cloud_users u ON u.id=k.user_id WHERE k.key_hash=$1 AND k.revoked_at IS NULL AND u.status='active'`, hash(h)).Scan(&id.UserID, &id.TenantID, &id.PrincipalID, &id.PlatformRole)
 	if err != nil {
 		http.Error(w, "invalid API key", 401)
 		return
 	}
+	// The request is read whole (bounded) before anything is proxied: the
+	// plan's feature gates and storage quota are decided on the tools it
+	// calls, and a refused request must never reach the gateway.
+	var requestBody []byte
+	if r.Body != nil {
+		requestBody, err = io.ReadAll(io.LimitReader(r.Body, maxProxiedBody+1))
+		if err != nil {
+			http.Error(w, "invalid request body", 400)
+			return
+		}
+		if len(requestBody) > maxProxiedBody {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
+	plan, err := loadEntitlements(r.Context(), s.db, id.TenantID)
+	if errors.Is(err, errNoSubscription) {
+		writeMCPRefusal(w, requestBody, &quotaError{status: http.StatusForbidden, code: "no_subscription", msg: "this workspace has no subscription"})
+		return
+	}
+	if err != nil {
+		http.Error(w, "billing unavailable", 503)
+		return
+	}
+	if plan.SubscriptionStatus != "active" {
+		writeMCPRefusal(w, requestBody, &quotaError{status: http.StatusPaymentRequired, code: "subscription_inactive", msg: "the " + plan.Plan + " subscription is " + plan.SubscriptionStatus})
+		return
+	}
+	measure := func(ctx context.Context) (int64, error) {
+		return s.measureBytesStored(ctx, id.TenantID, id.PrincipalID)
+	}
+	if err := checkToolEntitlements(r.Context(), plan, calledTools(requestBody), measure); err != nil {
+		var qe *quotaError
+		if errors.As(err, &qe) {
+			writeMCPRefusal(w, requestBody, qe)
+			return
+		}
+		http.Error(w, "usage unavailable", 503)
+		return
+	}
+	if err := s.admitMCPRequest(r.Context(), id.TenantID, plan.MonthlyMCPRequests); err != nil {
+		var qe *quotaError
+		if errors.As(err, &qe) {
+			writeMCPRefusal(w, requestBody, qe)
+			return
+		}
+		http.Error(w, "usage unavailable", 503)
+		return
+	}
 	_, _ = s.db.ExecContext(r.Context(), `UPDATE cloud_api_keys SET last_used_at=now() WHERE key_hash=$1`, hash(h))
-	_, _ = s.db.ExecContext(r.Context(), `INSERT INTO cloud_usage_daily(tenant_id,usage_date,api_requests) VALUES($1,current_date,1) ON CONFLICT (tenant_id,usage_date) DO UPDATE SET api_requests=cloud_usage_daily.api_requests+1`, id.TenantID)
-	claims := auth.Claims{TenantID: id.TenantID, PrincipalID: id.PrincipalID, Subject: id.UserID, JTI: hash(h)[:32], Scopes: []string{"memory:read", "memory:write"}, ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
+	claims := auth.Claims{TenantID: id.TenantID, PrincipalID: id.PrincipalID, Subject: id.UserID, JTI: hash(h)[:32], Scopes: hostedScopes(id.PlatformRole), ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
 	token, err := auth.SignClaims(claims, s.issuerSecret)
 	if err != nil {
 		http.Error(w, "authentication unavailable", 503)
@@ -888,7 +1095,15 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gateway unavailable", 503)
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), r.Body)
+	requestCopy := requestBody
+	if len(requestCopy) > maxMeteredBody {
+		requestCopy = requestCopy[:maxMeteredBody]
+	}
+	var body io.Reader
+	if r.Body != nil {
+		body = bytes.NewReader(requestBody)
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), body)
 	if err != nil {
 		http.Error(w, "gateway unavailable", 503)
 		return
@@ -905,5 +1120,42 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	var responseCopy bytes.Buffer
+	_, _ = io.Copy(flushWriter{w}, io.TeeReader(resp.Body, &limitedBuffer{buf: &responseCopy, limit: maxMeteredBody}))
+	if resp.StatusCode/100 == 2 {
+		reads, writes := countMemoryOps(requestCopy, responseCopy.Bytes(), resp.Header.Get("Content-Type"))
+		if err := s.recordMemoryOps(context.WithoutCancel(r.Context()), id.TenantID, reads, writes); err != nil {
+			log.Printf("record memory usage for tenant %s: %v", id.TenantID, err)
+		}
+	}
+}
+
+// limitedBuffer records at most limit bytes and silently discards the rest,
+// so metering never holds an unbounded body in memory.
+type limitedBuffer struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	if room := l.limit - l.buf.Len(); room > 0 {
+		if len(p) > room {
+			l.buf.Write(p[:room])
+		} else {
+			l.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+// flushWriter flushes after each write so streamed (SSE) MCP responses reach
+// the client as they are produced.
+type flushWriter struct{ w http.ResponseWriter }
+
+func (f flushWriter) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if fl, ok := f.w.(http.Flusher); ok {
+		fl.Flush()
+	}
+	return n, err
 }

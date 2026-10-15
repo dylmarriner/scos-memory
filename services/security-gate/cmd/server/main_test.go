@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/dylmarriner/scos-memory/services/readiness"
 )
@@ -191,24 +192,28 @@ func TestTokenPublicPart(t *testing.T) {
 }
 
 func TestPermissionCheckPublic(t *testing.T) {
-	check := &PermissionCheck{
+	check := PermissionCheck{
 		Principal: "user-1", Action: "read",
 		Resource: "doc.md", DataClass: ClassPublic, Tenant: "t-1",
 	}
-	allowed := evaluatePermission(check)
-	if !allowed {
-		t.Fatal("public data should be allowed")
+	now := time.Now().UTC()
+	if d := evaluatePermission(check, permissionInputs{Now: now, TokenMaxClass: ClassInternal}); d.Allowed {
+		t.Fatalf("public data must not be allowed without a grant, got %+v", d)
+	}
+	grants := []PermissionGrant{{ID: "g-1", Principal: "user-1", Action: "read", Resource: "doc.md", MaxClass: ClassPublic}}
+	if d := evaluatePermission(check, permissionInputs{Now: now, TokenMaxClass: ClassInternal, Grants: grants}); !d.Allowed || d.GrantID != "g-1" {
+		t.Fatalf("public read covered by a grant should be allowed, got %+v", d)
 	}
 }
 
 func TestPermissionCheckSecret(t *testing.T) {
-	check := &PermissionCheck{
+	check := PermissionCheck{
 		Principal: "user-1", Action: "read",
 		Resource: "secret.doc", DataClass: ClassSecret, Tenant: "t-1",
 	}
-	allowed := evaluatePermission(check)
-	if allowed {
-		t.Fatal("secret should be denied by default")
+	grants := []PermissionGrant{{ID: "g-1", Principal: "user-1", Action: "read", Resource: "*", MaxClass: ClassRestricted}}
+	if d := evaluatePermission(check, permissionInputs{Now: time.Now().UTC(), TokenMaxClass: ClassSecret, Grants: grants}); d.Allowed {
+		t.Fatalf("secret should be denied without an explicit secret grant, got %+v", d)
 	}
 }
 
@@ -399,11 +404,11 @@ func TestHandleSecretResolveFailsClosedWhenNotConfigured(t *testing.T) {
 
 func TestResolveSecretValueRejectsNonSecurestoreProvider(t *testing.T) {
 	s := newResolveTestServer("https://securestore.invalid")
-	identity := requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}
-	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "vault", Ref: "secret/data/db"}
+	caller := authorizedResolveCaller()
+	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "vault", Ref: "secret/data/db", Scope: "tenant", DataClass: ClassSecret}
 	req := httptest.NewRequest(http.MethodPost, "/v1/secrets/sec-1/resolve", nil)
 	rec := httptest.NewRecorder()
-	s.resolveSecretValue(rec, req, identity, ref)
+	s.resolveSecretValue(rec, req, caller, ref)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a non-securestore reference, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -433,11 +438,11 @@ func TestResolveSecretValueSuccessAuditsAndReturnsValue(t *testing.T) {
 	var audited []AuditRecord
 	s.auditHook = func(record AuditRecord) { audited = append(audited, record) }
 
-	identity := requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}
-	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "securestore", Ref: "cred-1"}
+	caller := authorizedResolveCaller()
+	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "securestore", Ref: "cred-1", Scope: "tenant", DataClass: ClassSecret}
 	req := httptest.NewRequest(http.MethodPost, "/v1/secrets/sec-1/resolve", nil)
 	rec := httptest.NewRecorder()
-	s.resolveSecretValue(rec, req, identity, ref)
+	s.resolveSecretValue(rec, req, caller, ref)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -468,11 +473,11 @@ func TestResolveSecretValueFailsClosedWhenSecurestoreUnreachable(t *testing.T) {
 	var audited []AuditRecord
 	s.auditHook = func(record AuditRecord) { audited = append(audited, record) }
 
-	identity := requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}
-	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "securestore", Ref: "cred-1"}
+	caller := authorizedResolveCaller()
+	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "securestore", Ref: "cred-1", Scope: "tenant", DataClass: ClassSecret}
 	req := httptest.NewRequest(http.MethodPost, "/v1/secrets/sec-1/resolve", nil)
 	rec := httptest.NewRecorder()
-	s.resolveSecretValue(rec, req, identity, ref)
+	s.resolveSecretValue(rec, req, caller, ref)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 when securestore is unreachable, got %d: %s", rec.Code, rec.Body.String())
@@ -497,11 +502,11 @@ func TestResolveSecretValueFailsClosedOnApprovalRequired(t *testing.T) {
 	defer upstream.Close()
 
 	s := newResolveTestServer(upstream.URL)
-	identity := requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}
-	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "securestore", Ref: "cred-1"}
+	caller := authorizedResolveCaller()
+	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "securestore", Ref: "cred-1", Scope: "tenant", DataClass: ClassSecret}
 	req := httptest.NewRequest(http.MethodPost, "/v1/secrets/sec-1/resolve", nil)
 	rec := httptest.NewRecorder()
-	s.resolveSecretValue(rec, req, identity, ref)
+	s.resolveSecretValue(rec, req, caller, ref)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 when securestore requires approval, got %d: %s", rec.Code, rec.Body.String())
@@ -515,11 +520,11 @@ func TestResolveSecretValueFailsClosedOnUpstreamErrorStatus(t *testing.T) {
 	defer upstream.Close()
 
 	s := newResolveTestServer(upstream.URL)
-	identity := requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}
-	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "securestore", Ref: "cred-1"}
+	caller := authorizedResolveCaller()
+	ref := &SecretReference{ID: "sec-1", Name: "db-password", Provider: "securestore", Ref: "cred-1", Scope: "tenant", DataClass: ClassSecret}
 	req := httptest.NewRequest(http.MethodPost, "/v1/secrets/sec-1/resolve", nil)
 	rec := httptest.NewRecorder()
-	s.resolveSecretValue(rec, req, identity, ref)
+	s.resolveSecretValue(rec, req, caller, ref)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 for a non-2xx securestore response, got %d: %s", rec.Code, rec.Body.String())

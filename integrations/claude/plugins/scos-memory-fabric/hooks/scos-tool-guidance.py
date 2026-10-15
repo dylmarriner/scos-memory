@@ -39,9 +39,10 @@ KNOWN_ERRORS = [
     ("gateway unavailable", "Not a credentials problem -- cloud-control-plane's "
      "internal proxy hop to mcp-gateway is broken (infra issue, see "
      "docs/agent-connection-guide.md section 5)."),
-    ("not yet implemented", "scos_correct/scos_forget are documented as "
-     "not-yet-implemented on this fleet -- confirm the exact memory_id with "
-     "the user before retrying, this isn't a transient failure."),
+    ("memory-intelligence returned 404", "scos_explain/scos_correct/"
+     "scos_forget take the memory_id of an existing fact in this tenant. A "
+     "404 means that id is unknown or already forgotten -- re-run scos_recall "
+     "to get the current id and confirm it with the user before retrying."),
 ]
 
 FALLBACK = (

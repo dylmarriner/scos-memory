@@ -223,7 +223,10 @@ func TestOKFProposalRequiresValidationAndIndependentReview(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# old\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := &okfServer{okfRoot: root, proposals: map[string]*OKFProposal{}}
+	s := &okfServer{okfRoot: root, proposals: map[string]*OKFProposal{}, governanceRoles: staticRoles(map[string][]string{
+		"alice": {"knowledge_curator"},
+		"bob":   {"knowledge_curator"},
+	})}
 	p, err := s.createProposal(okfProposalRequest{Path: "policy.md", Content: "# new\n", Proposer: "alice"})
 	if err != nil {
 		t.Fatal(err)

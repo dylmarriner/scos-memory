@@ -184,7 +184,7 @@ func TestLocalRecoveryInspectsPersistedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision := RouteDecision{InteractionID: "recover-1", DecisionID: "decision-1", CreatedAt: time.Now().UTC()}
-	if err := store.saveRoute("tenant", "actor", decision); err != nil {
+	if err := store.saveRoute("tenant", "actor", RouteRequest{TenantID: "tenant", ActorID: "actor", InteractionID: "recover-1", Input: "recover me"}, decision); err != nil {
 		t.Fatal(err)
 	}
 	store.mu.Lock()
@@ -227,6 +227,21 @@ func TestIngestOrchestratesConfiguredDependenciesAndExposesDegradedStages(t *tes
 			t.Fatalf("missing control-plane ingress credential")
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/operations/start" {
+			// Tool governance answers with the operation it started.
+			_, _ = w.Write([]byte(`{"id":"op-1","tool_id":"tool-1","state":"executing"}`))
+			return
+		}
+		if r.URL.Path == "/v2/code/repos" {
+			// Code intelligence answers with the durable repository id.
+			_, _ = w.Write([]byte(`{"repository_id":"repo-1"}`))
+			return
+		}
+		if r.URL.Path == "/v1/proxy/execute" {
+			// The execution proxy answers with the command's own result.
+			_, _ = w.Write([]byte(`{"operation_id":"i","exit_status":0}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer dependency.Close()
@@ -260,7 +275,7 @@ func TestIngestOrchestratesConfiguredDependenciesAndExposesDegradedStages(t *tes
 	if receipt.Status != "degraded" {
 		t.Fatalf("status = %q; body=%s", receipt.Status, response.Body.String())
 	}
-	for _, path := range []string{"/v1/retrieve", "/v1/code/query", "/v1/context/compile", "/v1/operations/start", "/v1/proxy/execute"} {
+	for _, path := range []string{"/v1/retrieve", "/v2/code/repos", "/v2/code/query", "/v1/context/compile", "/v1/operations/start", "/v1/proxy/execute"} {
 		found := false
 		for _, call := range calls {
 			if call == path {
@@ -326,18 +341,28 @@ func (d testDispatcher) Dispatch(_ context.Context, _ agentRequest) (agentReply,
 	return agentReply{Content: d.content}, nil
 }
 
+// receiptCommitter is a test double for the memory-gateway committer: it
+// records what was committed and returns the receipt a gateway would.
+type receiptCommitter struct{ commits *[]string }
+
+func (c receiptCommitter) Commit(_ context.Context, req RouteRequest, reply agentReply) (turnCommitReceipt, error) {
+	*c.commits = append(*c.commits, req.InteractionID+":"+reply.Content)
+	return turnCommitReceipt{MessageID: "msg-" + req.InteractionID, CheckpointID: "ckpt-" + req.InteractionID}, nil
+}
+
 func TestAgentLifecycleCapturesReplyAndCommitsBeforeReturn(t *testing.T) {
 	store, err := newLocalStateStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}}
+	var commits []string
+	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}, committer: receiptCommitter{&commits}}
 	req := RouteRequest{TenantID: "tenant", ActorID: "actor", AgentID: "agent", InteractionID: "lifecycle", Input: "hello"}
 	decision := RouteDecision{DecisionID: "decision", InteractionID: req.InteractionID, SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}, {Order: 2, System: "turn-coordinator", Action: "complete", Required: true}}}
-	if err := store.saveRoute(req.TenantID, req.ActorID, decision); err != nil {
+	if err := store.saveRoute(req.TenantID, req.ActorID, req, decision); err != nil {
 		t.Fatal(err)
 	}
-	status, lifecycle := plane.executeRoute(context.Background(), req, decision)
+	status, lifecycle := plane.executeRoute(context.Background(), req, decision, nil)
 	if status != "completed" || lifecycle.Reply.Status != "completed" || lifecycle.Reply.Content != "captured reply" {
 		t.Fatalf("lifecycle = %+v", lifecycle)
 	}
@@ -345,11 +370,31 @@ func TestAgentLifecycleCapturesReplyAndCommitsBeforeReturn(t *testing.T) {
 	if persisted.Reply.Status != "completed" || persisted.Checkpoint.Status != "completed" || persisted.Outbox.Status != "completed" {
 		t.Fatalf("durability was not committed: %+v", persisted)
 	}
+	if len(commits) != 1 || commits[0] != "lifecycle:captured reply" || persisted.Checkpoint.ID != "ckpt-lifecycle" {
+		t.Fatalf("reply was not committed through the committer: %v %+v", commits, persisted.Checkpoint)
+	}
+}
+
+func TestAgentLifecycleWithoutCommitterIsDegraded(t *testing.T) {
+	store, err := newLocalStateStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "reply"}}
+	req := RouteRequest{TenantID: "tenant", ActorID: "actor", AgentID: "agent", InteractionID: "no-commit", Input: "hello"}
+	decision := RouteDecision{DecisionID: "d", InteractionID: req.InteractionID, SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}, {Order: 2, System: "turn-coordinator", Action: "complete", Required: true}}}
+	if err := store.saveRoute(req.TenantID, req.ActorID, req, decision); err != nil {
+		t.Fatal(err)
+	}
+	status, lifecycle := plane.executeRoute(context.Background(), req, decision, nil)
+	if status != "degraded" || lifecycle.Reply.Status == "completed" {
+		t.Fatalf("an uncommitted reply must not be reported complete: %s %+v", status, lifecycle)
+	}
 }
 
 func TestAgentLifecycleMissingAgentIsDegraded(t *testing.T) {
 	plane := &controlPlane{dispatcher: testDispatcher{content: "must not be used"}}
-	status, lifecycle := plane.executeRoute(context.Background(), RouteRequest{AgentID: "", InteractionID: "missing", Input: "hello"}, RouteDecision{DecisionID: "decision", SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}}})
+	status, lifecycle := plane.executeRoute(context.Background(), RouteRequest{AgentID: "", InteractionID: "missing", Input: "hello"}, RouteDecision{DecisionID: "decision", SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}}}, nil)
 	if status == "completed" || lifecycle.Stages[0].Status != "degraded" {
 		t.Fatalf("missing agent claimed success: status=%s lifecycle=%+v", status, lifecycle)
 	}
@@ -408,10 +453,10 @@ func TestAgentSuccessIsReturnedOnlyAfterAuthoritativeCommit(t *testing.T) {
 	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "reply"}, committer: committer}
 	req := RouteRequest{TenantID: "tenant", ActorID: "actor", AgentID: "agent", InteractionID: "commit-order", Input: "hello"}
 	decision := RouteDecision{DecisionID: "decision", InteractionID: req.InteractionID, SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}, {Order: 2, System: "turn-coordinator", Action: "complete", Required: true}}}
-	if err := store.saveRoute(req.TenantID, req.ActorID, decision); err != nil {
+	if err := store.saveRoute(req.TenantID, req.ActorID, req, decision); err != nil {
 		t.Fatal(err)
 	}
-	status, lifecycle := plane.executeRoute(context.Background(), req, decision)
+	status, lifecycle := plane.executeRoute(context.Background(), req, decision, nil)
 	if !committer.committed || status != "completed" || lifecycle.Checkpoint.Status != "completed" {
 		t.Fatalf("success returned before commit: committed=%t status=%s lifecycle=%+v", committer.committed, status, lifecycle)
 	}
@@ -444,13 +489,14 @@ func TestAgentLifecycleDispatchesGovernedHookStages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}}
+	var hookCommits []string
+	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}, committer: receiptCommitter{&hookCommits}}
 	req := RouteRequest{TenantID: "tenant", ActorID: "actor", AgentID: "agent", InteractionID: "hook-lifecycle", Input: "hello"}
 	decision := RouteDecision{DecisionID: "decision", InteractionID: req.InteractionID, SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}, {Order: 2, System: "turn-coordinator", Action: "complete", Required: true}}}
-	if err := store.saveRoute(req.TenantID, req.ActorID, decision); err != nil {
+	if err := store.saveRoute(req.TenantID, req.ActorID, req, decision); err != nil {
 		t.Fatal(err)
 	}
-	status, _ := plane.executeRoute(context.Background(), req, decision)
+	status, _ := plane.executeRoute(context.Background(), req, decision, nil)
 	if status != "completed" {
 		t.Fatalf("lifecycle status = %s, events = %v", status, events)
 	}

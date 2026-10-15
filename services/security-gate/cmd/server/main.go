@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -64,36 +65,68 @@ type AuditRecord struct {
 	Reason    string    `json:"reason,omitempty"`
 	TraceID   string    `json:"trace_id"`
 	Timestamp string    `json:"timestamp"`
+	// CallerAnnotation holds fields a caller asserted through
+	// POST /v1/audit/record. They are stored verbatim but kept apart from
+	// the record's own fields, which the server always derives from the
+	// authenticated identity and the operation it performed, so an
+	// unverified assertion is never read back as an audited fact.
+	CallerAnnotation *CallerAnnotation `json:"caller_annotation,omitempty"`
+}
+
+// CallerAnnotation is the unverified, caller-asserted part of an audit
+// entry recorded through POST /v1/audit/record.
+type CallerAnnotation struct {
+	Action    string `json:"action,omitempty"`
+	Result    string `json:"result,omitempty"`
+	DataClass string `json:"data_class,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	TraceID   string `json:"trace_id,omitempty"`
 }
 
 // ── permission check ────────────────────────────────────────────────────
 
 type PermissionCheck struct {
-	Principal          string    `json:"principal"`
-	Action             string    `json:"action"`
-	Resource           string    `json:"resource"`
-	DataClass          DataClass `json:"data_class"`
-	Tenant             string    `json:"tenant"`
-	DelegatedAuthority string    `json:"delegated_authority,omitempty"`
-	ExpiresAt          string    `json:"expires_at,omitempty"`
-	TraceID            string    `json:"trace_id,omitempty"`
+	Principal string    `json:"principal"`
+	Action    string    `json:"action"`
+	Resource  string    `json:"resource"`
+	DataClass DataClass `json:"data_class"`
+	Tenant    string    `json:"tenant"`
+	// DelegatedAuthority, when set, is the id of a delegation issued to the
+	// token's principal; the check is then decided against that delegation
+	// and the delegator's grants instead of the principal's own.
+	DelegatedAuthority string `json:"delegated_authority,omitempty"`
+	// ExpiresAt, when set, is the RFC3339 time until which the caller
+	// needs the permission; the covering grant (and delegation) must
+	// remain valid at least that long.
+	ExpiresAt string `json:"expires_at,omitempty"`
+	TraceID   string `json:"trace_id,omitempty"`
 }
 
 type PermissionResult struct {
-	Allowed bool   `json:"allowed"`
-	Reason  string `json:"reason"`
-	AuditID string `json:"audit_id,omitempty"`
+	Allowed      bool   `json:"allowed"`
+	Reason       string `json:"reason"`
+	AuditID      string `json:"audit_id,omitempty"`
+	GrantID      string `json:"grant_id,omitempty"`
+	DelegationID string `json:"delegation_id,omitempty"`
 }
 
 // ── secret reference ─────────────────────────────────────────────────────
 
 type SecretReference struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Provider  string `json:"provider"` // env, vault, aws-secrets, gcp-sm, securestore
-	Ref       string `json:"ref"`
-	Scope     string `json:"scope"`
-	UpdatedAt string `json:"updated_at"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Provider string `json:"provider"` // env, vault, aws-secrets, gcp-sm, securestore
+	Ref      string `json:"ref"`
+	// Scope lists who may resolve the reference's value: comma- or
+	// space-separated "tenant", "principal:<id>" and "agent:<id>"
+	// selectors (see parseSecretScope). Empty means never resolvable.
+	Scope string `json:"scope"`
+	// DataClass is the sensitivity of the referenced value; resolving it
+	// requires a matching "data_class:<class>" claims scope (see
+	// secretCaller.clearance). Defaults to secret.
+	DataClass DataClass `json:"data_class"`
+	UpdatedAt string    `json:"updated_at"`
 }
 
 // validSecretProviders lists the secret-manager backends a SecretReference
@@ -198,6 +231,10 @@ func main() {
 		logger.Error("startup failed", "error", err)
 		os.Exit(1)
 	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		logger.Error("refusing to start", "error", err)
+		os.Exit(1)
+	}
 	database.TuneSQLDB(db)
 	defer db.Close()
 
@@ -217,6 +254,10 @@ func main() {
 	// Permission
 	mux.HandleFunc("/v1/permissions/check", s.handlePermissionCheck)
 	mux.HandleFunc("/v1/permissions/classify", s.handleClassifyData)
+	mux.HandleFunc("/v1/permissions/grants", s.handlePermissionGrants)
+	mux.HandleFunc("/v1/permissions/grants/revoke", s.handlePermissionGrantRevoke)
+	mux.HandleFunc("/v1/permissions/delegations", s.handlePermissionDelegations)
+	mux.HandleFunc("/v1/permissions/delegations/revoke", s.handlePermissionDelegationRevoke)
 
 	// Audit
 	mux.HandleFunc("/v1/audit", s.handleAudit)
@@ -237,7 +278,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           handler,
+		Handler:           telemetry.Instrument("security-gate", handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -367,6 +408,14 @@ func (s *securityServer) authenticatedToken(r *http.Request) (*AuthToken, bool) 
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(authorization, prefix))
 	if !s.validToken(token) {
+		// The fabric's own identity is a claims token signed with the
+		// issuer secret, which the auth middleware has already verified. It
+		// carries no data-class ceiling of its own, so the principal's
+		// grants alone bound what it may touch, short of secret: reaching
+		// secret material takes a token this gate issued at that class.
+		if claims, ok := auth.CanonicalClaims(r.Context()); ok && isUUID(claims.TenantID) && isUUID(claims.PrincipalID) {
+			return &AuthToken{Principal: claims.PrincipalID, AgentID: claims.AgentID, Tenant: claims.TenantID, DataClass: ClassRestricted}, true
+		}
 		return nil, false
 	}
 	authToken, ok, err := lookupToken(r.Context(), s.db, tokenPublicPart(token))
@@ -437,7 +486,7 @@ func (s *securityServer) handleAuthRevoke(w http.ResponseWriter, r *http.Request
 		http.Error(w, "token not found", http.StatusUnauthorized)
 		return
 	}
-	if _, err := revokeToken(r.Context(), s.db, tokenPublicPart(req.Token)); err != nil {
+	if _, err := revokeToken(r.Context(), s.db, tok); err != nil {
 		http.Error(w, "unable to revoke token", http.StatusInternalServerError)
 		return
 	}
@@ -486,46 +535,36 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 	if check.DataClass == "" {
 		check.DataClass = ClassPublic
 	}
-	if classRank(check.DataClass) > classRank(authToken.DataClass) {
-		serviceMetrics.Count(telemetry.MetricPermissionDenial,
-			map[string]string{"reason": "data_class_exceeds_token", "action": check.Action},
-			telemetry.Correlation{Tenant: check.Tenant})
-		identity := requestIdentity{TenantID: authToken.Tenant, PrincipalID: authToken.Principal}
-		auditID, err := s.insertPermissionAudit(r, identity, check, authToken, false, "requested data class exceeds token authorisation")
-		if err != nil {
-			http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, PermissionResult{Allowed: false, Reason: "requested data class exceeds token authorisation", AuditID: auditID})
+	requestedUntil, err := parseOptionalExpiry(check.ExpiresAt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
-	allowed := evaluatePermission(&check)
-	if !allowed {
-		// §32 tracks permission denial; the target is zero unauthorised
-		// retrieval, so every denial must be countable.
-		serviceMetrics.Count(telemetry.MetricPermissionDenial,
-			map[string]string{"reason": "policy_denied", "action": check.Action},
-			telemetry.Correlation{Tenant: check.Tenant})
 	}
 
 	identity := requestIdentity{TenantID: authToken.Tenant, PrincipalID: authToken.Principal}
-	record := &AuditRecord{
-		Action: check.Action, Principal: check.Principal,
-		Resource: check.Resource, DataClass: check.DataClass,
-		Tenant: check.Tenant, Result: map[bool]string{true: "allowed", false: "denied"}[allowed],
-		TraceID: check.TraceID, AgentID: authToken.AgentID, SessionID: authToken.SessionID,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	decision, err := s.decidePermission(r.Context(), identity, check, authToken, requestedUntil, time.Now().UTC())
+	if err != nil {
+		http.Error(w, "unable to evaluate permission", http.StatusInternalServerError)
+		return
 	}
-	auditID, err := insertAuditEntry(r.Context(), s.db, identity, record)
+	if !decision.Allowed {
+		// §32 tracks permission denial; the target is zero unauthorised
+		// retrieval, so every denial must be countable.
+		serviceMetrics.Count(telemetry.MetricPermissionDenial,
+			map[string]string{"reason": decision.Code, "action": check.Action},
+			telemetry.Correlation{Tenant: check.Tenant})
+	}
+	auditID, err := s.insertPermissionAudit(r, identity, check, authToken, decision.Allowed, decision.Reason)
 	if err != nil {
 		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
 		return
 	}
-
 	writeJSON(w, PermissionResult{
-		Allowed: allowed,
-		Reason:  map[bool]string{true: "permitted by policy", false: "data class exceeds authorisation"}[allowed],
-		AuditID: auditID,
+		Allowed:      decision.Allowed,
+		Reason:       decision.Reason,
+		AuditID:      auditID,
+		GrantID:      decision.GrantID,
+		DelegationID: decision.DelegationID,
 	})
 }
 
@@ -542,13 +581,6 @@ func (s *securityServer) auditAction(r *http.Request, identity requestIdentity, 
 	} // unit handlers may be exercised without PostgreSQL
 	_, err := insertAuditEntry(r.Context(), s.db, identity, &record)
 	return err
-}
-
-func evaluatePermission(check *PermissionCheck) bool {
-	if check.DataClass == ClassSecret {
-		return false // requires specific elevated grant
-	}
-	return true // basic policy: allow up to restricted
 }
 
 func classRank(class DataClass) int {
@@ -647,23 +679,83 @@ func (s *securityServer) handleAuditByID(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, record)
 }
 
+// auditAnnotationRequest is the body of POST /v1/audit/record. Its
+// principal, tenant and agent_id fields are accepted only as consistency
+// checks against the authenticated identity; every other field is an
+// unverified caller assertion.
+type auditAnnotationRequest struct {
+	Action    string `json:"action"`
+	Principal string `json:"principal"`
+	AgentID   string `json:"agent_id"`
+	Tenant    string `json:"tenant"`
+	SessionID string `json:"session_id"`
+	Resource  string `json:"resource"`
+	Result    string `json:"result"`
+	DataClass string `json:"data_class"`
+	Reason    string `json:"reason"`
+	TraceID   string `json:"trace_id"`
+}
+
+// handleAuditRecord lets a caller append a note to the audit trail. The
+// stored record is built server-side: who recorded it comes from the
+// authenticated identity (a body tenant, principal or agent_id that
+// disagrees with it is refused), the action is always caller_annotation and
+// the decision always recorded, and the timestamp is the database's. What
+// the caller claims happened -- its action, result, data class, reason,
+// session and trace -- is kept under caller_annotation, clearly separated
+// from the fields the gate itself vouches for.
 func (s *securityServer) handleAuditRecord(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var record AuditRecord
-	if err := json.NewDecoder(r.Body).Decode(&record); err != nil {
+	var req auditAnnotationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	identity, status, msg := resolveIdentity(r, record.Tenant, record.Principal)
+	identity, status, msg := resolveIdentity(r, req.Tenant, req.Principal)
 	if status != 0 {
 		http.Error(w, msg, status)
 		return
 	}
-	if record.Timestamp == "" {
-		record.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	caller := callerFromRequest(r, identity)
+	if req.AgentID != "" && req.AgentID != caller.agentID {
+		http.Error(w, "agent_id does not match authenticated identity", http.StatusForbidden)
+		return
+	}
+	if strings.TrimSpace(req.Action) == "" || strings.TrimSpace(req.Resource) == "" {
+		http.Error(w, "action and resource are required", http.StatusBadRequest)
+		return
+	}
+	traceID := caller.traceID
+	if traceID == "" {
+		traceID = r.Header.Get("X-SCOS-Trace-ID")
+	}
+	record := AuditRecord{
+		Action:    "caller_annotation",
+		Principal: identity.PrincipalID,
+		Tenant:    identity.TenantID,
+		AgentID:   caller.agentID,
+		Resource:  req.Resource,
+		Result:    "recorded",
+		Reason:    "caller-reported event; caller_annotation fields are unverified assertions",
+		TraceID:   traceID,
+		CallerAnnotation: &CallerAnnotation{
+			Action:    req.Action,
+			Result:    req.Result,
+			DataClass: req.DataClass,
+			Reason:    req.Reason,
+			SessionID: req.SessionID,
+			TraceID:   req.TraceID,
+		},
+	}
+	if s.auditHook != nil {
+		s.auditHook(record)
+	}
+	if s.db == nil {
+		http.Error(w, "audit store not configured", http.StatusServiceUnavailable)
+		return
 	}
 	auditID, err := insertAuditEntry(r.Context(), s.db, identity, &record)
 	if err != nil {
@@ -688,6 +780,10 @@ func (s *securityServer) handleSecrets(w http.ResponseWriter, r *http.Request) {
 		}
 		if !validSecretProviders[ref.Provider] {
 			http.Error(w, "unsupported provider", http.StatusBadRequest)
+			return
+		}
+		if err := validateSecretReferencePolicy(&ref); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		identity, status, msg := resolveIdentity(r, "", "")
@@ -754,7 +850,7 @@ func (s *securityServer) handleSecretByID(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, map[string]any{
 		"id": ref.ID, "name": ref.Name, "provider": ref.Provider,
-		"ref": ref.Ref, "scope": ref.Scope,
+		"ref": ref.Ref, "scope": ref.Scope, "data_class": ref.DataClass,
 		"note": "secret value not exposed via API",
 	})
 }
@@ -790,17 +886,39 @@ func (s *securityServer) handleSecretResolve(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "unable to read secret reference", http.StatusInternalServerError)
 		return
 	}
-	s.resolveSecretValue(w, r, identity, ref)
+	s.resolveSecretValue(w, r, callerFromRequest(r, identity), ref)
 }
 
-// resolveSecretValue performs the securestore-facing part of a resolve
-// request: given an already-looked-up SecretReference, it calls out to
-// Securestore, audits the result, and writes the HTTP response. It is
-// factored out of handleSecretResolve so it can be exercised directly
-// against a securestore stub without a database dependency, matching how
-// other handlers in this file are exercised with s.db == nil.
-func (s *securityServer) resolveSecretValue(w http.ResponseWriter, r *http.Request, identity requestIdentity, ref *SecretReference) {
+// resolveSecretValue performs the authorisation and securestore-facing part
+// of a resolve request: given an already-looked-up SecretReference, it
+// checks the authenticated caller against the reference's scope and data
+// class, calls out to Securestore, audits the result, and writes the HTTP
+// response. It is factored out of handleSecretResolve so it can be
+// exercised directly against a securestore stub without a database
+// dependency, matching how other handlers in this file are exercised with
+// s.db == nil.
+func (s *securityServer) resolveSecretValue(w http.ResponseWriter, r *http.Request, caller secretCaller, ref *SecretReference) {
 	id := ref.ID
+	identity := caller.identity
+	record := func(result, reason string) AuditRecord {
+		return AuditRecord{
+			Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID,
+			AgentID: caller.agentID, TraceID: caller.traceID, Resource: id, DataClass: ref.DataClass,
+			Result: result, Reason: reason,
+		}
+	}
+
+	if allowed, reason := authorizeSecretResolve(caller, ref); !allowed {
+		serviceMetrics.Count(telemetry.MetricPermissionDenial,
+			map[string]string{"reason": "secret_resolve_denied", "action": "restricted_retrieval"},
+			telemetry.Correlation{Tenant: identity.TenantID})
+		if err := s.auditAction(r, identity, record("denied", reason)); err != nil {
+			http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
+			return
+		}
+		http.Error(w, "forbidden: "+reason, http.StatusForbidden)
+		return
+	}
 	if ref.Provider != "securestore" {
 		http.Error(w, "secret reference is not resolvable: provider is not securestore", http.StatusBadRequest)
 		return
@@ -809,27 +927,28 @@ func (s *securityServer) resolveSecretValue(w http.ResponseWriter, r *http.Reque
 	secret, err := s.securestoreClient().getSecret(r.Context(), ref.Ref)
 	if err != nil {
 		logger.Error("securestore resolve failed", "ref", id, "error", err)
-		if failErr := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "error", Reason: "securestore unreachable"}); failErr != nil {
+		if failErr := s.auditAction(r, identity, record("error", "securestore unreachable")); failErr != nil {
 			logger.Error("unable to persist audit record for failed resolve", "ref", id, "error", failErr)
 		}
 		http.Error(w, "securestore unreachable", http.StatusBadGateway)
 		return
 	}
 	if secret.Status == "approval_required" || secret.Value == "" {
-		if failErr := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "denied", Reason: "securestore requires approval"}); failErr != nil {
+		if failErr := s.auditAction(r, identity, record("denied", "securestore requires approval")); failErr != nil {
 			logger.Error("unable to persist audit record for pending resolve", "ref", id, "error", failErr)
 		}
 		http.Error(w, "secret retrieval requires approval", http.StatusServiceUnavailable)
 		return
 	}
 
-	if err := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: identity.PrincipalID, Tenant: identity.TenantID, Resource: id, Result: "allowed", Reason: "secret value resolved via securestore"}); err != nil {
+	if err := s.auditAction(r, identity, record("allowed", "secret value resolved via securestore")); err != nil {
 		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{
 		"id":              ref.ID,
 		"provider":        ref.Provider,
+		"data_class":      ref.DataClass,
 		"credential_type": secret.CredentialType,
 		"auth_scheme":     secret.AuthScheme,
 		"value":           secret.Value,

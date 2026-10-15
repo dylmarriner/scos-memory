@@ -60,7 +60,22 @@ set_var SCOS_APP_DATABASE_URL "postgres://scos_app:${SCOS_APP_PASSWORD}@postgres
 # Only consulted by autonomous-control-plane if it's ever asked to dispatch
 # without DEEPSEEK_API_KEY set; compose still requires a non-empty value.
 set_var SCOS_AGENT_ENDPOINT "disabled"
-set_var GRAPHIFY_WORKSPACE_HOST_PATH "$WORKSPACE_DIR"
+# Local backups: backup-manager takes real pg_dump archives into its volume and
+# restore-drills them into a temporary database. pg_dump must see every row,
+# so it connects as the owner role, not the RLS-bound runtime role.
+set_var SCOS_BACKUP_PROVIDER local
+set_var SCOS_BACKUP_DATABASE_URL "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require"
+set_var SCOS_BACKUP_RESTORE_DATABASE_URL "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/postgres?sslmode=require"
+# Repositories to index, graph and run governed commands in live here;
+# code-intelligence, graphify and execution-proxy mount it at /workspace and
+# accept host paths under it. execution-proxy runs as the workspace's owner.
+set_var SCOS_WORKSPACE_HOST_PATH "$WORKSPACE_DIR"
+set_var SCOS_WORKSPACE_UID "$(stat -c %u "$WORKSPACE_DIR" 2>/dev/null || stat -f %u "$WORKSPACE_DIR")"
+set_var SCOS_WORKSPACE_GID "$(stat -c %g "$WORKSPACE_DIR" 2>/dev/null || stat -f %g "$WORKSPACE_DIR")"
+# cloud-control-plane is not started locally, but compose interpolates every
+# service's environment, so its required public URL must still resolve: the
+# local mcp-gateway is the public entry point of a local stack.
+set_var SCOS_PUBLIC_GATEWAY_URL "https://127.0.0.1:8098"
 # tunnel-client is excluded from the `up` service list below (see comment at
 # top), but `docker compose config`/`up` interpolate every service's
 # environment up front regardless of which services actually start, so its

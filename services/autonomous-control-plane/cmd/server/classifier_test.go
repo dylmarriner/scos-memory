@@ -184,3 +184,48 @@ func TestPlatformCapabilitiesAreValid(t *testing.T) {
 		}
 	}
 }
+
+func TestContextCompilationIsNotCodeWork(t *testing.T) {
+	for _, input := range []string{
+		"compile context for a multi turn conversation and retrieve memory",
+		"compile a minimal context capsule while keeping the operation safe",
+		"restore the checkpoint state and compile the working context",
+	} {
+		class := classifyIntent(RouteRequest{Input: input})
+		if class.has("code_lookup") || class.has("repository_analysis") {
+			t.Errorf("%q classified as code work: %+v", input, class.Labels)
+		}
+	}
+	if class := classifyIntent(RouteRequest{Input: "compile the service and fix the build"}); !class.has("code_lookup") {
+		t.Errorf("compiling code must still be code work: %+v", class.Labels)
+	}
+}
+
+func TestExplicitCommandRequestsRouteToExecution(t *testing.T) {
+	for _, input := range []string{
+		"execute the command through the safe proxy",
+		"run the proxy command safely under governance policy",
+		"run a read-only command through the proxy without side effects",
+		"issue the execute command against the governed proxy adapter",
+		"route this read-only request through the safe execution proxy",
+		"block unsafe destructive proxy command without confirmation",
+	} {
+		class := classifyIntent(RouteRequest{Input: input})
+		if !class.has("command_execution") || !class.has("tool_operation") {
+			t.Errorf("%q not routed to execution: %+v", input, class.Labels)
+		}
+	}
+	if class := classifyIntent(RouteRequest{Input: "what does the deploy command line flag mean"}); class.has("command_execution") {
+		t.Errorf("a question about a command is not a request to run one: %+v", class.Labels)
+	}
+}
+
+func TestDestructiveRequestsRequireConfirmation(t *testing.T) {
+	decision, err := buildRoute(RouteRequest{InteractionID: "i", Input: "block unsafe destructive proxy command without confirmation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.ConfirmationRequired {
+		t.Fatalf("destructive request must require confirmation: %+v", decision)
+	}
+}

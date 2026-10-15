@@ -1,5 +1,7 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
+
 import (
 	"bytes"
 	"context"
@@ -81,7 +83,7 @@ func newCodeIntelligenceClientFromEnvironment() (*codeIntelligenceClient, error)
 			transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 		}
 	}
-	return &codeIntelligenceClient{baseURL: baseURL, httpClient: &http.Client{Timeout: time.Duration(timeout) * time.Second, Transport: transport}, serviceToken: cfg.Token, controlPlaneToken: cfg.ControlPlaneToken}, nil
+	return &codeIntelligenceClient{baseURL: baseURL, httpClient: &http.Client{Timeout: time.Duration(timeout) * time.Second, Transport: telemetry.ProcessTransport(transport)}, serviceToken: cfg.Token, controlPlaneToken: cfg.ControlPlaneToken}, nil
 }
 
 func (c *codeIntelligenceClient) Query(ctx context.Context, tenantID, principalID, repositoryID, branch, query string, limit int) (*codeQueryResponse, error) {

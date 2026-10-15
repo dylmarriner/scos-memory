@@ -1,4 +1,6 @@
 package main
+
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -7,18 +9,22 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
-	benchmarkharness "github.com/dylmarriner/scos-memory/packages/benchmark-harness"
 	servicestate "github.com/dylmarriner/scos-memory/packages/service-state"
 )
 
@@ -90,41 +96,6 @@ type ObservabilityTargets struct {
 	LostCommittedTurns        int     `json:"lost_committed_turns"`
 }
 
-type benchmarkCaseResult struct {
-	CaseID       string             `json:"case_id"`
-	RetrievedIDs []string           `json:"retrieved_ids"`
-	LatencyMs    float64            `json:"latency_ms"`
-	Scores       map[string]float64 `json:"scores"`
-}
-
-type benchmarkSummary struct {
-	Suite          string                `json:"suite"`
-	Version        string                `json:"version"`
-	TotalCases     int                   `json:"total_cases"`
-	AverageScores  map[string]float64    `json:"average_scores"`
-	TotalLatencyMs float64               `json:"total_latency_ms"`
-	AvgLatencyMs   float64               `json:"avg_latency_ms"`
-	Results        []benchmarkCaseResult `json:"results"`
-}
-
-type benchmarkCase struct {
-	id       string
-	query    string
-	expected []string
-}
-
-var frozenBenchmarkCases = []benchmarkCase{
-	{id: "case_001", query: "What is the authoritative transaction model for memory turns?", expected: []string{"doc_journal_commit", "doc_turn_durability"}},
-	{id: "case_002", query: "sys_memory_item_9921a", expected: []string{"sys_memory_item_9921a"}},
-	{id: "case_003", query: "What was the user's preferred database schema prior to revision 3?", expected: []string{"mem_schema_v2", "hist_rev_3"}},
-	{id: "case_004", query: "Confirm user identity bypass authorization", expected: []string{"sec_denied_injection"}},
-	{id: "case_005", query: "Retrieve project alpha deployment parameters for organization scos", expected: []string{"prj_alpha_deploy_cfg"}},
-	{id: "case_006", query: "What active conflicts exist for turn sequence 412?", expected: []string{"conflict_seq_412"}},
-	{id: "case_007", query: "Restore prior context state following worker process failure", expected: []string{"recovery_checkpoint_412"}},
-	{id: "case_008", query: "Identify deprecated extension hook signatures", expected: []string{"stale_hook_sig_v1"}},
-	{id: "case_009", query: "Trace multi-turn step 3 tool execution results", expected: []string{"turn_step_3_proxy_log"}},
-}
-
 // ── server ───────────────────────────────────────────────────────────────
 
 type observabilityServer struct {
@@ -141,6 +112,22 @@ type observabilityServer struct {
 	db         *servicestate.Repository
 	otlp       *otlpExporter
 	otlpErr    error
+
+	// Historic aggregates and recorded benchmark runs (rollup.go,
+	// benchmarks.go), persisted through history when a database is wired.
+	rollups    *rollupStore
+	benchmarks *benchmarkStore
+	history    historyPersister
+
+	persistMu      sync.Mutex
+	stateDirty     bool
+	lastPersistErr error
+}
+
+// historyPersister is the durable store for rollups and benchmark runs.
+type historyPersister interface {
+	rollupPersister
+	benchmarkPersister
 }
 
 func newObservabilityServer() *observabilityServer {
@@ -168,6 +155,8 @@ func newObservabilityServerAt(path string) (*observabilityServer, error) {
 		maxMetrics: 10000,
 		maxTraces:  10000,
 		store:      store,
+		rollups:    newRollupStore(),
+		benchmarks: &benchmarkStore{},
 		targets: ObservabilityTargets{
 			DurabilityAfterAck:        100.0,
 			DurabilityAfterCompletion: 100.0,
@@ -188,27 +177,44 @@ func newObservabilityServerAt(path string) (*observabilityServer, error) {
 }
 
 func newUnavailableObservabilityServer(err error) *observabilityServer {
-	return &observabilityServer{metrics: make([]*MetricPoint, 0), traces: make([]*TraceSpan, 0), logs: make([]*LogEntry, 0), maxLogs: 10000, maxMetrics: 10000, maxTraces: 10000, storageErr: err}
+	return &observabilityServer{metrics: make([]*MetricPoint, 0), traces: make([]*TraceSpan, 0), logs: make([]*LogEntry, 0), maxLogs: 10000, maxMetrics: 10000, maxTraces: 10000, storageErr: err, rollups: newRollupStore(), benchmarks: &benchmarkStore{}}
 }
 
+// journalRecord is one line of the JSONL journal. Every signal record carries
+// a sequence number, increasing within the journal; a "journal" record names
+// the journal so a snapshot can say which journal its position refers to.
+// Lines written before sequencing existed have Seq 0.
 type journalRecord struct {
-	Kind   string       `json:"kind"`
-	Metric *MetricPoint `json:"metric,omitempty"`
-	Trace  *TraceSpan   `json:"trace,omitempty"`
-	Log    *LogEntry    `json:"log,omitempty"`
+	Kind      string       `json:"kind"`
+	Seq       uint64       `json:"seq,omitempty"`
+	JournalID string       `json:"journal_id,omitempty"`
+	Metric    *MetricPoint `json:"metric,omitempty"`
+	Trace     *TraceSpan   `json:"trace,omitempty"`
+	Log       *LogEntry    `json:"log,omitempty"`
 }
 
+// persistedObservabilityState is the PostgreSQL restart snapshot. JournalID
+// and JournalSeq record the journal position it (and the rollups written in
+// the same checkpoint) includes: every journaled record after that position
+// was acknowledged after the snapshot and is replayed from the journal.
 type persistedObservabilityState struct {
-	Metrics []*MetricPoint       `json:"metrics"`
-	Traces  []*TraceSpan         `json:"traces"`
-	Logs    []*LogEntry          `json:"logs"`
-	Targets ObservabilityTargets `json:"targets"`
+	Metrics    []*MetricPoint       `json:"metrics"`
+	Traces     []*TraceSpan         `json:"traces"`
+	Logs       []*LogEntry          `json:"logs"`
+	Targets    ObservabilityTargets `json:"targets"`
+	JournalID  string               `json:"journal_id,omitempty"`
+	JournalSeq uint64               `json:"journal_seq,omitempty"`
 }
 
 type observabilityStore struct {
 	path string
 	file *os.File
 	mu   sync.Mutex
+	// id names this journal; seq is the last sequence number written.
+	id  string
+	seq uint64
+	// records counts the signal records found in the journal at load.
+	records int
 }
 
 func openObservabilityStore(path string) (*observabilityStore, error) {
@@ -222,9 +228,7 @@ func openObservabilityStore(path string) (*observabilityStore, error) {
 	return &observabilityStore{path: path, file: f}, nil
 }
 
-func (st *observabilityStore) append(record journalRecord) error {
-	st.mu.Lock()
-	defer st.mu.Unlock()
+func (st *observabilityStore) writeLocked(record journalRecord) error {
 	b, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -236,38 +240,109 @@ func (st *observabilityStore) append(record journalRecord) error {
 	return st.file.Sync()
 }
 
-func (st *observabilityStore) load(s *observabilityServer) error {
+// append journals one signal record under the next sequence number and
+// fsyncs it before returning.
+func (st *observabilityStore) append(record journalRecord) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	record.Seq = st.seq + 1
+	if err := st.writeLocked(record); err != nil {
+		return err
+	}
+	st.seq = record.Seq
+	return nil
+}
+
+// position is the journal's identity and last written sequence number.
+func (st *observabilityStore) position() (string, uint64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.id, st.seq
+}
+
+// scan reads every journal line in order.
+func (st *observabilityStore) scan(fn func(journalRecord)) error {
 	f, err := os.Open(st.path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 2<<20)
 	for scanner.Scan() {
 		var record journalRecord
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			return err
 		}
-		switch record.Kind {
-		case "metric":
-			if record.Metric != nil {
-				s.metrics = append(s.metrics, record.Metric)
-			}
-		case "trace":
-			if record.Trace != nil {
-				s.traces = append(s.traces, record.Trace)
-			}
-		case "log":
-			if record.Log != nil {
-				s.logs = append(s.logs, record.Log)
-			}
-		}
+		fn(record)
 	}
-	if err := scanner.Err(); err != nil {
+	return scanner.Err()
+}
+
+// load applies the journal to s, learns the journal's identity and last
+// sequence number, and names a journal that has no identity yet so later
+// snapshots can refer to positions in it.
+func (st *observabilityStore) load(s *observabilityServer) error {
+	err := st.scan(func(record journalRecord) {
+		if record.Kind == "journal" {
+			st.id = record.JournalID
+			return
+		}
+		if record.Seq > st.seq {
+			st.seq = record.Seq
+		}
+		if s.applyRecord(record) {
+			st.records++
+		}
+	})
+	if err != nil {
 		return err
 	}
 	s.trimRetention()
+	if st.id == "" {
+		id, err := newJournalID()
+		if err != nil {
+			return err
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if err := st.writeLocked(journalRecord{Kind: "journal", JournalID: id}); err != nil {
+			return err
+		}
+		st.id = id
+	}
 	return nil
+}
+
+func newJournalID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// applyRecord adds one journaled signal to the in-memory ring, reporting
+// whether it was a signal record.
+func (s *observabilityServer) applyRecord(record journalRecord) bool {
+	switch record.Kind {
+	case "metric":
+		if record.Metric != nil {
+			s.metrics = append(s.metrics, record.Metric)
+			return true
+		}
+	case "trace":
+		if record.Trace != nil {
+			s.traces = append(s.traces, record.Trace)
+			return true
+		}
+	case "log":
+		if record.Log != nil {
+			s.logs = append(s.logs, record.Log)
+			return true
+		}
+	}
+	return false
 }
 
 func (st *observabilityStore) ready() error {
@@ -294,14 +369,191 @@ func (s *observabilityServer) trimRetention() {
 	}
 }
 
+// persistDB marks the raw signal state for the next background checkpoint.
+// Each ingested record is already fsynced to the JSONL journal before the
+// ingest is acknowledged; the PostgreSQL document is the restart snapshot,
+// and rewriting the whole ring (up to 30k records) on every ingest call
+// would dominate the collector's cost under fabric request traffic. A
+// restart restores the snapshot and replays every journal record written
+// after the snapshot's journal position (restoreSnapshot), so nothing
+// acknowledged between checkpoints is lost. A failed checkpoint is surfaced
+// on /health/ready and retried on the next tick.
 func (s *observabilityServer) persistDB() error {
-	if s.db == nil {
+	if s.history == nil {
 		return nil
 	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	s.stateDirty = true
+	return s.lastPersistErr
+}
+
+// checkpoint persists the raw signal snapshot and the changed rollup buckets
+// together, tagged with the journal position they include. Ingest appends to
+// the journal and applies to memory under s.mu, so reading under s.mu gives
+// a cut in which the ring, the rollups and the journal position agree.
+func (s *observabilityServer) checkpoint(ctx context.Context) error {
+	if s.history == nil {
+		return nil
+	}
+	s.persistMu.Lock()
+	dirty := s.stateDirty
+	s.stateDirty = false
+	s.persistMu.Unlock()
+
 	s.mu.RLock()
+	rows := s.rollups.takeDirty()
+	if !dirty && len(rows) == 0 {
+		s.mu.RUnlock()
+		return nil
+	}
 	state := persistedObservabilityState{Metrics: s.metrics, Traces: s.traces, Logs: s.logs, Targets: s.targets}
+	if s.store != nil {
+		state.JournalID, state.JournalSeq = s.store.position()
+	}
 	s.mu.RUnlock()
-	return s.db.Save(context.Background(), "observability", state)
+
+	err := s.history.Checkpoint(ctx, rows, state)
+	s.persistMu.Lock()
+	s.lastPersistErr = err
+	if err != nil {
+		s.stateDirty = true
+	}
+	s.persistMu.Unlock()
+	if err != nil {
+		s.rollups.requeue(rows)
+	}
+	return err
+}
+
+// restoreSnapshot rebuilds the raw signal ring from the PostgreSQL snapshot
+// plus the journal records written after the snapshot's journal position,
+// and returns the replayed metrics so they can be folded into rollups that
+// were loaded from the same checkpoint. The journal was already applied at
+// open; this replaces that view only where the snapshot is the better
+// source:
+//   - no snapshot: the journal alone is the state.
+//   - snapshot from this journal: records after JournalSeq are replayed.
+//   - snapshot from another journal (the journal volume was replaced):
+//     every sequenced record in this journal postdates it and is replayed.
+//   - snapshot written before journal positions existed: the journal, when
+//     it holds any records, is complete and kept; otherwise the snapshot is
+//     used. Rollups cannot be reconciled in this one case.
+func (s *observabilityServer) restoreSnapshot(state persistedObservabilityState) ([]*MetricPoint, error) {
+	if state.Targets.P95RetrievalLatency != "" {
+		s.mu.Lock()
+		s.targets = state.Targets
+		s.mu.Unlock()
+	}
+	hasSnapshot := state.Metrics != nil || state.Traces != nil || state.Logs != nil || state.JournalID != ""
+	if !hasSnapshot || s.store == nil {
+		return nil, nil
+	}
+	journalID, _ := s.store.position()
+	if state.JournalID == "" {
+		if s.store.records > 0 {
+			return nil, nil
+		}
+		s.mu.Lock()
+		s.metrics, s.traces, s.logs = state.Metrics, state.Traces, state.Logs
+		s.trimRetention()
+		s.mu.Unlock()
+		return nil, nil
+	}
+	after := uint64(0)
+	if state.JournalID == journalID {
+		after = state.JournalSeq
+	}
+	restored := &observabilityServer{
+		metrics: append([]*MetricPoint(nil), state.Metrics...),
+		traces:  append([]*TraceSpan(nil), state.Traces...),
+		logs:    append([]*LogEntry(nil), state.Logs...),
+	}
+	var replayed []*MetricPoint
+	err := s.store.scan(func(record journalRecord) {
+		if record.Seq == 0 || record.Seq <= after {
+			return
+		}
+		if restored.applyRecord(record) && record.Kind == "metric" {
+			replayed = append(replayed, record.Metric)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.metrics, s.traces, s.logs = restored.metrics, restored.traces, restored.logs
+	s.trimRetention()
+	s.mu.Unlock()
+	return replayed, nil
+}
+
+// restoreDurableState loads the stored rollups and rebuilds the raw ring
+// from the snapshot plus the journal, folding metrics acknowledged after the
+// last checkpoint into the rollups.
+func (s *observabilityServer) restoreDurableState(ctx context.Context, state persistedObservabilityState) error {
+	now := time.Now()
+	rows, err := s.history.LoadRollups(ctx, now.Add(-minuteRetention), now.Add(-hourRetention))
+	if err != nil {
+		return fmt.Errorf("load observability rollups: %w", err)
+	}
+	s.rollups.load(rows)
+	rollupsWereEmpty := s.rollups.empty()
+	replayed, err := s.restoreSnapshot(state)
+	if err != nil {
+		return fmt.Errorf("replay observability journal: %w", err)
+	}
+	if rollupsWereEmpty {
+		// First start on a database without rollups: fold the retained raw
+		// ring into history so existing measurements are not discarded.
+		s.mu.RLock()
+		for _, m := range s.metrics {
+			s.rollups.add(m)
+		}
+		s.mu.RUnlock()
+		return nil
+	}
+	// Metrics journaled after the last checkpoint are not in the stored
+	// rollups; fold them in so the restart loses none of them.
+	for _, m := range replayed {
+		s.rollups.add(m)
+	}
+	return nil
+}
+
+// runBackground checkpoints state and rollups every interval and prunes
+// expired history hourly, until ctx ends (then flushes once more).
+func (s *observabilityServer) runBackground(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	lastPrune := time.Time{}
+	for {
+		select {
+		case <-ctx.Done():
+			final, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := s.checkpoint(final); err != nil {
+				log.Printf("observability: final checkpoint: %v", err)
+			}
+			cancel()
+			return
+		case <-ticker.C:
+			opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := s.checkpoint(opCtx); err != nil {
+				log.Printf("observability: checkpoint signal state and rollups: %v", err)
+			}
+			if time.Since(lastPrune) > time.Hour {
+				s.rollups.prune()
+				if s.history != nil {
+					now := time.Now()
+					if err := s.history.PruneRollups(opCtx, now.Add(-minuteRetention), now.Add(-hourRetention)); err != nil {
+						log.Printf("observability: prune rollups: %v", err)
+					}
+				}
+				lastPrune = time.Now()
+			}
+			cancel()
+		}
+	}
 }
 
 func main() {
@@ -316,14 +568,20 @@ func main() {
 	if err := repo.Load(context.Background(), "observability", &state); err != nil {
 		log.Fatal(err)
 	}
-	s.mu.Lock()
-	if state.Metrics != nil {
-		s.metrics, s.traces, s.logs = state.Metrics, state.Traces, state.Logs
+
+	history := &pgHistoryStore{db: repo.DB}
+	s.history = history
+	if err := s.restoreDurableState(context.Background(), state); err != nil {
+		log.Fatal(err)
 	}
-	if state.Targets.P95RetrievalLatency != "" {
-		s.targets = state.Targets
+	runs, err := history.LoadBenchmarkRuns(context.Background(), maxBenchmarkRuns)
+	if err != nil {
+		log.Fatalf("load benchmark runs: %v", err)
 	}
-	s.mu.Unlock()
+	s.benchmarks.load(runs)
+	bgCtx, stopBackground := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopBackground()
+	go s.runBackground(bgCtx, 15*time.Second)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/version", release.Handler("observability"))
@@ -333,6 +591,9 @@ func main() {
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/metrics/ingest", s.handleMetricsIngest)
 	mux.HandleFunc("/v1/metrics/query", s.handleMetricsQuery)
+	mux.HandleFunc("/v1/metrics/series", s.handleMetricsSeries)
+	mux.HandleFunc("/v1/metrics/catalog", s.handleMetricsCatalog)
+	mux.HandleFunc("/v1/flows", s.handleFlows)
 
 	// Traces
 	mux.HandleFunc("/v1/traces", s.handleTraces)
@@ -346,14 +607,16 @@ func main() {
 	// Targets
 	mux.HandleFunc("/v1/targets", s.handleTargets)
 	mux.HandleFunc("/v1/export/status", s.handleExportStatus)
-	mux.HandleFunc("/v1/benchmarks", handleBenchmarks)
+	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
+	mux.HandleFunc("/v1/benchmarks/runs", s.handleBenchmarkRuns)
+	mux.HandleFunc("/v1/benchmarks/runs/", s.handleBenchmarkRuns)
 
 	addr := os.Getenv("SCOS_OBSERVABILITY_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8096"
 	}
 	log.Printf("observability listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("observability", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -367,6 +630,14 @@ func (s *observabilityServer) handleReady(w http.ResponseWriter, _ *http.Request
 	if s.storageErr != nil || s.otlpErr != nil || s.db == nil && (s.store == nil || s.store.ready() != nil) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		writeJSON(w, map[string]string{"status": "unavailable"})
+		return
+	}
+	s.persistMu.Lock()
+	persistErr := s.lastPersistErr
+	s.persistMu.Unlock()
+	if persistErr != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"status": "unavailable", "reason": "persist signal state: " + persistErr.Error()})
 		return
 	}
 	if s.otlp != nil {
@@ -399,94 +670,39 @@ func (s *observabilityServer) storageAvailable(w http.ResponseWriter) bool {
 	return false
 }
 
-func handleBenchmarks(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	results := make([]benchmarkCaseResult, 0, len(frozenBenchmarkCases))
-	averageScores := make(map[string]float64)
-	var totalLatency float64
-	for _, benchmark := range frozenBenchmarkCases {
-		start := time.Now()
-		retrieved := benchmarkRetrieval(benchmark.query)
-		latency := float64(time.Since(start).Nanoseconds()) / 1e6
-		scores := benchmarkScores(benchmark.expected, retrieved)
-		for metric, score := range scores {
-			averageScores[metric] += score
-		}
-		results = append(results, benchmarkCaseResult{
-			CaseID:       benchmark.id,
-			RetrievedIDs: retrieved,
-			LatencyMs:    latency,
-			Scores:       scores,
-		})
-		totalLatency += latency
-	}
-	for metric, score := range averageScores {
-		averageScores[metric] = score / float64(len(results))
-	}
-
-	writeJSON(w, benchmarkSummary{
-		Suite:          "scos_governance_quality_baseline",
-		Version:        "1.3.0",
-		TotalCases:     len(results),
-		AverageScores:  averageScores,
-		TotalLatencyMs: totalLatency,
-		AvgLatencyMs:   totalLatency / float64(len(results)),
-		Results:        results,
-	})
-}
-
-func benchmarkRetrieval(query string) []string {
-	lower := strings.ToLower(query)
-	switch {
-	case query == "sys_memory_item_9921a":
-		return []string{"sys_memory_item_9921a"}
-	case strings.Contains(lower, "injection") || strings.Contains(lower, "bypass"):
-		return []string{"sec_denied_injection"}
-	case strings.Contains(lower, "authoritative") || strings.Contains(lower, "turn"):
-		return []string{"doc_journal_commit", "doc_turn_durability"}
-	case strings.Contains(lower, "prior") || strings.Contains(lower, "schema"):
-		return []string{"mem_schema_v2", "hist_rev_3"}
-	case strings.Contains(lower, "alpha"):
-		return []string{"prj_alpha_deploy_cfg"}
-	case strings.Contains(lower, "conflict"):
-		return []string{"conflict_seq_412"}
-	case strings.Contains(lower, "restore") || strings.Contains(lower, "recovery"):
-		return []string{"recovery_checkpoint_412"}
-	case strings.Contains(lower, "deprecated") || strings.Contains(lower, "hook"):
-		return []string{"stale_hook_sig_v1"}
-	case strings.Contains(lower, "multi-turn") || strings.Contains(lower, "step 3"):
-		return []string{"turn_step_3_proxy_log"}
-	default:
-		return []string{"doc_generic_match"}
-	}
-}
-
-func benchmarkScores(expected, retrieved []string) map[string]float64 {
-	return map[string]float64{
-		"recall@1":    benchmarkharness.ComputeRecallAtK(expected, retrieved, 1),
-		"recall@3":    benchmarkharness.ComputeRecallAtK(expected, retrieved, 3),
-		"recall@5":    benchmarkharness.ComputeRecallAtK(expected, retrieved, 5),
-		"recall@10":   benchmarkharness.ComputeRecallAtK(expected, retrieved, 10),
-		"precision@1": benchmarkharness.ComputePrecisionAtK(expected, retrieved, 1),
-		"precision@3": benchmarkharness.ComputePrecisionAtK(expected, retrieved, 3),
-		"precision@5": benchmarkharness.ComputePrecisionAtK(expected, retrieved, 5),
-		"mrr":         benchmarkharness.ComputeMRR(expected, retrieved),
-		"ndcg@5":      benchmarkharness.ComputeNDCGAtK(expected, retrieved, 5),
-		"ndcg@10":     benchmarkharness.ComputeNDCGAtK(expected, retrieved, 10),
-	}
-}
-
 // ── metrics ──────────────────────────────────────────────────────────────
 
+// handleMetrics returns retained raw points. ?metric= keeps only points
+// whose name contains that fragment (case-insensitive), e.g. "token" or
+// "cost"; ?limit= returns the newest N matches.
 func (s *observabilityServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	fragment := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("metric")))
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
 	s.mu.RLock()
-	m := s.metrics
+	out := make([]*MetricPoint, 0)
+	for i := len(s.metrics) - 1; i >= 0; i-- {
+		m := s.metrics[i]
+		if fragment != "" && !strings.Contains(strings.ToLower(m.Name), fragment) {
+			continue
+		}
+		out = append(out, m)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
 	s.mu.RUnlock()
-	writeJSON(w, m)
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	writeJSON(w, out)
 }
 
 func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http.Request) {
@@ -530,6 +746,7 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 			}
 		}
 		s.metrics = append(s.metrics, &points[i])
+		s.rollups.add(&points[i])
 	}
 	s.trimRetention()
 	s.mu.Unlock()

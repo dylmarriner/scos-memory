@@ -34,8 +34,20 @@ type outboxStatus struct {
 func (s server) readOutboxStatus(ctx context.Context, rc requestContext) (outboxStatus, error) {
 	status := outboxStatus{ObservedAt: time.Now().UTC().Format(time.RFC3339)}
 
+	// outbox_jobs and outbox_dead_letters are under FORCE RLS: the counts
+	// must be read inside a transaction carrying the tenant context, or the
+	// restricted runtime role sees no rows and reports an empty backlog.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return outboxStatus{}, err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, rc); err != nil {
+		return outboxStatus{}, err
+	}
+
 	var oldest sql.NullFloat64
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT
 			count(*) FILTER (WHERE status = 'pending'),
 			count(*) FILTER (WHERE status = 'processing'),
@@ -52,9 +64,12 @@ func (s server) readOutboxStatus(ctx context.Context, rc requestContext) (outbox
 		status.OldestPendingAge = int(oldest.Float64)
 	}
 
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM outbox_dead_letters WHERE tenant_id = $1`, rc.TenantID).
 		Scan(&status.DeadLetters); err != nil {
+		return outboxStatus{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return outboxStatus{}, err
 	}
 	return status, nil
@@ -105,7 +120,18 @@ func (s server) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.db.QueryContext(r.Context(), `
+	// Both tables are under FORCE RLS; read inside the tenant context.
+	tx, err := s.db.BeginTx(r.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list dead letters"})
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(r.Context(), tx, rc); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list dead letters"})
+		return
+	}
+	rows, err := tx.QueryContext(r.Context(), `
 		SELECT d.id, d.job_id, j.job_type, d.attempts, d.failure_reason, d.created_at
 		FROM outbox_dead_letters d
 		JOIN outbox_jobs j ON j.id = d.job_id
@@ -138,6 +164,11 @@ func (s server) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
 		letters = append(letters, d)
 	}
 	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read dead letters"})
+		return
+	}
+	rows.Close()
+	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read dead letters"})
 		return
 	}

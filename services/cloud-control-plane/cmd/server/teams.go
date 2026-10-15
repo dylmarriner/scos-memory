@@ -52,11 +52,17 @@ func (s *server) createTeam(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var tenant, team, principal, workspace, namespace string
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO tenants(name) VALUES($1) RETURNING id`, strings.TrimSpace(in.Name)).Scan(&tenant); err == nil {
+	if tenant, err = createTenant(r.Context(), tx, strings.TrimSpace(in.Name)); err == nil {
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO cloud_teams(tenant_id,owner_user_id,name) VALUES($1,$2,$3) RETURNING id`, tenant, id.UserID, strings.TrimSpace(in.Name)).Scan(&team)
 	}
 	if err == nil {
+		err = actAs(r.Context(), tx, tenant, "")
+	}
+	if err == nil {
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES($1,'human',$2,$3) RETURNING id`, tenant, "team:"+team+":"+id.UserID, id.DisplayName).Scan(&principal)
+	}
+	if err == nil {
+		err = actAs(r.Context(), tx, tenant, principal)
 	}
 	if err == nil {
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO workspaces(tenant_id,name) VALUES($1,$2) RETURNING id`, tenant, strings.TrimSpace(in.Name)).Scan(&workspace)
@@ -183,6 +189,11 @@ func (s *server) acceptInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var principal string
+	e = actAs(r.Context(), tx, tenant, "")
+	if e != nil {
+		http.Error(w, "invitation acceptance failed", 500)
+		return
+	}
 	e = tx.QueryRowContext(r.Context(), `INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES($1,'human',$2,$3) ON CONFLICT (tenant_id,external_id) DO UPDATE SET display_name=EXCLUDED.display_name RETURNING id`, tenant, "team:"+team+":"+id.UserID, id.DisplayName).Scan(&principal)
 	if e == nil {
 		_, e = tx.ExecContext(r.Context(), `INSERT INTO cloud_team_members(team_id,user_id,principal_id,role) VALUES($1,$2,$3,$4) ON CONFLICT (team_id,user_id) DO UPDATE SET role=EXCLUDED.role`, team, id.UserID, principal, role)

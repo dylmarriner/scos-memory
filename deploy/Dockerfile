@@ -81,7 +81,10 @@ FROM alpine:3.24
 # binaries land below) makes the installed `graphify` script reachable by
 # every user in the image, not just whichever account ran the build.
 ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
-RUN apk add --no-cache ca-certificates python3 py3-pip pipx \
+# backup-manager execs pg_dump, pg_restore, createdb and dropdb; the client
+# major version matches the pgvector/pgvector:pg17 server so dumps load.
+# git is what backup-manager mirrors the OKF repository with.
+RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client git \
     && pipx install graphifyy \
     && addgroup -S scos && adduser -S -G scos scos \
     # State directories for the services that keep local state. compose mounts
@@ -99,7 +102,11 @@ RUN apk add --no-cache ca-certificates python3 py3-pip pipx \
         /var/lib/scos/observability \
         /var/lib/scos/okf \
         /var/lib/scos/wal-archive \
-    && chown -R scos:scos /var/lib/scos
+        # graphify-provider's per-repo AST cache (compose mounts the
+        # graphify-cache volume here); without it the volume is seeded
+        # root-owned and every graphify query fails creating its cache.
+        /var/lib/graphify-cache \
+    && chown -R scos:scos /var/lib/scos /var/lib/graphify-cache
 
 COPY --from=build /out/ /usr/local/bin/
 

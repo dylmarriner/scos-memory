@@ -68,6 +68,10 @@ func main() {
 			logger.Error("startup failed", "error", err)
 			os.Exit(1)
 		}
+		if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+			logger.Error("refusing to start", "error", err)
+			os.Exit(1)
+		}
 		database.TuneSQLDB(db)
 		s.db = db
 		defer db.Close()
@@ -80,7 +84,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           auth.ControlPlaneHandler(s.routes(), authConfig),
+		Handler:           telemetry.Instrument("memory-gateway", auth.ControlPlaneHandler(s.routes(), authConfig)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

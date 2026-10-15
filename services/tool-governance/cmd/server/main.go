@@ -1,4 +1,6 @@
 package main
+
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -15,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	executionadapters "github.com/dylmarriner/scos-memory/packages/execution-adapters"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -75,6 +78,15 @@ type ToolOperation struct {
 	ParentOp    string    `json:"parent_op,omitempty"`
 	StartedAt   string    `json:"started_at"`
 	CompletedAt string    `json:"completed_at,omitempty"`
+	// The governance decision recorded with the operation's tool_executions
+	// row: the submitted plan, the risk the caller declared, the risk
+	// governance decided on, whether the caller confirmed, and the tool
+	// properties the decision was checked against.
+	Plan               *OperationPlan  `json:"plan,omitempty"`
+	RequestedRisk      string          `json:"requested_risk_level,omitempty"`
+	RiskLevel          string          `json:"risk_level,omitempty"`
+	Confirmed          bool            `json:"confirmed"`
+	DeclaredProperties *ToolProperties `json:"declared_properties,omitempty"`
 }
 
 var validTransitions = map[ToolState][]ToolState{
@@ -175,11 +187,33 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	database.TuneSQLDB(db)
 	defer db.Close()
 
 	s := &toolGovernanceServer{db: db}
 
+	mux := s.routes()
+
+	addr := os.Getenv("SCOS_TOOL_GOVERNANCE_HTTP_ADDR")
+	if addr == "" {
+		addr = ":8092"
+	}
+	log.Printf("tool governance listening on %s", addr)
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("tool-governance", auth.ControlPlaneHandler(mux, auth.MustFromEnvironment()))); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// toolAdminScope is the operator scope required to change a tenant's tool
+// catalog. The shared static service token carries no claims and so no
+// scopes: execution-proxy and other internal callers can prepare
+// operations on authorised tools but can never register or authorise one.
+const toolAdminScope = "tools:admin"
+
+func (s *toolGovernanceServer) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/version", release.Handler("tool-governance"))
@@ -189,23 +223,15 @@ func main() {
 
 	mux.HandleFunc("/v1/tools", s.handleTools)
 	mux.HandleFunc("/v1/tools/", s.handleToolByID)
-	mux.HandleFunc("/v1/tools/register", s.handleToolRegister)
-	mux.HandleFunc("/v1/tools/transition", s.handleToolTransition)
+	mux.Handle("/v1/tools/register", auth.RequireScope(toolAdminScope, http.HandlerFunc(s.handleToolRegister)))
+	mux.Handle("/v1/tools/transition", auth.RequireScope(toolAdminScope, http.HandlerFunc(s.handleToolTransition)))
 	mux.HandleFunc("/v1/operations", s.handleOperations)
 	mux.HandleFunc("/v1/operations/", s.handleOperationByID)
 	mux.HandleFunc("/v1/operations/start", s.handleOperationStart)
 	mux.HandleFunc("/v1/operations/prepare", s.handleOperationPrepare)
 	mux.HandleFunc("/v1/operations/complete", s.handleOperationComplete)
 	mux.HandleFunc("/v1/operations/reconcile", s.handleReconcile)
-
-	addr := os.Getenv("SCOS_TOOL_GOVERNANCE_HTTP_ADDR")
-	if addr == "" {
-		addr = ":8092"
-	}
-	log.Printf("tool governance listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
-		log.Fatal(err)
-	}
+	return mux
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {
@@ -475,13 +501,30 @@ func (s *toolGovernanceServer) handleOperationStart(w http.ResponseWriter, r *ht
 	}
 	defer r.Body.Close()
 	var req struct {
-		ToolID      string `json:"tool_id"`
-		Input       any    `json:"input,omitempty"`
-		TenantID    string `json:"tenant_id,omitempty"`
-		PrincipalID string `json:"principal_id,omitempty"`
+		ToolID      string        `json:"tool_id,omitempty"`
+		ToolName    string        `json:"tool_name,omitempty"`
+		OperationID string        `json:"operation_id,omitempty"`
+		Input       any           `json:"input,omitempty"`
+		Plan        OperationPlan `json:"plan"`
+		Risk        string        `json:"risk,omitempty"`
+		Confirmed   bool          `json:"confirmed,omitempty"`
+		TenantID    string        `json:"tenant_id,omitempty"`
+		PrincipalID string        `json:"principal_id,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if (req.ToolID == "") == (req.ToolName == "") {
+		http.Error(w, "exactly one of tool_id or tool_name is required", http.StatusBadRequest)
+		return
+	}
+	if req.ToolID != "" && !isUUID(req.ToolID) {
+		http.Error(w, "tool_id must be a UUID", http.StatusBadRequest)
+		return
+	}
+	if req.OperationID != "" && !isUUID(req.OperationID) {
+		http.Error(w, "operation_id must be a UUID", http.StatusBadRequest)
 		return
 	}
 	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
@@ -519,25 +562,33 @@ func (s *toolGovernanceServer) handleOperationStart(w http.ResponseWriter, r *ht
 		return
 	}
 
-	tool, err := loadTool(ctx, tx, identity.TenantID, req.ToolID)
-	if err == sql.ErrNoRows {
-		http.Error(w, "tool not found", http.StatusNotFound)
+	var tool *ToolDefinition
+	if req.ToolID != "" {
+		tool, err = loadTool(ctx, tx, identity.TenantID, req.ToolID)
+		if err == sql.ErrNoRows {
+			http.Error(w, "tool not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "load tool: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		var ok bool
+		if tool, ok = resolveOperationTool(ctx, w, tx, identity.TenantID, req.ToolName); !ok {
+			return
+		}
+	}
+	decision, refusal := decideOperation(tool, operationRequest{Risk: req.Risk, Plan: req.Plan, Confirmed: req.Confirmed, OperationID: req.OperationID})
+	if refusal != nil {
+		http.Error(w, refusal.Message, refusal.Status)
 		return
 	}
-	if err != nil {
-		http.Error(w, "load tool: "+err.Error(), http.StatusInternalServerError)
+	opID, ok := s.claimOperationID(ctx, w, tx, identity.TenantID, req.OperationID)
+	if !ok {
 		return
 	}
-	if tool.State != StateAuthorised {
-		http.Error(w, "tool must be authorised before execution", http.StatusConflict)
-		return
-	}
-	opID, err := newID()
-	if err != nil {
-		http.Error(w, "generate operation id: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	op, err := startOperation(ctx, tx, identity, opID, tool.Name, tool.Version, idemKeyHeader, req.Input, tool.Props)
+	op, err := startOperation(ctx, tx, identity, opID, tool.Name, tool.Version, idemKeyHeader, req.Input, tool.Props, decision, false)
 	if err != nil {
 		http.Error(w, "start operation: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -556,9 +607,16 @@ func (s *toolGovernanceServer) handleOperationStart(w http.ResponseWriter, r *ht
 // handleOperationPrepare is the boundary used by execution-proxy. It issues
 // an operation only after the governance service has classified and accepted
 // the tool request; callers cannot turn an arbitrary operation ID into a
-// capability. Unlike operation/start it auto-registers and auto-authorises
-// an unknown tool name, since execution-proxy calls this before any explicit
-// registration step exists for ad hoc tool invocations.
+// capability, and cannot bring a tool into existence by naming it. The tool
+// must already be registered for the tenant (through the admin-scoped
+// /v1/tools/register and /v1/tools/transition) or be one of the fabric's
+// built-in tools seeded in builtin_tool_definitions; any other name is
+// refused. The caller's plan and risk are decoded, checked against the
+// tool's declared properties by decideOperation, and persisted with the
+// operation. A prepare naming an operation /v1/operations/start already
+// started hands that operation to the executor (claimForExecutor): the
+// response then carries the confirmation and risk recorded on it, which is
+// the only confirmation execution-proxy acts on.
 func (s *toolGovernanceServer) handleOperationPrepare(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -570,11 +628,14 @@ func (s *toolGovernanceServer) handleOperationPrepare(w http.ResponseWriter, r *
 	}
 	defer r.Body.Close()
 	var req struct {
-		OperationID string `json:"operation_id"`
-		ToolName    string `json:"tool_name"`
-		Input       any    `json:"input,omitempty"`
-		TenantID    string `json:"tenant_id,omitempty"`
-		PrincipalID string `json:"principal_id,omitempty"`
+		OperationID string        `json:"operation_id"`
+		ToolName    string        `json:"tool_name"`
+		Input       any           `json:"input,omitempty"`
+		Plan        OperationPlan `json:"plan"`
+		Risk        string        `json:"risk,omitempty"`
+		Confirmed   bool          `json:"confirmed,omitempty"`
+		TenantID    string        `json:"tenant_id,omitempty"`
+		PrincipalID string        `json:"principal_id,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
@@ -582,6 +643,10 @@ func (s *toolGovernanceServer) handleOperationPrepare(w http.ResponseWriter, r *
 	}
 	if req.ToolName == "" {
 		http.Error(w, "tool_name required", http.StatusBadRequest)
+		return
+	}
+	if req.OperationID != "" && !isUUID(req.OperationID) {
+		http.Error(w, "operation_id must be a UUID", http.StatusBadRequest)
 		return
 	}
 	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
@@ -619,41 +684,44 @@ func (s *toolGovernanceServer) handleOperationPrepare(w http.ResponseWriter, r *
 		return
 	}
 
-	tool, err := loadToolByName(ctx, tx, identity.TenantID, req.ToolName)
+	tool, ok := resolveOperationTool(ctx, w, tx, identity.TenantID, req.ToolName)
+	if !ok {
+		return
+	}
+	var resp GovernedOperationResponse
+	started, err := s.startedOperationFor(ctx, tx, identity.TenantID, req.OperationID)
 	switch {
-	case err == sql.ErrNoRows:
-		tool = &ToolDefinition{Name: req.ToolName, Version: version, Props: ToolProperties{ExternallySideEffecting: true, Reconcilable: true}}
-		if err := registerTool(ctx, tx, identity, tool); err != nil {
-			http.Error(w, "register tool: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := transitionTool(ctx, tx, identity.TenantID, tool.ID, StateAuthorised); err != nil {
-			http.Error(w, "authorise tool: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		tool.State, tool.CurrentState = StateAuthorised, StateAuthorised
 	case err != nil:
-		http.Error(w, "load tool: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "load operation: "+err.Error(), http.StatusInternalServerError)
 		return
-	case tool.State != StateAuthorised:
-		http.Error(w, "tool is not authorised", http.StatusForbidden)
-		return
-	}
-
-	opID := req.OperationID
-	if opID == "" {
-		generated, err := newID()
-		if err != nil {
-			http.Error(w, "generate operation id: "+err.Error(), http.StatusInternalServerError)
+	case started != nil:
+		// The executor names an operation governance already started (the
+		// control plane's governed operation): it runs under that
+		// operation's recorded decision and confirmation, never one it
+		// asserts now.
+		var refusal *policyRefusal
+		if resp, refusal = claimForExecutor(ctx, tx, identity, tool, started, req.Risk, req.Plan); refusal != nil {
+			http.Error(w, refusal.Message, refusal.Status)
 			return
 		}
-		opID = generated
+	default:
+		decision, refusal := decideOperation(tool, operationRequest{Risk: req.Risk, Plan: req.Plan, Confirmed: req.Confirmed, OperationID: req.OperationID})
+		if refusal != nil {
+			http.Error(w, refusal.Message, refusal.Status)
+			return
+		}
+		opID, ok := s.claimOperationID(ctx, w, tx, identity.TenantID, req.OperationID)
+		if !ok {
+			return
+		}
+		// The executor preparing its own operation holds it from the start,
+		// so no later prepare can claim it again.
+		if _, err := startOperation(ctx, tx, identity, opID, tool.Name, tool.Version, idemKeyHeader, req.Input, tool.Props, decision, true); err != nil {
+			http.Error(w, "start operation: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp = GovernedOperationResponse{OperationID: opID, Prepared: true, Authorized: true, RiskLevel: decision.EffectiveRisk, Confirmed: decision.Confirmed}
 	}
-	if _, err := startOperation(ctx, tx, identity, opID, tool.Name, tool.Version, idemKeyHeader, req.Input, tool.Props); err != nil {
-		http.Error(w, "start operation: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	resp := GovernedOperationResponse{OperationID: opID, Prepared: true, Authorized: true}
 	if err := recordIdempotent(ctx, tx, identity, idemKey, "operation-prepare", fingerprint, resp); err != nil {
 		http.Error(w, "record idempotency: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -665,10 +733,116 @@ func (s *toolGovernanceServer) handleOperationPrepare(w http.ResponseWriter, r *
 	writeJSON(w, resp)
 }
 
+// claimOperationID returns the operation ID to start: the caller's, when it
+// names one that does not exist yet, or a freshly generated one. A caller
+// ID that already names an operation is refused with 409 -- a retry of the
+// same request replays through its Idempotency-Key instead, so a second
+// prepare under the same ID would be a second execution.
+func (s *toolGovernanceServer) claimOperationID(ctx context.Context, w http.ResponseWriter, tx *sql.Tx, tenantID, requested string) (string, bool) {
+	if requested == "" {
+		generated, err := newID()
+		if err != nil {
+			http.Error(w, "generate operation id: "+err.Error(), http.StatusInternalServerError)
+			return "", false
+		}
+		return generated, true
+	}
+	exists, err := operationExists(ctx, tx, tenantID, requested)
+	if err != nil {
+		http.Error(w, "check operation: "+err.Error(), http.StatusInternalServerError)
+		return "", false
+	}
+	if exists {
+		http.Error(w, fmt.Sprintf("operation %s already exists", requested), http.StatusConflict)
+		return "", false
+	}
+	return requested, true
+}
+
+// startedOperationFor returns the existing operation a prepare names, or
+// nil when it names none (or one that does not exist yet), in which case
+// prepare starts a new operation.
+func (s *toolGovernanceServer) startedOperationFor(ctx context.Context, tx *sql.Tx, tenantID, operationID string) (*startedOperation, error) {
+	if operationID == "" {
+		return nil, nil
+	}
+	started, err := loadStartedOperation(ctx, tx, tenantID, operationID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return started, err
+}
+
+// claimForExecutor hands an operation governance already started to the
+// executor that names it in a prepare. The executor must be the tool the
+// operation was started for, acting for the principal that started it, and
+// must plan the command the operation was started with. The executor's plan
+// is decided again, with the confirmation recorded on the operation -- not
+// one the executor asserts -- and at the higher of the recorded risk and
+// the plan's own grade, so a destructive command runs only under an
+// operation recorded as confirmed. An operation is claimed once: a second
+// prepare naming it is refused, so one confirmation authorises exactly one
+// execution.
+func claimForExecutor(ctx context.Context, tx *sql.Tx, identity requestIdentity, tool *ToolDefinition, started *startedOperation, risk string, plan OperationPlan) (GovernedOperationResponse, *policyRefusal) {
+	opID := started.ID
+	switch {
+	case started.ToolID != tool.Name:
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusConflict, fmt.Sprintf("operation %s was started for tool %q, not %q", opID, started.ToolID, tool.Name)}
+	case started.Claimed:
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusConflict, fmt.Sprintf("operation %s already exists and has been taken by an executor", opID)}
+	case started.StartedBy != identity.PrincipalID:
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusForbidden, fmt.Sprintf("operation %s was started by another principal", opID)}
+	case started.State != StateExecuting:
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusConflict, fmt.Sprintf("operation %s is %s, not awaiting execution", opID, started.State)}
+	}
+	recorded := plannedCommand(started.Plan)
+	if recorded == "" {
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusConflict, fmt.Sprintf("operation %s was started without a planned command", opID)}
+	}
+	if submitted := strings.TrimSpace(plan.OriginalRequest); submitted != recorded {
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusConflict, fmt.Sprintf("operation %s was started for command %q, not %q", opID, recorded, submitted)}
+	}
+	decision, refusal := decideOperation(tool, operationRequest{Risk: risk, Plan: plan, Confirmed: started.Confirmed, OperationID: opID})
+	if refusal != nil {
+		return GovernedOperationResponse{}, refusal
+	}
+	effective := decision.EffectiveRisk
+	if riskRank[started.RiskLevel] > riskRank[effective] {
+		effective = started.RiskLevel
+	}
+	if effective == executionadapters.RiskDestructive && !started.Confirmed {
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusForbidden, fmt.Sprintf("operation %s has no recorded confirmation; a destructive operation is not permitted", opID)}
+	}
+	claimed, err := claimStartedOperation(ctx, tx, opID, effective)
+	if err != nil {
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusInternalServerError, "claim operation: " + err.Error()}
+	}
+	if !claimed {
+		return GovernedOperationResponse{}, &policyRefusal{http.StatusConflict, fmt.Sprintf("operation %s already exists and has been taken by an executor", opID)}
+	}
+	return GovernedOperationResponse{OperationID: opID, Prepared: true, Authorized: true, RiskLevel: effective, Confirmed: started.Confirmed}, nil
+}
+
+// plannedCommand is the command an operation's recorded plan names.
+func plannedCommand(plan *OperationPlan) string {
+	if plan == nil {
+		return ""
+	}
+	if original := strings.TrimSpace(plan.OriginalRequest); original != "" {
+		return original
+	}
+	return strings.TrimSpace(plan.ExecutedRequest)
+}
+
+// GovernedOperationResponse is the capability prepare issues. RiskLevel is
+// the risk governance decided on, which may be higher than the caller
+// declared when the planned command grades higher.
 type GovernedOperationResponse struct {
 	OperationID string `json:"operation_id"`
 	Prepared    bool   `json:"prepared"`
 	Authorized  bool   `json:"authorized"`
+	RiskLevel   string `json:"risk_level,omitempty"`
+	Confirmed   bool   `json:"confirmed"`
 }
 
 func (s *toolGovernanceServer) handleOperationComplete(w http.ResponseWriter, r *http.Request) {
@@ -839,6 +1013,14 @@ func (s *toolGovernanceServer) handleReconcile(w http.ResponseWriter, r *http.Re
 		http.Error(w, "only failed or unknown operations can be reconciled", http.StatusConflict)
 		return
 	}
+	// Settling an executing operation is its completion; resolving a failed
+	// or uncertain outcome after the fact is reconciliation proper, which
+	// only a tool declared reconcilable supports. The properties checked are
+	// the snapshot recorded when the operation started.
+	if op.State != StateExecuting && (op.DeclaredProperties == nil || !op.DeclaredProperties.Reconcilable) {
+		http.Error(w, fmt.Sprintf("tool %q is not declared reconcilable; its %s operations cannot be reconciled", op.ToolID, op.State), http.StatusConflict)
+		return
+	}
 	var newState ToolState
 	switch req.Result {
 	case "":
@@ -888,4 +1070,30 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("encode response: %v", err)
 	}
+}
+
+// resolveOperationTool finds the named tool an operation will run: the
+// tenant's registered tool, or -- for one of the fabric's own built-in tools
+// -- the tenant's copy materialised from the catalog. Anything else is
+// refused; nothing is registered on a caller's say-so. It writes the
+// refusal itself and reports whether the caller may continue.
+func resolveOperationTool(ctx context.Context, w http.ResponseWriter, tx *sql.Tx, tenantID, name string) (*ToolDefinition, bool) {
+	tool, err := loadToolByName(ctx, tx, tenantID, name)
+	if err == sql.ErrNoRows {
+		builtin, builtinErr := loadBuiltinTool(ctx, tx, name)
+		switch {
+		case builtinErr == sql.ErrNoRows:
+			http.Error(w, fmt.Sprintf("tool %q is not registered for this tenant; register it through /v1/tools/register and authorise it through /v1/tools/transition", name), http.StatusForbidden)
+			return nil, false
+		case builtinErr != nil:
+			http.Error(w, "load built-in tool: "+builtinErr.Error(), http.StatusInternalServerError)
+			return nil, false
+		}
+		tool, err = materialiseBuiltinTool(ctx, tx, tenantID, builtin)
+	}
+	if err != nil {
+		http.Error(w, "load tool: "+err.Error(), http.StatusInternalServerError)
+		return nil, false
+	}
+	return tool, true
 }
