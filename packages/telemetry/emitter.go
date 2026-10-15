@@ -284,6 +284,7 @@ func (e *Emitter) send(ctx context.Context, points []MetricPoint) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(CallerHeader, e.service)
 	if token := strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN")); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

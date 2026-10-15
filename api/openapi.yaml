@@ -648,6 +648,18 @@ paths:
       operationId: getTransparencySnapshot
       responses:
         '200': {description: System transparency snapshot}
+  /v1/transparency/history/{view}:
+    get:
+      operationId: getTransparencyHistory
+      description: Read-only dashboard history (flows, series, catalog, benchmarks) proxied from observability with a whitelisted query.
+      parameters:
+        - name: view
+          in: path
+          required: true
+          schema: {type: string, enum: [flows, series, catalog, benchmarks]}
+      responses:
+        '200': {description: Observability history payload}
+        '404': {description: Unknown history view}
   /v1/transparency/events:
     get:
       operationId: getTransparencyEvents
