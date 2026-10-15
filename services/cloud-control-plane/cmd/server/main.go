@@ -5,6 +5,7 @@ import "github.com/dylmarriner/scos-memory/packages/telemetry"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -575,8 +576,14 @@ func (s *server) usage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication required", 401)
 		return
 	}
-	var requests, reads, writes, bytesStored int64
-	err = s.db.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(api_requests),0),COALESCE(SUM(memory_reads),0),COALESCE(SUM(memory_writes),0),COALESCE(SUM(bytes_stored),0) FROM cloud_usage_daily WHERE tenant_id=$1`, id.TenantID).Scan(&requests, &reads, &writes, &bytesStored)
+	var requests, reads, writes int64
+	err = s.db.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(api_requests),0),COALESCE(SUM(memory_reads),0),COALESCE(SUM(memory_writes),0) FROM cloud_usage_daily WHERE tenant_id=$1`, id.TenantID).Scan(&requests, &reads, &writes)
+	if err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
+	// Storage is a stock: measure it now rather than summing daily rows.
+	bytesStored, err := s.measureBytesStored(r.Context(), id.TenantID, id.PrincipalID)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
@@ -890,7 +897,14 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gateway unavailable", 503)
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), r.Body)
+	// Keep a bounded copy of the request for usage metering while the full
+	// body is still streamed to the gateway.
+	var requestCopy bytes.Buffer
+	var body io.Reader
+	if r.Body != nil {
+		body = io.TeeReader(r.Body, &limitedBuffer{buf: &requestCopy, limit: maxMeteredBody})
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), body)
 	if err != nil {
 		http.Error(w, "gateway unavailable", 503)
 		return
@@ -907,5 +921,42 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	var responseCopy bytes.Buffer
+	_, _ = io.Copy(flushWriter{w}, io.TeeReader(resp.Body, &limitedBuffer{buf: &responseCopy, limit: maxMeteredBody}))
+	if resp.StatusCode/100 == 2 {
+		reads, writes := countMemoryOps(requestCopy.Bytes(), responseCopy.Bytes(), resp.Header.Get("Content-Type"))
+		if err := s.recordMemoryOps(context.WithoutCancel(r.Context()), id.TenantID, reads, writes); err != nil {
+			log.Printf("record memory usage for tenant %s: %v", id.TenantID, err)
+		}
+	}
+}
+
+// limitedBuffer records at most limit bytes and silently discards the rest,
+// so metering never holds an unbounded body in memory.
+type limitedBuffer struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	if room := l.limit - l.buf.Len(); room > 0 {
+		if len(p) > room {
+			l.buf.Write(p[:room])
+		} else {
+			l.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+// flushWriter flushes after each write so streamed (SSE) MCP responses reach
+// the client as they are produced.
+type flushWriter struct{ w http.ResponseWriter }
+
+func (f flushWriter) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if fl, ok := f.w.(http.Flusher); ok {
+		fl.Flush()
+	}
+	return n, err
 }
