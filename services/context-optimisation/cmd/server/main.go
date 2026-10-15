@@ -32,7 +32,7 @@ var serviceMetrics = telemetry.FromEnvironment("context-optimisation")
 
 // ── configuration ────────────────────────────────────────────────────────
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 var startTime = time.Now()
 
@@ -93,13 +93,27 @@ type Segment struct {
 	// into several ranges).
 	SourceRanges []ContextRange `json:"source_ranges"`
 	// Transformation names what compression did to this segment:
-	// pass_through, truncation, reference_substitution or extractive_summary.
+	// pass_through, repetition_collapse, truncation, reference_substitution
+	// or extractive_summary. A collapsed segment that was then truncated,
+	// summarised or referenced is named by that later transformation; the
+	// capsule's repetition_collapse record still lists what was collapsed.
 	Transformation string `json:"transformation"`
 
 	// start and end locate the segment in the canonical text; retained is the
-	// number of leading bytes of the source slice copied verbatim into
-	// Content.
+	// number of leading bytes of the segment's content before compression
+	// copied verbatim into Content.
 	start, end, retained int
+	// origin maps each byte of the content before compression to its
+	// canonical offset, -1 for bytes the compiler inserted. nil means the
+	// content is the canonical slice [start, end).
+	origin []int
+	// pinned marks a segment holding a code symbol or memory reference; it
+	// is kept verbatim.
+	pinned bool
+	// collapsed are the canonical ranges repetition collapse removed, and
+	// marker the reference that replaced them.
+	collapsed []ContextRange
+	marker    string
 }
 
 type BudgetAllocation struct {
@@ -179,8 +193,8 @@ type RestorationHandle struct {
 // TransformationRecord is one transformation that changed this input.
 // SourceRanges are the source bytes it acted on; OriginalTokens is their
 // token count and CompiledTokens the tokens they became in the compiled
-// text. segment_framing adds the per-segment headers and has no source
-// range.
+// text. segment_framing is the per-segment headers and separators, present
+// only when there is more than one segment, and has no source range.
 type TransformationRecord struct {
 	Name           string         `json:"name"`
 	SourceRanges   []ContextRange `json:"source_ranges"`
@@ -633,6 +647,7 @@ func compileContext(req InputOptimiseRequest, store SourceStore) (InputOptimiseR
 		for _, pin := range pins {
 			if strings.Contains(classified[i].Content, pin) {
 				classified[i].Droppable = false
+				classified[i].pinned = true
 			}
 		}
 		classified[i].ContentHash = sha256Hex([]byte(classified[i].Content))
@@ -642,11 +657,23 @@ func compileContext(req InputOptimiseRequest, store SourceStore) (InputOptimiseR
 	// 3. Exact deduplication (within input).
 	kept, dropped := splitDuplicates(classified)
 
+	// 3a. Repetition collapse (within each segment) where the profile allows
+	// restorable lossy compression.
+	if collapsesRepetition[profile] {
+		for i := range kept {
+			kept[i] = collapseRepetition(kept[i], req.NonDroppableHints)
+		}
+	}
+
 	// 4. Allocate budget per class.
 	allocation := allocateBudget(tokenBudget, profile, kept)
 
-	// 5. Compress per profile.
+	// 5. Compress per profile. Segment framing is kept only while it does
+	// not make the compiled text larger than the input.
 	compiled, compiledSegments := compressSegments(kept, profile, allocation)
+	if len(compiled) > len(req.Input) {
+		compiled = assembleSegments(compiledSegments, false)
+	}
 
 	// 6. Invariant validation.
 	report := checkInvariants(req.Input, compiled, req.NonDroppableHints, pins)
@@ -654,7 +681,7 @@ func compileContext(req InputOptimiseRequest, store SourceStore) (InputOptimiseR
 	// 7. Build, persist and verify the capsule.
 	sourceHash := sha256Hex([]byte(req.Input))
 	source := sourceObjectFor(sourceHash)
-	policyVersion := "context-policy-2"
+	policyVersion := "context-policy-3"
 	policyHash := sha256Hex([]byte(policyVersion + ":" + profile + ":" + strconv.Itoa(tokenBudget)))
 	capsuleID := deriveCapsuleID("input", sourceHash, policyHash, sha256Hex([]byte(compiled)))
 	manifest := capsuleManifest{CapsuleID: capsuleID, Kind: "input", SourceObjects: []SourceObjectRef{source}, PolicyHash: policyHash, CompiledContentHash: sha256Hex([]byte(compiled))}
@@ -898,12 +925,29 @@ func (c canonicalText) sourceRanges(start, end int) []ContextRange {
 func (c canonicalText) inclusion(compiled []Segment) (included, excluded []ContextRange) {
 	included = []ContextRange{}
 	for _, seg := range compiled {
-		for _, r := range c.sourceRanges(seg.start, seg.start+seg.retained) {
-			included = appendRange(included, r.Start, r.End)
+		for _, canonical := range seg.retainedCanonical() {
+			for _, r := range c.sourceRanges(canonical.Start, canonical.End) {
+				included = appendRange(included, r.Start, r.End)
+			}
 		}
 	}
 	included = normaliseRanges(included)
 	return included, complementRanges(included, len(c.input))
+}
+
+// retainedCanonical returns the canonical ranges of the bytes the segment
+// copied verbatim into its compiled content, leaving out inserted bytes.
+func (seg Segment) retainedCanonical() []ContextRange {
+	if seg.origin == nil {
+		return appendRange(nil, seg.start, seg.start+seg.retained)
+	}
+	var ranges []ContextRange
+	for _, o := range seg.origin[:seg.retained] {
+		if o >= 0 {
+			ranges = appendRange(ranges, o, o+1)
+		}
+	}
+	return ranges
 }
 
 // appendRange appends [start, end), merging it into the last range when they
@@ -1110,6 +1154,202 @@ func splitDuplicates(segments []Segment) (kept, dropped []Segment) {
 	return kept, dropped
 }
 
+// ── repetition collapse ──────────────────────────────────────────────────
+
+// collapsesRepetition are the profiles allowed reversible lossy compression
+// (§18.4 balanced and aggressive) that collapse repeated passages inside a
+// segment. exact and conservative never alter segment content; adaptive
+// keeps its own per-segment choice of pass-through or summary.
+var collapsesRepetition = map[string]bool{"balanced": true, "aggressive": true}
+
+// minRepeatBytes is the smallest repeat worth collapsing: shorter repeats
+// ("very very", "Yes. Yes.") are left as written.
+const minRepeatBytes = 16
+
+// maxRepeatWords bounds the length, in words, of a run of words searched for
+// immediate repetition.
+const maxRepeatWords = 64
+
+// codeClasses are never collapsed: repeated lines are meaningful in code
+// and schemas.
+var codeClasses = map[string]bool{"code_symbol": true, "code_dependency": true, "tool_schema": true}
+
+// collapseRepetition keeps the first copy of every repeated passage in seg
+// and replaces the later copies with one reference marker (§18.3 step 2:
+// one authoritative copy of byte-identical content, repetitions replaced
+// with references). Two kinds of repetition are collapsed:
+//
+//   - a sentence or line identical to an earlier one in the segment;
+//   - a run of words immediately repeated within a sentence or line
+//     ("A B C A B C A B C" keeps "A B C").
+//
+// The removed bytes stay in the stored source and are listed in the
+// capsule's repetition_collapse record and excluded ranges. A segment is
+// left unchanged when it is pinned or code, when collapsing would not make
+// it smaller, or when a non-droppable hint or exact value it contains would
+// no longer appear.
+func collapseRepetition(seg Segment, hints []string) Segment {
+	if seg.pinned || codeClasses[seg.Class] || seg.origin != nil {
+		return seg
+	}
+	text := seg.Content
+	var removed []ContextRange // offsets in text
+	seen := map[string]bool{}
+	for _, unit := range splitUnits(text) {
+		body := text[unit.body:unit.end]
+		if len(body) >= minRepeatBytes && seen[body] {
+			removed = append(removed, ContextRange{Start: unit.start, End: unit.end})
+			continue
+		}
+		seen[body] = true
+		removed = append(removed, immediateRepeats(text, unit.body, unit.end)...)
+	}
+	if len(removed) == 0 {
+		return seg
+	}
+
+	var out strings.Builder
+	origin := make([]int, 0, len(text))
+	next := 0
+	for _, r := range removed {
+		out.WriteString(text[next:r.Start])
+		for i := next; i < r.Start; i++ {
+			origin = append(origin, seg.start+i)
+		}
+		next = r.End
+	}
+	out.WriteString(text[next:])
+	for i := next; i < len(text); i++ {
+		origin = append(origin, seg.start+i)
+	}
+	marker := fmt.Sprintf("[Reference: %d repeats omitted]", len(removed))
+	separator := " "
+	if strings.Contains(out.String(), "\n") {
+		separator = "\n"
+	}
+	inserted := separator + marker
+	out.WriteString(inserted)
+	for i := 0; i < len(inserted); i++ {
+		origin = append(origin, -1)
+	}
+	collapsed := out.String()
+
+	if len(collapsed) >= len(text) {
+		return seg
+	}
+	for _, hint := range hints {
+		if strings.Contains(text, hint) && !strings.Contains(collapsed, hint) {
+			return seg
+		}
+	}
+	for _, value := range extractExactValues(text) {
+		if !strings.Contains(collapsed, value) {
+			return seg
+		}
+	}
+
+	seg.Content = collapsed
+	seg.origin = origin
+	seg.marker = marker
+	seg.collapsed = make([]ContextRange, 0, len(removed))
+	for _, r := range removed {
+		seg.collapsed = append(seg.collapsed, ContextRange{Start: seg.start + r.Start, End: seg.start + r.End})
+	}
+	return seg
+}
+
+// textUnit is one sentence or line of a segment: [start, body) is the
+// whitespace before it and [body, end) its text.
+type textUnit struct{ start, body, end int }
+
+// splitUnits splits text into sentences and lines. A sentence ends after
+// '.', '!' or '?' followed by whitespace or the end of the text; a line ends
+// before '\n'.
+func splitUnits(text string) []textUnit {
+	var units []textUnit
+	i := 0
+	for i < len(text) {
+		start := i
+		for i < len(text) && isSpace(text[i]) {
+			i++
+		}
+		body := i
+		for i < len(text) && text[i] != '\n' {
+			c := text[i]
+			i++
+			if (c == '.' || c == '!' || c == '?') && (i == len(text) || isSpace(text[i])) {
+				break
+			}
+		}
+		if i > body {
+			units = append(units, textUnit{start: start, body: body, end: i})
+		}
+	}
+	return units
+}
+
+func isSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n'
+}
+
+// immediateRepeats finds runs of words in text[start:end] that are repeated
+// back to back and returns, for each, the range holding every copy after
+// the first (with the whitespace before them).
+func immediateRepeats(text string, start, end int) []ContextRange {
+	type word struct{ start, end int }
+	var words []word
+	for i := start; i < end; {
+		for i < end && isSpace(text[i]) {
+			i++
+		}
+		w := i
+		for i < end && !isSpace(text[i]) {
+			i++
+		}
+		if i > w {
+			words = append(words, word{w, i})
+		}
+	}
+	same := func(a, b int) bool { return text[words[a].start:words[a].end] == text[words[b].start:words[b].end] }
+	var removed []ContextRange
+	for i := 0; i < len(words); {
+		period := 0
+		for p := 1; p <= maxRepeatWords && i+2*p <= len(words); p++ {
+			match := true
+			for k := 0; k < p && match; k++ {
+				match = same(i+k, i+p+k)
+			}
+			if match {
+				period = p
+				break
+			}
+		}
+		if period == 0 {
+			i++
+			continue
+		}
+		copies := 2
+		for i+(copies+1)*period <= len(words) {
+			match := true
+			for k := 0; k < period && match; k++ {
+				match = same(i+k, i+copies*period+k)
+			}
+			if !match {
+				break
+			}
+			copies++
+		}
+		cut := ContextRange{Start: words[i+period-1].end, End: words[i+copies*period-1].end}
+		if cut.End-cut.Start >= minRepeatBytes {
+			removed = append(removed, cut)
+			i += copies * period
+			continue
+		}
+		i++
+	}
+	return removed
+}
+
 // ── budget allocation (§18.6) ────────────────────────────────────────────
 
 func allocateBudget(totalBudget int, profile string, segments []Segment) BudgetAllocation {
@@ -1146,14 +1386,36 @@ const (
 	transformTruncation  = "truncation"
 	transformReference   = "reference_substitution"
 	transformSummary     = "extractive_summary"
+	transformRepetition  = "repetition_collapse"
 )
 
 // truncationMarker is appended where balanced compression cut a segment.
 const truncationMarker = "\n<!-- truncated; full content in capsule -->"
 
-// passThrough marks a segment copied unchanged.
+// passThrough marks a segment copied without further change: unchanged, or
+// as repetition collapse left it.
 func passThrough(seg Segment) Segment {
-	return transformed(seg, seg.Content, transformPassThrough, len(seg.Content))
+	name := transformPassThrough
+	if len(seg.collapsed) > 0 {
+		name = transformRepetition
+	}
+	return transformed(seg, seg.Content, name, len(seg.Content))
+}
+
+// unlessLarger returns next, a lossy transformation of seg, only when it is
+// smaller than seg's content; a truncation, reference or summary that saves
+// nothing is not applied.
+func unlessLarger(seg, next Segment) Segment {
+	if len(next.Content) >= len(seg.Content) {
+		return passThrough(seg)
+	}
+	return next
+}
+
+// contentTokens is the token estimate of the segment's content as it enters
+// compression (after any repetition collapse).
+func contentTokens(seg Segment) int {
+	return estimateTokens(seg.Content)
 }
 
 // transformed records that seg was compiled to content, of which the first
@@ -1178,7 +1440,7 @@ func compressSegments(segments []Segment, profile string, allocation BudgetAlloc
 		if budget <= 0 {
 			return false
 		}
-		over := used[bucket] + seg.OriginalTokens - budget
+		over := used[bucket] + contentTokens(seg) - budget
 		return over <= 0 || over <= reserveRemaining
 	}
 	spend := func(seg Segment, tokens int) {
@@ -1200,74 +1462,56 @@ func compressSegments(segments []Segment, profile string, allocation BudgetAlloc
 	}
 
 	for _, seg := range segments {
-
-		// Never drop non-droppable classes
-		if !seg.Droppable {
-			compressed = append(compressed, passThrough(seg))
-			spend(seg, seg.OriginalTokens)
-			continue
-		}
-
-		// Apply profile-based compression
-		switch profile {
-		case "exact", "conservative":
+		next := passThrough(seg)
+		switch {
+		case !seg.Droppable:
+			// Never drop non-droppable classes.
+		case profile == "exact" || profile == "conservative":
 			// Only canonicalisation and exact deduplication; segment content
 			// is never altered.
-			compressed = append(compressed, passThrough(seg))
-			spend(seg, seg.OriginalTokens)
-
-		case "balanced":
-			if fits(seg) {
-				if len(seg.Content) > 1000 {
-					cut := runeBoundary(seg.Content, 1000)
-					next := transformed(seg, seg.Content[:cut]+truncationMarker, transformTruncation, cut)
-					compressed = append(compressed, next)
-					spend(seg, next.CompiledTokens)
-				} else {
-					compressed = append(compressed, passThrough(seg))
-					spend(seg, seg.OriginalTokens)
-				}
-			} else {
+		case profile == "balanced":
+			if !fits(seg) {
 				// Droppable class, over budget → replace with reference
 				ref := "[Reference: " + seg.Class + " hash=" + sha256Hex([]byte(seg.Content))[:12] + "]"
-				next := transformed(seg, ref, transformReference, 0)
-				compressed = append(compressed, next)
-				spend(seg, next.CompiledTokens)
+				next = unlessLarger(seg, transformed(seg, ref, transformReference, 0))
+			} else if len(seg.Content) > 1000 {
+				cut := runeBoundary(seg.Content, 1000)
+				next = unlessLarger(seg, transformed(seg, seg.Content[:cut]+truncationMarker, transformTruncation, cut))
 			}
-
-		case "aggressive":
+		case profile == "aggressive":
 			// Strong reduction: every droppable segment longer than one
 			// summary is summarised, whether or not it would have fitted;
 			// only short segments that fit are kept whole.
-			if seg.OriginalTokens <= aggressiveKeepTokens && fits(seg) {
-				compressed = append(compressed, passThrough(seg))
-				spend(seg, seg.OriginalTokens)
-			} else {
+			if contentTokens(seg) > aggressiveKeepTokens || !fits(seg) {
 				summary, kept := summarise(seg.Content, seg.Class)
-				next := transformed(seg, summary, transformSummary, kept)
-				compressed = append(compressed, next)
-				spend(seg, next.CompiledTokens)
+				next = unlessLarger(seg, transformed(seg, summary, transformSummary, kept))
 			}
-
 		default: // adaptive — bounded deterministic policy selection per segment
-			if seg.OriginalTokens > 250 {
+			if contentTokens(seg) > 250 {
 				summary, kept := summarise(seg.Content, seg.Class)
-				next := transformed(seg, summary, transformSummary, kept)
-				compressed = append(compressed, next)
-				spend(seg, next.CompiledTokens)
-			} else {
-				compressed = append(compressed, passThrough(seg))
-				spend(seg, seg.OriginalTokens)
+				next = unlessLarger(seg, transformed(seg, summary, transformSummary, kept))
 			}
 		}
+		compressed = append(compressed, next)
+		spend(seg, next.CompiledTokens)
 	}
 
-	// Assemble compiled text
-	var parts []string
-	for _, seg := range compressed {
-		parts = append(parts, segmentHeader(seg.Class)+seg.Content)
+	// A single segment needs no framing; several are framed by class.
+	return assembleSegments(compressed, len(compressed) > 1), compressed
+}
+
+// assembleSegments joins the compiled segments, with a class header on each
+// when framed.
+func assembleSegments(segments []Segment, framed bool) string {
+	parts := make([]string, 0, len(segments))
+	for _, seg := range segments {
+		if framed {
+			parts = append(parts, segmentHeader(seg.Class)+seg.Content)
+		} else {
+			parts = append(parts, seg.Content)
+		}
 	}
-	return strings.Join(parts, segmentSeparator), compressed
+	return strings.Join(parts, segmentSeparator)
 }
 
 const segmentSeparator = "\n\n"
@@ -1322,6 +1566,28 @@ func appliedTransformations(canon canonicalText, classified, dropped, compiled [
 		records = append(records, record)
 	}
 
+	// Repetition collapse acted on the repeats it removed; its compiled
+	// tokens are the references that replaced them, where they survived
+	// later compression.
+	repetition := TransformationRecord{Name: transformRepetition, SourceRanges: []ContextRange{}}
+	for _, seg := range compiled {
+		for _, collapsed := range seg.collapsed {
+			for _, r := range canon.sourceRanges(collapsed.Start, collapsed.End) {
+				repetition.SourceRanges = appendRange(repetition.SourceRanges, r.Start, r.End)
+			}
+		}
+		if len(seg.collapsed) > 0 {
+			repetition.OriginalTokens += tokensForBytes(rangeBytes(seg.collapsed))
+			if strings.Contains(seg.Content, seg.marker) {
+				repetition.CompiledTokens += estimateTokens(seg.marker)
+			}
+		}
+	}
+	if len(repetition.SourceRanges) > 0 {
+		repetition.SourceRanges = normaliseRanges(repetition.SourceRanges)
+		records = append(records, repetition)
+	}
+
 	for _, name := range []string{transformTruncation, transformReference, transformSummary} {
 		record := TransformationRecord{Name: name, SourceRanges: []ContextRange{}}
 		for _, seg := range compiled {
@@ -1339,12 +1605,12 @@ func appliedTransformations(canon canonicalText, classified, dropped, compiled [
 	}
 
 	// Segment headers and separators are the only compiled bytes that do
-	// not come from a segment.
-	if len(compiled) > 0 {
-		contentBytes := 0
-		for _, seg := range compiled {
-			contentBytes += len(seg.Content)
-		}
+	// not come from a segment; a single segment has neither.
+	contentBytes := 0
+	for _, seg := range compiled {
+		contentBytes += len(seg.Content)
+	}
+	if len(compiledText) > contentBytes {
 		records = append(records, TransformationRecord{
 			Name:           "segment_framing",
 			SourceRanges:   []ContextRange{},

@@ -719,3 +719,137 @@ func TestHandleExecuteRejectsBodyIdentityMismatchingAuthenticatedHeaders(t *test
 		t.Fatalf("expected identity mismatch to be rejected, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// deliveredOutputCases are the outputs every reduction test checks: the
+// repetitive outputs the reducer exists for and the short or non-repetitive
+// outputs it must not inflate.
+var deliveredOutputCases = []struct {
+	name, stdout, stderr string
+	exit                 int
+}{
+	{"repeated stdout lines", strings.Repeat("diagnostic\n", 300), "", 0},
+	{"repeated stderr diagnostics", "", strings.Repeat("cat: line: No such file or directory\n", 400), 1},
+	{"repeated error lines", "", strings.Repeat("error: build failed\n", 50) + "fatal: giving up\n", 2},
+	{"single short line", "ok", "", 0},
+	{"single path", "/srv/workspace/project\n", "", 0},
+	{"no output", "", "", 6},
+	{"unique listing", "total 8\ndrwxr-xr-x 2 root root 4096 a\n-rw-r--r-- 1 root root 12 b\n", "", 0},
+	{"one stderr error", "", "error: file not found\n", 1},
+	{"existing grouping input", "line1\nline1\nerror: failed\nwarning: old\n+ new change\nnormal line", "", 0},
+	{"existing dedup input", "same\nsame\nsame\nother", "", 0},
+	{"mixed streams", "ok 1\nerror: build failed\nwarning: deprecated flag\nok 2\n", "fatal: cannot open\n", 1},
+}
+
+func TestDeliverOutputCollapsesRepetitionWithCounts(t *testing.T) {
+	stdout := strings.Repeat("diagnostic\n", 300)
+	stderr := strings.Repeat("cat: line: No such file or directory\n", 400) + "error: read failed\n"
+	result := &ExecutionResult{}
+	deliverOutput(result, modeAdaptive, stdout, stderr, 1)
+	r := result.Reduction
+	if r == nil || !r.Applied || r.DeliveredBytes >= r.RawBytes || r.Ratio <= 0.9 {
+		t.Fatalf("repetition was not reduced: %+v", r)
+	}
+	if r.RawBytes != len(stdout)+len(stderr) || r.DeliveredBytes != deliveredBytes(result) {
+		t.Fatalf("reduction sizes not measured: %+v", r)
+	}
+	counts := map[string]int{}
+	for _, repeat := range r.RepeatedLines {
+		counts[repeat.Stream+":"+repeat.Line] = repeat.Occurrences
+	}
+	if counts["stdout:diagnostic"] != 300 || counts["stderr:cat: line: No such file or directory"] != 400 {
+		t.Fatalf("repeated lines did not keep their counts: %+v", r.RepeatedLines)
+	}
+	if result.StderrSummary != "cat: line: No such file or directory" {
+		t.Fatalf("stderr not collapsed to its distinct lines: %q", result.StderrSummary)
+	}
+	if len(result.Errors) != 1 || result.Errors[0] != "error: read failed" {
+		t.Fatalf("error line not listed once: %v", result.Errors)
+	}
+	if got := diagnosticRetention(stdout, stderr, result); got != 1 {
+		t.Fatalf("reduction lost a diagnostic, retention = %v", got)
+	}
+}
+
+func TestDeliverOutputIsNeverLargerThanTheRawOutput(t *testing.T) {
+	for _, tc := range deliveredOutputCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := &ExecutionResult{}
+			deliverOutput(result, modeAdaptive, tc.stdout, tc.stderr, tc.exit)
+			r := result.Reduction
+			raw := len(tc.stdout) + len(tc.stderr)
+			if r == nil || r.RawBytes != raw {
+				t.Fatalf("reduction not reported: %+v", r)
+			}
+			if r.Ratio < 0 || r.Reason == "" {
+				t.Fatalf("reduction must be non-negative and explained: %+v", r)
+			}
+			if r.Applied {
+				if r.DeliveredBytes >= raw || r.DeliveredBytes != deliveredBytes(result) {
+					t.Fatalf("applied reduction is not smaller than raw: %+v", r)
+				}
+			} else {
+				if r.Ratio != 0 || result.StdoutSummary != tc.stdout || result.StderrSummary != tc.stderr ||
+					result.Groups != nil || result.Errors != nil || result.Warnings != nil {
+					t.Fatalf("declined reduction must pass the raw output through: %+v %+v", r, result)
+				}
+				if r.DeliveredBytes != raw {
+					t.Fatalf("raw pass-through reported %d delivered bytes for %d raw", r.DeliveredBytes, raw)
+				}
+			}
+			if got := diagnosticRetention(tc.stdout, tc.stderr, result); got != 1 {
+				t.Fatalf("diagnostics lost, retention = %v", got)
+			}
+		})
+	}
+}
+
+func TestDeliverOutputForensicKeepsRawDetail(t *testing.T) {
+	stderr := strings.Repeat("error: x\n", 3)
+	result := &ExecutionResult{}
+	deliverOutput(result, modeForensic, "out\nout\n", stderr, 1)
+	if result.StdoutSummary != "out\nout\n" || result.StderrSummary != stderr || result.Reduction.Applied || result.Reduction.Ratio != 0 {
+		t.Fatalf("forensic mode must not reduce: %+v %+v", result, result.Reduction)
+	}
+}
+
+// TestExecuteReportsReductionAndRestoresRaw drives handleExecute: repetitive
+// output is reduced and its raw output restores to the recorded hash; a
+// two-byte output is passed through with zero reduction.
+func TestExecuteReportsReductionAndRestoresRaw(t *testing.T) {
+	t.Setenv("SCOS_PROXY_RAW_DIR", t.TempDir())
+	run := func(opID, command string) ExecutionResult {
+		governance := &testGovernance{operation: GovernedOperation{OperationID: opID, Prepared: true, Authorized: true}}
+		s := newProxyServerAtWithGovernance(filepath.Join(t.TempDir(), "proxy.json"), governance)
+		body, _ := json.Marshal(map[string]string{"tenant_id": "tenant", "principal_id": "principal", "operation_id": opID, "command": command})
+		r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewReader(body))
+		r.Header.Set("X-SCOS-Tenant-ID", "tenant")
+		r.Header.Set("X-SCOS-Principal-ID", "principal")
+		rec := httptest.NewRecorder()
+		s.handleExecute(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("execute %q: %d %s", command, rec.Code, rec.Body.String())
+		}
+		var result ExecutionResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		restore := httptest.NewRecorder()
+		s.handleRestore(restore, httptest.NewRequest(http.MethodGet, "/v1/proxy/restore/"+result.RestorationHandle, nil))
+		var raw rawArtifact
+		if err := json.Unmarshal(restore.Body.Bytes(), &raw); err != nil || restore.Code != http.StatusOK {
+			t.Fatalf("restore failed: %d %s", restore.Code, restore.Body.String())
+		}
+		if sha256Hex([]byte(raw.Stdout+"\x00"+raw.Stderr)) != result.RawContentHash {
+			t.Fatal("restored raw output does not match the recorded hash")
+		}
+		return result
+	}
+	repeated := run("repeat-op", "printf 'warn %s\\n' a a a a a a a a a a a a a a a a a a a a")
+	if repeated.Reduction == nil || !repeated.Reduction.Applied || repeated.Reduction.Ratio <= 0 {
+		t.Fatalf("repeated output was not reduced: %+v", repeated.Reduction)
+	}
+	short := run("short-op", "printf ok")
+	if short.Reduction == nil || short.Reduction.Applied || short.Reduction.Ratio != 0 || short.StdoutSummary != "ok" || len(short.Groups) != 0 {
+		t.Fatalf("short output must pass through unreduced: %+v %+v", short, short.Reduction)
+	}
+}

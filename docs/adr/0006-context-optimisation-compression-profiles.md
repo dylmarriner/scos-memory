@@ -26,13 +26,26 @@ High-impact or restricted tasks default to `exact` or `conservative`
 (§18.4); nothing upgrades a task's default profile without an explicit,
 recorded request.
 
-## Wire contract (compiler 0.2.0, policy `context-policy-2`)
+## Wire contract (compiler 0.3.0, policy `context-policy-3`)
 
 - Every token count uses one estimate, `utf8_bytes_div_4_ceil`, named in
   `token_accounting.method` and in the output and evaluate responses.
   `compiled_token_count` is the estimate of `compiled_text` as returned,
-  segment headers included, so framing overhead can make
-  `reduction_ratio` negative.
+  segment headers included.
+- `compiled_text` is never larger than the input. A single segment is not
+  framed; several segments get `--- <class> ---` headers only when the
+  framed text still fits within the input, otherwise they are joined
+  unframed. A truncation, reference or summary that would not make its
+  segment smaller is not applied.
+- `balanced` and `aggressive` collapse repetition inside a segment
+  (`repetition_collapse`): a sentence or line identical to an earlier one,
+  and a run of words repeated back to back, keep their first copy and the
+  later copies are replaced by one `[Reference: N repeats omitted]` marker.
+  Code, tool-schema and pinned segments are never collapsed, nor is a
+  segment whose hints or exact values would not survive. The removed bytes
+  are listed in the `repetition_collapse` record and `excluded_ranges` and
+  restore from the stored source. `exact`, `conservative` and `adaptive` do
+  not collapse.
 - `transformations` lists only what changed this input, each with the
   source byte ranges it acted on and their token counts before and after.
   `included_ranges`/`excluded_ranges` partition the stored source.

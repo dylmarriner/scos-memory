@@ -574,18 +574,31 @@ func TestCompileRejectsIgnoredOrInvalidFields(t *testing.T) {
 }
 
 // TestTransformationsReportOnlyAppliedWork: a clean single-segment input
-// under a lossless profile is only framed; nothing else may be claimed.
+// under a lossless profile is passed through unframed, so nothing may be
+// claimed; two segments are framed and the framing is measured.
 func TestTransformationsReportOnlyAppliedWork(t *testing.T) {
 	useStore(t, newFileSourceStore(t.TempDir()))
 	resp := compileForTest(t, InputOptimiseRequest{Input: "plain clean text", Profile: "exact"})
-	names := transformationNames(resp.Capsule)
-	if len(names) != 1 || names[0] != "segment_framing" {
-		t.Fatalf("expected only segment_framing, got %v", names)
+	if names := transformationNames(resp.Capsule); len(names) != 0 || resp.CompiledText != "plain clean text" {
+		t.Fatalf("expected an unframed pass-through with no transformations, got %v %q", names, resp.CompiledText)
 	}
-	framing := resp.Capsule.Transformations[0]
-	header := len(segmentHeader("optional_background"))
-	if framing.CompiledTokens != tokensForBytes(header) || framing.OriginalTokens != 0 || len(framing.SourceRanges) != 0 {
-		t.Fatalf("framing record not measured: %+v", framing)
+	// Framing that would make the text larger is left out...
+	unframed := compileForTest(t, InputOptimiseRequest{Input: "short note\n```\nfunc A() {}\n```", Profile: "exact"})
+	if strings.Contains(unframed.CompiledText, "--- ") || len(unframed.CompiledText) > len("short note\n```\nfunc A() {}\n```") {
+		t.Fatalf("framing must not make the text larger: %q", unframed.CompiledText)
+	}
+	// ...and kept when deduplication has saved more than it costs.
+	block := "\n```\n" + strings.Repeat("func A() { return helper(1, 2, 3) }\n", 4) + "```\n"
+	input := "a background paragraph" + block + block
+	framed := compileForTest(t, InputOptimiseRequest{Input: input, Profile: "exact"})
+	framing := transformationNamed(t, framed.Capsule, "segment_framing")
+	overhead := len(framed.CompiledText)
+	for _, seg := range framed.Capsule.Segments {
+		overhead -= len(seg.Content)
+	}
+	if !strings.Contains(framed.CompiledText, segmentHeader("optional_background")) ||
+		framing.CompiledTokens != tokensForBytes(overhead) || framing.OriginalTokens != 0 || len(framing.SourceRanges) != 0 {
+		t.Fatalf("framing record not measured: %+v %q", framing, framed.CompiledText)
 	}
 }
 
@@ -695,8 +708,8 @@ func TestTokenAccountingIsMeasured(t *testing.T) {
 	if c.OriginalTokens != estimateTokens(input) || c.CompiledTokens != estimateTokens(resp.CompiledText) {
 		t.Fatalf("capsule counts not measured: original=%d compiled=%d", c.OriginalTokens, c.CompiledTokens)
 	}
-	if want := 1 - float64(c.CompiledTokens)/float64(c.OriginalTokens); c.Reduction != want || c.Reduction >= 0 {
-		t.Fatalf("framing overhead must show as negative reduction, got %v", c.Reduction)
+	if want := 1 - float64(c.CompiledTokens)/float64(c.OriginalTokens); c.Reduction != want || c.Reduction != 0 || resp.CompiledText != input {
+		t.Fatalf("an unframed pass-through must report zero reduction, got %v for %q", c.Reduction, resp.CompiledText)
 	}
 	if c.TokenAccounting.Method != tokenMethod || c.TokenAccounting.Original != c.OriginalTokens || c.TokenAccounting.Compressed != c.CompiledTokens {
 		t.Fatalf("token accounting disagrees with capsule: %+v", c.TokenAccounting)
@@ -982,5 +995,200 @@ func TestBudgetIsNotGrownToFitTheInput(t *testing.T) {
 	}
 	if refs == 0 {
 		t.Fatalf("background beyond the evidence budget and reserve must be replaced by references: %+v", out)
+	}
+}
+
+// restoreByID restores a capsule by id alone and returns the content.
+func restoreByID(t *testing.T, capsuleID string) string {
+	t.Helper()
+	w := postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{CapsuleID: capsuleID})
+	if w.Code != http.StatusOK {
+		t.Fatalf("restore failed: %d %s", w.Code, w.Body.String())
+	}
+	var restored struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &restored); err != nil {
+		t.Fatal(err)
+	}
+	return restored.Content
+}
+
+// TestRepeatedSentenceIsCollapsedAndRestoresExactly: an instruction repeated
+// five times (the acceptance benchmark's shape) compiles to one copy plus a
+// reference under the lossy profiles, every removed byte is accounted for,
+// and the capsule restores the input byte for byte.
+func TestRepeatedSentenceIsCollapsedAndRestoresExactly(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	sentence := "preserve the exact operation id op-7734 recorded by the idempotency ledger"
+	input := strings.Repeat(sentence+" ", 5)
+	for _, profile := range []string{"balanced", "aggressive"} {
+		t.Run(profile, func(t *testing.T) {
+			resp := compileForTest(t, InputOptimiseRequest{Input: input, Profile: profile, NonDroppableHints: []string{"op-7734"}})
+			c := resp.Capsule
+			if strings.Count(resp.CompiledText, sentence) != 1 || strings.Contains(resp.CompiledText, "--- ") {
+				t.Fatalf("expected one unframed copy of the sentence, got %q", resp.CompiledText)
+			}
+			if c.Reduction < 0.5 || c.CompiledTokens >= c.OriginalTokens {
+				t.Fatalf("repetition not removed: reduction %v (%d -> %d)", c.Reduction, c.OriginalTokens, c.CompiledTokens)
+			}
+			if !c.Validation.Valid || !c.Validation.Checks["exact_values_retained"] || !c.Validation.Checks["non_droppable_hints_retained"] {
+				t.Fatalf("collapsed capsule failed validation: %+v", c.Validation)
+			}
+			if c.Segments[0].Transformation != transformRepetition {
+				t.Fatalf("segment transformation %q", c.Segments[0].Transformation)
+			}
+			record := transformationNamed(t, c, transformRepetition)
+			if got := strings.Join(sliceRanges(input, record.SourceRanges), ""); got != strings.Repeat(" "+sentence, 4) {
+				t.Fatalf("repetition record covers %q", got)
+			}
+			if record.OriginalTokens != tokensForBytes(rangeBytes(record.SourceRanges)) || record.CompiledTokens != estimateTokens(c.Segments[0].Content[len(sentence)+1:]) {
+				t.Fatalf("repetition record not measured: %+v", record)
+			}
+			if got := sliceRanges(input, c.IncludedRanges); len(got) != 1 || got[0] != sentence {
+				t.Fatalf("included ranges cover %q", got)
+			}
+			if c.TokenAccounting.Included != tokensForBytes(len(sentence)) || c.TokenAccounting.Excluded != tokensForBytes(len(input)-len(sentence)) ||
+				c.TokenAccounting.Compressed != estimateTokens(resp.CompiledText) || c.TokenAccounting.Original != estimateTokens(input) {
+				t.Fatalf("token accounting not truthful: %+v", c.TokenAccounting)
+			}
+			if restored := restoreByID(t, c.CapsuleID); restored != input {
+				t.Fatalf("restore returned %q", restored)
+			}
+		})
+	}
+}
+
+// TestLosslessProfilesKeepRepetition: exact and conservative never alter
+// segment content, so every copy survives.
+func TestLosslessProfilesKeepRepetition(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	sentence := "cite the rollback plan for migration rev-2044 before applying it"
+	input := strings.Repeat(sentence+" ", 5)
+	for _, profile := range []string{"exact", "conservative"} {
+		resp := compileForTest(t, InputOptimiseRequest{Input: input, Profile: profile})
+		if resp.CompiledText != strings.TrimRight(input, " ") {
+			t.Fatalf("%s altered content: %q", profile, resp.CompiledText)
+		}
+		for _, name := range transformationNames(resp.Capsule) {
+			if name == transformRepetition {
+				t.Fatalf("%s reported repetition collapse", profile)
+			}
+		}
+	}
+}
+
+func TestRepeatedSentencesAndLinesAreCollapsed(t *testing.T) {
+	text := "The deploy runs at noon today. Check the queue first. The deploy runs at noon today.\nqueue depth is reported here\nqueue depth is reported here\nend"
+	seg := Segment{Class: "optional_background", Content: text, end: len(text), Droppable: true}
+	out := collapseRepetition(seg, nil)
+	want := "The deploy runs at noon today. Check the queue first.\nqueue depth is reported here\nend\n[Reference: 2 repeats omitted]"
+	if out.Content != want {
+		t.Fatalf("collapsed to %q", out.Content)
+	}
+	var removed []string
+	for _, r := range out.collapsed {
+		removed = append(removed, text[r.Start:r.End])
+	}
+	if strings.Join(removed, "|") != " The deploy runs at noon today.|\nqueue depth is reported here" {
+		t.Fatalf("removed %q", removed)
+	}
+	for i, o := range out.origin {
+		if o >= 0 && text[o] != out.Content[i] {
+			t.Fatalf("byte %d maps to %q, holds %q", i, text[o], out.Content[i])
+		}
+	}
+}
+
+func TestRepetitionCollapseLeavesProtectedSegmentsAlone(t *testing.T) {
+	repeated := strings.Repeat("return helper(value, other) ", 4)
+	cases := map[string]Segment{
+		"code":   {Class: "code_symbol", Content: repeated, end: len(repeated)},
+		"pinned": {Class: "optional_background", Content: repeated, end: len(repeated), pinned: true},
+		"short":  {Class: "optional_background", Content: "very very very", end: len("very very very")},
+	}
+	for name, seg := range cases {
+		if out := collapseRepetition(seg, nil); out.Content != seg.Content || out.collapsed != nil {
+			t.Fatalf("%s segment was collapsed: %q", name, out.Content)
+		}
+	}
+	// A hint spanning two copies would be lost, so the segment is kept whole.
+	text := strings.Repeat("alpha beta gamma delta ", 3)
+	seg := Segment{Class: "optional_background", Content: text, end: len(text)}
+	if out := collapseRepetition(seg, []string{"delta alpha"}); out.Content != text {
+		t.Fatalf("collapse dropped a hint: %q", out.Content)
+	}
+}
+
+// compiledInputs are the inputs the compiler tests above use, plus the
+// acceptance benchmark's shape and a few framing edge cases.
+func compiledInputs() []string {
+	return []string{
+		"hello", "plain clean text", "a short note that passes through", "authoritative content",
+		"policy: preserve exact value 42\nversion 1.2.3",
+		"instruction: keep 550e8400-e29b-41d4-a716-446655440000\r\nbackground   \r\n",
+		"\ufeffintro  \r\n```go\nfunc A() {}\n```\nmiddle\n```go\nfunc A() {}\n```",
+		"policy: keep 1.2.3   \r\n" + strings.Repeat("background sentence one. ", 120) + "\n```js\nimport x from 'y'\n```\ntrailing",
+		strings.Repeat("background detail sentence. ", 80),
+		strings.Repeat("x", 3000), strings.Repeat("x", 1010),
+		"```\n" + strings.Repeat("background detail sentence. ", 80) + "\n```",
+		"notes about ParseConfig and mem-7781. " + strings.Repeat("filler sentence here. ", 80),
+		"exact value 1.2.3", "short note\n```\nfunc A() {}\n```", "a\n```\nb\n```\nc\n```\nd\n```\ne",
+		strings.Repeat("retain mandatory instruction exact value 412 and cite journal commit ", 5),
+		strings.Repeat("quote the governing policy clause forbidding unsigned extension packages ", 5),
+		"Yes. Yes. Yes.", "```", "x```y",
+	}
+}
+
+// TestCompiledTextIsNeverLargerThanInput: under every profile, framing and
+// markers never make the compiled text larger than the input, the reduction
+// is never negative, and validation (exact values, hints, restoration)
+// still holds.
+func TestCompiledTextIsNeverLargerThanInput(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	for _, input := range compiledInputs() {
+		for _, profile := range []string{"exact", "conservative", "balanced", "aggressive", "adaptive"} {
+			for _, budget := range []int{0, 10, 200} {
+				resp := compileForTest(t, InputOptimiseRequest{Input: input, Profile: profile, TokenBudget: budget})
+				c := resp.Capsule
+				if len(resp.CompiledText) > len(input) || c.CompiledTokens > c.OriginalTokens || c.Reduction < 0 {
+					t.Fatalf("%s/%d: %q compiled larger: %d -> %d bytes (%q)", profile, budget, input, len(input), len(resp.CompiledText), resp.CompiledText)
+				}
+				if !c.Validation.Checks["exact_values_retained"] || !c.Validation.Checks["restoration_verified"] {
+					t.Fatalf("%s/%d: %q failed validation %+v", profile, budget, input, c.Validation)
+				}
+				if rangeBytes(c.IncludedRanges)+rangeBytes(c.ExcludedRanges) != len(input) {
+					t.Fatalf("%s/%d: ranges do not partition %q", profile, budget, input)
+				}
+			}
+		}
+	}
+}
+
+// TestInstructionAndExactValuesSurviveCollapse: the acceptance benchmark's
+// cases keep their instruction sentence, exact value and cited source once
+// collapsed, and restore exactly.
+func TestInstructionAndExactValuesSurviveCollapse(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	cases := [][3]string{
+		{"retain mandatory instruction exact value 412 and cite journal commit", "412", "journal commit"},
+		{"quote the governing policy clause forbidding unsigned extension packages", "unsigned extension", "governing policy"},
+		{"retain the code symbol OutputReducer.reduce_output from the execution proxy adapter", "OutputReducer.reduce_output", "execution proxy adapter"},
+		{"keep the supersession chain reference linking version-vi to version-vii", "version-vi", "supersession chain reference"},
+	}
+	for _, tc := range cases {
+		input := strings.Repeat(tc[0]+" ", 5)
+		resp := compileForTest(t, InputOptimiseRequest{Input: input, NonDroppableHints: []string{tc[1]}})
+		for _, want := range tc {
+			if !strings.Contains(resp.CompiledText, want) {
+				t.Fatalf("%q lost %q: %q", tc[0], want, resp.CompiledText)
+			}
+		}
+		if !resp.Validated || resp.Capsule.Reduction < 0.5 {
+			t.Fatalf("%q: validated=%v reduction=%v", tc[0], resp.Validated, resp.Capsule.Reduction)
+		}
+		if restoreByID(t, resp.Capsule.CapsuleID) != input {
+			t.Fatalf("%q did not restore exactly", tc[0])
+		}
 	}
 }

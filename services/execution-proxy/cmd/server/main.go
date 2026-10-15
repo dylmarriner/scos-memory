@@ -278,6 +278,34 @@ type ExecutionResult struct {
 	Errors                []string      `json:"errors,omitempty"`
 	Warnings              []string      `json:"warnings,omitempty"`
 	ProxyPolicyVersion    string        `json:"proxy_policy_version"`
+	// Reduction reports whether the delivered result is the reduced form of
+	// the command's output or the raw output passed through, and why.
+	Reduction *OutputReduction `json:"reduction,omitempty"`
+}
+
+// OutputReduction measures what the reduction pipeline (§20.5) delivered
+// against what the command wrote. RawBytes is stdout plus stderr;
+// DeliveredBytes is every text field of the result that carries output
+// (stdout_summary, group headings and items, stderr_summary, errors,
+// warnings and repeated_lines), joined by newlines. Ratio is
+// 1 - delivered/raw when the reduction was applied and 0 when the raw output
+// was passed through, which happens whenever reduction would not make the
+// result smaller.
+type OutputReduction struct {
+	Applied        bool           `json:"applied"`
+	RawBytes       int            `json:"raw_bytes"`
+	DeliveredBytes int            `json:"delivered_bytes"`
+	Ratio          float64        `json:"reduction_ratio"`
+	Reason         string         `json:"reason"`
+	RepeatedLines  []RepeatedLine `json:"repeated_lines,omitempty"`
+}
+
+// RepeatedLine is an exact repeated output line the reduced result carries
+// once, with how many times the command wrote it (§20.5 step 3).
+type RepeatedLine struct {
+	Stream      string `json:"stream"`
+	Line        string `json:"line"`
+	Occurrences int    `json:"occurrences"`
 }
 
 type ResultGroup struct {
@@ -877,18 +905,7 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Process the result through the reduction pipeline (§20.5), unless the
 	// safety mode requires exact raw detail with no reduction (forensic,
 	// bypass — §20.9).
-	if reducesOutput(plan.Mode) {
-		result.StdoutSummary, result.Groups = reduceOutput(stdout)
-	} else {
-		result.StdoutSummary = stdout
-	}
-	result.StderrSummary = stderr
-
-	// Record errors/warnings
-	if exitStatus != 0 {
-		result.Errors = extractErrors(stderr)
-	}
-	result.Warnings = extractWarnings(stderr)
+	deliverOutput(result, plan.Mode, stdout, stderr, exitStatus)
 
 	// Transformation summary
 	if plan.RewriteSummary != "" {
@@ -1270,6 +1287,138 @@ func reduceOutput(stdout string) (string, []ResultGroup) {
 	summary := fmt.Sprintf("%d failures, %d warnings, %d changes, %d items total",
 		len(failures), len(warnings), len(changed), len(uniqueLines))
 	return summary, groups
+}
+
+// deliverOutput fills the result's output fields for the command's raw
+// stdout and stderr.
+//
+// forensic and bypass deliver the raw streams with no reduction (§20.9).
+// Every other mode builds the reduced form: stdout grouped by reduceOutput,
+// errors and warnings as distinct lines, stderr's remaining distinct lines
+// in stderr_summary (so each diagnostic is delivered once), and every exact
+// repeated line once with its occurrence count. The reduced form is
+// delivered only when it is smaller than the raw output; otherwise the raw
+// streams are passed through unchanged and the reduction is reported as 0
+// with the reason (§20.5 step 10).
+func deliverOutput(result *ExecutionResult, mode, stdout, stderr string, exitStatus int) {
+	rawBytes := len(stdout) + len(stderr)
+	if !reducesOutput(mode) {
+		result.StdoutSummary, result.StderrSummary = stdout, stderr
+		if exitStatus != 0 {
+			result.Errors = extractErrors(stderr)
+		}
+		result.Warnings = extractWarnings(stderr)
+		result.Reduction = &OutputReduction{RawBytes: rawBytes, DeliveredBytes: deliveredBytes(result),
+			Reason: "mode " + mode + " preserves the raw output without reduction"}
+		return
+	}
+
+	reduced := ExecutionResult{}
+	reduced.StdoutSummary, reduced.Groups = reduceOutput(stdout)
+	if exitStatus != 0 {
+		reduced.Errors = distinctLines(extractErrors(stderr))
+	}
+	reduced.Warnings = distinctLines(extractWarnings(stderr))
+	listed := map[string]bool{}
+	for _, line := range append(append([]string(nil), reduced.Errors...), reduced.Warnings...) {
+		listed[line] = true
+	}
+	var stderrLines []string
+	for _, line := range distinctLines(strings.Split(stderr, "\n")) {
+		if !listed[line] {
+			stderrLines = append(stderrLines, line)
+		}
+	}
+	reduced.StderrSummary = strings.Join(stderrLines, "\n")
+	repeated := append(repeatedLines("stdout", stdout), repeatedLines("stderr", stderr)...)
+	reduced.Reduction = &OutputReduction{RepeatedLines: repeated}
+
+	if delivered := deliveredBytes(&reduced); delivered < rawBytes {
+		result.StdoutSummary, result.Groups = reduced.StdoutSummary, reduced.Groups
+		result.StderrSummary = reduced.StderrSummary
+		result.Errors, result.Warnings = reduced.Errors, reduced.Warnings
+		result.Reduction = &OutputReduction{Applied: true, RawBytes: rawBytes, DeliveredBytes: delivered,
+			Ratio: 1 - float64(delivered)/float64(rawBytes), RepeatedLines: repeated,
+			Reason: "reduced output is smaller than the raw output"}
+		return
+	}
+
+	// The raw streams already carry every diagnostic line, so nothing is
+	// listed a second time and exactly the raw bytes are delivered.
+	result.StdoutSummary, result.StderrSummary = stdout, stderr
+	reason := "reduced output would not be smaller than the raw output; raw output passed through"
+	if rawBytes == 0 {
+		reason = "the command wrote no output"
+	}
+	result.Reduction = &OutputReduction{RawBytes: rawBytes, DeliveredBytes: rawBytes, Reason: reason}
+}
+
+// deliveredBytes is the size of every output-carrying text field of result,
+// joined by newlines, as a caller reading the result receives it.
+func deliveredBytes(result *ExecutionResult) int {
+	parts := []string{result.StdoutSummary}
+	for _, group := range result.Groups {
+		parts = append(parts, group.Heading)
+		parts = append(parts, group.Items...)
+	}
+	parts = append(parts, result.StderrSummary)
+	parts = append(parts, result.Errors...)
+	parts = append(parts, result.Warnings...)
+	if result.Reduction != nil {
+		for _, repeat := range result.Reduction.RepeatedLines {
+			parts = append(parts, repeat.Line)
+		}
+	}
+	total, nonEmpty := 0, 0
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		total += len(part)
+		nonEmpty++
+	}
+	if nonEmpty > 1 {
+		total += nonEmpty - 1
+	}
+	return total
+}
+
+// distinctLines returns the non-blank lines in their first-seen order, each
+// once.
+func distinctLines(lines []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" || seen[line] {
+			continue
+		}
+		seen[line] = true
+		out = append(out, line)
+	}
+	return out
+}
+
+// repeatedLines reports each non-blank line written more than once to a
+// stream, in first-seen order, with its occurrence count.
+func repeatedLines(stream, text string) []RepeatedLine {
+	counts := map[string]int{}
+	var order []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if counts[line] == 0 {
+			order = append(order, line)
+		}
+		counts[line]++
+	}
+	var out []RepeatedLine
+	for _, line := range order {
+		if counts[line] > 1 {
+			out = append(out, RepeatedLine{Stream: stream, Line: line, Occurrences: counts[line]})
+		}
+	}
+	return out
 }
 
 func extractErrors(stderr string) []string {

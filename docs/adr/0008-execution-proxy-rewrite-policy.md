@@ -28,6 +28,15 @@ never speculative rewriting (§20.6). Required safety modes
 operation, with high-impact and incident-response operations defaulting to
 `forensic` or `bypass` (§20.9).
 
+The reduced view is delivered only when it is smaller than the raw output
+(§20.5 step 10). In the reduced view stdout is grouped, exact repeated
+lines on either stream are carried once with their occurrence counts
+(`reduction.repeated_lines`), and each stderr line is delivered once:
+diagnostic lines under `errors`/`warnings`, the rest in `stderr_summary`.
+When that would not be smaller than stdout plus stderr, the raw streams are
+passed through unchanged with no `groups`, `errors` or `warnings`, and
+`reduction` reports `applied: false`, `reduction_ratio: 0` and the reason.
+
 ## Consequences
 
 - A rewrite bug can produce a worse summary but cannot silently hide exit

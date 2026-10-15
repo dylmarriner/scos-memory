@@ -519,11 +519,13 @@ func (c *controlPlane) executionProxyStage(ctx context.Context, req RouteRequest
 }
 
 // commandOutcome reads the execution proxy's result and reports a command
-// that exited non-zero, with what it wrote to stderr.
+// that exited non-zero, with what it wrote to stderr: a reduced result lists
+// stderr's error lines under errors and the rest in stderr_summary.
 func commandOutcome(body []byte) error {
 	var result struct {
-		ExitStatus    *int   `json:"exit_status"`
-		StderrSummary string `json:"stderr_summary"`
+		ExitStatus    *int     `json:"exit_status"`
+		StderrSummary string   `json:"stderr_summary"`
+		Errors        []string `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return errors.New("execution proxy returned an unreadable result: " + err.Error())
@@ -532,7 +534,7 @@ func commandOutcome(body []byte) error {
 		return errors.New("execution proxy result carries no exit status")
 	}
 	if *result.ExitStatus != 0 {
-		detail := strings.TrimSpace(result.StderrSummary)
+		detail := strings.TrimSpace(strings.Join(append(append([]string(nil), result.Errors...), result.StderrSummary), "\n"))
 		if detail == "" {
 			detail = "no stderr"
 		}
