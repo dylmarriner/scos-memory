@@ -38,8 +38,6 @@ type graphifyServer struct {
 	allowedRoot           string
 	cacheDir              string
 	namespaceID           string
-	tenantID              string
-	principalID           string
 	backend               string
 
 	extractorVersionOnce   sync.Once
@@ -53,6 +51,9 @@ type graphifyServer struct {
 	buildsMu  sync.Mutex
 	builds    map[string]*graphBuild
 	buildSlot sync.Mutex
+
+	jobsMu sync.Mutex
+	jobs   map[string]*extractJob
 }
 
 // extractorVersion identifies which graphify build this process will run,
@@ -170,8 +171,6 @@ func main() {
 		srv.cacheDir = "/var/lib/graphify-cache"
 	}
 	srv.namespaceID = strings.TrimSpace(os.Getenv("GRAPHIFY_NAMESPACE_ID"))
-	srv.tenantID = strings.TrimSpace(os.Getenv("GRAPHIFY_TENANT_ID"))
-	srv.principalID = strings.TrimSpace(os.Getenv("GRAPHIFY_PRINCIPAL_ID"))
 	srv.backend = strings.TrimSpace(os.Getenv("GRAPHIFY_BACKEND"))
 	srv.buildWait = 10 * time.Second
 
@@ -182,6 +181,7 @@ func main() {
 		return srv.readinessCheck()
 	}))
 	mux.HandleFunc("/v1/graphify/extract", srv.handleExtract)
+	mux.HandleFunc("/v1/graphify/extract/", srv.handleExtractStatus)
 	mux.HandleFunc("/v1/graphify/query", srv.handleQuery)
 	mux.HandleFunc("/v1/graphify/path", srv.handlePath)
 	mux.HandleFunc("/v1/graphify/explain", srv.handleExplain)
@@ -210,60 +210,6 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // ── extraction / ingestion ──────────────────────────────────────────────
 
-func (s *graphifyServer) handleExtract(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.namespaceID == "" || s.tenantID == "" || s.principalID == "" {
-		http.Error(w, "GRAPHIFY_NAMESPACE_ID, GRAPHIFY_TENANT_ID and GRAPHIFY_PRINCIPAL_ID must be configured", http.StatusPreconditionFailed)
-		return
-	}
-
-	graphPath, err := runExtract(r.Context(), s.repoPath, s.backend)
-	if err != nil {
-		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	graph, err := loadGraph(graphPath)
-	if err != nil {
-		http.Error(w, "load graph.json: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	summary := ingestSummary{}
-	memoryIDByNode := make(map[string]string, len(graph.Nodes))
-	for _, node := range graph.Nodes {
-		memoryID, err := s.ingestNode(r.Context(), node)
-		if err != nil {
-			summary.Errors = append(summary.Errors, "node "+node.ID+": "+err.Error())
-			continue
-		}
-		memoryIDByNode[node.ID] = memoryID
-		summary.NodesIngested++
-	}
-	for _, edge := range graph.Edges {
-		sourceID, sourceOK := memoryIDByNode[edge.Source]
-		targetID, targetOK := memoryIDByNode[edge.Target]
-		if !sourceOK || !targetOK {
-			summary.Errors = append(summary.Errors, "edge "+edge.Source+"->"+edge.Target+": unmapped node")
-			continue
-		}
-		if err := s.ingestEdge(r.Context(), sourceID, targetID, edge); err != nil {
-			summary.Errors = append(summary.Errors, "edge "+edge.Source+"->"+edge.Target+": "+err.Error())
-			continue
-		}
-		summary.EdgesIngested++
-	}
-	writeJSON(w, summary)
-}
-
-type ingestSummary struct {
-	NodesIngested int      `json:"nodes_ingested"`
-	EdgesIngested int      `json:"edges_ingested"`
-	Errors        []string `json:"errors,omitempty"`
-}
-
 // relationTypeFor maps graphify's edge confidence tag onto a
 // memory_relations relation_type; graphify's own EXTRACTED/INFERRED/
 // AMBIGUOUS vocabulary is preserved (lowercased) rather than collapsed,
@@ -281,28 +227,33 @@ func relationTypeFor(confidenceTag string) string {
 // ingestNode writes a graphify node as a Fact. Nodes are always AST-observed
 // (graphify only tags *edges* with EXTRACTED/INFERRED/AMBIGUOUS confidence,
 // not nodes -- a node either exists in the parsed source or isn't emitted at
-// all), so every node maps to Fact.Source "explicit".
-func (s *graphifyServer) ingestNode(ctx context.Context, node graphNode) (string, error) {
+// all), so every node maps to Fact.Source "explicit". The content names the
+// node's source location as well as its label: a repository has many
+// distinct main() and init() declarations, and a bare label would make
+// memory-intelligence merge them all into one fact.
+func (s *graphifyServer) ingestNode(ctx context.Context, bearer, namespaceID string, node graphNode) (string, error) {
 	evidence := []string(nil)
+	content := node.Label
 	if node.SourceFile != "" {
 		ref := node.SourceFile
 		if node.SourceLocation != "" {
 			ref = ref + ":" + node.SourceLocation
 		}
 		evidence = []string{ref}
+		content = node.Label + " (" + ref + ")"
 	}
 	fact := map[string]any{
-		"network":      "entity",
-		"content":      node.Label,
-		"source":       "explicit",
-		"confidence":   1.0,
-		"scope":        "namespace",
-		"derivation":   "graphify:node:" + node.ID,
-		"evidence":     evidence,
-		"inferred":     false,
-		"namespace_id": s.namespaceID,
-		"tenant_id":    s.tenantID,
-		"principal_id": s.principalID,
+		"network":    "entity",
+		"content":    content,
+		"source":     "explicit",
+		"confidence": 1.0,
+		"scope":      "namespace",
+		"derivation": "graphify:node:" + node.ID,
+		"evidence":   evidence,
+		"inferred":   false,
+	}
+	if namespaceID != "" {
+		fact["namespace_id"] = namespaceID
 	}
 	// memory-intelligence's POST /v1/facts nests the created (or merged)
 	// fact under "fact" in both response branches -- see handleFacts.
@@ -312,7 +263,7 @@ func (s *graphifyServer) ingestNode(ctx context.Context, node graphNode) (string
 		} `json:"fact"`
 		CanonicalFactID string `json:"canonical_fact_id,omitempty"`
 	}
-	if err := s.postJSON(ctx, s.memoryIntelligenceURL+"/v1/facts", fact, &resp); err != nil {
+	if err := s.postJSON(ctx, bearer, s.memoryIntelligenceURL+"/v1/facts", fact, &resp); err != nil {
 		return "", err
 	}
 	if resp.CanonicalFactID != "" {
@@ -321,15 +272,13 @@ func (s *graphifyServer) ingestNode(ctx context.Context, node graphNode) (string
 	return resp.Fact.ID, nil
 }
 
-func (s *graphifyServer) ingestEdge(ctx context.Context, sourceMemoryID, targetMemoryID string, edge graphEdge) error {
+func (s *graphifyServer) ingestEdge(ctx context.Context, bearer, sourceMemoryID, targetMemoryID string, edge graphEdge) error {
 	relation := map[string]any{
 		"source_memory_id": sourceMemoryID,
 		"target_memory_id": targetMemoryID,
 		"relation_type":    relationTypeFor(edge.Confidence),
-		"tenant_id":        s.tenantID,
-		"principal_id":     s.principalID,
 	}
-	return s.postJSON(ctx, s.memoryIntelligenceURL+"/v1/relations", relation, nil)
+	return s.postJSON(ctx, bearer, s.memoryIntelligenceURL+"/v1/relations", relation, nil)
 }
 
 // ── read-side: query / path / explain ───────────────────────────────────

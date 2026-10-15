@@ -715,16 +715,11 @@ services:
       # host paths under SCOS_WORKSPACE_HOST_PATH are translated to it.
       GRAPHIFY_ALLOWED_ROOT: /workspace
       SCOS_WORKSPACE_HOST_PATH: ${SCOS_WORKSPACE_HOST_PATH:-}
-      # Left optional rather than compose-required: these must be a real
-      # tenant/principal/namespace already provisioned with a
-      # namespace_memberships row (can_write_candidates=true) for ingestion
-      # to succeed, which isn't something this file can invent. Unset, the
-      # service still starts and serves /health and the read-side
-      # query/path/explain tools -- handleExtract (main.go) itself returns
-      # 412 for POST /v1/graphify/extract until these are set.
+      # Extraction writes memories as the principal who requested it, into
+      # the namespace the request names; this is only the default namespace
+      # for requests that name none (unset: the principal's own writable
+      # namespace).
       GRAPHIFY_NAMESPACE_ID: ${GRAPHIFY_NAMESPACE_ID:-}
-      GRAPHIFY_TENANT_ID: ${GRAPHIFY_TENANT_ID:-}
-      GRAPHIFY_PRINCIPAL_ID: ${GRAPHIFY_PRINCIPAL_ID:-}
       GRAPHIFY_BACKEND: ${GRAPHIFY_BACKEND:-}
     volumes:
       - tls-certs:/etc/scos/tls:ro

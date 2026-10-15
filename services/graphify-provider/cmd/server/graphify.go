@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -30,19 +31,6 @@ func runGraphify(ctx context.Context, workDir string, args ...string) (string, e
 		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// runExtract runs graphify's headless build (`graphify extract --code-only`,
-// no API key required) and returns the path to the resulting graph.json.
-func runExtract(ctx context.Context, workDir, backend string) (string, error) {
-	args := []string{"extract", workDir, "--code-only"}
-	if backend != "" {
-		args = []string{"extract", workDir, "--backend", backend}
-	}
-	if _, err := runGraphify(ctx, workDir, args...); err != nil {
-		return "", err
-	}
-	return filepath.Join(workDir, "graphify-out", "graph.json"), nil
 }
 
 // cacheKey turns a repo's identity plus everything that can change what
@@ -437,11 +425,11 @@ func loadGraph(path string) (*graphDocument, error) {
 	return &doc, nil
 }
 
-// postJSON POSTs a JSON body to an internal SCOS peer, sending the tenant/
-// principal identity headers this service was configured with, matching
-// the copyIdentityHeaders convention used elsewhere (mcp-gateway, hermes
-// adapter). out is optional; pass nil to discard the response body.
-func (s *graphifyServer) postJSON(ctx context.Context, url string, body, out any) error {
+// postJSON POSTs a JSON body to an internal SCOS peer as the caller whose
+// bearer token is given: memories written during an extraction belong to
+// the principal who asked for it, and memory-intelligence decides what that
+// principal may write. out is optional; pass nil to discard the response.
+func (s *graphifyServer) postJSON(ctx context.Context, bearer, url string, body, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -451,15 +439,15 @@ func (s *graphifyServer) postJSON(ctx context.Context, url string, body, out any
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-SCOS-Tenant-ID", s.tenantID)
-	req.Header.Set("X-SCOS-Principal-ID", s.principalID)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("upstream returned %s", resp.Status)
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("upstream returned %s: %s", resp.Status, strings.TrimSpace(string(detail)))
 	}
 	if out == nil {
 		return nil

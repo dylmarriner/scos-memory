@@ -294,6 +294,14 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/path", args)
 	case "scos_graphify_explain":
 		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/explain", args)
+	case "scos_graphify_ingest":
+		return s.forwardPOST(ctx, r, s.graphifyProviderURL+"/v1/graphify/extract", args)
+	case "scos_graphify_ingest_status":
+		jobID := stringArg(args, "job_id")
+		if jobID == "" || strings.ContainsAny(jobID, "/?#") {
+			return nil, fmt.Errorf("job_id is required")
+		}
+		return s.forwardGET(ctx, r, s.graphifyProviderURL+"/v1/graphify/extract/"+url.PathEscape(jobID))
 	case "scos_code_repo_register":
 		legacy, err := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/repos", args)
 		if err != nil {
@@ -1179,19 +1187,21 @@ func governedToolNames() map[string]bool {
 // none of mcp-gateway's code-intelligence, agent-registry, or governance
 // tooling, which those bundles never mention and are not built to drive.
 var memoryTierToolNames = map[string]bool{
-	"scos_recall":             true,
-	"scos_status":             true,
-	"scos_explain":            true,
-	"scos_user_model":         true,
-	"scos_memory_graph":       true,
-	"scos_remember":           true,
-	"scos_memory_review_list": true,
-	"scos_memory_review":      true,
-	"scos_correct":            true,
-	"scos_forget":             true,
-	"scos_graphify_query":     true,
-	"scos_graphify_path":      true,
-	"scos_graphify_explain":   true,
+	"scos_recall":                 true,
+	"scos_status":                 true,
+	"scos_explain":                true,
+	"scos_user_model":             true,
+	"scos_memory_graph":           true,
+	"scos_remember":               true,
+	"scos_memory_review_list":     true,
+	"scos_memory_review":          true,
+	"scos_correct":                true,
+	"scos_forget":                 true,
+	"scos_graphify_query":         true,
+	"scos_graphify_path":          true,
+	"scos_graphify_explain":       true,
+	"scos_graphify_ingest":        true,
+	"scos_graphify_ingest_status": true,
 }
 
 // desktopAgentToolNames maps X-SCOS-Agent-Name values (set by the shared
@@ -1339,6 +1349,28 @@ func governedTools() []map[string]any {
 					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo. The first question about a repository (or the first after it changes) builds its graph in the background; until it is ready the call returns status \"building\" with retry_after_seconds, and the same call should be repeated after that delay."},
 				},
 				"required": []string{"node"},
+			},
+		},
+		{
+			"name":        "scos_graphify_ingest",
+			"description": "Ingest a repository's graphify knowledge graph into memory as the caller: every code entity becomes an entity memory (with its source location) and every edge a relation. Runs in the background; returns a job_id to poll with scos_graphify_ingest_status, or status \"building\" with retry_after_seconds while the graph itself is still being built.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"repo_path":    map[string]any{"type": "string", "description": "Absolute path of the repo to ingest. Omit to use the provider's default repo."},
+					"namespace_id": map[string]any{"type": "string", "description": "Namespace to write the memories into. Omit to use the deployment default or the caller's own writable namespace."},
+				},
+			},
+		},
+		{
+			"name":        "scos_graphify_ingest_status",
+			"description": "Report the progress of a graph ingestion started with scos_graphify_ingest: nodes and edges ingested so far, errors, and whether it has finished",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"job_id": map[string]any{"type": "string", "description": "The job_id scos_graphify_ingest returned"},
+				},
+				"required": []string{"job_id"},
 			},
 		},
 		{
