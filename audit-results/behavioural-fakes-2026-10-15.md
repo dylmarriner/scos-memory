@@ -65,8 +65,8 @@ fixed), **VERIFY** (auditor claim not yet independently reproduced).
 - Persisted decisions drop scope and capability data. — OPEN
 
 ### Tool governance / execution proxy / security gate / credential vault
-- Prepare auto-registers and authorises any tool; plan and risk dropped by the decoder. — OPEN (security)
-- Declared tool properties never enforced; reconcile state machine partly dead. — OPEN
+- Prepare auto-registers and authorises any tool; plan and risk dropped by the decoder. — FIXED (security): prepare refuses unknown tools; registration and authorisation need the `tools:admin` scope; execution-proxy's built-in tool is seeded by migration 000047; plan and risk are decoded, re-graded by the shared classifier, persisted on `tool_executions`, and destructive risk requires confirmation.
+- Declared tool properties never enforced; reconcile state machine partly dead. — FIXED: read_only, destructive, externally_side_effecting, dry_run_capable, confirmation_gated and idempotent are enforced at prepare/start, reconcilable at reconcile; execution-proxy now reconciles as the preparing identity (it sent none, so every reconcile was refused).
 - Rewrite rules match on the first word and apply only the first replacement word; `cat`→`head` is lossy under "lossless-only". — OPEN
 - Diagnostic-retention metric compares stderr with itself. — OPEN
 - Permission policy allows every non-secret class and ignores action, resource, delegation, expiry; unknown classes allowed. — OPEN (security)

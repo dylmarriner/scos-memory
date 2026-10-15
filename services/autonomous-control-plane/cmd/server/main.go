@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -477,8 +478,19 @@ func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decis
 				if strings.TrimSpace(req.ProposedTool) == "" {
 					err = errors.New("proposed_tool is required for governance")
 				} else {
+					// The proposed tool is named, not identified: tool-governance
+					// resolves it among the tenant's registered tools and refuses
+					// one that is not registered and authorised. The plan names
+					// the command so governance grades its risk with the shared
+					// classifier, and confirmation travels as it does to the proxy.
 					_, err = c.callService(ctx, step.System, "/v1/operations/start", map[string]any{
-						"tool_id": req.ProposedTool, "input": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
+						"tool_name": req.ProposedTool, "input": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
+						"plan": map[string]any{
+							"original_request": req.ProposedTool, "executed_request": req.ProposedTool,
+							"working_directory": req.RepositoryPath,
+						},
+						"confirmed":    !decision.ConfirmationRequired,
+						"operation_id": governanceOperationID(req.InteractionID),
 					}, req)
 				}
 			case "adaptive-execution-proxy":
@@ -969,6 +981,16 @@ type RouteDecision struct {
 	RegistryGeneration   int64     `json:"registry_generation"`
 	ReasonCodes          []string  `json:"reason_codes"`
 	CreatedAt            time.Time `json:"created_at"`
+}
+
+// governanceOperationID derives the tool-governance operation ID for an
+// interaction's governance stage. It is stable, so a retried ingest names
+// the same operation (tool-governance refuses to start a second one for a
+// non-idempotent tool), and distinct from the interaction ID itself, which
+// execution-proxy prepares its own operation under.
+func governanceOperationID(interactionID string) string {
+	digest := sha256.Sum256([]byte(interactionID + "\x00tool-governance"))
+	return hex.EncodeToString(digest[:16])
 }
 
 func newID() (string, error) {

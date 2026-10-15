@@ -9,10 +9,12 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -122,6 +124,14 @@ type GovernedOperation struct {
 	OperationID string `json:"operation_id"`
 	Prepared    bool   `json:"prepared"`
 	Authorized  bool   `json:"authorized"`
+	// RiskLevel is the risk tool-governance decided on, which may be higher
+	// than the plan's own classification.
+	RiskLevel string `json:"risk_level,omitempty"`
+	// TenantID and PrincipalID are the identity the operation was prepared
+	// for; reconciliation must act as the same identity. They are set by
+	// the client, never read from the governance response.
+	TenantID    string `json:"-"`
+	PrincipalID string `json:"-"`
 }
 
 type ToolGovernance interface {
@@ -144,33 +154,59 @@ type toolGovernanceClient struct {
 	client  *http.Client
 }
 
+// executionProxyToolName is the built-in tool tool-governance knows this
+// service as (database/migrations/000047_tool_governance_prepare_policy.sql
+// seeds it into builtin_tool_definitions with its declared properties).
+const executionProxyToolName = "execution-proxy"
+
 func (c toolGovernanceClient) AuthorizeAndPrepare(ctx context.Context, req ExecuteRequest, plan CommandPlan) (GovernedOperation, error) {
-	var operation GovernedOperation
-	err := c.post(ctx, "/v1/operations/prepare", map[string]any{
+	payload, err := json.Marshal(map[string]any{
 		"tenant_id": req.TenantID, "principal_id": req.PrincipalID, "operation_id": req.OperationID,
-		"tool_name": "execution-proxy", "tool_version": version, "input": req,
-		"plan": plan,
-	}, &operation)
-	return operation, err
+		"tool_name": executionProxyToolName, "input": req,
+		"plan": plan, "risk": plan.RiskLevel, "confirmed": req.Confirmed,
+	})
+	if err != nil {
+		return GovernedOperation{}, err
+	}
+	// A request naming its operation is a retry of that operation and must
+	// replay governance's earlier answer. A request without one (read-only
+	// commands) is a new operation every time: keying it on the payload
+	// would hand the same operation, already settled, to a later identical
+	// command.
+	idempotencyKey := sha256Hex(payload)
+	if req.OperationID == "" {
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			return GovernedOperation{}, err
+		}
+		idempotencyKey = hex.EncodeToString(nonce)
+	}
+	var operation GovernedOperation
+	if err := c.post(ctx, "/v1/operations/prepare", payload, idempotencyKey, &operation); err != nil {
+		return GovernedOperation{}, err
+	}
+	operation.TenantID, operation.PrincipalID = req.TenantID, req.PrincipalID
+	return operation, nil
 }
 
 func (c toolGovernanceClient) Reconcile(ctx context.Context, operation GovernedOperation, outcome string, result *ExecutionResult) error {
-	return c.post(ctx, "/v1/operations/reconcile", map[string]any{
+	payload, err := json.Marshal(map[string]any{
+		"tenant_id": operation.TenantID, "principal_id": operation.PrincipalID,
 		"operation_id": operation.OperationID, "result": outcome, "output": result,
-	}, &struct{}{})
-}
-
-func (c toolGovernanceClient) post(ctx context.Context, path string, body any, response any) error {
-	payload, err := json.Marshal(body)
+	})
 	if err != nil {
 		return err
 	}
+	return c.post(ctx, "/v1/operations/reconcile", payload, sha256Hex(payload), &struct{}{})
+}
+
+func (c toolGovernanceClient) post(ctx context.Context, path string, payload []byte, idempotencyKey string, response any) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+path, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Idempotency-Key", sha256Hex(payload))
+	request.Header.Set("Idempotency-Key", idempotencyKey)
 	if token := os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN"); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -183,6 +219,13 @@ func (c toolGovernanceClient) post(ctx context.Context, path string, body any, r
 	}
 	defer responseBody.Body.Close()
 	if responseBody.StatusCode < 200 || responseBody.StatusCode >= 300 {
+		// Governance refusals carry the reason (unregistered tool, missing
+		// confirmation, a risk the tool's declared properties forbid); pass
+		// it on rather than only the status line.
+		detail, _ := io.ReadAll(io.LimitReader(responseBody.Body, 4<<10))
+		if reason := strings.TrimSpace(string(detail)); reason != "" {
+			return fmt.Errorf("tool governance returned %s: %s", responseBody.Status, reason)
+		}
 		return fmt.Errorf("tool governance returned %s", responseBody.Status)
 	}
 	return json.NewDecoder(responseBody.Body).Decode(response)

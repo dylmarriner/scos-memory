@@ -1079,7 +1079,8 @@ const (
 // localIdentityToken mints and caches the claims token that carries the
 // local-mode identity to downstream services. The local user owns the
 // whole installation, so the token also carries the operator scopes the
-// backup and recovery routes require.
+// backup and recovery routes and tool-governance's tool registration and
+// authorisation routes require.
 type localIdentityToken struct {
 	mu      sync.Mutex
 	value   string
@@ -1101,7 +1102,7 @@ func (l *localIdentityToken) token() (string, error) {
 		Subject:     localModePrincipalID,
 		AgentID:     "mcp-gateway-local",
 		ExpiresAt:   expires,
-		Scopes:      []string{"backups:admin", "recovery:admin"},
+		Scopes:      []string{"backups:admin", "recovery:admin", "tools:admin"},
 	}, os.Getenv("SCOS_SECURITY_ISSUER_SECRET"))
 	if err != nil {
 		return "", err
@@ -2094,25 +2095,34 @@ func governedTools() []map[string]any {
 	tools = append(tools,
 		tool("scos_tool_list", "List governed tool definitions", map[string]any{}),
 		tool("scos_tool_get", "Get a governed tool definition by ID", map[string]any{"id": strField("Tool ID")}, "id"),
-		tool("scos_tool_register", "Register a governed tool (requires Idempotency-Key header)", map[string]any{
+		tool("scos_tool_register", "Register a governed tool in state proposed; requires the tools:admin scope (requires Idempotency-Key header)", map[string]any{
 			"name":        strField("Tool name"),
 			"description": strField("Tool description"),
 			"version":     strField("Tool version"),
 			"properties":  objField("Tool properties (read_only, destructive, idempotent, externally_side_effecting, confirmation_gated, dry_run_capable, reconcilable)"),
 		}, "name"),
-		tool("scos_tool_transition", "Transition a governed tool's lifecycle state (requires Idempotency-Key header)", map[string]any{
+		tool("scos_tool_transition", "Transition a governed tool's lifecycle state (proposed -> prepared -> authorised); requires the tools:admin scope (requires Idempotency-Key header)", map[string]any{
 			"tool_id":   strField("Tool ID"),
 			"new_state": strField("New lifecycle state"),
 		}, "tool_id", "new_state"),
 		tool("scos_operation_list", "List governed tool operations", map[string]any{}),
 		tool("scos_operation_get", "Get a governed tool operation by ID", map[string]any{"id": strField("Operation ID")}, "id"),
-		tool("scos_operation_start", "Start a governed operation for an already-registered tool (requires Idempotency-Key header)", map[string]any{
-			"tool_id": strField("Tool ID"),
-			"input":   objField("Operation input"),
-		}, "tool_id"),
-		tool("scos_operation_prepare", "Prepare a governed operation, auto-registering the tool if unknown (requires Idempotency-Key header)", map[string]any{
-			"tool_name": strField("Tool name"),
-			"input":     objField("Operation input"),
+		tool("scos_operation_start", "Start a governed operation for a registered, authorised tool, named by tool_id or tool_name; the risk and plan are checked against the tool's declared properties (requires Idempotency-Key header)", map[string]any{
+			"tool_id":      strField("Tool ID (or give tool_name)"),
+			"tool_name":    strField("Tool name (or give tool_id)"),
+			"operation_id": strField("Operation ID (UUID); required for a side-effecting operation on a non-idempotent tool"),
+			"input":        objField("Operation input"),
+			"risk":         strField("Declared risk: read, test, write, or destructive (required unless the plan names a command)"),
+			"plan":         objField("Operation plan (original_request, executed_request, working_directory, risk_level, mode, dry_run)"),
+			"confirmed":    boolField("Explicit confirmation; required for destructive operations and confirmation-gated tools"),
+		}),
+		tool("scos_operation_prepare", "Prepare a governed operation for a registered, authorised tool or a built-in tool; unknown tools are refused, and the risk and plan are checked against the tool's declared properties (requires Idempotency-Key header)", map[string]any{
+			"tool_name":    strField("Tool name"),
+			"operation_id": strField("Operation ID (UUID); required for a side-effecting operation on a non-idempotent tool"),
+			"input":        objField("Operation input"),
+			"risk":         strField("Declared risk: read, test, write, or destructive (required unless the plan names a command)"),
+			"plan":         objField("Operation plan (original_request, executed_request, working_directory, risk_level, mode, dry_run)"),
+			"confirmed":    boolField("Explicit confirmation; required for destructive operations and confirmation-gated tools"),
 		}, "tool_name"),
 		tool("scos_operation_complete", "Complete a governed operation (requires Idempotency-Key header)", map[string]any{
 			"operation_id": strField("Operation ID"),
