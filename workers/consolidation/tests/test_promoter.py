@@ -1,5 +1,6 @@
 """Tests for the promoter module."""
 
+import json
 import sys
 import unittest
 from hashlib import sha256
@@ -110,6 +111,18 @@ class PromoterTests(unittest.TestCase):
         version = build_memory_version(c, item["id"])
         self.assertEqual(version["version_number"], 1)
         self.assertEqual(version["memory_id"], item["id"])
+
+    def test_build_memory_version_records_network_and_source(self):
+        for memory_class, network in [
+            (MemoryClass.SEMANTIC, "world"),
+            (MemoryClass.EPISODIC, "experience"),
+            (MemoryClass.PROCEDURAL, "procedure"),
+        ]:
+            c = _candidate(memory_class=memory_class)
+            structured = json.loads(build_memory_version(c, c.candidate_id)["structured_content"])
+            self.assertEqual(structured["network"], network)
+            self.assertEqual(structured["source"], "observed")
+            self.assertEqual(structured["title"], c.title)
 
     def test_build_memory_version_hashes_content(self):
         c = _candidate(content="Hash this content")

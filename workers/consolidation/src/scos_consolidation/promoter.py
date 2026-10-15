@@ -173,6 +173,18 @@ def evaluate_promotion(
     )
 
 
+def memory_network(memory_class: MemoryClass) -> str:
+    """Map a memory class onto memory-intelligence's memory network, the same
+    way its candidate review does (candidates.go, memoryTypeToNetwork)."""
+    if memory_class in (MemoryClass.EPISODIC, MemoryClass.WORKING):
+        return "experience"
+    if memory_class == MemoryClass.PROCEDURAL:
+        return "procedure"
+    if memory_class == MemoryClass.REVOCATION:
+        return "negative"
+    return "world"
+
+
 def build_memory_item(
     candidate: MemoryCandidate,
     decision: PromotionDecision,
@@ -213,6 +225,14 @@ def build_memory_version(
         "structured_content": json.dumps({
             "title": candidate.title,
             "evidence": [ev.model_dump() for ev in candidate.evidence],
+            # The fields memory-intelligence reads every fact through: a
+            # memory consolidated from a conversation was observed there.
+            "network": memory_network(candidate.memory_class),
+            "source": "observed",
+            "scope": "namespace",
+            "observed_at": now.isoformat(),
+            "inferred": False,
+            "derivation": "consolidation",
         }),
         "content_hash": sha256(candidate.content.encode("utf-8")).hexdigest(),
         "change_reason": "initial consolidation",

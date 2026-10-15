@@ -268,7 +268,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		placeholders[i] = fmt.Sprintf("$%d", i+2)
 	}
 	query := fmt.Sprintf(`
-		SELECT mi.id, mi.namespace_id, mi.authority_level, mi.confidence_score, mi.created_at, mi.status,
+		SELECT mi.id, mi.namespace_id, mi.authority_level, mi.confidence_score, mi.created_at, mi.status, mi.type,
 		       mv.content, mv.structured_content, mv.version_number, mv.created_at
 		FROM memory_items mi
 		JOIN memory_versions mv ON mv.id = mi.current_version_id
@@ -286,7 +286,8 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		var f Fact
 		var structuredRaw []byte
 		var itemCreatedAt, versionCreatedAt time.Time
-		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
+		var memoryType string
+		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &memoryType, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -306,6 +307,16 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		}
 		f.Network = structured.Network
 		f.Source = structured.Source
+		// Memories promoted by the consolidation worker before it recorded
+		// these fields carry only a title and evidence: their network
+		// follows from the memory type, and they were observed in the
+		// conversation they were consolidated from.
+		if f.Network == "" {
+			f.Network = memoryTypeToNetwork(memoryType)
+		}
+		if f.Source == "" {
+			f.Source = "observed"
+		}
 		f.Scope = structured.Scope
 		f.ObservedAt = structured.ObservedAt
 		f.ValidFrom = structured.ValidFrom
