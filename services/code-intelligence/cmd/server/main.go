@@ -463,6 +463,7 @@ func main() {
 	mux.HandleFunc("/v2/code/repos", srv.handlePGRepos)
 	mux.HandleFunc("/v2/code/index", srv.handlePGIndex)
 	mux.HandleFunc("/v2/code/scan", srv.handlePGScan)
+	mux.HandleFunc("/v2/code/snapshots", srv.handlePGSnapshots)
 	mux.HandleFunc("/v2/code/snapshots/", srv.handlePGSnapshot)
 	mux.HandleFunc("/v2/code/query", srv.handlePGQuery)
 	mux.HandleFunc("/v2/code/snapshots/diff", srv.handlePGSnapshotDiff)

@@ -335,6 +335,78 @@ const scanTimeout = 30 * time.Minute
 
 // handlePGSnapshot reports one snapshot's indexing state:
 // GET /v2/code/snapshots/{id}.
+// snapshotView is a durable snapshot as the scan, status and listing
+// endpoints report it.
+type snapshotView struct {
+	ID            string  `json:"snapshot_id"`
+	RepositoryID  string  `json:"repository_id"`
+	CanonicalPath string  `json:"canonical_path,omitempty"`
+	Branch        string  `json:"branch"`
+	CommitID      string  `json:"commit_id"`
+	Status        string  `json:"status"`
+	FileCount     int     `json:"file_count"`
+	SymbolCount   int     `json:"symbol_count"`
+	Error         *string `json:"error,omitempty"`
+	CreatedAt     string  `json:"created_at"`
+	ActivatedAt   *string `json:"activated_at,omitempty"`
+}
+
+const snapshotViewColumns = `snap.id::text, snap.repository_id::text, repo.canonical_path, snap.branch, snap.commit_id,
+	snap.status::text, snap.file_count, snap.symbol_count, snap.error,
+	to_char(snap.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+	to_char(snap.activated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
+
+func scanSnapshotView(row interface{ Scan(...any) error }) (snapshotView, error) {
+	var v snapshotView
+	err := row.Scan(&v.ID, &v.RepositoryID, &v.CanonicalPath, &v.Branch, &v.CommitID, &v.Status,
+		&v.FileCount, &v.SymbolCount, &v.Error, &v.CreatedAt, &v.ActivatedAt)
+	return v, err
+}
+
+// handlePGSnapshots lists the caller's most recent durable snapshots across
+// every repository, newest first -- what has been indexed, what is
+// indexing now, and what failed and why.
+func (s *server) handlePGSnapshots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requirePGStore(w) {
+		return
+	}
+	tenant, ok := requireTenant(r)
+	if !ok {
+		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
+		return
+	}
+	rows, err := s.pgStore.db.QueryContext(r.Context(), `
+		SELECT `+snapshotViewColumns+`
+		  FROM code_repository_snapshots snap
+		  JOIN code_repositories repo ON repo.id = snap.repository_id
+		 WHERE snap.tenant_id = $1::uuid
+		 ORDER BY snap.created_at DESC
+		 LIMIT 50`, tenant)
+	if err != nil {
+		http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	out := []snapshotView{}
+	for rows.Next() {
+		v, err := scanSnapshotView(rows)
+		if err != nil {
+			http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, out)
+}
+
 func (s *server) handlePGSnapshot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -353,25 +425,11 @@ func (s *server) handlePGSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	var out struct {
-		ID           string  `json:"snapshot_id"`
-		RepositoryID string  `json:"repository_id"`
-		Branch       string  `json:"branch"`
-		CommitID     string  `json:"commit_id"`
-		Status       string  `json:"status"`
-		FileCount    int     `json:"file_count"`
-		SymbolCount  int     `json:"symbol_count"`
-		Error        *string `json:"error,omitempty"`
-		CreatedAt    string  `json:"created_at"`
-		ActivatedAt  *string `json:"activated_at,omitempty"`
-	}
-	err := s.pgStore.db.QueryRowContext(r.Context(), `
-		SELECT id::text, repository_id::text, branch, commit_id, status::text, file_count, symbol_count, error,
-		       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		       to_char(activated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-		  FROM code_repository_snapshots
-		 WHERE id::text = $1 AND tenant_id = $2::uuid`, id, tenant).Scan(&out.ID, &out.RepositoryID, &out.Branch, &out.CommitID,
-		&out.Status, &out.FileCount, &out.SymbolCount, &out.Error, &out.CreatedAt, &out.ActivatedAt)
+	out, err := scanSnapshotView(s.pgStore.db.QueryRowContext(r.Context(), `
+		SELECT `+snapshotViewColumns+`
+		  FROM code_repository_snapshots snap
+		  JOIN code_repositories repo ON repo.id = snap.repository_id
+		 WHERE snap.id::text = $1 AND snap.tenant_id = $2::uuid`, id, tenant))
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "snapshot not found", http.StatusNotFound)
 		return

@@ -227,7 +227,7 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		"plugins":           {s.upstreams["extension_manager"], "/v1/extensions"},
 		"skills":            {s.upstreams["extension_manager"], "/v1/skills"},
 		"hooks":             {s.upstreams["extension_manager"], "/v1/hooks"},
-		"code_intelligence": {s.upstreams["code_intelligence"], "/v1/index/status"},
+		"code_intelligence": {s.upstreams["code_intelligence"], "/v2/code/snapshots"},
 		"routing":           {s.upstreams["autonomous_control_plane"], "/v1/control/decisions"},
 		"recovery":          {s.upstreams["recovery_orchestrator"], "/v1/recovery/status"},
 		"security":          {s.upstreams["security_gate"], "/v1/audit"},

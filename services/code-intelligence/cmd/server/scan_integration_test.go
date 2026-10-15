@@ -109,6 +109,13 @@ func TestHandlePGScanIndexesAWorkspaceRepositoryInTheBackground(t *testing.T) {
 		t.Fatalf("a bare declaration name must anchor on that declaration first: %s", q.Body.String())
 	}
 
+	list := call(srv.handlePGSnapshots, http.MethodGet, "/v2/code/snapshots", nil)
+	var listed []map[string]any
+	_ = json.Unmarshal(list.Body.Bytes(), &listed)
+	if list.Code != http.StatusOK || len(listed) != 1 || listed[0]["snapshot_id"] != first["snapshot_id"] || listed[0]["canonical_path"] != "/home/dev/code/svc" {
+		t.Fatalf("snapshot listing = %d %s", list.Code, list.Body.String())
+	}
+
 	again := scan()
 	if again["unchanged"] != true || again["snapshot_id"] != first["snapshot_id"] {
 		t.Fatalf("rescanning an unchanged tree must reuse its snapshot: %v", again)
