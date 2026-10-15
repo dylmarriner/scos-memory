@@ -1,4 +1,5 @@
 package main
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"

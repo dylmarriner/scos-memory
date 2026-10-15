@@ -40,6 +40,7 @@ type credentials struct {
 	Password    string `json:"password"`
 	DisplayName string `json:"display_name"`
 }
+
 // identity is the signed-in account; its JSON shape matches the session
 // response issueSession writes and the dashboard's account views read.
 type identity struct {
