@@ -367,6 +367,8 @@ func main() {
 
 	// Memory networks
 	mux.HandleFunc("/v1/facts", srv.handleFacts)
+	mux.HandleFunc("/v1/candidates", srv.handleCandidates)
+	mux.HandleFunc("/v1/candidates/", srv.handleCandidateDecision)
 	mux.HandleFunc("/v1/facts/batch-correct", srv.handleFactsBatchCorrect)
 	mux.HandleFunc("/v1/facts/batch-forget", srv.handleFactsBatchForget)
 	mux.HandleFunc("/v1/memory", srv.handleFacts)
@@ -2546,7 +2548,7 @@ func findMergeCandidate(ctx context.Context, fact *Fact, existing []*Fact) *merg
 		if top.score < 0.85 {
 			return nil
 		}
-		return &mergeDecision{ExistingFact: top.fact, NewIsRicher: len(fact.Content) >= len(top.fact.Content)}
+		return &mergeDecision{ExistingFact: top.fact, NewIsRicher: len(fact.Content) > len(top.fact.Content)}
 	}
 
 	var options strings.Builder

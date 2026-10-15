@@ -50,7 +50,7 @@ class DedupTests(unittest.TestCase):
         # Should find match and merge
         self.assertIn(results[0].action, ("merged", "new"))
 
-    def test_superseded_when_authority_gap_large(self):
+    def test_supersedes_when_authority_gap_large(self):
         c = _candidate(authority_level=95)
         existing = [
             {
@@ -61,8 +61,9 @@ class DedupTests(unittest.TestCase):
             }
         ]
         results = deduplicate([c], existing)
-        # 95 vs 40 = 55 diff, which is >= 20, so superseded
-        self.assertEqual(results[0].action, "superseded")
+        # 95 vs 40 = 55 diff, which is >= 20: the candidate replaces it
+        self.assertEqual(results[0].action, "supersedes")
+        self.assertIsNotNone(results[0].supersedes)
 
     def test_no_match_different_content(self):
         c = _candidate(title="Different title", content="Completely unrelated.")
@@ -84,3 +85,18 @@ class DedupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParaphraseTests(unittest.TestCase):
+    def test_reworded_statement_of_the_same_fact_merges(self):
+        from scos_consolidation.dedup import _overlap
+        self.assertGreaterEqual(_overlap(
+            "Our on-call rotation changes every Monday at 09:00.",
+            "The on-call rotation changes every Monday at 09:00."), 0.85)
+
+    def test_different_facts_do_not_merge(self):
+        from scos_consolidation.dedup import _overlap
+        self.assertLess(_overlap(
+            "The on-call rotation changes every Monday at 09:00.",
+            "The release train leaves every Thursday at noon."), 0.85)
+

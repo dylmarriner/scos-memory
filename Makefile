@@ -41,7 +41,7 @@ integration-test:
 rls-integration-test:
 	@test -n "$${DATABASE_URL}" || (printf '%s\n' 'DATABASE_URL (migration owner) must be set' >&2; exit 1)
 	@test -n "$${SCOS_APP_TEST_DATABASE_URL}" || (printf '%s\n' 'SCOS_APP_TEST_DATABASE_URL (scos_app runtime role) must be set' >&2; exit 1)
-	go test -tags=integration -count=1 ./database/integration ./services/security-gate/cmd/server ./services/recovery-orchestrator/cmd/server ./services/cloud-control-plane/cmd/server
+	go test -tags=integration -count=1 ./database/integration ./services/security-gate/cmd/server ./services/recovery-orchestrator/cmd/server ./services/cloud-control-plane/cmd/server ./services/memory-intelligence/cmd/server
 	python3 -m unittest discover -s tests/integration -p 'test_*.py' -v
 
 failure-injection:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -22,6 +23,15 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A user asking outright for something to be remembered: the statement after
+# the cue is the fact, worded by the user, and needs no inference.
+_EXPLICIT_MEMORY = re.compile(
+    r"^\s*(?:please\s+)?(?:remember|note|keep in mind|don'?t forget|for (?:future )?reference)"
+    r"\b[\s,:-]*(?:that\s+)?(?P<fact>\S.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_TITLE_LIMIT = 80
 
 # ── extraction triggers match §16 ──────────────────────────────────────────
 EXTRACTION_TRIGGERS = frozenset({
@@ -135,6 +145,8 @@ def _classify(
         return MemoryClass.GOVERNING
     if "revoke" in str(event.get("data", {})).lower():
         return MemoryClass.REVOCATION
+    if _explicit_statements(messages):
+        return MemoryClass.SEMANTIC
     if _has_code_output(messages):
         return MemoryClass.PROCEDURAL
     if _has_factual_claim(messages):
@@ -187,7 +199,19 @@ def _extract_content(
         except (json.JSONDecodeError, TypeError):
             data = {}
 
-    title = data.get("title", "") or data.get("subject", "") or event.get("subject", "")
+    statements = _explicit_statements(messages)
+    if statements:
+        # The user's own words are the memory; the surrounding transcript
+        # stays reachable through the evidence references.
+        content = "\n".join(statements)
+        return (data.get("title") or _title_from(statements[0])), content
+
+    # The event subject is an aggregate path ("turn/<uuid>"), not a title.
+    title = data.get("title", "") or data.get("subject", "")
+    if not title:
+        first_user = next((m.get("content", "") for m in messages if m.get("role") == "user" and m.get("content")), "")
+        if first_user:
+            title = _title_from(first_user)
     if not title:
         title_prefix = {
             MemoryClass.SEMANTIC: "Knowledge: ",
@@ -210,6 +234,30 @@ def _extract_content(
 
     content = "\n\n".join(content_parts) if content_parts else json.dumps(data, indent=2)
     return title[:240], content
+
+
+def _explicit_statements(messages: list[dict[str, Any]]) -> list[str]:
+    """User messages that ask for something to be remembered, cue removed."""
+    out: list[str] = []
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        match = _EXPLICIT_MEMORY.match(m.get("content", "") or "")
+        if not match:
+            continue
+        fact = " ".join(match.group("fact").split())
+        if fact:
+            out.append(fact[0].upper() + fact[1:])
+    return out
+
+
+def _title_from(text: str) -> str:
+    """First sentence of ``text``, bounded, as a human-readable title."""
+    line = " ".join(text.split())
+    sentence = re.split(r"(?<=[.!?])\s", line, maxsplit=1)[0]
+    if len(sentence) > _TITLE_LIMIT:
+        sentence = sentence[: _TITLE_LIMIT - 1].rstrip() + "…"
+    return sentence
 
 
 def _build_evidence(

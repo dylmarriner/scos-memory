@@ -83,6 +83,28 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(candidates[0].memory_class, MemoryClass.SEMANTIC)
         self.assertEqual(candidates[0].tenant_id, self.tenant_id)
 
+    def test_explicit_memory_request_stores_the_statement_not_the_transcript(self):
+        messages = [
+            self._message(role="user", content="Remember that our production database is PostgreSQL 17 on Linode."),
+            self._message(role="assistant", content="Noted."),
+        ]
+        candidates = extract_candidates(self._event(), messages)
+        self.assertEqual(len(candidates), 1)
+        c = candidates[0]
+        self.assertEqual(c.memory_class, MemoryClass.SEMANTIC)
+        self.assertEqual(c.content, "Our production database is PostgreSQL 17 on Linode.")
+        self.assertEqual(c.title, "Our production database is PostgreSQL 17 on Linode.")
+        self.assertNotIn("[user]", c.content)
+
+    def test_title_comes_from_content_not_the_event_subject(self):
+        messages = [
+            self._message(role="user", content="How do we roll back a failed deploy? Asking for the runbook."),
+            self._message(role="assistant", content="Revert the release tag and redeploy the previous image."),
+        ]
+        candidates = extract_candidates(self._event(), messages)
+        self.assertEqual(candidates[0].title, "How do we roll back a failed deploy?")
+        self.assertFalse(candidates[0].title.startswith("turn/"))
+
     def test_extract_procedural_from_code_output(self):
         event = self._event(event_type="turn.completed")
         messages = [

@@ -386,6 +386,24 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			}
 		}
 		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts", fact)
+	case "scos_memory_review_list":
+		status := stringArg(args, "status")
+		if status == "" {
+			status = "pending_review"
+		}
+		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/candidates?status="+url.QueryEscape(status))
+	case "scos_memory_review":
+		candidateID := stringArg(args, "candidate_id")
+		if candidateID == "" {
+			return nil, fmt.Errorf("candidate_id is required")
+		}
+		body := map[string]any{"decision": stringArg(args, "decision")}
+		for _, key := range []string{"rationale", "content", "network"} {
+			if value := stringArg(args, key); value != "" {
+				body[key] = value
+			}
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/candidates/"+url.PathEscape(candidateID)+"/review", body)
 	case "scos_correct":
 		memoryID := stringArg(args, "memory_id")
 		if memoryID == "" {
@@ -1064,17 +1082,19 @@ func governedToolNames() map[string]bool {
 // none of mcp-gateway's code-intelligence, agent-registry, or governance
 // tooling, which those bundles never mention and are not built to drive.
 var memoryTierToolNames = map[string]bool{
-	"scos_recall":           true,
-	"scos_status":           true,
-	"scos_explain":          true,
-	"scos_user_model":       true,
-	"scos_memory_graph":     true,
-	"scos_remember":         true,
-	"scos_correct":          true,
-	"scos_forget":           true,
-	"scos_graphify_query":   true,
-	"scos_graphify_path":    true,
-	"scos_graphify_explain": true,
+	"scos_recall":             true,
+	"scos_status":             true,
+	"scos_explain":            true,
+	"scos_user_model":         true,
+	"scos_memory_graph":       true,
+	"scos_remember":           true,
+	"scos_memory_review_list": true,
+	"scos_memory_review":      true,
+	"scos_correct":            true,
+	"scos_forget":             true,
+	"scos_graphify_query":     true,
+	"scos_graphify_path":      true,
+	"scos_graphify_explain":   true,
 }
 
 // desktopAgentToolNames maps X-SCOS-Agent-Name values (set by the shared
@@ -1339,6 +1359,31 @@ func governedTools() []map[string]any {
 					"valid_until":  map[string]any{"type": "string", "description": "RFC 3339 time after which the fact no longer holds"},
 				},
 				"required": []string{"content"},
+			},
+		},
+		{
+			"name":        "scos_memory_review_list",
+			"description": "List memories held back for a person's approval (high-impact, governing, sensitive or conflicting content extracted from conversations). They are not recalled until approved",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"status": map[string]any{"type": "string", "enum": []string{"pending_review", "promoted", "rejected"}, "description": "Defaults to pending_review"},
+				},
+			},
+		},
+		{
+			"name":        "scos_memory_review",
+			"description": "Approve a held-back memory into long-term memory (optionally with corrected wording) or reject it with a reason. Only do this on the user's explicit instruction",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"candidate_id": map[string]any{"type": "string", "description": "Candidate id from scos_memory_review_list"},
+					"decision":     map[string]any{"type": "string", "enum": []string{"approve", "reject"}},
+					"rationale":    map[string]any{"type": "string", "description": "Why; required to reject"},
+					"content":      map[string]any{"type": "string", "description": "Approve only: corrected wording to store instead of the extracted text"},
+					"network":      map[string]any{"type": "string", "enum": []string{"world", "experience", "entity", "belief", "procedure", "negative"}, "description": "Approve only: kind of memory, if the proposed one is wrong"},
+				},
+				"required": []string{"candidate_id", "decision"},
 			},
 		},
 		{

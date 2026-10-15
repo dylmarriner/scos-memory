@@ -148,6 +148,13 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
         logger.warning("job %s: no turn_id in payload", job_id)
         return
 
+    if job.get("job_type") == "turn.accepted":
+        # Acceptance is already journalled by memory-gateway; memories are
+        # extracted once per turn, from its completion. Extracting here too
+        # produced a second candidate for every turn.
+        _mark_completed(conn, job_id)
+        return
+
     logger.info("processing turn %s", turn_id)
 
     # ── 1. Load turn event and session messages ──────────────────────
@@ -200,10 +207,18 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
 
     # ── 6. Evaluate promotion for each candidate ─────────────────────
     for result in dedup_results:
-        if result.action == "superseded" or not result.candidate:
+        if not result.candidate:
             continue
-
         candidate = result.candidate
+
+        if result.action == "merged" and result.merged_into:
+            # Already stored (or already awaiting review): keep the single
+            # record and attach this turn's evidence to it. Never a second
+            # active memory or a second review item.
+            _merge_into_existing(conn, candidate, result.merged_into)
+            logger.info("candidate %s: merged into %s %s", candidate.candidate_id,
+                        result.merged_into.get("kind", "memory"), result.merged_into.get("id"))
+            continue
         candidate_conflicts = [c for c in conflicts
                                if str(candidate.source_event_id) in c.subjects]
 
@@ -233,10 +248,8 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
             _promote_candidate(conn, candidate, promotion)
             logger.info("candidate %s: promoted to %s",
                         candidate.candidate_id, promotion.target_status)
-
-        # Write dedup results for merged candidates
-        if result.action == "merged" and result.merged_into:
-            _record_merge(conn, candidate, result.merged_into)
+            if result.action == "supersedes" and result.supersedes and result.supersedes.get("kind") == "memory":
+                _supersede_memory(conn, result.supersedes["id"], candidate.candidate_id)
 
     # ── 9. Persist conflict sets ──────────────────────────────────────
     for conflict in conflicts:
@@ -326,7 +339,7 @@ def _load_existing_memory(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT mi.id, mi.title, COALESCE(mv.content, mi.canonical_summary) AS content,
+            SELECT 'memory' AS kind, mi.id, mi.title, COALESCE(mv.content, mi.canonical_summary) AS content,
                    mi.authority_level, mi.confidence_score, mi.sensitivity, mi.status, mi.metadata
             FROM memory_items mi
             LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
@@ -338,7 +351,23 @@ def _load_existing_memory(
             """,
             (tenant_id, namespace_id),
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+        # Candidates already waiting for review count as existing too, so a
+        # repeated statement does not queue a second review item.
+        cur.execute(
+            """
+            SELECT 'candidate' AS kind, c.id, c.title, c.content, c.authority_level,
+                   c.confidence_score, c.sensitivity, c.status, '{}'::jsonb AS metadata
+            FROM memory_candidates c
+            WHERE c.tenant_id = %s
+              AND c.namespace_id = %s
+              AND c.status = 'pending_review'
+            ORDER BY c.created_at DESC
+            LIMIT 100
+            """,
+            (tenant_id, namespace_id),
+        )
+        return rows + cur.fetchall()
 
 
 def _write_candidate(
@@ -468,6 +497,44 @@ def _promote_candidate(
         cur.execute(
             "UPDATE memory_candidates SET status = 'promoted' WHERE id = %s",
             (candidate.candidate_id,),
+        )
+
+
+def _merge_into_existing(
+    conn: psycopg.Connection,
+    candidate: MemoryCandidate,
+    existing: dict[str, Any],
+) -> None:
+    """Attach a duplicate's evidence to the record it duplicates."""
+    _write_candidate(conn, candidate, status="merged")
+    if existing.get("kind", "memory") == "memory":
+        with conn.cursor() as cur:
+            for evidence in candidate.evidence:
+                cur.execute(
+                    """
+                    INSERT INTO memory_evidence (memory_id, evidence_kind, reference_id, content_hash)
+                    SELECT %s, %s, %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM memory_evidence
+                         WHERE memory_id = %s AND evidence_kind = %s AND reference_id = %s)
+                    """,
+                    (existing["id"], evidence.kind, evidence.reference_id, evidence.content_hash,
+                     existing["id"], evidence.kind, evidence.reference_id),
+                )
+    _record_merge(conn, candidate, existing)
+
+
+def _supersede_memory(conn: psycopg.Connection, memory_id: Any, superseded_by: Any) -> None:
+    """Retire an active memory replaced by a higher-authority statement of it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE memory_items
+               SET status = 'superseded',
+                   metadata = metadata || jsonb_build_object('superseded_by', %s::text)
+             WHERE id = %s AND status = 'active'
+            """,
+            (str(superseded_by), memory_id),
         )
 
 

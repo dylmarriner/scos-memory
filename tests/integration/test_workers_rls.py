@@ -69,8 +69,9 @@ class Fixture:
     def completed_turn(self, user: str, assistant: str) -> str:
         turn = str(uuid.uuid4())
         x = self.admin.execute
-        x("INSERT INTO turns (id, session_id, sequence, actor_id, status) VALUES (%s, %s, 1, %s, 'completed')",
-          (turn, self.session, self.principal))
+        self.turns = getattr(self, "turns", 0) + 1
+        x("INSERT INTO turns (id, session_id, sequence, actor_id, status) VALUES (%s, %s, %s, %s, 'completed')",
+          (turn, self.session, self.turns, self.principal))
         for role, content in (("user", user), ("assistant", assistant)):
             x("INSERT INTO messages (tenant_id, session_id, turn_id, role, content, content_hash, sensitivity) VALUES (%s, %s, %s, %s, %s, %s, 'internal')",
               (self.tenant, self.session, turn, role, content, hashlib.sha256(content.encode()).hexdigest()))
@@ -114,6 +115,33 @@ class WorkerRLSTests(unittest.TestCase):
         self.admin.commit()
         self.assertEqual(status, "succeeded")
         self.assertGreaterEqual(candidates, 1, "a completed turn must yield a memory candidate")
+
+    def test_repeated_fact_is_one_memory_with_merged_evidence(self):
+        from scos_consolidation import worker
+
+        fx = Fixture(self.admin)
+        statement = "Remember that the staging cluster runs Kubernetes 1.31."
+        first = fx.completed_turn(statement, "Noted.")
+        worker._process_cycle(self.app)
+        second = fx.completed_turn(statement, "Noted again.")
+        worker._process_cycle(self.app)
+
+        rows = self.admin.execute(
+            """SELECT count(*) FILTER (WHERE mi.status = 'active'), count(*)
+                 FROM memory_items mi JOIN memory_versions mv ON mv.id = mi.current_version_id
+                WHERE mi.tenant_id = %s AND mv.content = 'The staging cluster runs Kubernetes 1.31.'""",
+            (fx.tenant,)).fetchone()
+        statuses = sorted(r[0] for r in self.admin.execute(
+            "SELECT status FROM memory_candidates WHERE tenant_id = %s", (fx.tenant,)).fetchall())
+        evidence = self.admin.execute(
+            """SELECT count(DISTINCT e.reference_id) FROM memory_evidence e
+                 JOIN memory_items mi ON mi.id = e.memory_id WHERE mi.tenant_id = %s""",
+            (fx.tenant,)).fetchone()[0]
+        self.admin.commit()
+        self.assertEqual(rows, (1, 1), "a repeated fact must stay one active memory")
+        self.assertEqual(statuses, ["merged", "promoted"])
+        self.assertGreater(evidence, 1, "the second turn's evidence must be attached to the existing memory")
+        self.assertNotEqual(first, second)
 
     def test_index_maintenance_expires_across_tenants(self):
         index_main = _load("index_maintenance_main", ROOT / "workers/index-maintenance/main.py")

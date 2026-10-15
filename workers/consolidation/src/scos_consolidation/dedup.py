@@ -22,7 +22,12 @@ def deduplicate(
     candidates: list[MemoryCandidate],
     existing: Sequence[dict],
 ) -> list[DedupResult]:
-    """Classify each candidate as *new*, *merged*, or *superseded*.
+    """Classify each candidate as *new*, *merged* or *supersedes*.
+
+    *merged*: an existing memory (or pending candidate) already states this;
+    the candidate's evidence belongs on that record and nothing new is
+    stored. *supersedes*: the candidate restates an existing memory with
+    significantly higher authority, so it replaces that memory.
 
     Parameters
     ----------
@@ -40,13 +45,13 @@ def deduplicate(
     results: list[DedupResult] = []
     for c in candidates:
         fp = _fingerprint(c)
-        match = _find_match(fp, existing)
+        match = _find_match(fp, existing, c.content)
         if match is None:
             results.append(DedupResult(candidate=c, action="new"))
             continue
 
-        if _is_superseded(c, match):
-            results.append(DedupResult(candidate=c, action="superseded", superseded_by=match))
+        if _outranks(c, match):
+            results.append(DedupResult(candidate=c, action="supersedes", supersedes=match))
             continue
 
         merged = _merge_evidence(c, match)
@@ -60,19 +65,19 @@ def deduplicate(
 class DedupResult:
     """Outcome of deduplication for one candidate."""
 
-    __slots__ = ("candidate", "action", "merged_into", "superseded_by")
+    __slots__ = ("candidate", "action", "merged_into", "supersedes")
 
     def __init__(
         self,
         candidate: MemoryCandidate | None,
         action: str,
         merged_into: dict | None = None,
-        superseded_by: dict | None = None,
+        supersedes: dict | None = None,
     ) -> None:
         self.candidate = candidate
-        self.action = action  # "new" | "merged" | "superseded"
+        self.action = action  # "new" | "merged" | "supersedes"
         self.merged_into = merged_into
-        self.superseded_by = superseded_by
+        self.supersedes = supersedes
 
 
 # ── internal helpers ──────────────────────────────────────────────────────
@@ -90,19 +95,46 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower().strip())
 
 
-def _find_match(fp: str, existing: Sequence[dict]) -> dict | None:
-    """Find an existing record whose fingerprint overlaps."""
+# Same duplicate rule as memory-intelligence's deterministic merge
+# (findMergeCandidate): the shorter statement's significant words (longer than
+# three characters) are almost all in the other.
+DUPLICATE_OVERLAP = 0.85
+
+
+def _significant_words(text: str) -> set[str]:
+    import re
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9:._/-]*[a-z0-9]|[a-z0-9]", text.lower()) if len(w) > 3}
+
+
+def _overlap(a: str, b: str) -> float:
+    aw, bw = _significant_words(a), _significant_words(b)
+    if not aw or not bw:
+        return 0.0
+    return len(aw & bw) / min(len(aw), len(bw))
+
+
+def _find_match(fp: str, existing: Sequence[dict], content: str = "") -> dict | None:
+    """The existing record this candidate duplicates, if any.
+
+    An identical title and content always matches; otherwise the closest
+    record whose significant-word overlap reaches DUPLICATE_OVERLAP.
+    """
+    best: tuple[float, dict] | None = None
     for row in existing:
         existing_content = _normalise(row.get("content", ""))
         existing_title = row.get("title", "").lower().strip()[:100]
         combined = sha256((existing_title + "|" + existing_content[:300]).encode()).hexdigest()
         if combined == fp:
             return row
-    return None
+        if content:
+            score = _overlap(content, row.get("content", ""))
+            if score >= DUPLICATE_OVERLAP and (best is None or score > best[0]):
+                best = (score, row)
+    return best[1] if best else None
 
 
-def _is_superseded(candidate: MemoryCandidate, existing: dict) -> bool:
-    """A candidate supersedes existing if it has higher authority."""
+def _outranks(candidate: MemoryCandidate, existing: dict) -> bool:
+    """A candidate supersedes an existing record it significantly outranks."""
     existing_authority = existing.get("authority_level", 0)
     candidate_authority = candidate.authority_level
     return candidate_authority >= existing_authority + 20  # significant gap
