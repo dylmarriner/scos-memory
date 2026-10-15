@@ -1049,3 +1049,21 @@ func shortUnixSocketPath(t *testing.T) string {
 	t.Cleanup(func() { _ = os.Remove(path) })
 	return path
 }
+
+// TestHandleMCPAnswersNonPostWithMethodNotAllowed guards the Streamable HTTP
+// contract: without a GET event stream or DELETE session termination, the
+// endpoint answers 405 with Allow: POST so clients fall back to POST-only
+// operation rather than treating the server as broken.
+func TestHandleMCPAnswersNonPostWithMethodNotAllowed(t *testing.T) {
+	server := &localServer{
+		tunnelID: types.TunnelID("tunnel_methodnotallowedaaaaaaaaaaaaaa"),
+		stateCh:  make(chan struct{}),
+		inFlight: make(map[string]*localRequest),
+	}
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		recorder := httptest.NewRecorder()
+		server.handleMCP(recorder, httptest.NewRequest(method, "/v1/mcp/"+server.tunnelID.String(), nil))
+		require.Equal(t, http.StatusMethodNotAllowed, recorder.Code, method)
+		require.Equal(t, http.MethodPost, recorder.Header().Get("Allow"), method)
+	}
+}
