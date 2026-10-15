@@ -23,11 +23,11 @@ func TestExtensionStateSurvivesRestart(t *testing.T) {
 	manifest := ExtensionManifest{
 		SchemaVersion: "1.0", PackageID: "restart.ext", Name: "Restart", Version: "1.0.0",
 		Publisher: "Test", License: "MIT", ExtensionTypes: []string{"plugin"}, RequiredCoreVersion: "^0.1.0",
-		ContentHash: "hash", Isolation: "separate_process", HooksSubscribed: []string{"turn.completed"},
+		Isolation: "remote_endpoint", HooksSubscribed: []string{"turn.completed"},
 		HookEndpoints: map[string]string{"turn.completed": "http://127.0.0.1:9999/hook"},
 		RollbackPlan:  "uninstall and restore previous package version",
 	}
-	manifest.Signature = signManifest(t, manifest, privateKey)
+	manifest = sealManifest(t, manifest, privateKey)
 	res := httptest.NewRecorder()
 	first.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusOK {
@@ -180,8 +180,8 @@ func TestInstallDryRun(t *testing.T) {
 		License:             "MIT",
 		ExtensionTypes:      []string{"ui_extension"},
 		RequiredCoreVersion: "^0.1.0",
-		Isolation:           "wasm_sandbox",
-		ContentHash:         "def456",
+		Isolation:           "remote_endpoint",
+		ContentHash:         "sha256:def456",
 		RollbackPlan:        "disable and remove panel registration",
 	}
 
@@ -203,27 +203,31 @@ func TestValidateManifestMissingFields(t *testing.T) {
 	}
 }
 
-func TestDetermineIsolation(t *testing.T) {
+// TestInstallRefusesIsolationTheRuntimeDoesNotProvide: the manager never
+// runs extension code, so only remote_endpoint isolation can be honoured;
+// a manifest asking for any other mode is refused rather than labelled.
+func TestInstallRefusesIsolationTheRuntimeDoesNotProvide(t *testing.T) {
+	key := withSigningKey(t)
 	srv := newExtServer()
-
-	plugin := ExtensionManifest{ExtensionTypes: []string{"plugin"}}
-	if srv.determineIsolation(plugin) != "separate_process" {
-		t.Fatal("plugin should be separate_process")
+	for _, mode := range []string{"in_process_trusted", "separate_process", "container", "wasm_sandbox", "made_up"} {
+		m := validManifest("iso-" + mode)
+		m.Isolation = mode
+		m = sealManifest(t, m, key)
+		res := httptest.NewRecorder()
+		srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+		if res.Code != http.StatusForbidden || !strings.Contains(res.Body.String(), "isolation") {
+			t.Fatalf("isolation %s install = %d %s", mode, res.Code, res.Body.String())
+		}
 	}
-
-	ui := ExtensionManifest{ExtensionTypes: []string{"ui_extension"}}
-	if srv.determineIsolation(ui) != "wasm_sandbox" {
-		t.Fatal("ui_extension should be wasm_sandbox")
+	m := sealManifest(t, validManifest("iso-remote"), key)
+	res := httptest.NewRecorder()
+	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+	if res.Code != http.StatusOK {
+		t.Fatalf("remote_endpoint install = %d %s", res.Code, res.Body.String())
 	}
-
-	skill := ExtensionManifest{ExtensionTypes: []string{"skill"}}
-	if srv.determineIsolation(skill) != "in_process_trusted" {
-		t.Fatal("skill should be in_process_trusted")
-	}
-
-	adapter := ExtensionManifest{ExtensionTypes: []string{"agent_adapter"}}
-	if srv.determineIsolation(adapter) != "remote_endpoint" {
-		t.Fatal("agent_adapter should be remote_endpoint")
+	ext := srv.extensions["iso-remote"]
+	if ext.Isolation != isolationRemoteEndpoint || ext.IsolationEnforcement != isolationEnforcement {
+		t.Fatalf("reported isolation = %q / %q", ext.Isolation, ext.IsolationEnforcement)
 	}
 }
 
@@ -252,24 +256,71 @@ func TestCreateSkill(t *testing.T) {
 	}
 }
 
-func TestDeleteExtension(t *testing.T) {
+// TestUninstallRemovesExactlyThatExtension: uninstalling one extension
+// removes its own hooks and skills only; another extension subscribed to
+// the same event keeps its hook and skills.
+func TestUninstallRemovesExactlyThatExtension(t *testing.T) {
+	key := withSigningKey(t)
 	srv := newExtServer()
-	srv.extensions["ext-1"] = &Extension{
-		Manifest: ExtensionManifest{
-			PackageID:       "ext-1",
-			HooksSubscribed: []string{"on_session_start"},
-		},
+	install := func(id string) {
+		t.Helper()
+		m := validManifest(id)
+		m.HooksSubscribed = []string{"on_session_start"}
+		m.HookEndpoints = map[string]string{"on_session_start": "https://" + id + ".example/hook"}
+		m.SkillsExported = []string{"summarise"}
+		m = sealManifest(t, m, key)
+		res := httptest.NewRecorder()
+		srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+		if res.Code != http.StatusOK {
+			t.Fatalf("install %s = %d %s", id, res.Code, res.Body.String())
+		}
 	}
+	install("ext-1")
+	install("ext-2")
 
-	srv.mu.Lock()
-	delete(srv.extensions, "ext-1")
-	srv.mu.Unlock()
+	res := httptest.NewRecorder()
+	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodDelete, "/v1/extensions/ext-1", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("uninstall = %d %s", res.Code, res.Body.String())
+	}
+	if _, ok := srv.extensions["ext-1"]; ok {
+		t.Fatal("extension still installed")
+	}
+	hooks := srv.hooks["on_session_start"]
+	if len(hooks) != 1 || hooks[0].ExtensionID != "ext-2" {
+		t.Fatalf("other extension's hook was not preserved: %+v", hooks)
+	}
+	if srv.skills["ext-1/summarise"] != nil {
+		t.Fatal("uninstalled extension's skill is still registered")
+	}
+	if srv.skills["ext-2/summarise"] == nil {
+		t.Fatal("other extension's skill was removed")
+	}
+}
 
-	srv.mu.RLock()
-	_, ok := srv.extensions["ext-1"]
-	srv.mu.RUnlock()
-	if ok {
-		t.Fatal("expected extension to be deleted")
+func TestUninstallAndDisableRefusedWhileAnEnabledExtensionDependsOnIt(t *testing.T) {
+	key := withSigningKey(t)
+	srv := newExtServer()
+	provider := sealManifest(t, validManifest("provider"), key)
+	consumer := validManifest("consumer")
+	consumer.Dependencies = []ExtensionDependency{{PackageID: "provider", Version: "^1.0.0"}}
+	consumer = sealManifest(t, consumer, key)
+	for _, m := range []ExtensionManifest{provider, consumer} {
+		res := httptest.NewRecorder()
+		srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+		if res.Code != http.StatusOK {
+			t.Fatalf("install %s = %d %s", m.PackageID, res.Code, res.Body.String())
+		}
+	}
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodDelete, "/v1/extensions/provider", nil),
+		httptest.NewRequest(http.MethodPost, "/v1/extensions/provider/disable", nil),
+	} {
+		res := httptest.NewRecorder()
+		srv.handleExtensionByID(res, req)
+		if res.Code != http.StatusConflict || srv.extensions["provider"] == nil || srv.extensions["provider"].Status != "enabled" {
+			t.Fatalf("%s %s = %d", req.Method, req.URL.Path, res.Code)
+		}
 	}
 }
 
@@ -320,8 +371,9 @@ func TestUpdateExtensionStatus(t *testing.T) {
 }
 
 func TestExtensionLifecycleEndpoints(t *testing.T) {
+	key := withSigningKey(t)
 	srv := newExtServer()
-	srv.extensions["ext"] = &Extension{Manifest: ExtensionManifest{PackageID: "ext", Version: "2"}, Status: "enabled"}
+	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, validManifest("ext"), key), Status: "enabled"}
 	for _, action := range []string{"disable", "enable"} {
 		res := httptest.NewRecorder()
 		srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/"+action, nil))
@@ -345,9 +397,12 @@ func TestRollbackUnavailableWithoutHistory(t *testing.T) {
 }
 
 func TestRollbackRestoresPreviousManifest(t *testing.T) {
+	key := withSigningKey(t)
 	srv := newExtServer()
-	srv.extensions["ext"] = &Extension{Manifest: ExtensionManifest{PackageID: "ext", Version: "2"}, Status: "enabled"}
-	srv.history["ext"] = []ExtensionManifest{{PackageID: "ext", Version: "1"}}
+	current, previous := validManifest("ext"), validManifest("ext")
+	current.Version, previous.Version = "2", "1"
+	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, current, key), Status: "enabled"}
+	srv.history["ext"] = []ExtensionManifest{sealManifest(t, previous, key)}
 	res := httptest.NewRecorder()
 	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
 	if res.Code != http.StatusOK || srv.extensions["ext"].Manifest.Version != "1" {
@@ -371,7 +426,7 @@ func TestInstallRejectsMissingRollbackPlan(t *testing.T) {
 	srv := newExtServer()
 	manifest := validManifest("no-rollback")
 	manifest.RollbackPlan = ""
-	manifest.Signature = signManifest(t, manifest, privateKey)
+	manifest = sealManifest(t, manifest, privateKey)
 	res := httptest.NewRecorder()
 	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusForbidden || srv.extensions["no-rollback"] != nil {
@@ -399,7 +454,7 @@ func TestInstallRejectsDependencyConflict(t *testing.T) {
 	srv.extensions["provider"] = &Extension{Manifest: ExtensionManifest{PackageID: "provider", Version: "1.0.0"}, Status: "enabled"}
 	manifest := validManifest("consumer")
 	manifest.Dependencies = []ExtensionDependency{{PackageID: "provider", Version: ">=2.0.0"}}
-	manifest.Signature = signManifest(t, manifest, privateKey)
+	manifest = sealManifest(t, manifest, privateKey)
 	res := httptest.NewRecorder()
 	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusForbidden || srv.extensions["consumer"] != nil {
@@ -408,18 +463,40 @@ func TestInstallRejectsDependencyConflict(t *testing.T) {
 }
 
 func TestRollbackRestoresRegistrationsAndIsolation(t *testing.T) {
+	key := withSigningKey(t)
 	srv := newExtServer()
-	srv.extensions["ext"] = &Extension{Manifest: ExtensionManifest{PackageID: "ext", Version: "2", ExtensionTypes: []string{"plugin"}, Isolation: "separate_process"}, Isolation: "separate_process", Status: "enabled"}
-	srv.history["ext"] = []ExtensionManifest{{PackageID: "ext", Version: "1", ExtensionTypes: []string{"skill"}, Isolation: "in_process_trusted", SkillsExported: []string{"restored"}}}
+	current, previous := validManifest("ext"), validManifest("ext")
+	current.Version, previous.Version = "2", "1"
+	previous.ExtensionTypes = []string{"skill"}
+	previous.SkillsExported = []string{"restored"}
+	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, current, key), Isolation: isolationRemoteEndpoint, Status: "enabled"}
+	srv.history["ext"] = []ExtensionManifest{sealManifest(t, previous, key)}
 	res := httptest.NewRecorder()
 	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
-	if res.Code != http.StatusOK || srv.extensions["ext"].Isolation != "in_process_trusted" || srv.extensions["ext"].Status != "enabled" || srv.skills["ext/restored"] == nil {
+	if res.Code != http.StatusOK || srv.extensions["ext"].Isolation != isolationRemoteEndpoint || srv.extensions["ext"].Status != "enabled" ||
+		srv.skills["ext/restored"] == nil || srv.skills["ext/restored"].ExtensionID != "ext" {
 		t.Fatalf("rollback did not restore complete previous state: status=%d ext=%#v skills=%#v", res.Code, srv.extensions["ext"], srv.skills)
 	}
 }
 
+func TestRollbackRefusesTamperedPriorManifest(t *testing.T) {
+	key := withSigningKey(t)
+	srv := newExtServer()
+	current, previous := validManifest("ext"), validManifest("ext")
+	current.Version, previous.Version = "2", "1"
+	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, current, key), Status: "enabled"}
+	tampered := sealManifest(t, previous, key)
+	tampered.HookEndpoints = map[string]string{"turn.completed": "https://attacker.example/hook"}
+	srv.history["ext"] = []ExtensionManifest{tampered}
+	res := httptest.NewRecorder()
+	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
+	if res.Code != http.StatusConflict || srv.extensions["ext"].Manifest.Version != "2" {
+		t.Fatalf("rollback to a tampered manifest = %d, version %s", res.Code, srv.extensions["ext"].Manifest.Version)
+	}
+}
+
 func validManifest(packageID string) ExtensionManifest {
-	return ExtensionManifest{SchemaVersion: "1.0", PackageID: packageID, Name: packageID, Version: "1.0.0", Publisher: "Test", License: "MIT", ExtensionTypes: []string{"plugin"}, RequiredCoreVersion: "^0.1.0", ContentHash: "hash", Isolation: "separate_process", RollbackPlan: "uninstall package and restore prior version"}
+	return ExtensionManifest{SchemaVersion: "1.0", PackageID: packageID, Name: packageID, Version: "1.0.0", Publisher: "Test", License: "MIT", ExtensionTypes: []string{"plugin"}, RequiredCoreVersion: "^0.1.0", Isolation: "remote_endpoint", RollbackPlan: "uninstall package and restore prior version"}
 }
 
 func signManifest(t *testing.T, manifest ExtensionManifest, privateKey ed25519.PrivateKey) string {
@@ -430,6 +507,35 @@ func signManifest(t *testing.T, manifest ExtensionManifest, privateKey ed25519.P
 		t.Fatal(err)
 	}
 	return base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payload))
+}
+
+// sealManifest sets the manifest's content hash and signs it, as a
+// publisher would.
+func sealManifest(t *testing.T, manifest ExtensionManifest, privateKey ed25519.PrivateKey) ExtensionManifest {
+	t.Helper()
+	hash, err := manifestContentHash(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ContentHash = hash
+	manifest.Signature = signManifest(t, manifest, privateKey)
+	return manifest
+}
+
+// withSigningKey installs a fresh signing key for the test and returns its
+// private half.
+func withSigningKey(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
+	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))
+	return privateKey
+}
+
+// enableForTest records enabled extensions for hooks registered directly.
+func enableForTest(srv *extServer, ids ...string) {
+	for _, id := range ids {
+		srv.extensions[id] = &Extension{Manifest: ExtensionManifest{PackageID: id, Version: "1.0.0"}, Status: "enabled"}
+	}
 }
 
 func TestHookRegistration(t *testing.T) {
@@ -556,6 +662,7 @@ func TestHookDispatchOrderingIsDeterministic(t *testing.T) {
 	defer third.Close()
 
 	srv := newExtServer()
+	enableForTest(srv, "ext-a", "ext-b", "ext-c")
 	srv.hooks["on_turn_start"] = []*Hook{
 		{Event: "on_turn_start", ExtensionID: "ext-a", Endpoint: first.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
 		{Event: "on_turn_start", ExtensionID: "ext-b", Endpoint: second.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
@@ -612,6 +719,7 @@ func TestHookDispatchTimeoutFallsBackToContinue(t *testing.T) {
 	defer slow.Close()
 
 	srv := newExtServer()
+	enableForTest(srv, "slow-ext")
 	srv.hooks["on_before_tool"] = []*Hook{{
 		Event: "on_before_tool", ExtensionID: "slow-ext", Endpoint: slow.URL,
 		TimeoutMs: 50, FallbackPolicy: "continue",
@@ -641,6 +749,7 @@ func TestHookDispatchCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	defer failing.Close()
 
 	srv := newExtServer()
+	enableForTest(srv, "flaky-ext")
 	hook := &Hook{Event: "on_after_tool", ExtensionID: "flaky-ext", Endpoint: failing.URL, TimeoutMs: 1000, FallbackPolicy: "continue"}
 	srv.hooks["on_after_tool"] = []*Hook{hook}
 
@@ -674,6 +783,7 @@ func TestHookDispatchCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 // silently skipped — it SHALL fail the dispatch closed.
 func TestHookDispatchFailsClosedOnUndeclaredEndpoint(t *testing.T) {
 	srv := newExtServer()
+	enableForTest(srv, "critical-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{{
 		Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: "", FallbackPolicy: "fail_closed",
 	}}
@@ -691,6 +801,7 @@ func TestHookDispatchFailsClosedOnUndeclaredEndpoint(t *testing.T) {
 // rather than silently dropped, and SHALL NOT block dispatch.
 func TestHookDispatchSkipsUndeclaredEndpointWhenNotCritical(t *testing.T) {
 	srv := newExtServer()
+	enableForTest(srv, "optional-ext")
 	srv.hooks["on_memory_candidate"] = []*Hook{{
 		Event: "on_memory_candidate", ExtensionID: "optional-ext", Endpoint: "", FallbackPolicy: "continue",
 	}}
@@ -745,11 +856,11 @@ func TestAllRequiredLifecycleHooksAreRegistrable(t *testing.T) {
 	manifest := ExtensionManifest{
 		SchemaVersion: "1.0", PackageID: "full.lifecycle.ext", Name: "Full Lifecycle", Version: "1.0.0",
 		Publisher: "Test", License: "MIT", ExtensionTypes: []string{"hook"}, RequiredCoreVersion: "^0.1.0",
-		ContentHash: "hash", Isolation: "in_process_trusted", HooksSubscribed: requiredHooks,
+		Isolation: "remote_endpoint", HooksSubscribed: requiredHooks,
 		HookEndpoints: endpoints,
 		RollbackPlan:  "uninstall and restore previous package version",
 	}
-	manifest.Signature = signManifest(t, manifest, privateKey)
+	manifest = sealManifest(t, manifest, privateKey)
 
 	res := httptest.NewRecorder()
 	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))

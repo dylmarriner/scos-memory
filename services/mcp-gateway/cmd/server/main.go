@@ -588,6 +588,12 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.compatGatewayURL+"/v1/envelope/render", args)
 	case "scos_translate":
 		return s.forwardPOST(ctx, r, s.compatGatewayURL+"/v1/translate", args)
+	case "scos_compat_conformance":
+		u := s.compatGatewayURL + "/v1/compatibility/conformance"
+		if boundary := stringArg(args, "boundary"); boundary != "" {
+			u += "?boundary=" + url.QueryEscape(boundary)
+		}
+		return s.forwardGET(ctx, r, u)
 
 	// ── context-optimisation ─────────────────────────────────────────────
 	case "scos_context_optimize_input":
@@ -1633,8 +1639,8 @@ func governedTools() []map[string]any {
 			"capabilities":       arrField(strField(""), "Capabilities"),
 			"inputs":             arrField(strField(""), "Accepted inputs"),
 			"outputs":            arrField(strField(""), "Produced outputs"),
-			"tool_permissions":   arrField(strField(""), "Granted tool permissions"),
-			"memory_permissions": arrField(strField(""), "Granted memory permissions"),
+			"tool_permissions":   arrField(strField(""), "Tool permissions this agent declares; a handoff requiring a tool not covered here is refused. Exact names, \"*\", or a prefix ending in *"),
+			"memory_permissions": arrField(strField(""), "Memory namespaces this agent declares; a handoff authorising a namespace not covered here is refused. Exact names, \"*\", or a prefix ending in *"),
 			"max_classification": strField("Max data classification"),
 			"model_provider":     strField("Model provider"),
 			"cost_policy":        strField("Cost policy"),
@@ -1647,22 +1653,24 @@ func governedTools() []map[string]any {
 		tool("scos_handoff_list", "List handoff packets for the caller's tenant", map[string]any{}),
 		tool("scos_handoff_get", "Get a handoff packet by ID", map[string]any{"id": strField("Handoff UUID")}, "id"),
 		tool("scos_handoff_initiate", "Initiate an agent-to-agent handoff", map[string]any{
-			"from_agent":            strField("Originating agent"),
-			"to_agent":              strField("Receiving agent"),
-			"objective":             strField("Handoff objective"),
-			"constraints":           arrField(strField(""), "Constraints"),
-			"authorised_namespaces": arrField(strField(""), "Authorised namespaces"),
-			"memory_references":     arrField(strField(""), "Memory references"),
-			"artifact_references":   arrField(strField(""), "Artifact references"),
-			"completed_work":        arrField(strField(""), "Completed work"),
-			"open_work":             arrField(strField(""), "Open work"),
-			"known_failures":        arrField(strField(""), "Known failures"),
-			"acceptance_criteria":   strField("Acceptance criteria"),
-			"expires_at":            strField("Expiry timestamp"),
-		}, "from_agent", "to_agent", "objective"),
-		tool("scos_handoff_respond", "Accept or reject a handoff", map[string]any{
+			"from_agent":                strField("Originating agent (defaults to, and must match, the caller's agent claim when it has one)"),
+			"to_agent":                  strField("Registration UUID of the receiving agent"),
+			"objective":                 strField("Handoff objective"),
+			"constraints":               arrField(strField(""), "Constraints"),
+			"authorised_namespaces":     arrField(strField(""), "Authorised namespaces"),
+			"memory_references":         arrField(strField(""), "Memory references"),
+			"artifact_references":       arrField(strField(""), "Artifact references"),
+			"completed_work":            arrField(strField(""), "Completed work"),
+			"open_work":                 arrField(strField(""), "Open work"),
+			"known_failures":            arrField(strField(""), "Known failures"),
+			"acceptance_criteria":       strField("Acceptance criteria"),
+			"expires_at":                strField("RFC 3339 expiry; after it the handoff can no longer be answered"),
+			"required_tool_permissions": arrField(strField(""), "Tool permissions the receiving agent must declare"),
+		}, "to_agent", "objective"),
+		tool("scos_handoff_respond", "Accept or reject a handoff. Only the addressed agent, or the principal that registered it, may answer; a handoff is answered once and an expired one is refused", map[string]any{
 			"handoff_id": strField("Handoff UUID"),
 			"response":   strField("accepted or rejected"),
+			"reason":     strField("Optional reason recorded with the answer"),
 		}, "handoff_id", "response"),
 	)
 
@@ -1770,19 +1778,22 @@ func governedTools() []map[string]any {
 			"artifacts":              arrField(strField(""), "Artifacts"),
 			"sources":                arrField(strField(""), "Sources"),
 			"restoration_references": arrField(strField(""), "Restoration references"),
-			"format":                 strField("native, markdown, json, or text"),
+			"format":                 strField("markdown, json, or text (default json)"),
 		}, "agent_id", "session_id"),
-		tool("scos_envelope_render", "Render a stored context envelope in a target format", map[string]any{
+		tool("scos_envelope_render", "Render a stored context envelope in a target format. The response's format is the format actually produced; an unsupported format is refused", map[string]any{
 			"session_id":    strField("Session ID"),
-			"target_format": strField("markdown, text, or json"),
+			"target_format": strField("markdown, text, or json (omit to use the envelope's stored format)"),
 			"agent_id":      strField("Agent ID"),
-		}, "session_id", "target_format"),
-		tool("scos_translate", "Translate a native event into the SCOS common event model", map[string]any{
-			"event_type":    strField("Event type"),
-			"source_data":   objField("Source event payload"),
-			"source_format": strField("Source format"),
-			"target_format": strField("Target format"),
-		}, "event_type"),
+		}, "session_id"),
+		tool("scos_translate", "Translate one event between wire formats through the SCOS common event model. Unsupported formats are refused; an event the target format cannot express is refused rather than approximated", map[string]any{
+			"event_type":    strField("Optional: message, tool_call, or tool_result; must match the source event"),
+			"source_data":   objField("Source event: an OpenAI chat message, an Anthropic message, an MCP tools/call request or result frame, or a scos_common event"),
+			"source_format": strField("openai, anthropic, mcp, or scos_common"),
+			"target_format": strField("openai, anthropic, mcp, or scos_common (default scos_common)"),
+		}, "source_format", "source_data"),
+		tool("scos_compat_conformance", "Report the conformance run each adapter boundary's tested flag is derived from", map[string]any{
+			"boundary": strField("Optional adapter boundary"),
+		}),
 	)
 
 	// ── context-optimisation ─────────────────────────────────────────────
@@ -1881,7 +1892,7 @@ func governedTools() []map[string]any {
 	tools = append(tools,
 		tool("scos_extension_list", "List installed extensions", map[string]any{}),
 		tool("scos_extension_get", "Get an installed extension by package ID", map[string]any{"id": strField("Package ID")}, "id"),
-		tool("scos_skill_list", "List registered skills", map[string]any{}),
+		tool("scos_skill_list", "List available skills (an extension's skills are available only while it is enabled)", map[string]any{}),
 		tool("scos_skill_create", "Register a skill", map[string]any{
 			"name":                  strField("Skill name"),
 			"version":               strField("Skill version"),
@@ -1895,11 +1906,15 @@ func governedTools() []map[string]any {
 		}, "name"),
 		tool("scos_skill_get", "Get a skill by ID", map[string]any{"id": strField("Skill ID")}, "id"),
 		tool("scos_hook_list", "List registered hooks", map[string]any{}),
-		tool("scos_hook_dispatch", "Dispatch a hook event to subscribed extensions", map[string]any{
+		tool("scos_hook_dispatch", "Dispatch a hook event to the enabled extensions subscribed to it; a package with an active canary is routed to the candidate version for callers in its cohort", map[string]any{
 			"event":        strField("Hook event name"),
 			"tenant_id":    strField("Tenant ID"),
 			"principal_id": strField("Principal ID"),
 			"payload":      objField("Event payload"),
+			"agent_id":     strField("Caller agent for canary routing (an agent token's own id is used and cannot be overridden)"),
+			"profile_id":   strField("Caller profile for canary routing"),
+			"workspace_id": strField("Caller workspace for canary routing"),
+			"project_id":   strField("Caller project for canary routing"),
 		}, "event"),
 		tool("scos_hook_get", "List hooks subscribed to an event", map[string]any{"event": strField("Hook event name")}, "event"),
 		tool("scos_extension_install", "Install an extension from its manifest", map[string]any{
@@ -1913,14 +1928,14 @@ func governedTools() []map[string]any {
 			"supported_platforms":   arrField(strField(""), "Supported platforms"),
 			"required_core_version": strField("Required core version"),
 			"dependencies":          arrField(objField(""), "Package dependencies"),
-			"isolation":             strField("Isolation mode"),
+			"isolation":             strField("Must be remote_endpoint: the extension manager never runs extension code, hooks are delivered to the extension's own endpoint"),
 			"capabilities_provided": arrField(strField(""), "Capabilities provided"),
 			"capabilities_consumed": arrField(strField(""), "Capabilities consumed"),
 			"hooks_subscribed":      arrField(strField(""), "Hooks subscribed"),
 			"skills_exported":       arrField(strField(""), "Skills exported"),
 			"permissions":           arrField(strField(""), "Permissions"),
 			"rollback_plan":         strField("Rollback plan"),
-			"content_hash":          strField("Manifest content hash"),
+			"content_hash":          strField("sha256:<hex> of the manifest JSON with content_hash and signature empty; verified on install and enable"),
 			"signature":             strField("Manifest signature"),
 		}, "package_id", "version"),
 		tool("scos_extension_install_dryrun", "Validate an extension manifest and report whether installing it would be accepted, without applying it", map[string]any{
@@ -1934,14 +1949,14 @@ func governedTools() []map[string]any {
 			"supported_platforms":   arrField(strField(""), "Supported platforms"),
 			"required_core_version": strField("Required core version"),
 			"dependencies":          arrField(objField(""), "Package dependencies"),
-			"isolation":             strField("Isolation mode"),
+			"isolation":             strField("Must be remote_endpoint: the extension manager never runs extension code, hooks are delivered to the extension's own endpoint"),
 			"capabilities_provided": arrField(strField(""), "Capabilities provided"),
 			"capabilities_consumed": arrField(strField(""), "Capabilities consumed"),
 			"hooks_subscribed":      arrField(strField(""), "Hooks subscribed"),
 			"skills_exported":       arrField(strField(""), "Skills exported"),
 			"permissions":           arrField(strField(""), "Permissions"),
 			"rollback_plan":         strField("Rollback plan"),
-			"content_hash":          strField("Manifest content hash"),
+			"content_hash":          strField("sha256:<hex> of the manifest JSON with content_hash and signature empty; verified on install and enable"),
 			"signature":             strField("Manifest signature"),
 		}, "package_id", "version"),
 		tool("scos_extension_receipts", "List extension installation receipts", map[string]any{}),

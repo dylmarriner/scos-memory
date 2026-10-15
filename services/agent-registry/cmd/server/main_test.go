@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 func TestNewAgentRegistry(t *testing.T) {
@@ -213,5 +215,106 @@ func TestNullableText(t *testing.T) {
 	}
 	if nullableText("x") != "x" {
 		t.Fatal("expected non-empty string to pass through")
+	}
+}
+
+func TestPermissionCoverage(t *testing.T) {
+	agent := receivingAgent{
+		ID:                "123e4567-e89b-12d3-a456-426614174000",
+		ToolPermissions:   []string{"git.read"},
+		MemoryPermissions: []string{"project/alpha/*", "shared"},
+	}
+	if missing := uncoveredPermissions(agent, []string{"project/alpha/notes", "shared"}, []string{"git.read"}); len(missing) != 0 {
+		t.Fatalf("declared permissions reported missing: %v", missing)
+	}
+	missing := uncoveredPermissions(agent, []string{"project/beta", "shared/x"}, []string{"git.push"})
+	want := []string{"namespace:project/beta", "namespace:shared/x", "tool:git.push"}
+	if len(missing) != len(want) {
+		t.Fatalf("missing = %v, want %v", missing, want)
+	}
+	for i := range want {
+		if missing[i] != want[i] {
+			t.Fatalf("missing = %v, want %v", missing, want)
+		}
+	}
+	if !permissionCovered([]string{"*"}, "anything") {
+		t.Fatal("wildcard declaration should cover every permission")
+	}
+	if permissionCovered(nil, "x") {
+		t.Fatal("an agent declaring nothing covers nothing")
+	}
+}
+
+func TestMayAnswerOnlyAddressedAgentOrItsPrincipal(t *testing.T) {
+	agent := receivingAgent{ID: "agent-b", PrincipalID: "operator"}
+	cases := []struct {
+		claims auth.Claims
+		want   bool
+	}{
+		{auth.Claims{PrincipalID: "operator"}, true},
+		{auth.Claims{PrincipalID: "someone", AgentID: "agent-b"}, true},
+		{auth.Claims{PrincipalID: "someone", AgentID: "agent-a"}, false},
+		{auth.Claims{PrincipalID: "someone"}, false},
+	}
+	for _, c := range cases {
+		if got := mayAnswer(c.claims, agent); got != c.want {
+			t.Fatalf("mayAnswer(%+v) = %v, want %v", c.claims, got, c.want)
+		}
+	}
+	// A registration with no recorded principal is answerable only by the
+	// agent's own token.
+	if mayAnswer(auth.Claims{PrincipalID: ""}, receivingAgent{ID: "agent-b"}) {
+		t.Fatal("empty principal must not match an unrecorded registration principal")
+	}
+}
+
+func TestParseHandoffExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+	if got, err := parseHandoffExpiry("", now); err != nil || got != nil {
+		t.Fatalf("empty expiry = %v, %v", got, err)
+	}
+	if _, err := parseHandoffExpiry("tomorrow", now); err == nil {
+		t.Fatal("non-RFC3339 expiry accepted")
+	}
+	if _, err := parseHandoffExpiry(now.Add(-time.Second).Format(time.RFC3339), now); err == nil {
+		t.Fatal("past expiry accepted")
+	}
+	if got, err := parseHandoffExpiry(now.Add(time.Hour).Format(time.RFC3339), now); err != nil || !got.Equal(now.Add(time.Hour)) {
+		t.Fatalf("future expiry = %v, %v", got, err)
+	}
+}
+
+func TestHandoffRespondRejectsUnknownResponse(t *testing.T) {
+	s := newAgentRegistryServer()
+	body, _ := json.Marshal(map[string]string{"handoff_id": "123e4567-e89b-12d3-a456-426614174000", "response": "maybe"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/handoffs/respond", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.handleHandoffRespond(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a response that is neither accepted nor rejected, got %d", rec.Code)
+	}
+}
+
+func TestHandoffRespondRequiresAuthenticatedClaims(t *testing.T) {
+	s := newAgentRegistryServer()
+	body, _ := json.Marshal(map[string]string{"handoff_id": "123e4567-e89b-12d3-a456-426614174000", "response": "accepted"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/handoffs/respond", bytes.NewReader(body))
+	req.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	req.Header.Set("X-SCOS-Principal-ID", "principal-1")
+	rec := httptest.NewRecorder()
+	s.handleHandoffRespond(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when the responder is named only by headers, got %d", rec.Code)
+	}
+}
+
+func TestHandoffInitiateRequiresRegisteredReceiverID(t *testing.T) {
+	s := newAgentRegistryServer()
+	body, _ := json.Marshal(map[string]string{"from_agent": "a", "to_agent": "agent-b", "objective": "o"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/handoffs/initiate", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.handleHandoffInitiate(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a non-UUID to_agent, got %d", rec.Code)
 	}
 }

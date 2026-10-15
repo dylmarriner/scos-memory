@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewCompatServer(t *testing.T) {
@@ -87,16 +89,101 @@ func TestSupportedIntegrationBoundariesComplete(t *testing.T) {
 	}
 }
 
-func TestUntestedBoundariesLabelledExperimental(t *testing.T) {
+// TestTestedComesOnlyFromConformance guards ss23.7: a boundary is tested
+// only when the in-process conformance run passed every check for it, and a
+// boundary the gateway does not implement is unsupported, never tested.
+func TestTestedComesOnlyFromConformance(t *testing.T) {
 	srv := newCompatServer()
-	for _, boundary := range []string{"model_api_proxy", "provider_plugin", "lifecycle_hooks", "event_bridge", "a2a_adapter"} {
-		a, ok := srv.adapters[boundary]
-		if !ok {
-			t.Fatalf("expected %s adapter to be registered", boundary)
+	for boundary, a := range srv.adapters {
+		if _, implemented := boundaryProfiles[boundary]; !implemented {
+			if a.Support != supportUnsupported || a.Tested || a.Conformance != nil {
+				t.Errorf("%s has no implementation but reports support=%s tested=%v", boundary, a.Support, a.Tested)
+			}
+			continue
 		}
-		if a.Tested {
-			t.Errorf("%s has no conformance evidence yet and should be labelled experimental (Tested=false)", boundary)
+		if a.Conformance == nil || len(a.Conformance.Checks) == 0 {
+			t.Fatalf("%s has no conformance run", boundary)
 		}
+		for _, check := range a.Conformance.Checks {
+			if !check.Passed {
+				t.Errorf("%s: conformance check %q failed: %s", boundary, check.Name, check.Detail)
+			}
+		}
+		if a.Tested != a.Conformance.Passed {
+			t.Errorf("%s: tested=%v but conformance passed=%v", boundary, a.Tested, a.Conformance.Passed)
+		}
+	}
+}
+
+// TestFailingConformanceMarksBoundaryUntested proves the flag follows the
+// run: a profile whose checks fail leaves its boundary untested.
+func TestFailingConformanceMarksBoundaryUntested(t *testing.T) {
+	broken := boundaryProfile{eventFormats: []string{"not_a_format"}, contextFormats: []string{"yaml"}}
+	eventFixtures["not_a_format"] = []eventFixture{{name: "message", operation: "capture_ingress", native: `{}`}}
+	defer delete(eventFixtures, "not_a_format")
+	result := runBoundaryConformance(broken, time.Now())
+	if result.Passed || len(result.Checks) == 0 {
+		t.Fatalf("expected a failing run, got %+v", result)
+	}
+	for _, c := range result.Checks {
+		if c.Passed || c.Detail == "" {
+			t.Fatalf("expected every check to fail with detail, got %+v", c)
+		}
+	}
+	srv := newCompatServer()
+	srv.applyConformance(map[string]*AdapterConformance{"native_sdk": result})
+	if srv.adapters["native_sdk"].Tested {
+		t.Fatal("a failing conformance run must leave the boundary untested")
+	}
+	if srv.adapters["http_sidecar"].Tested {
+		t.Fatal("a boundary with no conformance result must not be tested")
+	}
+}
+
+func TestSessionWatcherIsUnsupported(t *testing.T) {
+	srv := newCompatServer()
+	a := srv.adapters["session_watcher"]
+	if a.Support != supportUnsupported || a.Tested || len(a.Supported) != 0 {
+		t.Fatalf("session_watcher should be unsupported with no supported operations, got %+v", a)
+	}
+	if got := srv.adapterHealthStatus(context.Background(), "tenant", a); got != "unsupported" {
+		t.Fatalf("session_watcher health = %s", got)
+	}
+	body := strings.NewReader(`{"agent_id":"watcher-1","boundary":"session_watcher"}`)
+	r := httptest.NewRequest(http.MethodPost, "/v1/agents", body)
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	r.Header.Set("X-SCOS-Principal-ID", "principal-1")
+	w := httptest.NewRecorder()
+	srv.handleAgents(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("registering against an unimplemented boundary = %d", w.Code)
+	}
+}
+
+func TestConformanceEndpointReportsRun(t *testing.T) {
+	srv := newCompatServer()
+	r := httptest.NewRequest(http.MethodGet, "/v1/compatibility/conformance?boundary=mcp_server", nil)
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	r.Header.Set("X-SCOS-Principal-ID", "principal-1")
+	w := httptest.NewRecorder()
+	srv.handleConformance(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("conformance = %d %s", w.Code, w.Body.String())
+	}
+	var out []struct {
+		Boundary    string              `json:"boundary"`
+		Tested      bool                `json:"tested"`
+		Conformance *AdapterConformance `json:"conformance"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Boundary != "mcp_server" || !out[0].Tested || out[0].Conformance == nil {
+		t.Fatalf("unexpected conformance report %+v", out)
+	}
+	ops := strings.Join(out[0].Conformance.VerifiedOperations, ",")
+	if ops != "inject_context,observe_tool_call,observe_tool_result" {
+		t.Fatalf("verified operations = %s", ops)
 	}
 }
 
@@ -211,44 +298,115 @@ func TestJSONRoundTripEnvelope(t *testing.T) {
 	}
 }
 
-func TestTranslateOpenAIToSCOS(t *testing.T) {
-	source := map[string]any{
-		"role":    "user",
-		"content": "Hello SCOS",
+func translateCall(t *testing.T, body string) (int, map[string]any) {
+	t.Helper()
+	srv := newCompatServer()
+	r := httptest.NewRequest(http.MethodPost, "/v1/translate", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleTranslate(w, r)
+	out := map[string]any{}
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	return w.Code, out
+}
+
+func TestTranslateProducesRequestedTargetFormat(t *testing.T) {
+	code, out := translateCall(t, `{"source_format":"openai","target_format":"anthropic","source_data":{"role":"assistant","content":"Looking.","tool_calls":[{"id":"c1","type":"function","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}`)
+	if code != http.StatusOK || out["target_format"] != "anthropic" || out["event_type"] != "tool_call" {
+		t.Fatalf("translate = %d %+v", code, out)
 	}
-	translated := translateEvent("message", source, "openai")
-	if translated["provenance"] != "openai_compatible" {
-		t.Fatal("expected openai_compatible provenance")
+	msg := out["translated"].(map[string]any)
+	blocks := msg["content"].([]any)
+	if msg["role"] != "assistant" || len(blocks) != 2 {
+		t.Fatalf("anthropic message = %+v", msg)
 	}
-	if translated["role"] != "user" {
-		t.Fatal("expected role to be preserved")
+	use := blocks[1].(map[string]any)
+	if use["type"] != "tool_use" || use["id"] != "c1" || use["name"] != "search" || use["input"].(map[string]any)["q"] != "x" {
+		t.Fatalf("tool_use block = %+v", use)
+	}
+
+	code, out = translateCall(t, `{"source_format":"anthropic","target_format":"mcp","source_data":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"done","is_error":true}]}}`)
+	if code != http.StatusOK {
+		t.Fatalf("anthropic->mcp = %d %+v", code, out)
+	}
+	frame := out["translated"].(map[string]any)
+	result := frame["result"].(map[string]any)
+	if frame["jsonrpc"] != "2.0" || frame["id"] != "c1" || result["isError"] != true {
+		t.Fatalf("mcp frame = %+v", frame)
+	}
+
+	code, out = translateCall(t, `{"source_format":"mcp","source_data":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{"path":"a"}}}}`)
+	common := out["translated"].(map[string]any)
+	if code != http.StatusOK || out["target_format"] != "scos_common" || common["event_type"] != "tool_call" || common["role"] != "assistant" {
+		t.Fatalf("mcp->scos_common = %d %+v", code, out)
 	}
 }
 
-func TestTranslateMCPToSCOS(t *testing.T) {
-	source := map[string]any{
-		"tool":  "read_file",
-		"input": "test.txt",
-	}
-	translated := translateEvent("tool_call", source, "mcp")
-	if translated["provenance"] != "mcp" {
-		t.Fatal("expected mcp provenance")
-	}
-}
-
-func TestTranslateAnthropicToSCOS(t *testing.T) {
-	source := map[string]any{"text": "Hello"}
-	translated := translateEvent("message", source, "anthropic")
-	if translated["provenance"] != "anthropic" {
-		t.Fatal("expected anthropic provenance")
+func TestTranslateRejectsUnsupportedFormats(t *testing.T) {
+	for _, body := range []string{
+		`{"source_format":"openai","target_format":"yaml","source_data":{"role":"user","content":"hi"}}`,
+		`{"source_format":"custom","target_format":"scos_common","source_data":{"role":"user","content":"hi"}}`,
+		`{"target_format":"openai","source_data":{"role":"user","content":"hi"}}`,
+	} {
+		if code, _ := translateCall(t, body); code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400", body, code)
+		}
 	}
 }
 
-func TestTranslateDefault(t *testing.T) {
-	source := "raw data"
-	translated := translateEvent("unknown", source, "custom")
-	if translated["provenance"] != "custom" {
-		t.Fatal("expected custom provenance")
+func TestTranslateRefusesUnrepresentableEvents(t *testing.T) {
+	cases := []string{
+		`{"source_format":"openai","target_format":"mcp","source_data":{"role":"user","content":"hi"}}`,
+		`{"source_format":"openai","target_format":"anthropic","source_data":{"role":"system","content":"be terse"}}`,
+		`{"source_format":"anthropic","target_format":"openai","source_data":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":"x","is_error":true}]}}`,
+	}
+	for _, body := range cases {
+		if code, out := translateCall(t, body); code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s = %d %+v, want 422", body, code, out)
+		}
+	}
+}
+
+func TestTranslateRejectsMismatchedEventTypeAndMalformedSource(t *testing.T) {
+	if code, _ := translateCall(t, `{"event_type":"tool_call","source_format":"openai","source_data":{"role":"user","content":"hi"}}`); code != http.StatusBadRequest {
+		t.Fatalf("mismatched event_type = %d", code)
+	}
+	if code, _ := translateCall(t, `{"source_format":"openai","source_data":{"role":"wizard","content":"hi"}}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown role = %d", code)
+	}
+	if code, _ := translateCall(t, `{"source_format":"mcp","source_data":{"jsonrpc":"2.0","id":1,"method":"resources/list"}}`); code != http.StatusBadRequest {
+		t.Fatalf("non-tools/call MCP frame = %d", code)
+	}
+}
+
+func TestRenderEnvelopeReportsProducedFormat(t *testing.T) {
+	env := ContextEnvelope{AgentID: "a", SessionID: "s", Facts: []string{"f"}}
+	for _, format := range renderFormats {
+		produced, content, err := renderEnvelope(&env, format)
+		if err != nil || produced != format || !strings.Contains(content, "f") {
+			t.Fatalf("render %s = %s %q %v", format, produced, content, err)
+		}
+	}
+	if _, _, err := renderEnvelope(&env, "yaml"); err == nil {
+		t.Fatal("unsupported render format must be refused, not rendered as JSON")
+	}
+}
+
+func TestRenderTextIncludesUserModel(t *testing.T) {
+	env := ContextEnvelope{AgentID: "a", SessionID: "s", UserModel: "prefers terse answers"}
+	if !strings.Contains(renderText(&env), "prefers terse answers") {
+		t.Fatal("text rendering dropped the user model")
+	}
+}
+
+func TestEnvelopeRejectsUnknownFormat(t *testing.T) {
+	srv := newCompatServer()
+	r := httptest.NewRequest(http.MethodPost, "/v1/envelope", strings.NewReader(`{"agent_id":"a","session_id":"s","format":"native"}`))
+	r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	r.Header.Set("X-SCOS-Principal-ID", "principal-1")
+	w := httptest.NewRecorder()
+	srv.handleEnvelope(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown envelope format = %d", w.Code)
 	}
 }
 

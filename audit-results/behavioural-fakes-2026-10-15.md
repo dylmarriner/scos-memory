@@ -81,11 +81,11 @@ fixed), **VERIFY** (auditor claim not yet independently reproduced).
 - Vault "rotate by restart" would make every credential unreadable; `key_version` never used. — FIXED (keyring with retired keys; audited re-seal)
 
 ### Agent registry / compatibility gateway / extension manager
-- Handoff responses coerced to rejected; expiry never applied; responder not checked; declared permissions never enforced. — OPEN
-- Compatibility matrix hard-codes `Tested: true` with no conformance suite; `session_watcher` has no implementation. — OPEN
-- Translate ignores `target_format`; render falls back to JSON while echoing the requested format. — OPEN
-- Isolation modes, content hash, hook semantics, enable/disable and canary are labels only. — OPEN
-- Uninstall deletes other extensions' hooks and leaves its own skills active. — OPEN
+- Handoff responses coerced to rejected; expiry never applied; responder not checked; declared permissions never enforced. — FIXED (only `accepted`/`rejected` accepted, else 400; answered once, only by the addressed agent's token or the principal that registered it, from claims; responder/time/reason recorded; expired handoffs refused with 410 and stored `expired`; namespaces and `required_tool_permissions` checked against the receiver's declared memory/tool permissions at initiate and accept; migration 000054; integration-tested as scos_app)
+- Compatibility matrix hard-codes `Tested: true` with no conformance suite; `session_watcher` has no implementation. — FIXED (`tested` is derived from an in-process conformance run over each boundary's translate and render paths, reported at `/v1/compatibility/conformance`; the run caught text render dropping the user model, now fixed; `session_watcher` is `support: unsupported`, all operations unsupported, registration refused)
+- Translate ignores `target_format`; render falls back to JSON while echoing the requested format. — FIXED (real openai/anthropic/mcp/scos_common codecs via a common event model; unsupported formats 400, events the target cannot express 422; render returns the format it produced and refuses unknown formats)
+- Isolation modes, content hash, hook semantics, enable/disable and canary are labels only. — FIXED (only `remote_endpoint` accepted and reported, with what it enforces; `content_hash` is sha256 of the manifest, verified on install/enable/rollback/promote/load; hooks report the dispatcher's real type/retry/timeout; disabled extensions get no hook deliveries and their skills are unavailable; canary routes hook dispatch to the cohort)
+- Uninstall deletes other extensions' hooks and leaves its own skills active. — FIXED (removes exactly that extension's hooks, skills, canary and history; refused while an enabled extension depends on it; skills left by the old uninstall are dropped at load)
 
 ### Consolidation worker / index maintenance
 - "Merged" duplicates are promoted as a second active memory; evidence merge reads a field never loaded. — FIXED

@@ -417,10 +417,17 @@ func (c *controlPlane) dispatchHook(ctx context.Context, event string, payload m
 	if strings.TrimSpace(os.Getenv("SCOS_EXTENSION_MANAGER_URL")) == "" {
 		return nil
 	}
-	_, err := c.callService(ctx, "extension-manager", "/v1/hooks/dispatch", map[string]any{
+	// The project routes packages with an active canary to the right
+	// version; the agent cohort comes from the caller's token, which the
+	// extension manager reads itself.
+	body := map[string]any{
 		"event":   event,
 		"payload": payload,
-	}, req)
+	}
+	if req.ProjectID != "" {
+		body["project_id"] = req.ProjectID
+	}
+	_, err := c.callService(ctx, "extension-manager", "/v1/hooks/dispatch", body, req)
 	return err
 }
 

@@ -15,6 +15,7 @@ func TestHookExecutionsAreRecordedPerTenant(t *testing.T) {
 	defer failing.Close()
 
 	srv := newExtServer()
+	enableForTest(srv, "good", "bad")
 	srv.hooks["turn.completed"] = []*Hook{
 		{Event: "turn.completed", ExtensionID: "good", Endpoint: ok.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
 		{Event: "turn.completed", ExtensionID: "bad", Endpoint: failing.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
