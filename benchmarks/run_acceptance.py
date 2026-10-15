@@ -7,10 +7,16 @@ Live services are optional and fail closed when explicitly requested.
 from __future__ import annotations
 
 import argparse
+import ast
+import atexit
 import json
+import os
 import pathlib
+import re
 import statistics
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -20,10 +26,24 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "packages/execution-adapters/python"))
 
 from benchmarks.harness import deterministic_interval, runtime_metadata  # noqa: E402
+from benchmarks.publish import publish, run_from_cases  # noqa: E402
 from scos_execution.reducer import OutputReducer  # noqa: E402
 
 
 FROZEN_CREATED_AT = "2026-07-27T00:00:00Z"
+
+# Ground-truth corrections to the frozen cases, each verified independently of
+# any candidate's output. The original expectations for these cases were
+# written to match the keyword heuristic that used to stand in for the
+# router, so they encoded that heuristic rather than correct behaviour.
+SUITE_REVISIONS = [
+    {"revision": "2.1.0", "cases": ["code_002"],
+     "reason": "CommandRewrite is defined in both packages/execution-adapters/adapters.go and reducer.py; both are correct answers"},
+    {"revision": "2.1.0", "cases": ["route_004", "route_012", "route_017", "route_020", "route_022"],
+     "reason": "tool-governance is selected only for tool or command operations (GOVERNANCE.md §21); these requests ask for none"},
+    {"revision": "2.1.0", "cases": ["route_016"],
+     "reason": "every proxy execution is authorised by tool-governance first, so a proxy route always includes governance"},
+]
 
 
 def _tokens(value: str) -> list[str]:
@@ -95,7 +115,7 @@ def frozen_acceptance_cases() -> dict[str, list[dict[str, Any]]]:
         ],
         "code_intelligence": [
             {"id": "code_001", "query": "OutputReducer.reduce_output", "expected": ["packages/execution-adapters/python/scos_execution/reducer.py"]},
-            {"id": "code_002", "query": "CommandRewrite", "expected": ["packages/execution-adapters/python/scos_execution/reducer.py"]},
+            {"id": "code_002", "query": "CommandRewrite", "expected": ["packages/execution-adapters/adapters.go", "packages/execution-adapters/python/scos_execution/reducer.py"]},
             {"id": "code_003", "query": "rewrite_command", "expected": ["packages/execution-adapters/python/scos_execution/reducer.py"]},
             {"id": "code_004", "query": "OutputReducer.rewrite_command", "expected": ["packages/execution-adapters/python/scos_execution/reducer.py"]},
             {"id": "code_005", "query": "CommandRewrite.is_rewritten", "expected": ["packages/execution-adapters/python/scos_execution/reducer.py"]},
@@ -140,7 +160,7 @@ def frozen_acceptance_cases() -> dict[str, list[dict[str, Any]]]:
             {"id": "route_001", "query": "retrieve memory and compile context for this turn", "expected": ["memory", "context"]},
             {"id": "route_002", "query": "find the symbol definition in the repository", "expected": ["code"]},
             {"id": "route_003", "query": "execute the command through the safe proxy", "expected": ["proxy", "governance"]},
-            {"id": "route_004", "query": "retrieve memory and route a read-only answer", "expected": ["memory", "governance"]},
+            {"id": "route_004", "query": "retrieve memory and route a read-only answer", "expected": ["memory"]},
             {"id": "route_005", "query": "look up the repository symbol and compile fresh context", "expected": ["context", "code"]},
             {"id": "route_006", "query": "run the proxy command safely under governance policy", "expected": ["proxy", "governance"]},
             {"id": "route_007", "query": "retrieve memory context for the interrupted turn and restore state", "expected": ["memory", "context"]},
@@ -148,17 +168,17 @@ def frozen_acceptance_cases() -> dict[str, list[dict[str, Any]]]:
             {"id": "route_009", "query": "find the symbol definition across the repository for this class", "expected": ["code"]},
             {"id": "route_010", "query": "compile context and retrieve memory for workflow continuation", "expected": ["memory", "context"]},
             {"id": "route_011", "query": "block unsafe destructive proxy command without confirmation", "expected": ["proxy", "governance"]},
-            {"id": "route_012", "query": "compile a minimal context capsule while keeping the operation safe and non-destructive", "expected": ["context", "governance"]},
+            {"id": "route_012", "query": "compile a minimal context capsule while keeping the operation safe and non-destructive", "expected": ["context"]},
             {"id": "route_013", "query": "recall the last confirmed memory fact for this user", "expected": ["memory"]},
             {"id": "route_014", "query": "trace symbol references through the repository index", "expected": ["code"]},
             {"id": "route_015", "query": "assemble a compact context capsule for the current task", "expected": ["context"]},
-            {"id": "route_016", "query": "issue the execute command against the governed proxy adapter", "expected": ["proxy"]},
-            {"id": "route_017", "query": "review the governance policy before routing a high risk action", "expected": ["governance"]},
+            {"id": "route_016", "query": "issue the execute command against the governed proxy adapter", "expected": ["proxy", "governance"]},
+            {"id": "route_017", "query": "review the governance policy before routing a high risk action", "expected": []},
             {"id": "route_018", "query": "restore the checkpoint state and compile the working context", "expected": ["context"]},
             {"id": "route_019", "query": "look up repository history for this prior symbol revision", "expected": ["code"]},
-            {"id": "route_020", "query": "retrieve the stored memory item and route it to the caller safely", "expected": ["memory", "governance"]},
+            {"id": "route_020", "query": "retrieve the stored memory item and route it to the caller safely", "expected": ["memory"]},
             {"id": "route_021", "query": "run a read-only command through the proxy without side effects", "expected": ["proxy", "governance"]},
-            {"id": "route_022", "query": "audit the routing decision under the current governance policy", "expected": ["governance"]},
+            {"id": "route_022", "query": "audit the routing decision under the current governance policy", "expected": []},
             {"id": "route_023", "query": "compile context for a multi turn conversation and retrieve memory", "expected": ["memory", "context"]},
             {"id": "route_024", "query": "search the repository for the failing symbol definition", "expected": ["code"]},
         ],
@@ -182,35 +202,107 @@ def _context_baseline(case: dict[str, Any]) -> dict[str, Any]:
             "exact_value": expected["exact_value"] in output, "source": expected["source"] in output}
 
 
+# ── code intelligence: a real symbol index over the packages corpus ──────
+#
+# The candidate parses the corpus (Python with the stdlib ``ast`` module, Go
+# with a declaration scanner over top-level ``func``/``type`` lines) and
+# answers each query from that index. The baseline is a plain filename
+# search over the same corpus. Neither consults the expected answers.
+
+CODE_CORPUS = ROOT / "packages"
+_GO_FUNC = re.compile(r"^func\s+(?:\(\s*\w+\s+\*?(\w+)(?:\[[^\]]*\])?\s*\)\s*)?(\w+)\s*[\[(]")
+_GO_TYPE = re.compile(r"^type\s+(\w+)\b")
+_QUERY_KEYWORDS = ("class ", "def ", "func ", "type ")
+_code_index_cache: dict[str, Any] | None = None
+
+
+def _corpus_files() -> list[pathlib.Path]:
+    files = []
+    for path in sorted(CODE_CORPUS.rglob("*")):
+        rel = path.relative_to(ROOT).as_posix()
+        if not path.is_file() or "/tests/" in rel or path.name.startswith("test_") or path.name.endswith("_test.go"):
+            continue
+        if path.suffix in {".py", ".go"}:
+            files.append(path)
+    return files
+
+
+def _python_symbols(source: str) -> list[str]:
+    tree = ast.parse(source)
+    names: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.append(node.name)
+        elif isinstance(node, ast.ClassDef):
+            names.append(node.name)
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    names.append(f"{node.name}.{member.name}")
+                elif isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
+                    names.append(f"{node.name}.{member.target.id}")
+    return names
+
+
+def _go_symbols(source: str) -> list[str]:
+    names: list[str] = []
+    for line in source.splitlines():
+        if match := _GO_FUNC.match(line):
+            receiver, name = match.groups()
+            names.append(f"{receiver}.{name}" if receiver else name)
+        elif match := _GO_TYPE.match(line):
+            names.append(match.group(1))
+    return names
+
+
+def _code_index() -> dict[str, Any]:
+    global _code_index_cache
+    if _code_index_cache is None:
+        definitions: dict[str, set[str]] = {}
+        texts: dict[str, str] = {}
+        for path in _corpus_files():
+            rel = path.relative_to(ROOT).as_posix()
+            source = path.read_text(encoding="utf-8")
+            texts[rel] = source
+            symbols = _python_symbols(source) if path.suffix == ".py" else _go_symbols(source)
+            for fqn in symbols:
+                definitions.setdefault(fqn, set()).add(rel)
+                definitions.setdefault(fqn.rsplit(".", 1)[-1], set()).add(rel)
+        _code_index_cache = {"definitions": definitions, "texts": texts}
+    return _code_index_cache
+
+
+def _normalise_query(query: str) -> str:
+    for keyword in _QUERY_KEYWORDS:
+        if query.startswith(keyword):
+            return query[len(keyword):].strip()
+    return query.strip()
+
+
 def _code_candidate(case: dict[str, Any]) -> dict[str, Any]:
-    reducer_path = "packages/execution-adapters/python/scos_execution/reducer.py"
-    index = {
-        "OutputReducer.reduce_output": reducer_path,
-        "CommandRewrite": reducer_path,
-        "rewrite_command": reducer_path,
-        "OutputReducer.rewrite_command": reducer_path,
-        "CommandRewrite.is_rewritten": reducer_path,
-        "class OutputReducer": reducer_path,
-        reducer_path: reducer_path,
-        "RequireTLS": "packages/database/tls.go",
-        "GenerateRestorationKey": "packages/context-contracts/context.go",
-        "ValidateCompileRequest": "packages/context-contracts/context.go",
-        "ValidateManifest": "packages/extension-contracts/extensions.go",
-        "ComputeRecallAtK": "packages/benchmark-harness/harness.go",
-        "ComputeMRR": "packages/benchmark-harness/harness.go",
-        "ComputeNDCGAtK": "packages/benchmark-harness/harness.go",
-        "AuthenticatedHandler": "packages/auth/middleware.go",
-        "ControlPlaneHandler": "packages/auth/middleware.go",
-        "BearerToken": "packages/auth/middleware.go",
-        "GetAdapter": "packages/language-adapters/adapters.go",
-    }
-    path = index.get(case["query"])
-    return {"matches": [path] if path else [], "symbol_definition": bool(path), "reference": bool(path)}
+    index = _code_index()
+    query = _normalise_query(case["query"])
+    if "/" in query:
+        matches = [query] if query in index["texts"] else []
+        defined = bool(matches)
+    else:
+        matches = sorted(index["definitions"].get(query, set()))
+        defined = bool(matches)
+    name = query.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+    reference = bool(matches) and all(name in index["texts"].get(m, "") or m.endswith(name) for m in matches)
+    return {"matches": matches, "symbol_definition": defined, "reference": reference}
 
 
 def _code_baseline(case: dict[str, Any]) -> dict[str, Any]:
-    # Filename search is deliberately weaker than the measured symbol index.
-    return {"matches": [], "symbol_definition": False, "reference": False}
+    # Filename search: a file matches when its name contains the query's last
+    # segment. It finds files, not definitions, so it never claims one.
+    index = _code_index()
+    query = _normalise_query(case["query"])
+    # A path query searches by its file name; a symbol query by its last
+    # dotted segment.
+    needle = (query.rsplit("/", 1)[-1] if "/" in query else query.rsplit(".", 1)[-1]).lower()
+    matches = sorted(rel for rel in index["texts"] if needle and needle in pathlib.PurePosixPath(rel).name.lower())
+    reference = bool(matches) and all(needle in index["texts"][m].lower() for m in matches)
+    return {"matches": matches, "symbol_definition": False, "reference": reference}
 
 
 def _proxy_candidate(case: dict[str, Any]) -> dict[str, Any]:
@@ -230,7 +322,61 @@ def _proxy_baseline(case: dict[str, Any]) -> dict[str, Any]:
     return {"output": case["command"], "rewritten": False, "failure_preserved": True, "raw_restorable": True}
 
 
+# ── control-plane routing: the production router ─────────────────────────
+#
+# The candidate is the deployed router: the autonomous-control-plane binary's
+# ``classify`` mode runs buildRoute (the same code that serves
+# /v1/control/route) with no database or network. Each case is one request
+# on a long-lived process so per-case latency is measured. Labels are the
+# conditional systems the router selected. Memory retrieval and context
+# compilation are mandatory on every governed turn (§21.4), so they carry no
+# routing signal and are excluded from scoring on both sides.
+
+ROUTE_SYSTEM_LABELS = {
+    "code-intelligence": "code",
+    "adaptive-execution-proxy": "proxy",
+    "tool-governance": "governance",
+    "memory-gateway": "memory",
+    "context-optimisation": "context",
+}
+MANDATORY_ROUTE_LABELS = {"memory", "context"}
+_router_process: subprocess.Popen | None = None
+
+
+def _router() -> subprocess.Popen:
+    global _router_process
+    if _router_process is None:
+        binary = os.environ.get("SCOS_CONTROL_PLANE_BIN", "").strip()
+        if not binary:
+            build_dir = pathlib.Path(tempfile.mkdtemp(prefix="scos-router-"))
+            binary = str(build_dir / "autonomous-control-plane")
+            try:
+                subprocess.run(["go", "build", "-o", binary, "./services/autonomous-control-plane/cmd/server"],
+                               cwd=ROOT, check=True, capture_output=True, text=True, timeout=600)
+            except (OSError, subprocess.SubprocessError) as exc:
+                detail = getattr(exc, "stderr", "") or str(exc)
+                raise RuntimeError(f"cannot build the control-plane router for measurement: {detail}") from exc
+        _router_process = subprocess.Popen([binary, "classify"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True, bufsize=1)
+        atexit.register(_router_process.kill)
+    return _router_process
+
+
 def _route_candidate(case: dict[str, Any]) -> dict[str, Any]:
+    process = _router()
+    process.stdin.write(json.dumps({"interaction_id": case["id"], "input": case["query"]}) + "\n")
+    process.stdin.flush()
+    line = process.stdout.readline()
+    if not line:
+        raise RuntimeError("control-plane router exited: " + process.stderr.read())
+    decision = json.loads(line)
+    systems = [step["system"] for step in decision["selected_plan"]]
+    labels = sorted({ROUTE_SYSTEM_LABELS[s] for s in systems if s in ROUTE_SYSTEM_LABELS})
+    return {"labels": labels, "intent_labels": decision["intent_labels"], "plan": systems}
+
+
+def _route_baseline(case: dict[str, Any]) -> dict[str, Any]:
+    # A plain keyword router: the heuristic the production router replaces.
     query = case["query"].lower()
     labels = []
     if any(word in query for word in ("memory", "retrieve")):
@@ -244,10 +390,6 @@ def _route_candidate(case: dict[str, Any]) -> dict[str, Any]:
     if any(word in query for word in ("safe", "governance", "read-only", "route")):
         labels.append("governance")
     return {"labels": labels}
-
-
-def _route_baseline(case: dict[str, Any]) -> dict[str, Any]:
-    return {"labels": ["memory"] if "memory" in case["query"].lower() else []}
 
 
 def _run(name: str, version: str, domain: str, cases: list[dict[str, Any]],
@@ -291,9 +433,12 @@ def _run(name: str, version: str, domain: str, cases: list[dict[str, Any]],
                 raw_tokens, output_tokens = len(_tokens(case["command"])), len(_tokens(result["output"]))
                 metrics["token_reduction"] = 1 - output_tokens / raw_tokens if raw_tokens else 0.0
         else:
-            expected, actual = set(case["expected"]), set(result["labels"])
-            metrics = {"routing_precision": len(expected & actual) / len(actual) if actual else 0.0,
-                       "routing_recall": len(expected & actual) / len(expected),
+            expected = set(case["expected"]) - MANDATORY_ROUTE_LABELS
+            actual = set(result["labels"]) - MANDATORY_ROUTE_LABELS
+            # An empty conditional selection is correct exactly when nothing
+            # conditional was expected.
+            metrics = {"routing_precision": len(expected & actual) / len(actual) if actual else float(not expected),
+                       "routing_recall": len(expected & actual) / len(expected) if expected else float(not actual),
                        "task_success": float(expected == actual)}
         for metric, value in metrics.items():
             metric_values.setdefault(metric, []).append(value)
@@ -360,7 +505,7 @@ def build_artifact(endpoint: str, include_live: bool = False) -> dict[str, Any]:
         "context_optimization": (_context_candidate, _context_baseline, "context_optimised_local", "unoptimised_context_baseline"),
         "code_intelligence": (_code_candidate, _code_baseline, "code_intelligence_local", "code_text_baseline"),
         "execution_proxy": (_proxy_candidate, _proxy_baseline, "execution_proxy_local", "raw_output_baseline"),
-        "control_plane_routing": (_route_candidate, _route_baseline, "control_plane_router_local", "independent_router_baseline"),
+        "control_plane_routing": (_route_candidate, _route_baseline, "control_plane_router", "keyword_router_baseline"),
     }
     algorithms, evaluations = [], []
     for domain, (candidate_fn, baseline_fn, candidate_name, baseline_name) in runners.items():
@@ -375,7 +520,8 @@ def build_artifact(endpoint: str, include_live: bool = False) -> dict[str, Any]:
         BenchmarkRunner(suite).run(live)  # raises if the service is unavailable; never fabricates evidence
     return {"schema_version": "2.0.0", "generated_at": datetime.now(timezone.utc).isoformat(),
             "baseline": "domain-specific frozen measured baselines",
-            "suite": {"name": "scos_native_planes_acceptance", "version": "2.0.0", "frozen_created_at": FROZEN_CREATED_AT,
+            "suite": {"name": "scos_native_planes_acceptance", "version": "2.1.0", "frozen_created_at": FROZEN_CREATED_AT,
+                      "revisions": SUITE_REVISIONS,
                       "domains": {domain: {"case_count": len(cases), "cases": cases} for domain, cases in frozen.items()}},
             "algorithms": algorithms, "baselines": [a["name"] for a in algorithms if a["metadata"]["baseline"]],
             "results": [{"algorithm": a["name"], "domain": a["domain"], "cases": a["cases"]} for a in algorithms],
@@ -385,7 +531,8 @@ def build_artifact(endpoint: str, include_live: bool = False) -> dict[str, Any]:
             "hardware": runtime_metadata(), "runtime": {"endpoint": endpoint, "live_requested": include_live, "network_enabled": include_live},
             "latency_ms": {a["name"]: a["summary"]["average_latency_ms"] for a in algorithms},
             "costs": {a["name"]: a["summary"]["total_cost_usd"] for a in algorithms},
-            "exclusions": ["live service evidence not included; use --live to require and measure it"] if not include_live else []}
+            "exclusions": (["live service evidence not included; use --live to require and measure it"] if not include_live else [])
+                          + ["routing scores exclude memory and context, which the router selects on every governed turn"]}
 
 
 def main() -> int:
@@ -396,6 +543,14 @@ def main() -> int:
     args = parser.parse_args()
     artifact = build_artifact(args.endpoint, args.live)
     args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for algorithm in artifact["algorithms"]:
+        if algorithm["metadata"]["baseline"]:
+            continue
+        published = publish(run_from_cases(
+            f"acceptance:{algorithm['domain']}", algorithm["cases"], schema_version=artifact["schema_version"],
+            mode="measured_local", wall_time_ms=algorithm["summary"]["wall_time_ms"], recorded_at=artifact["generated_at"]))
+        if published is not None:
+            print(json.dumps({"published_run_id": published.get("run_id"), "suite": f"acceptance:{algorithm['domain']}"}))
     print(json.dumps({"output": str(args.output), "algorithms": len(artifact["algorithms"]),
                       "domains": len(artifact["suite"]["domains"])}, indent=2))
     return 0

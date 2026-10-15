@@ -1256,6 +1256,17 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 }
 
 func main() {
+	// `autonomous-control-plane classify` runs the production route builder
+	// over JSON-lines RouteRequests on stdin and writes one RouteDecision per
+	// line, with no database or network. The acceptance benchmark measures
+	// routing through it so the evaluated router is the deployed one.
+	if len(os.Args) > 1 && os.Args[1] == "classify" {
+		if err := classifyStream(os.Stdin, os.Stdout); err != nil {
+			_, _ = os.Stderr.WriteString(err.Error() + "\n")
+			os.Exit(1)
+		}
+		return
+	}
 	databaseURL := os.Getenv("DATABASE_URL")
 	statePath := os.Getenv("SCOS_CONTROL_PLANE_STATE_PATH")
 	if statePath == "" {
