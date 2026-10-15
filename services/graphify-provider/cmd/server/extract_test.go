@@ -90,7 +90,7 @@ func TestExtractIngestsTheGraphAsTheCallingPrincipal(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("extract: %d %s", w.Code, w.Body.String())
 	}
-	var job extractJob
+	var job extractJobStatus
 	_ = json.Unmarshal(w.Body.Bytes(), &job)
 	if job.Nodes != 2 || job.Edges != 1 || job.ID == "" {
 		t.Fatalf("job = %+v", job)

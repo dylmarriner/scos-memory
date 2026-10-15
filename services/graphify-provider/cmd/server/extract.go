@@ -25,9 +25,15 @@ const maxReportedErrors = 50
 // a large repository is tens of thousands of nodes and edges -- and its
 // progress is read back through GET /v1/graphify/extract/{job_id}.
 type extractJob struct {
-	mu            sync.Mutex
+	mu       sync.Mutex
+	tenantID string
+	status   extractJobStatus
+}
+
+// extractJobStatus is an ingestion job as GET /v1/graphify/extract/{id}
+// reports it.
+type extractJobStatus struct {
 	ID            string    `json:"job_id"`
-	TenantID      string    `json:"-"`
 	RepoPath      string    `json:"repo_path"`
 	NamespaceID   string    `json:"namespace_id,omitempty"`
 	Status        string    `json:"status"`
@@ -44,21 +50,18 @@ type extractJob struct {
 func (j *extractJob) recordError(msg string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.ErrorCount++
-	if len(j.Errors) < maxReportedErrors {
-		j.Errors = append(j.Errors, msg)
+	j.status.ErrorCount++
+	if len(j.status.Errors) < maxReportedErrors {
+		j.status.Errors = append(j.status.Errors, msg)
 	}
 }
 
-func (j *extractJob) snapshot() extractJob {
+func (j *extractJob) snapshot() extractJobStatus {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return extractJob{
-		ID: j.ID, RepoPath: j.RepoPath, NamespaceID: j.NamespaceID, Status: j.Status,
-		Nodes: j.Nodes, Edges: j.Edges, NodesIngested: j.NodesIngested, EdgesIngested: j.EdgesIngested,
-		ErrorCount: j.ErrorCount, Errors: append([]string(nil), j.Errors...),
-		StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
-	}
+	out := j.status
+	out.Errors = append([]string(nil), j.status.Errors...)
+	return out
 }
 
 // handleExtract ingests a repository's graph into memory as the caller.
@@ -112,15 +115,15 @@ func (s *graphifyServer) handleExtract(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "allocate job id: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	job := &extractJob{
-		ID: hex.EncodeToString(idBytes), TenantID: claims.TenantID, RepoPath: workDir, NamespaceID: namespaceID,
+	job := &extractJob{tenantID: claims.TenantID, status: extractJobStatus{
+		ID: hex.EncodeToString(idBytes), RepoPath: workDir, NamespaceID: namespaceID,
 		Status: "ingesting", Nodes: len(graph.Nodes), Edges: len(graph.Edges), StartedAt: time.Now().UTC(),
-	}
+	}}
 	s.jobsMu.Lock()
 	if s.jobs == nil {
 		s.jobs = make(map[string]*extractJob)
 	}
-	s.jobs[job.ID] = job
+	s.jobs[job.status.ID] = job
 	s.jobsMu.Unlock()
 	go s.ingest(job, bearer, graph)
 
@@ -145,7 +148,7 @@ func (s *graphifyServer) handleExtractStatus(w http.ResponseWriter, r *http.Requ
 	s.jobsMu.Lock()
 	job := s.jobs[id]
 	s.jobsMu.Unlock()
-	if job == nil || job.TenantID != claims.TenantID {
+	if job == nil || job.tenantID != claims.TenantID {
 		http.Error(w, "no such extraction job", http.StatusNotFound)
 		return
 	}
@@ -157,7 +160,7 @@ func (s *graphifyServer) ingest(job *extractJob, bearer string, graph *graphDocu
 	defer cancel()
 	memoryIDByNode := make(map[string]string, len(graph.Nodes))
 	for _, node := range graph.Nodes {
-		memoryID, err := s.ingestNode(ctx, bearer, job.NamespaceID, node)
+		memoryID, err := s.ingestNode(ctx, bearer, job.status.NamespaceID, node)
 		if err != nil {
 			job.recordError("node " + node.ID + ": " + err.Error())
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -167,7 +170,7 @@ func (s *graphifyServer) ingest(job *extractJob, bearer string, graph *graphDocu
 		}
 		memoryIDByNode[node.ID] = memoryID
 		job.mu.Lock()
-		job.NodesIngested++
+		job.status.NodesIngested++
 		job.mu.Unlock()
 	}
 	for _, edge := range graph.Edges {
@@ -190,24 +193,24 @@ func (s *graphifyServer) ingest(job *extractJob, bearer string, graph *graphDocu
 			continue
 		}
 		job.mu.Lock()
-		job.EdgesIngested++
+		job.status.EdgesIngested++
 		job.mu.Unlock()
 	}
 	job.mu.Lock()
 	defer job.mu.Unlock()
-	job.FinishedAt = time.Now().UTC()
+	job.status.FinishedAt = time.Now().UTC()
 	switch {
 	case ctx.Err() != nil:
-		job.Status = "failed"
-		if len(job.Errors) < maxReportedErrors {
-			job.Errors = append(job.Errors, "ingestion stopped: "+ctx.Err().Error())
+		job.status.Status = "failed"
+		if len(job.status.Errors) < maxReportedErrors {
+			job.status.Errors = append(job.status.Errors, "ingestion stopped: "+ctx.Err().Error())
 		}
-		job.ErrorCount++
-	case job.NodesIngested == 0 && job.Nodes > 0:
-		job.Status = "failed"
-	case job.ErrorCount > 0:
-		job.Status = "completed_with_errors"
+		job.status.ErrorCount++
+	case job.status.NodesIngested == 0 && job.status.Nodes > 0:
+		job.status.Status = "failed"
+	case job.status.ErrorCount > 0:
+		job.status.Status = "completed_with_errors"
 	default:
-		job.Status = "completed"
+		job.status.Status = "completed"
 	}
 }
