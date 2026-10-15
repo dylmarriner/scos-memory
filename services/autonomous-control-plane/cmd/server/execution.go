@@ -284,8 +284,24 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 		state.memory = memory
 		return completedStage("")
 	case "code-intelligence":
-		code, err := c.callService(ctx, step.System, "/v1/code/query", map[string]any{
-			"intent": "implementation_search", "query": req.Input, "path": req.RepositoryPath, "max_results": 10,
+		// Code context comes from the durable (v2) index of the named
+		// repository -- the one scos_code_index builds -- resolved by its
+		// canonical path. No repository named means no code context.
+		if strings.TrimSpace(req.RepositoryPath) == "" {
+			return skippedStage("no repository_path on the request")
+		}
+		registered, err := c.callService(ctx, step.System, "/v2/code/repos", map[string]any{"canonical_path": req.RepositoryPath}, req)
+		if err != nil {
+			return degradedStage("resolve repository: " + err.Error())
+		}
+		var repo struct {
+			RepositoryID string `json:"repository_id"`
+		}
+		if err := json.Unmarshal(registered, &repo); err != nil || repo.RepositoryID == "" {
+			return degradedStage("resolve repository: code-intelligence returned no repository_id")
+		}
+		code, err := c.callService(ctx, step.System, "/v2/code/query", map[string]any{
+			"repository_id": repo.RepositoryID, "query": req.Input, "max_results": 10,
 		}, req)
 		if err != nil {
 			return degradedStage(err.Error())

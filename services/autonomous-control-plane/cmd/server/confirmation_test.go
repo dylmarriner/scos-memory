@@ -55,6 +55,10 @@ func newFabric(t *testing.T) *fabric {
 				onRetrieve()
 			}
 			_, _ = w.Write([]byte(`{"memories":[]}`))
+		case "/v2/code/repos":
+			_, _ = w.Write([]byte(`{"repository_id":"repo-1"}`))
+		case "/v2/code/query":
+			_, _ = w.Write([]byte(`{"results":[],"retrieval_mode":"lexical","degraded_models":[]}`))
 		default:
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		}

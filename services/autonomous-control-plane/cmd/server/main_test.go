@@ -232,6 +232,11 @@ func TestIngestOrchestratesConfiguredDependenciesAndExposesDegradedStages(t *tes
 			_, _ = w.Write([]byte(`{"id":"op-1","tool_id":"tool-1","state":"executing"}`))
 			return
 		}
+		if r.URL.Path == "/v2/code/repos" {
+			// Code intelligence answers with the durable repository id.
+			_, _ = w.Write([]byte(`{"repository_id":"repo-1"}`))
+			return
+		}
 		if r.URL.Path == "/v1/proxy/execute" {
 			// The execution proxy answers with the command's own result.
 			_, _ = w.Write([]byte(`{"operation_id":"i","exit_status":0}`))
@@ -270,7 +275,7 @@ func TestIngestOrchestratesConfiguredDependenciesAndExposesDegradedStages(t *tes
 	if receipt.Status != "degraded" {
 		t.Fatalf("status = %q; body=%s", receipt.Status, response.Body.String())
 	}
-	for _, path := range []string{"/v1/retrieve", "/v1/code/query", "/v1/context/compile", "/v1/operations/start", "/v1/proxy/execute"} {
+	for _, path := range []string{"/v1/retrieve", "/v2/code/repos", "/v2/code/query", "/v1/context/compile", "/v1/operations/start", "/v1/proxy/execute"} {
 		found := false
 		for _, call := range calls {
 			if call == path {
