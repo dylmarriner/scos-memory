@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dylmarriner/scos-memory/packages/workspace"
 	"io/fs"
 	"log"
 	"net/http"
@@ -48,48 +49,6 @@ var scanSkipDirs = map[string]bool{
 	"dist": true, "build": true, "target": true, ".venv": true, "venv": true,
 	"__pycache__": true, ".mypy_cache": true, ".pytest_cache": true, ".next": true,
 	"graphify-out": true, ".idea": true, ".vscode": true, "coverage": true,
-}
-
-func workspaceRoot() string {
-	if v := strings.TrimSpace(os.Getenv("SCOS_WORKSPACE_ROOT")); v != "" {
-		return filepath.Clean(v)
-	}
-	return "/workspace"
-}
-
-// resolveWorkspacePath maps a repository path an agent supplied to the
-// directory this service can read, refusing anything outside the workspace.
-func resolveWorkspacePath(canonical string) (string, error) {
-	canonical = filepath.Clean(strings.TrimSpace(canonical))
-	if !filepath.IsAbs(canonical) {
-		return "", fmt.Errorf("repository path %q must be absolute", canonical)
-	}
-	root := workspaceRoot()
-	if host := strings.TrimSpace(os.Getenv("SCOS_WORKSPACE_HOST_PATH")); host != "" {
-		host = filepath.Clean(host)
-		if rel, err := filepath.Rel(host, canonical); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			canonical = filepath.Join(root, rel)
-		}
-	}
-	rel, err := filepath.Rel(root, canonical)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("repository %q is outside the mounted workspace; place it under SCOS_WORKSPACE_HOST_PATH (%s)", canonical, os.Getenv("SCOS_WORKSPACE_HOST_PATH"))
-	}
-	resolved, err := filepath.EvalSymlinks(canonical)
-	if err != nil {
-		return "", fmt.Errorf("repository %q is not readable: %w", canonical, err)
-	}
-	realRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", fmt.Errorf("workspace %s is not mounted: %w", root, err)
-	}
-	if rel, err := filepath.Rel(realRoot, resolved); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("repository %q resolves outside the workspace", canonical)
-	}
-	if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
-		return "", fmt.Errorf("repository %q is not a directory", canonical)
-	}
-	return resolved, nil
 }
 
 // scanRepository reads every indexable source file under dir.
@@ -261,7 +220,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repository not found", http.StatusNotFound)
 		return
 	}
-	dir, err := resolveWorkspacePath(canonical)
+	dir, err := workspace.Resolve(canonical)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return

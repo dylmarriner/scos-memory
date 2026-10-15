@@ -584,8 +584,36 @@ services:
       start_period: 30s
       retries: 10
 
+  # Governed commands act on the operator's repositories, so the execution
+  # proxy runs as the workspace owner (SCOS_WORKSPACE_UID/GID, set by
+  # scripts/local_quickstart.sh to the operator's own ids; unset, the image's
+  # scos user). That user needs its own copy of the service TLS key, which is
+  # readable only by scos, and ownership of the proxy's state volumes.
+  execution-proxy-init:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - tls-certs:/etc/scos/tls:ro
+      - execution-proxy-tls:/etc/scos/execution-proxy-tls
+      - execution-proxy-raw:/var/lib/scos/execution-proxy/raw
+      - execution-proxy-state:/var/lib/scos/execution-proxy/state
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        owner="${SCOS_WORKSPACE_UID:-100}:${SCOS_WORKSPACE_GID:-101}"
+        cp /etc/scos/tls/tls.crt /etc/scos/tls/tls.key /etc/scos/execution-proxy-tls/
+        chown "$$owner" /etc/scos/execution-proxy-tls/tls.crt /etc/scos/execution-proxy-tls/tls.key
+        chmod 644 /etc/scos/execution-proxy-tls/tls.crt
+        chmod 600 /etc/scos/execution-proxy-tls/tls.key
+        chown -R "$$owner" /var/lib/scos/execution-proxy/raw /var/lib/scos/execution-proxy/state
+    depends_on:
+      tls-certs:
+        condition: service_completed_successfully
+
   execution-proxy:
     <<: [*service-limits, *fabric-image]
+    user: "${SCOS_WORKSPACE_UID:-100}:${SCOS_WORKSPACE_GID:-101}"
     command: ["execution-proxy"]
     restart: unless-stopped
     environment:
@@ -594,19 +622,35 @@ services:
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
       SCOS_EXECUTION_PROXY_STORE_PATH: ${SCOS_EXECUTION_PROXY_STORE_PATH:-/var/lib/scos/execution-proxy/state.json}
       SCOS_PROXY_RAW_DIR: ${SCOS_PROXY_RAW_DIR:-/var/lib/scos/execution-proxy/raw}
+      # Every execution is prepared, authorised and reconciled by tool
+      # governance; without it the proxy refuses to run anything.
+      SCOS_TOOL_GOVERNANCE_URL: ${SCOS_TOOL_GOVERNANCE_URL:-https://tool-governance:8092}
+      # Commands run only inside the shared workspace; agents name host
+      # paths under SCOS_WORKSPACE_HOST_PATH, translated to /workspace.
+      SCOS_WORKSPACE_HOST_PATH: ${SCOS_WORKSPACE_HOST_PATH:-}
+      SCOS_WORKSPACE_ROOT: /workspace
+      SCOS_TLS_CERT_FILE: /etc/scos/execution-proxy-tls/tls.crt
+      SCOS_TLS_KEY_FILE: /etc/scos/execution-proxy-tls/tls.key
     volumes:
       - tls-certs:/etc/scos/tls:ro
+      - execution-proxy-tls:/etc/scos/execution-proxy-tls:ro
       - execution-proxy-raw:/var/lib/scos/execution-proxy/raw
       - execution-proxy-state:/var/lib/scos/execution-proxy/state
+      # Read-write: governed commands act on the operator's repositories.
+      - ${SCOS_WORKSPACE_HOST_PATH:-../..}:/workspace:rw
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8085:8085"
     depends_on:
       tls-certs:
         condition: service_completed_successfully
+      execution-proxy-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       migrations:
         condition: service_completed_successfully
+      tool-governance:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:8085/health/ready"]
       interval: ${SCOS_HEALTHCHECK_INTERVAL:-30s}
@@ -1235,6 +1279,7 @@ volumes:
   postgres-data:
   execution-proxy-raw:
   execution-proxy-state:
+  execution-proxy-tls:
   agent-registry-state:
   autonomous-control-plane-state:
   security-gate-data:

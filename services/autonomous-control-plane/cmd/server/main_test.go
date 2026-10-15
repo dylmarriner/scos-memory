@@ -232,6 +232,11 @@ func TestIngestOrchestratesConfiguredDependenciesAndExposesDegradedStages(t *tes
 			_, _ = w.Write([]byte(`{"id":"op-1","tool_id":"tool-1","state":"executing"}`))
 			return
 		}
+		if r.URL.Path == "/v1/proxy/execute" {
+			// The execution proxy answers with the command's own result.
+			_, _ = w.Write([]byte(`{"operation_id":"i","exit_status":0}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer dependency.Close()

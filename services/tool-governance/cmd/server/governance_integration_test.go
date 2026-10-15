@@ -349,3 +349,21 @@ func TestBuiltinExecutionProxyToolComesFromTheSeededCatalog(t *testing.T) {
 		t.Fatalf("expected unconfirmed destructive proxy command to be refused, got %d %s", status, body)
 	}
 }
+
+// TestStartResolvesTheBuiltinExecutionProxyTool covers the control plane's
+// path: it starts an operation for the execution proxy by name, before any
+// prepare has materialised the tenant's copy.
+func TestStartResolvesTheBuiltinExecutionProxyTool(t *testing.T) {
+	f := newGovernanceFixture(t)
+	opID, _ := newID()
+	plan := map[string]any{"executed_request": "rm -rf ./build-output"}
+	if status, body := f.serviceCall("/v1/operations/start", map[string]any{"tool_name": "execution-proxy", "operation_id": opID, "plan": plan}); status != http.StatusForbidden {
+		t.Fatalf("an unconfirmed destructive start must be refused, got %d %s", status, body)
+	}
+	if status, body := f.serviceCall("/v1/operations/start", map[string]any{"tool_name": "execution-proxy", "operation_id": opID, "plan": plan, "confirmed": true}); status != http.StatusOK {
+		t.Fatalf("a confirmed start of the built-in tool must be allowed, got %d %s", status, body)
+	}
+	if status, body := f.serviceCall("/v1/operations/start", map[string]any{"tool_name": "not-a-tool", "risk": "read"}); status != http.StatusForbidden {
+		t.Fatalf("an unknown tool must still be refused, got %d %s", status, body)
+	}
+}

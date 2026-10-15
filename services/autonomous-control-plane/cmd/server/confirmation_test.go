@@ -21,6 +21,7 @@ type fabric struct {
 	calls        []string
 	bodies       map[string]map[string]any
 	governance   func(w http.ResponseWriter)
+	proxyResult  string
 	onRetrieve   func()
 	server       *httptest.Server
 	proxyInvoked int
@@ -28,7 +29,7 @@ type fabric struct {
 
 func newFabric(t *testing.T) *fabric {
 	t.Helper()
-	f := &fabric{bodies: map[string]map[string]any{}}
+	f := &fabric{bodies: map[string]map[string]any{}, proxyResult: `{"operation_id":"op","exit_status":0}`}
 	f.governance = func(w http.ResponseWriter) {
 		_, _ = w.Write([]byte(`{"id":"op-77","tool_id":"tool","state":"executing"}`))
 	}
@@ -41,12 +42,14 @@ func newFabric(t *testing.T) *fabric {
 		if r.URL.Path == "/v1/proxy/execute" {
 			f.proxyInvoked++
 		}
-		onRetrieve, governance := f.onRetrieve, f.governance
+		onRetrieve, governance, proxyResult := f.onRetrieve, f.governance, f.proxyResult
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/operations/start":
 			governance(w)
+		case "/v1/proxy/execute":
+			_, _ = w.Write([]byte(proxyResult))
 		case "/v1/retrieve":
 			if onRetrieve != nil {
 				onRetrieve()
@@ -236,6 +239,11 @@ func TestConfirmedActionExecutesFrozenRequestAndAssertsConfirmation(t *testing.T
 	}
 	if !f.called("/v1/operations/start") {
 		t.Fatalf("tool governance was not consulted: %v", f.calls)
+	}
+	governed := f.body("/v1/operations/start")
+	plan, _ := governed["plan"].(map[string]any)
+	if governed["tool_name"] != executionProxyToolName || governed["confirmed"] != true || plan == nil || plan["executed_request"] != "rm -rf /srv/build" {
+		t.Fatalf("governance must authorise the execution proxy running this command, got %+v", governed)
 	}
 	proxy := f.body("/v1/proxy/execute")
 	if proxy == nil {
@@ -550,5 +558,46 @@ func TestDestructiveProposedCommandRequiresConfirmation(t *testing.T) {
 	}
 	if readOnly.ConfirmationRequired {
 		t.Fatalf("read-only command required confirmation: %+v", readOnly.ReasonCodes)
+	}
+}
+
+func TestDestructiveCommandIsCriticalWhateverRiskTheRequestClaims(t *testing.T) {
+	decision, err := buildRoute(RouteRequest{InteractionID: "i", Input: "clean the build output", ProposedTool: "rm -rf ./build", RiskClass: "read_only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.RiskClass != "critical" || !decision.ConfirmationRequired {
+		t.Fatalf("risk = %q, confirmation = %v", decision.RiskClass, decision.ConfirmationRequired)
+	}
+}
+
+func TestFailedCommandIsAFailedStage(t *testing.T) {
+	f := newFabric(t)
+	f.proxyResult = `{"operation_id":"op","exit_status":1,"stderr_summary":"rm: cannot remove './build/a.o': Permission denied"}`
+	plane := newConfirmPlane(t, f)
+	decisionID := ingestAwaitingConfirmation(t, plane)
+	_, payload := controlCall(t, plane.handleConfirm, "/v1/control/confirm", "actor",
+		`{"interaction_id":"confirm-1","decision_id":"`+decisionID+`","resolution":"confirmed"}`)
+	if payload["status"] == runCompleted {
+		t.Fatalf("a command that exited non-zero must not complete the run: %v", payload)
+	}
+	lifecycle := plane.lifecycle(context.Background(), "tenant", "actor", "confirm-1", RouteDecision{})
+	for _, stage := range lifecycle.Stages {
+		if stage.System == "adaptive-execution-proxy" {
+			if stage.Status == "completed" || !strings.Contains(stage.Detail, "status 1") || !strings.Contains(stage.Detail, "Permission denied") {
+				t.Fatalf("proxy stage = %+v", stage)
+			}
+			return
+		}
+	}
+	t.Fatal("no execution stage recorded")
+}
+
+func TestCommandOutcomeRequiresAnExitStatus(t *testing.T) {
+	if err := commandOutcome([]byte(`{"ok":true}`)); err == nil {
+		t.Fatal("a result without an exit status is not a success")
+	}
+	if err := commandOutcome([]byte(`{"exit_status":0}`)); err != nil {
+		t.Fatalf("exit 0 is a success: %v", err)
 	}
 }

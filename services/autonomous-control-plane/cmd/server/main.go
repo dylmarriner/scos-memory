@@ -1130,6 +1130,13 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 	if destructive {
 		confirmation = true
 		reasons = append(reasons, "destructive_command_detected")
+		// The caller's declared risk never understates the command: a
+		// destructive command is critical whatever the request claimed, so
+		// every downstream consumer of risk_class (context optimisation's
+		// profile floor, the persisted decision) sees what will run.
+		if risk != "critical" {
+			risk = "critical"
+		}
 	}
 	if confirmation {
 		reasons = append(reasons, "confirmation_policy_applies")

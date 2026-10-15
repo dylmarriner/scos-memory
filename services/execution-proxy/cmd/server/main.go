@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/dylmarriner/scos-memory/packages/workspace"
 	"io"
 	"log"
 	"net/http"
@@ -679,6 +680,21 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
+
+	// Commands run only inside the shared workspace: the directory an agent
+	// names is a path on its own machine, translated to the mount this
+	// process sees, and a command with no directory runs at the workspace
+	// root -- never in the proxy's own working directory.
+	requestedDir := req.WorkingDir
+	if strings.TrimSpace(requestedDir) == "" {
+		requestedDir = workspace.Root()
+	}
+	workingDir, err := workspace.Resolve(requestedDir)
+	if err != nil {
+		http.Error(w, "working_directory: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.WorkingDir = workingDir
 
 	// Plan the command
 	plan := s.planCommand(req)

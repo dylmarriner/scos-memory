@@ -564,16 +564,19 @@ func (s *toolGovernanceServer) handleOperationStart(w http.ResponseWriter, r *ht
 	var tool *ToolDefinition
 	if req.ToolID != "" {
 		tool, err = loadTool(ctx, tx, identity.TenantID, req.ToolID)
+		if err == sql.ErrNoRows {
+			http.Error(w, "tool not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "load tool: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	} else {
-		tool, err = loadToolByName(ctx, tx, identity.TenantID, req.ToolName)
-	}
-	if err == sql.ErrNoRows {
-		http.Error(w, "tool not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		http.Error(w, "load tool: "+err.Error(), http.StatusInternalServerError)
-		return
+		var ok bool
+		if tool, ok = resolveOperationTool(ctx, w, tx, identity.TenantID, req.ToolName); !ok {
+			return
+		}
 	}
 	decision, refusal := decideOperation(tool, operationRequest{Risk: req.Risk, Plan: req.Plan, Confirmed: req.Confirmed, OperationID: req.OperationID})
 	if refusal != nil {
@@ -677,21 +680,8 @@ func (s *toolGovernanceServer) handleOperationPrepare(w http.ResponseWriter, r *
 		return
 	}
 
-	tool, err := loadToolByName(ctx, tx, identity.TenantID, req.ToolName)
-	if err == sql.ErrNoRows {
-		builtin, builtinErr := loadBuiltinTool(ctx, tx, req.ToolName)
-		switch {
-		case builtinErr == sql.ErrNoRows:
-			http.Error(w, fmt.Sprintf("tool %q is not registered for this tenant; register it through /v1/tools/register and authorise it through /v1/tools/transition", req.ToolName), http.StatusForbidden)
-			return
-		case builtinErr != nil:
-			http.Error(w, "load built-in tool: "+builtinErr.Error(), http.StatusInternalServerError)
-			return
-		}
-		tool, err = materialiseBuiltinTool(ctx, tx, identity.TenantID, builtin)
-	}
-	if err != nil {
-		http.Error(w, "load tool: "+err.Error(), http.StatusInternalServerError)
+	tool, ok := resolveOperationTool(ctx, w, tx, identity.TenantID, req.ToolName)
+	if !ok {
 		return
 	}
 	decision, refusal := decideOperation(tool, operationRequest{Risk: req.Risk, Plan: req.Plan, Confirmed: req.Confirmed, OperationID: req.OperationID})
@@ -982,4 +972,30 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("encode response: %v", err)
 	}
+}
+
+// resolveOperationTool finds the named tool an operation will run: the
+// tenant's registered tool, or -- for one of the fabric's own built-in tools
+// -- the tenant's copy materialised from the catalog. Anything else is
+// refused; nothing is registered on a caller's say-so. It writes the
+// refusal itself and reports whether the caller may continue.
+func resolveOperationTool(ctx context.Context, w http.ResponseWriter, tx *sql.Tx, tenantID, name string) (*ToolDefinition, bool) {
+	tool, err := loadToolByName(ctx, tx, tenantID, name)
+	if err == sql.ErrNoRows {
+		builtin, builtinErr := loadBuiltinTool(ctx, tx, name)
+		switch {
+		case builtinErr == sql.ErrNoRows:
+			http.Error(w, fmt.Sprintf("tool %q is not registered for this tenant; register it through /v1/tools/register and authorise it through /v1/tools/transition", name), http.StatusForbidden)
+			return nil, false
+		case builtinErr != nil:
+			http.Error(w, "load built-in tool: "+builtinErr.Error(), http.StatusInternalServerError)
+			return nil, false
+		}
+		tool, err = materialiseBuiltinTool(ctx, tx, tenantID, builtin)
+	}
+	if err != nil {
+		http.Error(w, "load tool: "+err.Error(), http.StatusInternalServerError)
+		return nil, false
+	}
+	return tool, true
 }

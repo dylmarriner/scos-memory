@@ -17,31 +17,6 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func TestResolveWorkspacePathTranslatesHostPathsAndRefusesEscapes(t *testing.T) {
-	root := t.TempDir()
-	repo := filepath.Join(root, "proj")
-	writeFile(t, filepath.Join(repo, "main.go"), "package main\n")
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SCOS_WORKSPACE_ROOT", root)
-	t.Setenv("SCOS_WORKSPACE_HOST_PATH", "/home/dev/code")
-
-	want, _ := filepath.EvalSymlinks(repo)
-	for _, in := range []string{"/home/dev/code/proj", repo} {
-		got, err := resolveWorkspacePath(in)
-		if err != nil || got != want {
-			t.Fatalf("resolve(%q) = %q, %v; want %q", in, got, err, want)
-		}
-	}
-	for _, in := range []string{"/etc", "/home/dev/other", "/home/dev/code/../../../etc", filepath.Join(root, "escape"), "relative/path", "/home/dev/code/missing"} {
-		if got, err := resolveWorkspacePath(in); err == nil {
-			t.Fatalf("resolve(%q) = %q, expected refusal", in, got)
-		}
-	}
-}
-
 func TestScanRepositoryReadsSourceAndSkipsGeneratedContent(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "cmd", "app", "main.go"), "package main\n\nfunc Run() {}\n")

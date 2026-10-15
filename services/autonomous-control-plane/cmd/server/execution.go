@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -415,17 +416,22 @@ func (c *controlPlane) governanceStage(ctx context.Context, req RouteRequest, st
 	return completedStage("tool governance started operation " + operationID)
 }
 
+// executionProxyToolName is the tool-governance name of the execution
+// proxy, seeded by migration 000047's builtin_tool_definitions.
+const executionProxyToolName = "execution-proxy"
+
 func (c *controlPlane) startGovernedOperation(ctx context.Context, req RouteRequest, confirmed bool) (string, error) {
 	if strings.TrimSpace(req.ProposedTool) == "" {
 		return "", errors.New("proposed_tool is required for governance")
 	}
-	// The proposed tool is named, not identified: tool-governance resolves
-	// it among the tenant's registered tools and refuses one that is not
-	// registered and authorised. The plan names the command so governance
-	// grades its risk with the shared classifier, and confirmation is the
-	// recorded one, exactly as the proxy receives it.
+	// The proposed tool is a command, and the tool that runs it is the
+	// execution proxy (the built-in governed tool), so that is the tool
+	// governance must have registered and authorised for the tenant. The
+	// plan names the command so governance grades its risk with the shared
+	// classifier, and confirmation is the recorded one, exactly as the proxy
+	// receives it.
 	body, err := c.callService(ctx, "tool-governance", "/v1/operations/start", map[string]any{
-		"tool_name": req.ProposedTool, "input": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
+		"tool_name": executionProxyToolName, "input": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
 		"plan": map[string]any{
 			"original_request": req.ProposedTool, "executed_request": req.ProposedTool,
 			"working_directory": req.RepositoryPath,
@@ -462,11 +468,16 @@ func (c *controlPlane) executionProxyStage(ctx context.Context, req RouteRequest
 	if err := c.dispatchHook(ctx, "on_before_tool", map[string]any{"interaction_id": req.InteractionID, "tool": req.ProposedTool}, req); err != nil {
 		return degradedStage("not executed: on_before_tool hook failed: " + err.Error())
 	}
-	_, err := c.callService(ctx, "adaptive-execution-proxy", "/v1/proxy/execute", map[string]any{
+	body, err := c.callService(ctx, "adaptive-execution-proxy", "/v1/proxy/execute", map[string]any{
 		"tenant_id": req.TenantID, "principal_id": req.ActorID, "agent_id": req.AgentID,
 		"operation_id": req.InteractionID, "command": req.ProposedTool, "working_directory": req.RepositoryPath,
 		"confirmed": state.confirmed,
 	}, req)
+	// A command the proxy ran but that failed is a failed stage: the proxy
+	// answers 200 with the command's own exit status, which is the outcome.
+	if err == nil {
+		err = commandOutcome(body)
+	}
 	hookEvent := "on_after_tool"
 	if err != nil {
 		hookEvent = "on_tool_error"
@@ -479,4 +490,27 @@ func (c *controlPlane) executionProxyStage(ctx context.Context, req RouteRequest
 		return degradedStage("on_after_tool hook: " + hookErr.Error())
 	}
 	return completedStage("executed under governed operation " + state.governedOperationID)
+}
+
+// commandOutcome reads the execution proxy's result and reports a command
+// that exited non-zero, with what it wrote to stderr.
+func commandOutcome(body []byte) error {
+	var result struct {
+		ExitStatus    *int   `json:"exit_status"`
+		StderrSummary string `json:"stderr_summary"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return errors.New("execution proxy returned an unreadable result: " + err.Error())
+	}
+	if result.ExitStatus == nil {
+		return errors.New("execution proxy result carries no exit status")
+	}
+	if *result.ExitStatus != 0 {
+		detail := strings.TrimSpace(result.StderrSummary)
+		if detail == "" {
+			detail = "no stderr"
+		}
+		return fmt.Errorf("command exited with status %d: %s", *result.ExitStatus, detail)
+	}
+	return nil
 }
