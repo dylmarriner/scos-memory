@@ -404,7 +404,7 @@ func (s *server) handlePGSnapshot(w http.ResponseWriter, r *http.Request) {
 // import-qualified call names, plus Tree-sitter), part of the snapshot's
 // identity. Bump it whenever extraction output changes, so snapshots never
 // reuse declarations parsed by an older extractor.
-const scanExtractorVersion = "scan-goast-treesitter-v2"
+const scanExtractorVersion = "scan-goast-treesitter-v3"
 
 // errSnapshotConflict marks a request for a snapshot key that already
 // names a different tree, or one still being built.

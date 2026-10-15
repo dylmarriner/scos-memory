@@ -689,7 +689,7 @@ func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch
 		) prior ON true
 		WHERE snap.repository_id = $1 AND snap.branch = $2 AND snap.status = 'active'
 		  AND (sv.fully_qualified_name = $3 OR sv.path = $3
-		       OR (left($3, 2) = '%.' AND sv.kind IN ('function', 'method', 'type', 'class', 'interface')
+		       OR (left($3, 2) = '%.' AND sv.kind IN ('function', 'method', 'type', 'class', 'interface', 'field')
 		           AND sv.fully_qualified_name LIKE '%.' || replace(replace(substr($3, 3), '%', '\%'), '_', '\_')))
 		ORDER BY sv.fully_qualified_name`,
 		repositoryID, branch, query)

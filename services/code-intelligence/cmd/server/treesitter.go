@@ -153,7 +153,49 @@ func classifyTreeSitterDeclaration(kind, language string) (treeSitterDeclaration
 	return treeSitterDeclaration{kind: declKind}, ok
 }
 
+// pythonClassAttribute returns the name a Python class body statement
+// declares as a class attribute -- "is_rewritten: bool" (a dataclass field)
+// or "retries = 3" -- and the assignment node, or ("", nil) when the
+// statement is anything else.
+func pythonClassAttribute(node *ts.Node, source []byte) (string, *ts.Node) {
+	if node.Kind() != "expression_statement" || node.NamedChildCount() != 1 {
+		return "", nil
+	}
+	block := node.Parent()
+	if block == nil || block.Kind() != "block" || block.Parent() == nil || block.Parent().Kind() != "class_definition" {
+		return "", nil
+	}
+	assignment := node.NamedChild(0)
+	if assignment == nil || assignment.Kind() != "assignment" {
+		return "", nil
+	}
+	left := assignment.ChildByFieldName("left")
+	if left == nil || left.Kind() != "identifier" {
+		return "", nil
+	}
+	return left.Utf8Text(source), assignment
+}
+
 func collectTreeSitterSymbols(node *ts.Node, parents []string, language, path, repoID string, source []byte, out *[]Symbol) {
+	if language == "python" && len(parents) > 0 {
+		if name, assignment := pythonClassAttribute(node, source); name != "" {
+			start, end := assignment.ByteRange()
+			if end <= uint(len(source)) && start < end {
+				body := source[start:end]
+				sum := sha256.Sum256(body)
+				contentHash := hex.EncodeToString(sum[:])
+				qualified := append(append([]string(nil), parents...), name)
+				id := symbolScope(repoID, path+"\x00"+strings.Join(qualified, ".")+"\x00"+contentHash)
+				*out = append(*out, Symbol{
+					ID: id[:16], RepoID: repoID,
+					FullyQualifiedName: strings.Join(qualified, "."), Kind: "field",
+					Path: path, Range: fmt.Sprintf("%d-%d", node.StartPosition().Row+1, node.EndPosition().Row+1),
+					Language: language, ContentHash: contentHash, Signature: string(body),
+				})
+			}
+			return
+		}
+	}
 	if declaration, ok := classifyTreeSitterDeclaration(node.Kind(), language); ok {
 		nameNode := node.ChildByFieldName("name")
 		if nameNode != nil {
