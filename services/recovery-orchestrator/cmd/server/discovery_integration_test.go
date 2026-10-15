@@ -11,13 +11,13 @@ import (
 )
 
 // TestDiscoveryThroughRestrictedRole runs discovery as the runtime role
-// (SCOS_RECOVERY_APP_DATABASE_URL, e.g. scos_app) against state seeded by
+// (SCOS_APP_TEST_DATABASE_URL, e.g. scos_app) against state seeded by
 // the owning role (DATABASE_URL): the restricted role must still see the
 // interrupted fabric state and requeue a crashed worker's job.
 func TestDiscoveryThroughRestrictedRole(t *testing.T) {
-	adminURL, appURL := os.Getenv("DATABASE_URL"), os.Getenv("SCOS_RECOVERY_APP_DATABASE_URL")
+	adminURL, appURL := os.Getenv("DATABASE_URL"), os.Getenv("SCOS_APP_TEST_DATABASE_URL")
 	if adminURL == "" || appURL == "" {
-		t.Fatal("DATABASE_URL (owner) and SCOS_RECOVERY_APP_DATABASE_URL (runtime role) must be set")
+		t.Fatal("DATABASE_URL (owner) and SCOS_APP_TEST_DATABASE_URL (runtime role) must be set")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, adminURL)

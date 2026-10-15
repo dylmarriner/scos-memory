@@ -437,7 +437,7 @@ func (s *securityServer) handleAuthRevoke(w http.ResponseWriter, r *http.Request
 		http.Error(w, "token not found", http.StatusUnauthorized)
 		return
 	}
-	if _, err := revokeToken(r.Context(), s.db, tokenPublicPart(req.Token)); err != nil {
+	if _, err := revokeToken(r.Context(), s.db, tok); err != nil {
 		http.Error(w, "unable to revoke token", http.StatusInternalServerError)
 		return
 	}
