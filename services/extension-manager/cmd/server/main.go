@@ -1035,6 +1035,15 @@ func (s *extServer) handleInstallDryRun(w http.ResponseWriter, r *http.Request) 
 	}
 
 	warnings := s.validateManifest(manifest)
+	// The verdict the real install would reach: the same checks /v1/install
+	// applies (completeness, signature, isolation, core version,
+	// dependencies), so a dry run never reports an install that would fail.
+	rejection := ""
+	if manifest.PackageID == "" || manifest.Version == "" {
+		rejection = "package_id and version required"
+	} else if err := s.validateInstallManifest(manifest); err != nil {
+		rejection = err.Error()
+	}
 
 	receipt := InstallationReceipt{
 		PackageID: manifest.PackageID,
@@ -1045,10 +1054,12 @@ func (s *extServer) handleInstallDryRun(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, map[string]any{
-		"dry_run":  true,
-		"manifest": manifest,
-		"receipt":  receipt,
-		"warnings": warnings,
+		"dry_run":           true,
+		"manifest":          manifest,
+		"receipt":           receipt,
+		"warnings":          warnings,
+		"would_be_accepted": rejection == "",
+		"rejection":         rejection,
 		"would_install": map[string]any{
 			"hooks":       manifest.HooksSubscribed,
 			"skills":      manifest.SkillsExported,

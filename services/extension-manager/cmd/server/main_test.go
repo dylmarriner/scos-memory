@@ -767,3 +767,29 @@ func TestAllRequiredLifecycleHooksAreRegistrable(t *testing.T) {
 		t.Fatal("hook event " + hookEvent + " was not registered by installation: " + hookEvent)
 	}
 }
+
+// TestInstallDryRunReportsTheInstallVerdict guards that a dry run answers
+// whether the real install would be accepted: an unsigned manifest that is
+// otherwise complete still must not be reported as installable.
+func TestInstallDryRunReportsTheInstallVerdict(t *testing.T) {
+	srv := newExtServer()
+	body := `{"schema_version":"1.0","package_id":"com.example.unsigned","name":"Unsigned","version":"1.0.0","publisher":"Pub","license":"MIT","extension_types":["ui_extension"],"required_core_version":"^0.1.0","isolation":"wasm_sandbox","content_hash":"abc","rollback_plan":"remove","permissions":["filesystem.root"]}`
+	w := httptest.NewRecorder()
+	srv.handleInstallDryRun(w, httptest.NewRequest(http.MethodPost, "/v1/install/dryrun", strings.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("dry run status = %d: %s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["would_be_accepted"] != false || out["rejection"] != "invalid signature" {
+		t.Fatalf("unsigned manifest reported as installable: %v", out)
+	}
+
+	w = httptest.NewRecorder()
+	srv.handleInstallDryRun(w, httptest.NewRequest(http.MethodPost, "/v1/install/dryrun", strings.NewReader(`{"manifest":{}}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("a wrapped manifest must be rejected as malformed, got %d", w.Code)
+	}
+}

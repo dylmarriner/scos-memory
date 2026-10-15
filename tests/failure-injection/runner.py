@@ -279,7 +279,10 @@ class FailureInjector:
             # lookup path and should 404, which is the correct/expected
             # outcome for an interaction that was never created.
             "autonomy": ("autonomous-control-plane", "/v1/control/status?interaction_id=00000000-0000-0000-0000-0000000000ff", None),
-            "extension": ("extension-manager", "/v1/install/dryrun", {"manifest": {"name": "probe", "version": "1.0.0", "permissions": ["filesystem.root"]}}),
+            # The dry-run body is the manifest itself (the same contract as
+            # /v1/install). An unsigned manifest asking for root filesystem
+            # access must never be reported as installable.
+            "extension": ("extension-manager", "/v1/install/dryrun", {"package_id": "failure-probe", "name": "probe", "version": "1.0.0", "extension_types": ["plugin"], "permissions": ["filesystem.root", "secrets.read"]}),
             "hermes": ("hermes-provider", "/v1/provider/status", None),
         }
         service, path, body = routes[category]
@@ -290,6 +293,8 @@ class FailureInjector:
             predicate = lambda status, payload: status == 200 and payload.get("valid") is True
         if category == "code_intel" and test_name == "malformed syntax":
             predicate = lambda status, payload: status in {200, 400, 422}
+        if category == "extension":
+            predicate = lambda status, payload: status == 200 and isinstance(payload, dict) and payload.get("would_be_accepted") is False and bool(payload.get("rejection"))
         if category == "autonomy":
             predicate = lambda status, payload: status == 404 and isinstance(payload, dict)
         return self._http_probe(category, test_name, service, path, body, predicate)
