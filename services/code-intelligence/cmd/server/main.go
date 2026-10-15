@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -674,15 +675,44 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		RepoID   string   `json:"repository_id"`
 		CommitID string   `json:"commit_id"`
 		Files    []string `json:"files"`
+		// Sources carries file content so declarations can be parsed. Paths
+		// listed only in Files are indexed at file level.
+		Sources []struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		} `json:"sources,omitempty"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	contents := make(map[string]*string, len(req.Sources))
+	for i := range req.Sources {
+		path := strings.TrimSpace(req.Sources[i].Path)
+		if path == "" {
+			http.Error(w, "sources must not contain empty paths", http.StatusBadRequest)
+			return
+		}
+		if _, dup := contents[path]; dup {
+			http.Error(w, "duplicate source path: "+path, http.StatusBadRequest)
+			return
+		}
+		contents[path] = &req.Sources[i].Content
+	}
+	for _, file := range req.Files {
+		if _, ok := contents[file]; !ok {
+			contents[file] = nil
+		}
+	}
+	req.Files = req.Files[:0]
+	for path := range contents {
+		req.Files = append(req.Files, path)
+	}
+	sort.Strings(req.Files)
 	if req.RepoID == "" || len(req.Files) == 0 {
-		http.Error(w, "repository_id and files are required", http.StatusBadRequest)
+		http.Error(w, "repository_id and files or sources are required", http.StatusBadRequest)
 		return
 	}
 	for _, file := range req.Files {
@@ -745,19 +775,27 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Extract symbols based on tier
-		symbols := extractSymbols(file, lang, tier, req.RepoID)
+		symbols, err := extractSymbols(file, lang, tier, req.RepoID, contents[file])
+		if err != nil {
+			s.store.mu.Unlock()
+			http.Error(w, "index "+file+": "+err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		for _, sym := range symbols {
 			sym.CommitID = req.CommitID
 			candidate.symbols[sym.ID] = &sym
 
-			// Create chunk for this symbol
-			candidate.chunks[sym.ID] = &Chunk{
-				SymbolID:    sym.ID,
-				Content:     sym.Signature,
-				Path:        sym.Path,
-				Range:       sym.Range,
-				ContentHash: sym.ContentHash,
+			// The chunk is the symbol's own source span when content was
+			// supplied; otherwise only its signature is known.
+			chunk := &Chunk{SymbolID: sym.ID, Content: sym.Signature, Path: sym.Path, Range: sym.Range, ContentHash: sym.ContentHash}
+			var startLine, endLine int
+			if src := contents[file]; src != nil {
+				if _, err := fmt.Sscanf(sym.Range, "%d-%d", &startLine, &endLine); err == nil {
+					chunk.Content = sourceLines(*src, startLine, endLine)
+					chunk.LineStart, chunk.LineEnd = startLine, endLine
+				}
 			}
+			candidate.chunks[sym.ID] = chunk
 		}
 	}
 
@@ -858,15 +896,17 @@ func (s *server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := struct {
-		Intent     string            `json:"intent"`
-		Results    []CodeQueryResult `json:"results"`
-		Count      int               `json:"count"`
-		PlanesUsed []string          `json:"planes_used"`
+		Intent         string            `json:"intent"`
+		Results        []CodeQueryResult `json:"results"`
+		Count          int               `json:"count"`
+		PlanesSearched []string          `json:"planes_searched"`
+		PlanesUsed     []string          `json:"planes_used"`
 	}{
-		Intent:     q.Intent,
-		Results:    results,
-		Count:      len(results),
-		PlanesUsed: determinePlanes(q.Intent),
+		Intent:         q.Intent,
+		Results:        results,
+		Count:          len(results),
+		PlanesSearched: []string{planeForIntent(q.Intent)},
+		PlanesUsed:     planesUsed(results),
 	}
 
 	// §32 code-intelligence measures. Symbol quality is the share of returned
@@ -966,216 +1006,172 @@ func (s *server) withProvenance(results []CodeQueryResult) []CodeQueryResult {
 
 func (s *server) executeQuery(q CodeQuery) []CodeQueryResult {
 	var results []CodeQueryResult
-	qLower := strings.ToLower(q.Query)
+	qLower := strings.ToLower(strings.TrimSpace(q.Query))
+	if qLower == "" {
+		return results
+	}
 	symbols := s.scopedSymbols(q)
+	plane := planeForIntent(q.Intent)
 
-	switch q.Intent {
-	case "exact_lookup":
-		// Exact text match on paths and content
-		for _, sym := range symbols {
-			if strings.Contains(strings.ToLower(sym.Path), qLower) ||
-				strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) {
-				chunk := s.store.chunks[sym.ID]
-				if chunk == nil {
-					continue
-				}
-				results = append(results, CodeQueryResult{
-					Symbol:    *sym,
-					Chunk:     *chunk,
-					Relevance: 1.0,
-					Plane:     "exact",
-				})
+	// add records a match when the best weighted lexical score across the
+	// candidate fields is positive. Relevance is that score, so ranking
+	// reflects how well each symbol actually matched the query.
+	add := func(sym *Symbol, fields ...scoredField) {
+		best := 0.0
+		for _, f := range fields {
+			if score := lexicalScore(f.text, qLower) * f.weight; score > best {
+				best = score
 			}
 		}
-
-	case "symbol_lookup":
-		for _, sym := range symbols {
-			if strings.EqualFold(sym.FullyQualifiedName, q.Query) ||
-				strings.HasSuffix(strings.ToLower(sym.FullyQualifiedName), "."+qLower) {
-				chunk := s.store.chunks[sym.ID]
-				if chunk == nil {
-					continue
-				}
-				results = append(results, CodeQueryResult{
-					Symbol:    *sym,
-					Chunk:     *chunk,
-					Relevance: 1.0,
-					Plane:     "symbol",
-				})
-			}
+		if best <= 0 {
+			return
 		}
+		chunk := s.store.chunks[sym.ID]
+		if chunk == nil {
+			return
+		}
+		results = append(results, CodeQueryResult{Symbol: *sym, Chunk: *chunk, Relevance: roundScore(best), Plane: plane})
+	}
 
-	case "reference_search":
-		for _, sym := range symbols {
+	for _, sym := range symbols {
+		switch q.Intent {
+		case "exact_lookup":
+			add(sym, scoredField{sym.Path, 1}, scoredField{sym.FullyQualifiedName, 1})
+		case "symbol_lookup":
+			// Symbol lookup matches the qualified name or its final segment only.
+			if strings.EqualFold(sym.FullyQualifiedName, q.Query) || strings.HasSuffix(strings.ToLower(sym.FullyQualifiedName), "."+qLower) {
+				add(sym, scoredField{sym.FullyQualifiedName, 1})
+			}
+		case "reference_search":
+			fields := make([]scoredField, 0, len(sym.Imports))
 			for _, imp := range sym.Imports {
-				if strings.Contains(strings.ToLower(imp), qLower) {
-					chunk := s.store.chunks[sym.ID]
-					if chunk == nil {
-						continue
-					}
-					results = append(results, CodeQueryResult{
-						Symbol:    *sym,
-						Chunk:     *chunk,
-						Relevance: 0.8,
-						Plane:     "relation",
-					})
-					break
-				}
+				fields = append(fields, scoredField{imp, 1})
 			}
-		}
-
-	case "implementation_search":
-		for _, sym := range symbols {
+			add(sym, fields...)
+		case "implementation_search":
 			if sym.Kind == "class" || sym.Kind == "function" || sym.Kind == "method" {
-				if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) ||
-					strings.Contains(strings.ToLower(sym.Signature), qLower) {
-					chunk := s.store.chunks[sym.ID]
-					if chunk == nil {
-						continue
-					}
-					results = append(results, CodeQueryResult{
-						Symbol:    *sym,
-						Chunk:     *chunk,
-						Relevance: 0.9,
-						Plane:     "structural",
-					})
-				}
+				add(sym, scoredField{sym.FullyQualifiedName, 1}, scoredField{sym.Signature, 0.85})
 			}
-		}
-
-	case "architecture_question":
-		// Find packages/modules and their relations
-		for _, sym := range symbols {
+		case "architecture_question":
 			if sym.Kind == "package" || sym.Kind == "module" || sym.Kind == "interface" {
-				if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) ||
-					strings.Contains(strings.ToLower(sym.DocComment), qLower) {
-					chunk := s.store.chunks[sym.ID]
-					if chunk == nil {
-						continue
-					}
-					results = append(results, CodeQueryResult{
-						Symbol:    *sym,
-						Chunk:     *chunk,
-						Relevance: 0.7,
-						Plane:     "relation",
-					})
-				}
+				add(sym, scoredField{sym.FullyQualifiedName, 1}, scoredField{sym.DocComment, 0.7})
 			}
-		}
-
-	case "test_discovery":
-		for _, sym := range symbols {
-			if len(sym.Tests) > 0 {
-				if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) {
-					chunk := s.store.chunks[sym.ID]
-					if chunk == nil {
-						continue
-					}
-					results = append(results, CodeQueryResult{
-						Symbol:    *sym,
-						Chunk:     *chunk,
-						Relevance: 0.85,
-						Plane:     "runtime_evidence",
-					})
-				}
-			}
-		}
-		// Also find test files
-		for _, sym := range symbols {
-			if strings.Contains(strings.ToLower(sym.Path), "_test") ||
+		case "test_discovery":
+			isTestFile := strings.Contains(strings.ToLower(sym.Path), "_test") ||
 				strings.Contains(strings.ToLower(sym.Path), ".spec.") ||
-				strings.Contains(strings.ToLower(sym.Path), "/test_") {
-				if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) ||
-					strings.Contains(strings.ToLower(sym.Path), qLower) {
-					chunk := s.store.chunks[sym.ID]
-					if chunk == nil {
-						continue
-					}
-					results = append(results, CodeQueryResult{
-						Symbol:    *sym,
-						Chunk:     *chunk,
-						Relevance: 0.9,
-						Plane:     "runtime_evidence",
-					})
-				}
+				strings.Contains(strings.ToLower(sym.Path), "/test_")
+			if len(sym.Tests) > 0 || isTestFile {
+				add(sym, scoredField{sym.FullyQualifiedName, 1}, scoredField{sym.Path, 0.9})
 			}
-		}
-
-	case "configuration_lookup":
-		for _, sym := range symbols {
-			if sym.Kind == "configuration" || strings.HasSuffix(sym.Path, ".yaml") ||
-				strings.HasSuffix(sym.Path, ".yml") || strings.HasSuffix(sym.Path, ".toml") ||
-				strings.HasSuffix(sym.Path, ".json") || strings.HasSuffix(sym.Path, ".env") {
-				if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) ||
-					strings.Contains(strings.ToLower(sym.Path), qLower) {
-					chunk := s.store.chunks[sym.ID]
-					if chunk == nil {
-						continue
-					}
-					results = append(results, CodeQueryResult{
-						Symbol:    *sym,
-						Chunk:     *chunk,
-						Relevance: 0.9,
-						Plane:     "exact",
-					})
-				}
+		case "configuration_lookup":
+			if isConfigurationSymbol(sym) {
+				add(sym, scoredField{sym.FullyQualifiedName, 1}, scoredField{sym.Path, 1})
 			}
-		}
-
-	default: // structural_pattern, bug_localisation, history_question, security_review
-		// Broader fallback: search all symbols
-		for _, sym := range symbols {
-			if strings.Contains(strings.ToLower(sym.FullyQualifiedName), qLower) ||
-				strings.Contains(strings.ToLower(sym.Signature), qLower) ||
-				strings.Contains(strings.ToLower(sym.DocComment), qLower) {
-				chunk := s.store.chunks[sym.ID]
-				if chunk == nil {
-					continue
-				}
-				results = append(results, CodeQueryResult{
-					Symbol:    *sym,
-					Chunk:     *chunk,
-					Relevance: 0.5,
-					Plane:     "semantic",
-				})
-			}
+		default:
+			add(sym, scoredField{sym.FullyQualifiedName, 1}, scoredField{sym.Signature, 0.85}, scoredField{sym.DocComment, 0.6})
 		}
 	}
 
-	// Sort by relevance
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Relevance > results[j].Relevance
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Relevance != results[j].Relevance {
+			return results[i].Relevance > results[j].Relevance
+		}
+		return results[i].Symbol.FullyQualifiedName < results[j].Symbol.FullyQualifiedName
 	})
-
-	if len(results) > q.MaxResults {
+	if q.MaxResults > 0 && len(results) > q.MaxResults {
 		results = results[:q.MaxResults]
 	}
 	return results
 }
 
-func determinePlanes(intent string) []string {
+type scoredField struct {
+	text   string
+	weight float64
+}
+
+func isConfigurationSymbol(sym *Symbol) bool {
+	return sym.Kind == "configuration" || strings.HasSuffix(sym.Path, ".yaml") ||
+		strings.HasSuffix(sym.Path, ".yml") || strings.HasSuffix(sym.Path, ".toml") ||
+		strings.HasSuffix(sym.Path, ".json") || strings.HasSuffix(sym.Path, ".env")
+}
+
+// lexicalScore grades a case-insensitive match of qLower in text: an exact
+// match scores 1, a match of a whole trailing segment (".Name", "/name.go")
+// 0.95, a prefix 0.85, a match starting at a word boundary 0.75 and any
+// other substring 0.6, discounted by how much of the text the query covers
+// so a short query buried in a long string ranks below a tight match.
+func lexicalScore(text, qLower string) float64 {
+	if text == "" || qLower == "" {
+		return 0
+	}
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, qLower)
+	if idx < 0 {
+		return 0
+	}
+	if lower == qLower {
+		return 1
+	}
+	var base float64
+	tail := len(lower) - len(qLower)
+	switch {
+	case strings.HasSuffix(lower, qLower) && isSegmentBoundary(lower[tail-1]):
+		base = 0.95
+	case idx == 0:
+		base = 0.85
+	case isSegmentBoundary(lower[idx-1]):
+		base = 0.75
+	default:
+		base = 0.6
+	}
+	coverage := float64(len(qLower)) / float64(len(lower))
+	return base * (0.9 + 0.1*coverage)
+}
+
+func isSegmentBoundary(b byte) bool {
+	switch b {
+	case '.', '/', '_', '-', ' ', ':', '(', ',':
+		return true
+	}
+	return false
+}
+
+func roundScore(v float64) float64 { return math.Round(v*1000) / 1000 }
+
+// planeForIntent names the retrieval plane each intent's search actually
+// runs. The v1 in-memory engine is lexical over symbol metadata; planes
+// that need other machinery (embeddings, history, runtime traces) are not
+// claimed here.
+func planeForIntent(intent string) string {
 	switch intent {
 	case "exact_lookup":
-		return []string{"exact"}
+		return "exact"
 	case "symbol_lookup":
-		return []string{"symbol", "exact"}
-	case "reference_search":
-		return []string{"relation", "exact"}
+		return "symbol"
+	case "reference_search", "architecture_question":
+		return "relation"
 	case "implementation_search":
-		return []string{"structural", "symbol", "exact"}
-	case "architecture_question":
-		return []string{"relation", "structural", "semantic"}
-	case "bug_localisation":
-		return []string{"runtime_evidence", "historical", "structural"}
-	case "change_impact":
-		return []string{"relation", "structural", "runtime_evidence"}
+		return "structural"
 	case "test_discovery":
-		return []string{"runtime_evidence", "exact"}
+		return "test_relation"
 	case "configuration_lookup":
-		return []string{"exact"}
+		return "configuration"
 	default:
-		return []string{"semantic", "exact", "symbol"}
+		return "lexical"
 	}
+}
+
+// planesUsed lists, in first-seen order, the planes that produced results.
+func planesUsed(results []CodeQueryResult) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, r := range results {
+		if !seen[r.Plane] {
+			seen[r.Plane] = true
+			out = append(out, r.Plane)
+		}
+	}
+	return out
 }
 
 // ── context assembly endpoint (§19.8) ────────────────────────────────────
@@ -1499,120 +1495,115 @@ func symbolScope(repoID, discriminator string) string {
 	return sha256Hex([]byte(repoID + "\x00" + discriminator))
 }
 
-func extractSymbols(path string, language string, tier int, repoID string) []Symbol {
-	base := filepath.Base(path)
-	dir := filepath.Dir(path)
-	var symbols []Symbol
-
+// extractSymbols indexes one file. Without content only a file-level record
+// is produced: nothing about the file's declarations is known, so nothing is
+// claimed (no content hash, no inferred package or module symbols). With
+// content, the file is parsed — go/ast for Go, Tree-sitter for Python,
+// TypeScript, JavaScript and Rust — and its real declarations are returned
+// with spans, signatures and span-level content hashes. A file that fails to
+// parse is an error, never a silent file-only result.
+func extractSymbols(path string, language string, tier int, repoID string, content *string) ([]Symbol, error) {
 	kind := "file"
-	if language == "configuration" {
+	if language == "configuration" || language == "yaml" {
 		kind = "configuration"
 	}
-
-	// Tier 0: file-level indexing
-	contentHash := symbolScope(repoID, path)
-	symbols = append(symbols, Symbol{
-		ID:                 contentHash[:16],
+	file := Symbol{
+		ID:                 symbolScope(repoID, path)[:16],
 		RepoID:             repoID,
 		FullyQualifiedName: path,
 		Kind:               kind,
 		Path:               path,
 		Range:              "1-",
 		Language:           language,
-		ContentHash:        contentHash,
 		Signature:          path,
-	})
-
-	if tier < 1 {
-		return symbols
 	}
-
-	// Extract common symbols by extension and naming conventions
+	if content == nil {
+		return []Symbol{file}, nil
+	}
+	file.ContentHash = sha256Hex([]byte(*content))
+	file.Range = fmt.Sprintf("1-%d", strings.Count(*content, "\n")+1)
+	symbols := []Symbol{file}
+	if tier < 1 {
+		return symbols, nil
+	}
 	switch language {
 	case "go":
-		symbols = append(symbols, extractGoSymbols(base, dir, path, repoID)...)
-	case "python":
-		symbols = append(symbols, extractPythonSymbols(base, dir, path, repoID)...)
-	case "typescript", "javascript":
-		symbols = append(symbols, extractTSJSSymbols(base, dir, path, language, repoID)...)
-	case "configuration":
-		symbols = append(symbols, extractConfigurationSymbols(base, path, repoID)...)
+		decls, err := extractGoSymbolsFromSource(path, *content, repoID)
+		if err != nil {
+			return nil, err
+		}
+		symbols = append(symbols, decls...)
+	case "python", "typescript", "javascript", "rust":
+		decls, err := extractTreeSitterSymbols(path, language, *content, repoID)
+		if err != nil {
+			return nil, err
+		}
+		for i := range decls {
+			decls[i].ParentSymbol = file.ID
+		}
+		symbols = append(symbols, decls...)
 	}
-
-	return symbols
+	return symbols, nil
 }
 
-func extractGoSymbols(base, dir, path, repoID string) []Symbol {
-	var symbols []Symbol
-	// Package
-	pkgName := filepath.Base(dir)
-	if pkgName == "." {
-		pkgName = "main"
+// extractGoSymbolsFromSource parses Go source with go/ast and returns the
+// package symbol plus one symbol per top-level declaration.
+func extractGoSymbolsFromSource(path, content, repoID string) ([]Symbol, error) {
+	pkgName, decls, err := extractGoDeclarations(path, content)
+	if err != nil {
+		return nil, err
 	}
-	pkgID := symbolScope(repoID, dir)
-	symbols = append(symbols, Symbol{
-		ID:                 "pkg:" + pkgID[:12],
+	pkgID := symbolScope(repoID, path+"\x00package:"+pkgName)
+	symbols := []Symbol{{
+		ID:                 pkgID[:16],
 		RepoID:             repoID,
 		FullyQualifiedName: pkgName,
 		Kind:               "package",
 		Path:               path,
-		Range:              "1-",
+		Range:              fmt.Sprintf("1-%d", strings.Count(content, "\n")+1),
 		Language:           "go",
-		ContentHash:        pkgID,
-	})
-	return symbols
-}
-
-func extractPythonSymbols(base, dir, path, repoID string) []Symbol {
-	var symbols []Symbol
-	moduleName := strings.TrimSuffix(base, ".py")
-	modID := symbolScope(repoID, path)
-	symbols = append(symbols, Symbol{
-		ID:                 "mod:" + modID[:12],
-		RepoID:             repoID,
-		FullyQualifiedName: moduleName,
-		Kind:               "module",
-		Path:               path,
-		Range:              "1-",
-		Language:           "python",
-		ContentHash:        modID,
-	})
-	return symbols
-}
-
-func extractTSJSSymbols(base, dir, path, language, repoID string) []Symbol {
-	var symbols []Symbol
-	moduleName := strings.TrimSuffix(base, ".ts")
-	moduleName = strings.TrimSuffix(moduleName, ".tsx")
-	moduleName = strings.TrimSuffix(moduleName, ".js")
-	moduleName = strings.TrimSuffix(moduleName, ".jsx")
-	modID := symbolScope(repoID, path)
-	symbols = append(symbols, Symbol{
-		ID:                 "ts:" + modID[:12],
-		RepoID:             repoID,
-		FullyQualifiedName: moduleName,
-		Kind:               "module",
-		Path:               path,
-		Range:              "1-",
-		Language:           language,
-		ContentHash:        modID,
-	})
-	return symbols
-}
-
-func extractConfigurationSymbols(base, path, repoID string) []Symbol {
-	configID := symbolScope(repoID, "config:"+path)
-	return []Symbol{{
-		ID:                 "cfg:" + configID[:12],
-		RepoID:             repoID,
-		FullyQualifiedName: base,
-		Kind:               "configuration",
-		Path:               path,
-		Range:              "1-",
-		Language:           "configuration",
-		ContentHash:        configID,
-		Signature:          path,
+		ContentHash:        sha256Hex([]byte(content)),
+		Signature:          "package " + pkgName,
 	}}
+	for _, d := range decls {
+		fqn := d.FullyQualifiedName(pkgName)
+		id := symbolScope(repoID, path+"\x00"+fqn+"\x00"+d.ContentHash)
+		visibility := "private"
+		if d.Name != "" && strings.ToUpper(d.Name[:1]) == d.Name[:1] {
+			visibility = "public"
+		}
+		symbols = append(symbols, Symbol{
+			ID:                 id[:16],
+			RepoID:             repoID,
+			FullyQualifiedName: fqn,
+			Kind:               d.Kind,
+			Signature:          d.Signature,
+			Path:               path,
+			Range:              fmt.Sprintf("%d-%d", d.StartLine, d.EndLine),
+			ParentSymbol:       pkgID[:16],
+			Language:           "go",
+			ContentHash:        d.ContentHash,
+			DocComment:         d.DocComment,
+			Visibility:         visibility,
+			CalledNames:        d.CalledNames,
+		})
+	}
+	return symbols, nil
+}
+
+// sourceLines returns the 1-based inclusive line span of content.
+func sourceLines(content string, start, end int) string {
+	lines := strings.Split(content, "\n")
+	if start < 1 {
+		start = 1
+	}
+	if end > len(lines) {
+		end = len(lines)
+	}
+	if start > end {
+		return ""
+	}
+	return strings.Join(lines[start-1:end], "\n")
 }
 
 // ── language detection ───────────────────────────────────────────────────

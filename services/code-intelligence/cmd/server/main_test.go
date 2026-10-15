@@ -58,54 +58,87 @@ func TestDetectLanguage(t *testing.T) {
 }
 
 func TestExtractSymbolsTier0(t *testing.T) {
-	symbols := extractSymbols("/path/to/file.txt", "unknown", 0, "repo-1")
-	if len(symbols) != 1 {
-		t.Fatalf("expected 1 symbol (file), got %d", len(symbols))
+	symbols, err := extractSymbols("/path/to/file.txt", "unknown", 0, "repo-1", nil)
+	if err != nil || len(symbols) != 1 {
+		t.Fatalf("expected 1 file symbol, got %d (%v)", len(symbols), err)
 	}
-	if symbols[0].Kind != "file" {
-		t.Fatalf("expected file kind, got %s", symbols[0].Kind)
+	if symbols[0].Kind != "file" || symbols[0].ContentHash != "" {
+		t.Fatalf("path-only file must not claim a content hash: %+v", symbols[0])
+	}
+}
+
+func TestExtractSymbolsPathOnlyClaimsNothing(t *testing.T) {
+	symbols, err := extractSymbols("/src/cmd/server/main.go", "go", 1, "repo-1", nil)
+	if err != nil || len(symbols) != 1 || symbols[0].Kind != "file" {
+		t.Fatalf("path-only Go file must yield only its file record, got %+v (%v)", symbols, err)
 	}
 }
 
 func TestExtractGoSymbols(t *testing.T) {
-	symbols := extractSymbols("/src/cmd/server/main.go", "go", 1, "repo-1")
-	foundPkg := false
+	src := "package server\n\n// Handle serves a request.\nfunc Handle() { helper() }\n\nfunc helper() {}\n\ntype Config struct{ Addr string }\n"
+	symbols, err := extractSymbols("/src/cmd/server/main.go", "go", 1, "repo-1", &src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Symbol{}
 	for _, s := range symbols {
-		if s.Kind == "package" {
-			foundPkg = true
-			break
+		byName[s.FullyQualifiedName] = s
+	}
+	if byName["server"].Kind != "package" {
+		t.Fatalf("expected parsed package symbol, got %+v", symbols)
+	}
+	handle := byName["server.Handle"]
+	if handle.Kind != "function" || handle.DocComment != "Handle serves a request." || handle.Range != "4-4" || handle.Visibility != "public" || handle.ContentHash == "" {
+		t.Fatalf("unexpected Handle symbol %+v", handle)
+	}
+	if byName["server.helper"].Visibility != "private" || byName["server.Config"].Kind != "type" {
+		t.Fatalf("unexpected declarations %+v", symbols)
+	}
+	if symbols[0].ContentHash != sha256Hex([]byte(src)) {
+		t.Fatal("file content hash must hash the file content")
+	}
+	changed := src + "\nvar X = 1\n"
+	again, _ := extractSymbols("/src/cmd/server/main.go", "go", 1, "repo-1", &changed)
+	for _, s := range again {
+		if s.FullyQualifiedName == "server.Handle" && s.ContentHash != handle.ContentHash {
+			t.Fatal("unchanged declaration must keep its span hash when another declaration changes")
 		}
 	}
-	if !foundPkg {
-		t.Fatal("expected package symbol for Go file")
+	bad := "package server\nfunc {"
+	if _, err := extractSymbols("/src/bad.go", "go", 1, "repo-1", &bad); err == nil {
+		t.Fatal("unparseable Go must be an error")
 	}
 }
 
 func TestExtractPythonSymbols(t *testing.T) {
-	symbols := extractSymbols("/src/models.py", "python", 1, "repo-1")
-	foundMod := false
-	for _, s := range symbols {
-		if s.Kind == "module" {
-			foundMod = true
-			break
-		}
+	src := "class Model:\n    def save(self):\n        return persist(self)\n\ndef persist(x):\n    return x\n"
+	symbols, err := extractSymbols("/src/models.py", "python", 1, "repo-1", &src)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !foundMod {
-		t.Fatal("expected module symbol for Python file")
+	kinds := map[string]string{}
+	for _, s := range symbols {
+		kinds[s.FullyQualifiedName] = s.Kind
+	}
+	if kinds["models.Model"] != "class" || kinds["models.Model.save"] != "method" || kinds["models.persist"] != "function" {
+		t.Fatalf("unexpected python symbols %v", kinds)
 	}
 }
 
 func TestExtractTSJSSymbols(t *testing.T) {
-	symbols := extractSymbols("/src/app.tsx", "typescript", 1, "repo-1")
-	foundMod := false
+	src := "export function render(): string { return format(1) }\nfunction format(n: number) { return String(n) }\n"
+	symbols, err := extractSymbols("/src/app.ts", "typescript", 1, "repo-1", &src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
 	for _, s := range symbols {
-		if s.Kind == "module" {
-			foundMod = true
-			break
+		if s.FullyQualifiedName == "app.render" && s.Kind == "function" {
+			found = true
 		}
 	}
-	if !foundMod {
-		t.Fatal("expected module symbol for TypeScript file")
+	if !found {
+		t.Fatalf("expected parsed TypeScript function, got %+v", symbols)
 	}
 }
 
@@ -180,8 +213,8 @@ func TestExecuteTestDiscovery(t *testing.T) {
 	if len(results) == 0 {
 		t.Fatalf("expected at least 1 result")
 	}
-	if results[0].Plane != "runtime_evidence" {
-		t.Fatalf("expected runtime_evidence plane, got %s", results[0].Plane)
+	if results[0].Plane != "test_relation" {
+		t.Fatalf("expected test_relation plane, got %s", results[0].Plane)
 	}
 }
 
@@ -247,14 +280,30 @@ func TestExecuteReferenceSearch(t *testing.T) {
 	}
 }
 
-func TestDeterminePlanes(t *testing.T) {
-	planes := determinePlanes("exact_lookup")
-	if len(planes) != 1 || planes[0] != "exact" {
-		t.Fatalf("unexpected planes: %v", planes)
+func TestPlaneReporting(t *testing.T) {
+	if planeForIntent("exact_lookup") != "exact" || planeForIntent("bug_localisation") != "lexical" {
+		t.Fatal("unexpected plane mapping")
 	}
-	planes = determinePlanes("change_impact")
-	if len(planes) != 3 {
-		t.Fatalf("expected 3 planes for change_impact, got %d", len(planes))
+	used := planesUsed([]CodeQueryResult{{Plane: "symbol"}, {Plane: "symbol"}, {Plane: "exact"}})
+	if len(used) != 2 || used[0] != "symbol" || used[1] != "exact" {
+		t.Fatalf("planesUsed = %v", used)
+	}
+	if got := planesUsed(nil); len(got) != 0 {
+		t.Fatalf("no results must report no planes used, got %v", got)
+	}
+}
+
+func TestLexicalScoreOrdersMatches(t *testing.T) {
+	q := "reduce"
+	exact := lexicalScore("reduce", q)
+	segment := lexicalScore("pkg.OutputReducer.reduce", q)
+	prefix := lexicalScore("reducer_factory", q)
+	inner := lexicalScore("outputreducer", q)
+	if !(exact == 1 && exact > segment && segment > prefix && prefix > inner && inner > 0) {
+		t.Fatalf("scores exact=%v segment=%v prefix=%v inner=%v", exact, segment, prefix, inner)
+	}
+	if lexicalScore("unrelated", q) != 0 || lexicalScore("", q) != 0 {
+		t.Fatal("non-matches must score zero")
 	}
 }
 
@@ -288,7 +337,10 @@ func TestIndexFiles(t *testing.T) {
 	gen := &IndexGeneration{Generation: 1, RepoID: "repo-1", Status: "active"}
 	for _, file := range []string{"/test/repo/main.go", "/test/repo/app.py"} {
 		lang := detectLanguage(file)
-		symbols := extractSymbols(file, lang, 1, "repo-1")
+		symbols, err := extractSymbols(file, lang, 1, "repo-1", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, sym := range symbols {
 			store.symbols[sym.ID] = &sym
 			store.chunks[sym.ID] = &Chunk{SymbolID: sym.ID}
@@ -312,8 +364,9 @@ func TestExtractSymbolsRepoScoped(t *testing.T) {
 	// Two repositories indexing the identical relative path must not collide
 	// in the shared global symbol/chunk maps, and a scoped query must never
 	// return the other repository's symbols.
-	symbolsA := extractSymbols("/src/main.go", "go", 1, "repo-a")
-	symbolsB := extractSymbols("/src/main.go", "go", 1, "repo-b")
+	src := "package main\n\nfunc main() {}\n"
+	symbolsA, _ := extractSymbols("/src/main.go", "go", 1, "repo-a", &src)
+	symbolsB, _ := extractSymbols("/src/main.go", "go", 1, "repo-b", &src)
 	if len(symbolsA) != len(symbolsB) {
 		t.Fatalf("expected identical symbol counts, got %d vs %d", len(symbolsA), len(symbolsB))
 	}
@@ -587,18 +640,6 @@ func TestContextAssembly(t *testing.T) {
 	}
 	if chunk.Content != "type MyStruct struct{}" {
 		t.Fatal("chunk content mismatch")
-	}
-}
-
-func TestDeterminePlanesAll(t *testing.T) {
-	intents := []string{"exact_lookup", "symbol_lookup", "reference_search",
-		"implementation_search", "architecture_question", "bug_localisation",
-		"change_impact", "test_discovery", "configuration_lookup", "unknown"}
-	for _, intent := range intents {
-		planes := determinePlanes(intent)
-		if len(planes) == 0 {
-			t.Errorf("expected at least 1 plane for %s", intent)
-		}
 	}
 }
 
@@ -886,5 +927,42 @@ func TestIndexCreatesConfigurationSymbols(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("configuration lookup did not surface the indexed config symbol: %+v", results)
+	}
+}
+
+func TestIndexWithSourcesParsesDeclarations(t *testing.T) {
+	store := newCodeStore()
+	registerDefaultAdapters(store)
+	store.repos["repo-1"] = &Repository{ID: "repo-1", TenantID: "tenant-1", CanonicalPath: "/repo", Branch: "main"}
+	srv := &server{store: store}
+
+	body := `{"repository_id":"repo-1","commit_id":"c1","files":["README.md"],"sources":[{"path":"svc/handler.go","content":"package svc\n\n// Serve answers.\nfunc Serve() string {\n\treturn \"ok\"\n}\n"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(body))
+	req.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	res := httptest.NewRecorder()
+	srv.handleIndex(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("index: %d %s", res.Code, res.Body.String())
+	}
+	if store.generations["repo-1"].FileCount != 2 {
+		t.Fatalf("file count = %d", store.generations["repo-1"].FileCount)
+	}
+	results := srv.executeQuery(CodeQuery{Intent: "symbol_lookup", Query: "Serve", RepoID: "repo-1", MaxResults: 5})
+	if len(results) != 1 || results[0].Symbol.FullyQualifiedName != "svc.Serve" {
+		t.Fatalf("symbol lookup = %+v", results)
+	}
+	if !strings.Contains(results[0].Chunk.Content, "return \"ok\"") || results[0].Chunk.LineStart != 4 || results[0].Chunk.LineEnd != 6 {
+		t.Fatalf("chunk must be the declaration's source span: %+v", results[0].Chunk)
+	}
+
+	bad := httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewBufferString(`{"repository_id":"repo-1","sources":[{"path":"x.go","content":"package x\nfunc {"}]}`))
+	bad.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+	badRes := httptest.NewRecorder()
+	srv.handleIndex(badRes, bad)
+	if badRes.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unparseable source should be 422, got %d", badRes.Code)
+	}
+	if store.generations["repo-1"].CommitID != "c1" {
+		t.Fatal("a failed index must not replace the committed generation")
 	}
 }
