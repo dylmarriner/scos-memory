@@ -384,6 +384,14 @@ func (s *securityServer) authenticatedToken(r *http.Request) (*AuthToken, bool) 
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(authorization, prefix))
 	if !s.validToken(token) {
+		// The fabric's own identity is a claims token signed with the
+		// issuer secret, which the auth middleware has already verified. It
+		// carries no data-class ceiling of its own, so the principal's
+		// grants alone bound what it may touch, short of secret: reaching
+		// secret material takes a token this gate issued at that class.
+		if claims, ok := auth.CanonicalClaims(r.Context()); ok && isUUID(claims.TenantID) && isUUID(claims.PrincipalID) {
+			return &AuthToken{Principal: claims.PrincipalID, AgentID: claims.AgentID, Tenant: claims.TenantID, DataClass: ClassRestricted}, true
+		}
 		return nil, false
 	}
 	authToken, ok, err := lookupToken(r.Context(), s.db, tokenPublicPart(token))

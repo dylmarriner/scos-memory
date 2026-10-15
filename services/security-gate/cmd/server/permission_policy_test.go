@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 const (
@@ -286,5 +288,20 @@ func TestPermissionDelegationRequiresBearerToken(t *testing.T) {
 	s.handlePermissionDelegations(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for a forged token, got %d", rec.Code)
+	}
+}
+
+func TestAuthenticatedTokenAcceptsAVerifiedClaimsIdentityBelowSecret(t *testing.T) {
+	s := &securityServer{}
+	tenant, principal := "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"
+	r := httptest.NewRequest(http.MethodPost, "/v1/permissions/check", nil)
+	r.Header.Set("Authorization", "Bearer header.payload.signature")
+	if _, ok := s.authenticatedToken(r); ok {
+		t.Fatal("a bearer without verified claims must not authenticate")
+	}
+	r = r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: tenant, PrincipalID: principal}))
+	tok, ok := s.authenticatedToken(r)
+	if !ok || tok.Tenant != tenant || tok.Principal != principal || tok.DataClass != ClassRestricted {
+		t.Fatalf("claims identity = %+v, %v", tok, ok)
 	}
 }
