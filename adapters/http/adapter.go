@@ -23,7 +23,9 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
-// CheckHealth queries target service live health endpoint.
+// CheckHealth queries the target service's liveness endpoint. A transport
+// failure is returned as an error (the service could not be asked), distinct
+// from a reachable service reporting itself unhealthy (false, nil).
 func (c *Client) CheckHealth(ctx context.Context) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/health/live", nil)
 	if err != nil {
@@ -31,7 +33,7 @@ func (c *Client) CheckHealth(ctx context.Context) (bool, error) {
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return false, nil
+		return false, err
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK, nil

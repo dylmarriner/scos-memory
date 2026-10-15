@@ -22,3 +22,23 @@ func TestExecutionAdapter(t *testing.T) {
 		t.Fatalf("expected reduced output marker, got: %s", reduced)
 	}
 }
+
+func TestClassifyRiskSharedPolicy(t *testing.T) {
+	cases := map[string]string{
+		"ls -la":             RiskRead,
+		"mkdir build":        RiskWrite,
+		"go test ./...":      RiskTest,
+		"rm -rf /tmp/x":      RiskDestructive,
+		"cat a | rm b":       RiskDestructive,
+		"kubectl delete pod": RiskDestructive,
+	}
+	for cmd, want := range cases {
+		if got := ClassifyRisk(cmd); got != want {
+			t.Errorf("ClassifyRisk(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+	d := &DefaultAdapter{}
+	if _, err := d.RewriteCommand("   "); err == nil {
+		t.Fatal("empty command must be rejected")
+	}
+}

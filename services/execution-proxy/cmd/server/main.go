@@ -1,4 +1,6 @@
 package main
+
+import executionadapters "github.com/dylmarriner/scos-memory/packages/execution-adapters"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -938,67 +940,10 @@ func (s *proxyServer) planCommand(req ExecuteRequest) CommandPlan {
 	return plan
 }
 
-func classifyRisk(command string) string {
-	lower := strings.ToLower(strings.TrimSpace(command))
-
-	// Check for destructive operations
-	destructiveKeywords := []string{"rm ", "rmdir ", "dd ", "mkfs", "format", "fdisk",
-		"drop ", "truncate", "> /dev/", "chmod 0", "chown ", ":(){ :|:&};:", "mv ",
-		"sudo ", "su ", "passwd", "useradd", "usermod", "groupadd",
-		"shutdown", "reboot", "poweroff", "init ", "systemctl ", "service ",
-		"iptables", "ufw ", "tcpdump", "nmap",
-		"git push", "git merge", "git rebase", "git reset", "git commit",
-		"pip install", "npm install -g", "apt install", "yum install", "brew install",
-		"docker rm", "docker rmi", "docker stop", "docker kill",
-		"kubectl delete", "kubectl apply", "helm install", "helm delete",
-		"mysql ", "psql ",
-		"post ", "put ", "delete ", "patch ",
-	}
-
-	for _, kw := range destructiveKeywords {
-		if strings.HasPrefix(lower, kw) {
-			return "destructive"
-		}
-	}
-	// A composed shell command can hide a side effect after a read command.
-	// Treat it conservatively when a destructive token appears anywhere.
-	if strings.ContainsAny(lower, ";|&\n`)$(") {
-		for _, kw := range destructiveKeywords {
-			if strings.Contains(lower, strings.TrimSpace(kw)) {
-				return "destructive"
-			}
-		}
-	}
-
-	// Check for write operations
-	writeKeywords := []string{"touch ", "mkdir ", "cp ", "ln ", ">", ">>",
-		"echo ", "printf ", "write", "tee", "sed -i", "awk",
-		"git add", "git checkout", "git branch", "git tag",
-		"npm install", "npm run", "yarn ", "npx ",
-		"docker build", "docker compose", "docker-compose",
-		"make ", "go build", "go install", "cargo build",
-		"terraform ", "ansible-", "pulumi",
-		"ssh ", "scp ", "rsync",
-	}
-
-	for _, kw := range writeKeywords {
-		if strings.HasPrefix(lower, kw) {
-			return "write"
-		}
-	}
-
-	// Test operations
-	testKeywords := []string{"go test", "python -m pytest", "npm test", "yarn test",
-		"cargo test", "jest", "pytest", "rspec", "mocha"}
-	for _, kw := range testKeywords {
-		if strings.HasPrefix(lower, kw) {
-			return "test"
-		}
-	}
-
-	// Default: read
-	return "read"
-}
+// classifyRisk is the shared command risk classifier (see
+// packages/execution-adapters), so the proxy and every client-side wrapper
+// grade a command identically.
+func classifyRisk(command string) string { return executionadapters.ClassifyRisk(command) }
 
 func (s *proxyServer) applyRewrites(command string, riskLevel string) (string, string) {
 	return s.applyRewritesForMode(command, riskLevel, false)

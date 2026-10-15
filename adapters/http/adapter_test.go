@@ -13,3 +13,10 @@ func TestHTTPClient(t *testing.T) {
 
 	_, _ = cli.CheckHealth(context.Background())
 }
+
+func TestCheckHealthDistinguishesUnreachableFromUnhealthy(t *testing.T) {
+	c := NewClient("http://127.0.0.1:1")
+	if ok, err := c.CheckHealth(context.Background()); ok || err == nil {
+		t.Fatalf("unreachable service must be an error, got ok=%v err=%v", ok, err)
+	}
+}

@@ -309,11 +309,11 @@ def _proxy_candidate(case: dict[str, Any]) -> dict[str, Any]:
     reducer = OutputReducer()
     rewrite = reducer.rewrite_command(case["command"])
     raw = case["command"]
-    # A rewritten (blocked) command returns the safety message that was
-    # actually substituted, not the raw dangerous command; token count is
+    # A blocked command returns the policy reason it was blocked for, not the
+    # raw dangerous command; token count is
     # not a meaningful signal for that substitution (see the token_reduction
     # exclusion below), only that the danger was actually intercepted.
-    output = rewrite.rewritten_command if rewrite.is_rewritten else reducer.reduce_output(raw, max_bytes=80)
+    output = rewrite.reason if rewrite.is_rewritten else reducer.reduce_output(raw, max_bytes=80)
     return {"output": output, "rewritten": rewrite.is_rewritten, "failure_preserved": case["failure"] == rewrite.is_rewritten,
             "raw_restorable": raw == case["command"]}
 
