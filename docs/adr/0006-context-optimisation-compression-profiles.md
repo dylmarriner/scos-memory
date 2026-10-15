@@ -26,6 +26,31 @@ High-impact or restricted tasks default to `exact` or `conservative`
 (§18.4); nothing upgrades a task's default profile without an explicit,
 recorded request.
 
+## Wire contract (compiler 0.2.0, policy `context-policy-2`)
+
+- Every token count uses one estimate, `utf8_bytes_div_4_ceil`, named in
+  `token_accounting.method` and in the output and evaluate responses.
+  `compiled_token_count` is the estimate of `compiled_text` as returned,
+  segment headers included, so framing overhead can make
+  `reduction_ratio` negative.
+- `transformations` lists only what changed this input, each with the
+  source byte ranges it acted on and their token counts before and after.
+  `included_ranges`/`excluded_ranges` partition the stored source.
+- `capsule_id` is derived from the kind, source hash, policy hash and
+  compiled hash, and a manifest is stored under it beside the source; POST
+  `/v1/context/restore` with `{"capsule_id": ...}` (or the full capsule,
+  whose source objects must match) returns the source. Output optimisation
+  stores the raw output the same way.
+- `validation.checks` are measured: retention of hints, exact values and
+  pinned references; `source_hash_recorded` and `restoration_verified` read
+  the source and capsule back from the store.
+- `code_symbols` and `memory_references` must occur in the input; segments
+  containing them are kept verbatim and checked. `model`,
+  `session_context` and `request_intent` had no implementation and are
+  rejected as unknown fields, as are unknown profiles and the `diff`
+  output format.
+- Readiness writes to the configured source store, not the temp directory.
+
 ## Consequences
 
 - Every compacted artifact is restorable by construction, not by

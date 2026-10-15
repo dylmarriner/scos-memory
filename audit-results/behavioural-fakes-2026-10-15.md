@@ -49,10 +49,10 @@ fixed), **VERIFY** (auditor claim not yet independently reproduced).
 - Standing-answer shortcut skips the sensitivity filter and the run record. — VERIFY
 
 ### Context optimisation
-- Hard-coded list of 14 transformations returned for every profile (8 unimplemented); ranges and token accounting constant; `source_hash_recorded` literal true. — OPEN
-- Pass-through segments count 0 compiled tokens, inflating reduction ratio; restoration and exact-value metrics are constants. — OPEN
-- Model, session context, code symbols, memory references and output intent accepted and ignored; output `capsule_id` is random and unrestorable. — OPEN
-- Readiness checks `os.TempDir()` instead of the source store. — OPEN
+- Hard-coded list of 14 transformations returned for every profile (8 unimplemented); ranges and token accounting constant; `source_hash_recorded` literal true. — FIXED: only transformations applied to the input are reported, with source byte ranges and before/after tokens (one estimate, `utf8_bytes_div_4_ceil`); included/excluded ranges partition the source; `source_hash_recorded` reads the source back from the store
+- Pass-through segments count 0 compiled tokens, inflating reduction ratio; restoration and exact-value metrics are constants. — FIXED: compiled tokens are measured on the returned text (headers included); exact-value and instruction retention are retained/total ratios; restoration success is a real restore of the capsule just written
+- Model, session context, code symbols, memory references and output intent accepted and ignored; output `capsule_id` is random and unrestorable. — FIXED: `model`, `session_context`, `request_intent` (and unknown profiles, `diff` format) rejected with 400; code symbols and memory references are verified retention pins; input and output capsule ids are content-derived, recorded in a manifest and restorable via `/v1/context/restore {"capsule_id"}`
+- Readiness checks `os.TempDir()` instead of the source store. — FIXED: readiness writes to the configured source store
 
 ### Memory intelligence
 - `/v1/reflect` beliefs are facts scaled by 0.9; "stale" means "agrees with its evidence". — OPEN

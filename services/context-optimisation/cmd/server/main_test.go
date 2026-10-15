@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestCanonicaliseRemovesBOM(t *testing.T) {
@@ -209,24 +210,48 @@ func TestClassBudgetFor(t *testing.T) {
 }
 
 func TestSummary(t *testing.T) {
-	s := summarise("This is a long piece of content. It has multiple sentences.", "test")
+	s, kept := summarise("This is a long piece of content. It has multiple sentences.", "test")
 	if !strings.Contains(s, "[test summary]") {
 		t.Fatal("summary should include class tag")
 	}
 	if !strings.Contains(s, "This is a long piece of content.") {
 		t.Fatal("summary should include first sentence")
 	}
+	if kept != len("This is a long piece of content.") {
+		t.Fatalf("summary reported %d retained bytes", kept)
+	}
 }
 
-func TestCapsuleID(t *testing.T) {
-	id := newCapsuleID()
-	// Format: 16 hex chars + "-" + 4 hex chars + "-" + 12 hex chars = 34
-	if len(id) != 34 {
-		t.Fatalf("expected 34 chars (UUID-like), got %d: %q", len(id), id)
+func TestSummaryDoesNotSplitRunes(t *testing.T) {
+	content := strings.Repeat("é", 150)
+	s, kept := summarise(content, "test")
+	if kept > 200 || !utf8.ValidString(s) || !strings.HasPrefix(content, content[:kept]) {
+		t.Fatalf("summary cut inside a rune: kept=%d valid=%v", kept, utf8.ValidString(s))
 	}
-	parts := strings.Split(id, "-")
-	if len(parts) != 3 {
-		t.Fatalf("expected 3 parts, got %d", len(parts))
+}
+
+func TestCapsuleIDIsDerivedFromContent(t *testing.T) {
+	a := deriveCapsuleID("input", sha256Hex([]byte("a")), "p", "c")
+	if a != deriveCapsuleID("input", sha256Hex([]byte("a")), "p", "c") {
+		t.Fatal("capsule id must be deterministic")
+	}
+	if !validCapsuleID(a) {
+		t.Fatalf("derived id %q is not a valid capsule id", a)
+	}
+	for _, other := range []string{
+		deriveCapsuleID("output", sha256Hex([]byte("a")), "p", "c"),
+		deriveCapsuleID("input", sha256Hex([]byte("b")), "p", "c"),
+		deriveCapsuleID("input", sha256Hex([]byte("a")), "q", "c"),
+		deriveCapsuleID("input", sha256Hex([]byte("a")), "p", "d"),
+	} {
+		if other == a {
+			t.Fatal("capsule id must change with kind, source, policy and compiled content")
+		}
+	}
+	for _, bad := range []string{"", "c1", "capsule-xyz", "capsule-" + strings.Repeat("g", 32), "../capsule-" + strings.Repeat("a", 32)} {
+		if validCapsuleID(bad) {
+			t.Fatalf("%q accepted as a capsule id", bad)
+		}
 	}
 }
 
@@ -237,23 +262,24 @@ func TestSha256Hex(t *testing.T) {
 	}
 }
 
-func TestBuildCapsule(t *testing.T) {
-	segments := []Segment{
-		{Class: "test", Content: "hello", OriginalTokens: 5},
+func TestCompileContextBuildsCapsule(t *testing.T) {
+	store := newFileSourceStore(t.TempDir())
+	resp, _, err := compileContext(InputOptimiseRequest{Input: "hello"}, store)
+	if err != nil {
+		t.Fatal(err)
 	}
-	compiled := []Segment{
-		{Class: "test", Content: "hi", CompiledTokens: 2},
-	}
-	alloc := allocateBudget(8000, "balanced", nil)
-	capsule := buildCapsule("hello", "balanced", segments, compiled, alloc)
+	capsule := resp.Capsule
 	if capsule.Profile != "balanced" {
 		t.Fatal("profile mismatch")
 	}
 	if capsule.CompilerVersion != version {
 		t.Fatal("version mismatch")
 	}
-	if capsule.CapsuleID == "" {
-		t.Fatal("expected capsule ID")
+	if !validCapsuleID(capsule.CapsuleID) {
+		t.Fatalf("expected a derived capsule id, got %q", capsule.CapsuleID)
+	}
+	if capsule.TokenBudget != defaultTokenBudget {
+		t.Fatalf("expected default budget, got %d", capsule.TokenBudget)
 	}
 }
 
@@ -303,7 +329,7 @@ func TestContextRestoreResolvesExactAuthoritativeSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body, _ := json.Marshal(contextRestoreRequest{Capsule: response.Capsule})
+	body, _ := json.Marshal(contextRestoreRequest{Capsule: &response.Capsule})
 	restore := httptest.NewRecorder()
 	handleContextRestore(restore, httptest.NewRequest(http.MethodPost, "/v1/context/restore", bytes.NewReader(body)))
 	if restore.Code != http.StatusOK {
@@ -320,40 +346,538 @@ func TestContextRestoreResolvesExactAuthoritativeSource(t *testing.T) {
 	}
 }
 
-func TestContextRestoreRejectsTamperedSource(t *testing.T) {
-	store := newFileSourceStore(t.TempDir())
+// useStore points the handlers at store for the duration of the test.
+func useStore(t *testing.T, store SourceStore) {
+	t.Helper()
 	previous := authoritativeSourceStore
 	authoritativeSourceStore = store
 	t.Cleanup(func() { authoritativeSourceStore = previous })
-	content := "authoritative content"
-	hash := sha256Hex([]byte(content))
-	objectID := "source-" + hash[:32]
-	if err := store.Put(objectID, "1", hash, content); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(store.root, objectID+"-1.source"), []byte("tampered"), 0600); err != nil {
-		t.Fatal(err)
-	}
+}
 
-	capsule := ContextCapsule{CapsuleID: "c1", SourceObjects: []SourceObjectRef{{ObjectID: objectID, Version: "1", ContentHash: hash}}}
-	body, _ := json.Marshal(contextRestoreRequest{Capsule: capsule})
+func postJSON(t *testing.T, handler http.HandlerFunc, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := httptest.NewRecorder()
-	handleContextRestore(w, httptest.NewRequest(http.MethodPost, "/v1/context/restore", bytes.NewReader(body)))
+	handler(w, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw)))
+	return w
+}
+
+func compileForTest(t *testing.T, req InputOptimiseRequest) InputOptimiseResponse {
+	t.Helper()
+	w := postJSON(t, handleInputOptimise, "/v1/context/compile", req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("compile failed: %d %s", w.Code, w.Body.String())
+	}
+	var resp InputOptimiseResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestContextRestoreRejectsTamperedSource(t *testing.T) {
+	store := newFileSourceStore(t.TempDir())
+	useStore(t, store)
+	resp := compileForTest(t, InputOptimiseRequest{Input: "authoritative content"})
+	source := resp.Capsule.SourceObjects[0]
+	if err := os.WriteFile(filepath.Join(store.root, source.ObjectID+"-1.source"), []byte("tampered"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{CapsuleID: resp.Capsule.CapsuleID})
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected tamper conflict, got %d", w.Code)
 	}
 }
 
+func TestContextRestoreRejectsTamperedManifest(t *testing.T) {
+	store := newFileSourceStore(t.TempDir())
+	useStore(t, store)
+	original := compileForTest(t, InputOptimiseRequest{Input: "original content"})
+	other := compileForTest(t, InputOptimiseRequest{Input: "other content"})
+	// Re-point the first capsule's manifest at the other source.
+	manifestPath := filepath.Join(store.root, original.Capsule.CapsuleID+"-"+manifestVersion+".source")
+	body, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest capsuleManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.SourceObjects = other.Capsule.SourceObjects
+	edited, _ := json.Marshal(manifest)
+	if err := os.WriteFile(manifestPath, edited, 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{CapsuleID: original.Capsule.CapsuleID})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected manifest tamper conflict, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestContextRestoreRejectsMissingSource(t *testing.T) {
-	previous := authoritativeSourceStore
-	authoritativeSourceStore = newFileSourceStore(t.TempDir())
-	t.Cleanup(func() { authoritativeSourceStore = previous })
-	capsule := ContextCapsule{CapsuleID: "c1", SourceObjects: []SourceObjectRef{{ObjectID: "missing", Version: "1", ContentHash: strings.Repeat("a", 64)}}}
-	body, _ := json.Marshal(contextRestoreRequest{Capsule: capsule})
-	w := httptest.NewRecorder()
-	handleContextRestore(w, httptest.NewRequest(http.MethodPost, "/v1/context/restore", bytes.NewReader(body)))
+	store := newFileSourceStore(t.TempDir())
+	useStore(t, store)
+	resp := compileForTest(t, InputOptimiseRequest{Input: "content that will go missing"})
+	source := resp.Capsule.SourceObjects[0]
+	if err := os.Remove(filepath.Join(store.root, source.ObjectID+"-1.source")); err != nil {
+		t.Fatal(err)
+	}
+	w := postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{CapsuleID: resp.Capsule.CapsuleID})
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected missing-source failure, got %d", w.Code)
+	}
+}
+
+func TestContextRestoreRejectsUnknownCapsule(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	w := postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{CapsuleID: "capsule-" + strings.Repeat("a", 32)})
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected unknown capsule to be 404, got %d", w.Code)
+	}
+	w = postJSON(t, handleContextRestore, "/v1/context/restore", map[string]string{"capsule_id": "c1"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected malformed capsule id to be 400, got %d", w.Code)
+	}
+}
+
+// TestContextRestoreRefusesForgedSourceObjects: a caller cannot borrow a real
+// capsule id to read a different stored source.
+func TestContextRestoreRefusesForgedSourceObjects(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	mine := compileForTest(t, InputOptimiseRequest{Input: "my content"})
+	theirs := compileForTest(t, InputOptimiseRequest{Input: "their content"})
+	forged := mine.Capsule
+	forged.SourceObjects = theirs.Capsule.SourceObjects
+	w := postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{Capsule: &forged})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected forged source objects to be refused, got %d", w.Code)
+	}
+	w = postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{CapsuleID: theirs.Capsule.CapsuleID, Capsule: &mine.Capsule})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected mismatched capsule_id to be 400, got %d", w.Code)
+	}
+}
+
+// TestCapsuleIDRestoresByIDAlone: the id in the response is the restore key,
+// and the same input under the same policy always yields the same id.
+func TestCapsuleIDRestoresByIDAlone(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	input := "instruction: keep 550e8400-e29b-41d4-a716-446655440000\r\nbackground   \r\n"
+	first := compileForTest(t, InputOptimiseRequest{Input: input})
+	second := compileForTest(t, InputOptimiseRequest{Input: input})
+	if first.Capsule.CapsuleID != second.Capsule.CapsuleID {
+		t.Fatalf("same input and policy produced different ids: %s %s", first.Capsule.CapsuleID, second.Capsule.CapsuleID)
+	}
+	if first.Capsule.RestorationHandles[0].HandleID != first.Capsule.CapsuleID {
+		t.Fatal("restoration handle must name the restorable capsule id")
+	}
+	other := compileForTest(t, InputOptimiseRequest{Input: input, Profile: "exact"})
+	if other.Capsule.CapsuleID == first.Capsule.CapsuleID {
+		t.Fatal("a different policy must yield a different capsule id")
+	}
+	w := postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{CapsuleID: first.Capsule.CapsuleID})
+	if w.Code != http.StatusOK {
+		t.Fatalf("restore by id failed: %d %s", w.Code, w.Body.String())
+	}
+	var restored struct {
+		CapsuleID string `json:"capsule_id"`
+		Kind      string `json:"kind"`
+		Content   string `json:"content"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Content != input || restored.CapsuleID != first.Capsule.CapsuleID || restored.Kind != "input" {
+		t.Fatalf("restore returned %+v", restored)
+	}
+}
+
+func TestOutputCapsuleIsRestorable(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	raw := "I believe the answer is 42.\n\nLet me check.\nI believe the answer is 42."
+	w := postJSON(t, handleOutputOptimise, "/v1/optimize/output", OutputOptimiseRequest{RawOutput: raw, Format: "compact"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("output optimise failed: %d %s", w.Code, w.Body.String())
+	}
+	var out OutputOptimiseResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Optimised != "the answer is 42." {
+		t.Fatalf("unexpected compact output %q", out.Optimised)
+	}
+	if out.OriginalTokens != estimateTokens(raw) || out.OptimisedTokens != estimateTokens(out.Optimised) ||
+		out.Reduction != out.OriginalTokens-out.OptimisedTokens || out.TokenMethod != tokenMethod {
+		t.Fatalf("output token accounting not measured: %+v", out)
+	}
+	if !validCapsuleID(out.CapsuleID) || out.SourceContentHash != sha256Hex([]byte(raw)) {
+		t.Fatalf("unexpected capsule identity: %+v", out)
+	}
+	restore := postJSON(t, handleContextRestore, "/v1/context/restore", contextRestoreRequest{CapsuleID: out.CapsuleID})
+	if restore.Code != http.StatusOK {
+		t.Fatalf("restore failed: %d %s", restore.Code, restore.Body.String())
+	}
+	var restored struct {
+		Kind    string `json:"kind"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(restore.Body.Bytes(), &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Content != raw || restored.Kind != "output" {
+		t.Fatalf("output restore returned %+v", restored)
+	}
+}
+
+func TestOutputOptimiseRejectsUnimplementedFields(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	cases := map[string]map[string]any{
+		"request_intent was never used": {"raw_output": "x", "request_intent": "summarise"},
+		"diff format is not supported":  {"raw_output": "x", "format": "diff"},
+		"unknown format":                {"raw_output": "x", "format": "yaml"},
+		"negative max tokens":           {"raw_output": "x", "max_tokens": -1},
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if w := postJSON(t, handleOutputOptimise, "/v1/optimize/output", body); w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestCompileRejectsIgnoredOrInvalidFields(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	cases := map[string]map[string]any{
+		"model has no tokenizer":          {"input": "x", "model": "gpt-4"},
+		"session context is unsupported":  {"input": "x", "session_context": map[string]string{"session_id": "s"}},
+		"unknown profile":                 {"input": "x", "profile": "maximal"},
+		"negative budget":                 {"input": "x", "token_budget": -5},
+		"code symbol absent from input":   {"input": "x", "code_symbols": []string{"ParseConfig"}},
+		"memory reference absent":         {"input": "x", "memory_references": []string{"mem-1"}},
+		"empty pinned reference":          {"input": "x", "code_symbols": []string{""}},
+		"missing input":                   {"profile": "exact"},
+		"unknown field from old contract": {"input": "x", "last_capsule_id": "c"},
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if w := postJSON(t, handleInputOptimise, "/v1/context/compile", body); w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestTransformationsReportOnlyAppliedWork: a clean single-segment input
+// under a lossless profile is only framed; nothing else may be claimed.
+func TestTransformationsReportOnlyAppliedWork(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	resp := compileForTest(t, InputOptimiseRequest{Input: "plain clean text", Profile: "exact"})
+	names := transformationNames(resp.Capsule)
+	if len(names) != 1 || names[0] != "segment_framing" {
+		t.Fatalf("expected only segment_framing, got %v", names)
+	}
+	framing := resp.Capsule.Transformations[0]
+	header := len(segmentHeader("optional_background"))
+	if framing.CompiledTokens != tokensForBytes(header) || framing.OriginalTokens != 0 || len(framing.SourceRanges) != 0 {
+		t.Fatalf("framing record not measured: %+v", framing)
+	}
+}
+
+func transformationNames(c ContextCapsule) []string {
+	var names []string
+	for _, tr := range c.Transformations {
+		names = append(names, tr.Name)
+	}
+	return names
+}
+
+func transformationNamed(t *testing.T, c ContextCapsule, name string) TransformationRecord {
+	t.Helper()
+	for _, tr := range c.Transformations {
+		if tr.Name == name {
+			return tr
+		}
+	}
+	t.Fatalf("transformation %q not reported; got %v", name, transformationNames(c))
+	return TransformationRecord{}
+}
+
+func sliceRanges(s string, ranges []ContextRange) []string {
+	var out []string
+	for _, r := range ranges {
+		out = append(out, s[r.Start:r.End])
+	}
+	return out
+}
+
+func TestTransformationRangesAddressTheSource(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	block := "```go\nfunc A() {}\n```"
+	input := "\ufeffintro  \r\n" + block + "\nmiddle\n" + block
+	resp := compileForTest(t, InputOptimiseRequest{Input: input, Profile: "exact"})
+	c := resp.Capsule
+
+	canon := transformationNamed(t, c, "canonicalisation")
+	if got := sliceRanges(input, canon.SourceRanges); strings.Join(got, "|") != "\ufeff|  \r\n" {
+		t.Fatalf("canonicalisation ranges cover %q", got)
+	}
+	if canon.OriginalTokens != tokensForBytes(len("\ufeff  \r\n")) || canon.CompiledTokens != tokensForBytes(1) {
+		t.Fatalf("canonicalisation tokens not measured: %+v", canon)
+	}
+
+	dedup := transformationNamed(t, c, "exact_deduplication")
+	secondCode := strings.LastIndex(input, "func A() {}")
+	if len(dedup.SourceRanges) != 1 || dedup.SourceRanges[0] != (ContextRange{Start: secondCode, End: secondCode + len("func A() {}")}) {
+		t.Fatalf("deduplication ranges %+v do not address the second copy", dedup.SourceRanges)
+	}
+	if dedup.OriginalTokens != estimateTokens("func A() {}") || dedup.CompiledTokens != 0 {
+		t.Fatalf("deduplication tokens not measured: %+v", dedup)
+	}
+
+	fences := transformationNamed(t, c, "code_fence_removal")
+	for _, text := range sliceRanges(input, fences.SourceRanges) {
+		if strings.Trim(text, "`go\n") != "" {
+			t.Fatalf("fence range covers non-fence text %q", text)
+		}
+	}
+	for _, name := range transformationNames(c) {
+		if name == transformTruncation || name == transformReference || name == transformSummary {
+			t.Fatalf("exact profile reported lossy transformation %q", name)
+		}
+	}
+}
+
+// TestRangesPartitionSourceAndMatchCompiledText: included and excluded ranges
+// cover the source exactly once, and every included byte is in the output.
+func TestRangesPartitionSourceAndMatchCompiledText(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	input := "policy: keep 1.2.3   \r\n" + strings.Repeat("background sentence one. ", 120) + "\n```js\nimport x from 'y'\n```\ntrailing"
+	for _, profile := range []string{"exact", "conservative", "balanced", "aggressive", "adaptive"} {
+		t.Run(profile, func(t *testing.T) {
+			resp := compileForTest(t, InputOptimiseRequest{Input: input, Profile: profile, TokenBudget: 200})
+			c := resp.Capsule
+			all := normaliseRanges(append(append([]ContextRange{}, c.IncludedRanges...), c.ExcludedRanges...))
+			if len(all) != 1 || all[0] != (ContextRange{Start: 0, End: len(input)}) || rangeBytes(c.IncludedRanges)+rangeBytes(c.ExcludedRanges) != len(input) {
+				t.Fatalf("ranges do not partition the source: %+v / %+v", c.IncludedRanges, c.ExcludedRanges)
+			}
+			for _, text := range sliceRanges(input, c.IncludedRanges) {
+				if !strings.Contains(resp.CompiledText, strings.ReplaceAll(text, "\r\n", "\n")) {
+					t.Fatalf("included range %q is not in the compiled text", text)
+				}
+			}
+			if c.TokenAccounting.Included != tokensForBytes(rangeBytes(c.IncludedRanges)) ||
+				c.TokenAccounting.Excluded != tokensForBytes(rangeBytes(c.ExcludedRanges)) {
+				t.Fatalf("included/excluded tokens not derived from ranges: %+v", c.TokenAccounting)
+			}
+		})
+	}
+}
+
+// TestTokenAccountingIsMeasured: pass-through segments count their real
+// tokens and the reduction ratio is computed from the returned text.
+func TestTokenAccountingIsMeasured(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	input := "a short note that passes through"
+	resp := compileForTest(t, InputOptimiseRequest{Input: input})
+	c := resp.Capsule
+	if len(c.Segments) != 1 || c.Segments[0].Transformation != transformPassThrough {
+		t.Fatalf("expected one pass-through segment, got %+v", c.Segments)
+	}
+	if c.Segments[0].CompiledTokens != c.Segments[0].OriginalTokens || c.Segments[0].CompiledTokens == 0 {
+		t.Fatalf("pass-through segment tokens: %+v", c.Segments[0])
+	}
+	if c.OriginalTokens != estimateTokens(input) || c.CompiledTokens != estimateTokens(resp.CompiledText) {
+		t.Fatalf("capsule counts not measured: original=%d compiled=%d", c.OriginalTokens, c.CompiledTokens)
+	}
+	if want := 1 - float64(c.CompiledTokens)/float64(c.OriginalTokens); c.Reduction != want || c.Reduction >= 0 {
+		t.Fatalf("framing overhead must show as negative reduction, got %v", c.Reduction)
+	}
+	if c.TokenAccounting.Method != tokenMethod || c.TokenAccounting.Original != c.OriginalTokens || c.TokenAccounting.Compressed != c.CompiledTokens {
+		t.Fatalf("token accounting disagrees with capsule: %+v", c.TokenAccounting)
+	}
+	// The evaluate endpoint uses the same estimate and agrees with the capsule.
+	w := postJSON(t, handleContextEvaluate, "/v1/context/evaluate", contextEvaluateRequest{Input: input, CompiledText: resp.CompiledText, Capsule: &c})
+	var eval struct {
+		Valid          bool `json:"valid"`
+		CompiledTokens int  `json:"compiled_tokens"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &eval); err != nil {
+		t.Fatal(err)
+	}
+	if !eval.Valid || eval.CompiledTokens != c.CompiledTokens {
+		t.Fatalf("evaluate disagrees with capsule: %+v", eval)
+	}
+}
+
+func TestReducingProfilesReportTheirTransformations(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	long := strings.Repeat("background detail sentence. ", 80)
+	summarised := compileForTest(t, InputOptimiseRequest{Input: long, Profile: "adaptive"})
+	summary := transformationNamed(t, summarised.Capsule, transformSummary)
+	segment := summarised.Capsule.Segments[0]
+	if summary.OriginalTokens != segment.OriginalTokens || summary.CompiledTokens != estimateTokens(segment.Content) {
+		t.Fatalf("summary tokens not measured: %+v", summary)
+	}
+	if summarised.Capsule.CompiledTokens >= summarised.Capsule.OriginalTokens {
+		t.Fatalf("expected a real reduction, got %d -> %d", summarised.Capsule.OriginalTokens, summarised.Capsule.CompiledTokens)
+	}
+	if got := sliceRanges(long, summarised.Capsule.IncludedRanges); len(got) != 1 || got[0] != "background detail sentence." {
+		t.Fatalf("summary included ranges cover %q", got)
+	}
+	truncated := compileForTest(t, InputOptimiseRequest{Input: strings.Repeat("x", 3000), Profile: "balanced"})
+	record := transformationNamed(t, truncated.Capsule, transformTruncation)
+	if len(truncated.Capsule.IncludedRanges) != 1 || truncated.Capsule.IncludedRanges[0] != (ContextRange{Start: 0, End: 1000}) {
+		t.Fatalf("truncation included ranges %+v", truncated.Capsule.IncludedRanges)
+	}
+	if record.CompiledTokens != estimateTokens(strings.Repeat("x", 1000)+truncationMarker) {
+		t.Fatalf("truncation tokens %+v", record)
+	}
+	referenced := compileForTest(t, InputOptimiseRequest{Input: "```\n" + long + "\n```", Profile: "balanced", TokenBudget: 10})
+	transformationNamed(t, referenced.Capsule, transformReference)
+	if len(referenced.Capsule.IncludedRanges) != 0 {
+		t.Fatalf("a reference substitution includes no source bytes, got %+v", referenced.Capsule.IncludedRanges)
+	}
+}
+
+// TestPinnedReferencesAreKeptAndValidated: code symbols and memory references
+// stop a segment from being summarised and are checked in the output.
+func TestPinnedReferencesAreKeptAndValidated(t *testing.T) {
+	useStore(t, newFileSourceStore(t.TempDir()))
+	input := "notes about ParseConfig and mem-7781. " + strings.Repeat("filler sentence here. ", 80)
+	unpinned := compileForTest(t, InputOptimiseRequest{Input: input, Profile: "adaptive", TokenBudget: 100})
+	if strings.Contains(unpinned.CompiledText, "filler sentence here. filler") {
+		t.Fatal("expected the unpinned segment to be summarised")
+	}
+	pinned := compileForTest(t, InputOptimiseRequest{Input: input, Profile: "adaptive", TokenBudget: 100,
+		CodeSymbols: []string{"ParseConfig"}, MemoryReferences: []string{"mem-7781"}})
+	if !strings.Contains(pinned.CompiledText, strings.TrimSpace(input)) {
+		t.Fatal("a segment holding a pinned reference must pass through unchanged")
+	}
+	if pinned.Capsule.Segments[0].Droppable || pinned.Capsule.Segments[0].Transformation != transformPassThrough {
+		t.Fatalf("pinned segment: %+v", pinned.Capsule.Segments[0])
+	}
+	if !pinned.Capsule.Validation.Checks["pinned_references_retained"] {
+		t.Fatal("pinned references check failed")
+	}
+	if strings.Join(pinned.Capsule.CodeSymbols, ",") != "ParseConfig" || strings.Join(pinned.Capsule.MemoryReferences, ",") != "mem-7781" {
+		t.Fatalf("capsule does not record its pins: %+v %+v", pinned.Capsule.CodeSymbols, pinned.Capsule.MemoryReferences)
+	}
+	report := checkInvariants(input, "summary without them", nil, []string{"ParseConfig", "mem-7781"})
+	if report.pinsTotal != 2 || report.pinsRetained != 0 || report.holds() {
+		t.Fatalf("pin check did not measure loss: %+v", report)
+	}
+}
+
+// lyingStore stores sources but returns other bytes on read, so nothing it
+// claims to hold can be verified.
+type lyingStore struct{ *fileSourceStore }
+
+func (s lyingStore) Get(objectID, version string) (string, error) {
+	content, err := s.fileSourceStore.Get(objectID, version)
+	if err != nil || version == manifestVersion {
+		return content, err
+	}
+	return content + " (altered)", nil
+}
+
+// TestSourceHashRecordedReflectsTheStore: the check is read back from the
+// store, not asserted.
+func TestSourceHashRecordedReflectsTheStore(t *testing.T) {
+	good, _, err := compileContext(InputOptimiseRequest{Input: "exact value 1.2.3"}, newFileSourceStore(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !good.Capsule.Validation.Checks["source_hash_recorded"] || !good.Capsule.Validation.Checks["restoration_verified"] || !good.Validated {
+		t.Fatalf("expected verified capsule: %+v", good.Capsule.Validation)
+	}
+	bad, _, err := compileContext(InputOptimiseRequest{Input: "exact value 1.2.3"}, lyingStore{newFileSourceStore(t.TempDir())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := bad.Capsule.Validation.Checks
+	if checks["source_hash_recorded"] || checks["restoration_verified"] || bad.Capsule.Validation.Valid || bad.Validated {
+		t.Fatalf("an unverifiable store must fail validation: %+v", bad.Capsule.Validation)
+	}
+}
+
+func TestInvariantReportCountsRetention(t *testing.T) {
+	report := checkInvariants("ids 1.2.3 and 4.5.6", "kept 1.2.3", []string{"kept", "lost"}, nil)
+	if report.exactTotal != 2 || report.exactRetained != 1 || report.hintsTotal != 2 || report.hintsRetained != 1 {
+		t.Fatalf("unexpected report %+v", report)
+	}
+}
+
+// legacyCanonicalise is the original string-replacement canonicaliser, kept
+// as the oracle for the offset-tracking one.
+func legacyCanonicalise(input string) string {
+	cleaned := strings.ReplaceAll(input, "\r\n", "\n")
+	cleaned = strings.ReplaceAll(cleaned, "\r", "\n")
+	cleaned = strings.TrimPrefix(cleaned, "\ufeff")
+	lines := strings.Split(cleaned, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TestCanonicaliseMappedMatchesLegacyAndMapsBytes(t *testing.T) {
+	inputs := []string{
+		"", "abc", "\ufeffabc  ", "a \t\r\nb\rc\r\r\nd\n\n", "  \n\t\n", "x\r", "\ufeff\r\n  ", "é  \r\nü",
+	}
+	for _, input := range inputs {
+		c := canonicaliseMapped(input)
+		if c.text != legacyCanonicalise(input) {
+			t.Fatalf("canonicalise(%q) = %q, want %q", input, c.text, legacyCanonicalise(input))
+		}
+		for i := 0; i < len(c.text); i++ {
+			src := input[c.origin[i]:c.originEnd(i)]
+			if src != c.text[i:i+1] && !(c.text[i] == '\n' && (src == "\r" || src == "\r\n")) {
+				t.Fatalf("%q: canonical byte %d (%q) maps to %q", input, i, c.text[i], src)
+			}
+		}
+		covered := normaliseRanges(append(c.sourceRanges(0, len(c.text)), c.rewritten...))
+		if len(input) > 0 && (len(covered) != 1 || covered[0] != (ContextRange{Start: 0, End: len(input)})) {
+			t.Fatalf("%q: mapped and rewritten ranges %+v do not cover the input", input, covered)
+		}
+	}
+}
+
+func TestSplitCodeBlocksHandlesEmptyBlock(t *testing.T) {
+	parts := splitCodeBlocks("before\n```\n```\nafter")
+	var contents []string
+	for _, p := range parts {
+		contents = append(contents, p.content)
+	}
+	if strings.Join(contents, "|") != "before\n||\nafter" {
+		t.Fatalf("unexpected parts %q", contents)
+	}
+	segments := classifySegments("```\n```", nil)
+	if len(segments) != 0 {
+		t.Fatalf("an empty code block yields no segments, got %+v", segments)
+	}
+}
+
+func TestReadinessChecksTheSourceStore(t *testing.T) {
+	useStore(t, newFileSourceStore(filepath.Join(t.TempDir(), "sources")))
+	if err := readinessCheck(); err != nil {
+		t.Fatalf("expected writable source store to be ready: %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	useStore(t, newFileSourceStore(file))
+	if err := readinessCheck(); err == nil {
+		t.Fatal("a source store that is a file must not be ready")
+	}
+	useStore(t, newFileSourceStore(""))
+	if err := readinessCheck(); err == nil {
+		t.Fatal("an unconfigured source store must not be ready")
 	}
 }
 
