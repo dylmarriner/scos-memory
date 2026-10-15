@@ -94,6 +94,8 @@ type hermesServer struct {
 	prefetchQueue prefetchQueue
 	// memoryIntelligence executes the inspection/correction tools.
 	memoryIntelligence *memoryIntelligence
+	// retrieval executes scos_recall through governed hybrid retrieval.
+	retrieval *retrievalOrchestrator
 }
 
 func (s *hermesServer) readinessCheck() error {
@@ -169,6 +171,11 @@ func main() {
 		log.Fatalf("configure memory-intelligence client: %v", err)
 	}
 	srv.memoryIntelligence = mi
+	ro, err := retrievalOrchestratorFromEnvironment()
+	if err != nil {
+		log.Fatalf("configure retrieval-orchestrator client: %v", err)
+	}
+	srv.retrieval = ro
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)

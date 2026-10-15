@@ -38,29 +38,49 @@ func memoryIntelligenceFromEnvironment() (*memoryIntelligence, error) {
 	return &memoryIntelligence{baseURL: base, controlPlaneToken: strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")), client: client}, nil
 }
 
-// upstreamError carries memory-intelligence's own status so the caller sees
+// upstreamError carries the owning service's own status so the caller sees
 // the real outcome (404 for an unknown fact, 403 for a scope denial).
 type upstreamError struct {
-	status int
-	body   string
+	service string
+	status  int
+	body    string
 }
 
 func (e *upstreamError) Error() string {
-	return fmt.Sprintf("memory-intelligence returned %d: %s", e.status, e.body)
+	return fmt.Sprintf("%s returned %d: %s", e.service, e.status, e.body)
 }
 
 func (m *memoryIntelligence) do(ctx context.Context, src *http.Request, identity requestIdentity, method, path string, payload any) (any, error) {
+	raw, status, err := callService(ctx, m.client, "memory-intelligence", m.baseURL, m.controlPlaneToken, src, identity, method, path, payload)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return map[string]any{"status": status}, nil
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("memory-intelligence returned invalid JSON: %w", err)
+	}
+	return out, nil
+}
+
+// callService performs one delegated request to a fabric service as the
+// caller: their bearer token and identity travel with it, plus the
+// control-plane token that authenticates this provider as the forwarder.
+// A non-2xx answer is returned as an *upstreamError carrying its status.
+func callService(ctx context.Context, client *http.Client, service, baseURL, controlPlaneToken string, src *http.Request, identity requestIdentity, method, path string, payload any) ([]byte, int, error) {
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		body = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, m.baseURL+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, body)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -70,29 +90,22 @@ func (m *memoryIntelligence) do(ctx context.Context, src *http.Request, identity
 	}
 	req.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
 	req.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
-	if m.controlPlaneToken != "" {
-		req.Header.Set("X-SCOS-Control-Plane-Token", m.controlPlaneToken)
+	if controlPlaneToken != "" {
+		req.Header.Set("X-SCOS-Control-Plane-Token", controlPlaneToken)
 	}
-	resp, err := m.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("memory-intelligence unavailable: %w", err)
+		return nil, 0, fmt.Errorf("%s unavailable: %w", service, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, &upstreamError{status: resp.StatusCode, body: strings.TrimSpace(string(raw))}
+		return nil, resp.StatusCode, &upstreamError{service: service, status: resp.StatusCode, body: strings.TrimSpace(string(raw))}
 	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return map[string]any{"status": resp.StatusCode}, nil
-	}
-	var out any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("memory-intelligence returned invalid JSON: %w", err)
-	}
-	return out, nil
+	return raw, resp.StatusCode, nil
 }
 
 func stringArgument(args map[string]any, name string) string {

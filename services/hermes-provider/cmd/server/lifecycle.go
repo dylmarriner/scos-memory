@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
@@ -342,23 +343,21 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 				maxItems = int(n)
 			}
 		}
-		ctx := r.Context()
-		tx, err := s.db.BeginTx(ctx, nil)
+		if s.retrieval == nil {
+			http.Error(w, "retrieval-orchestrator is not configured for scos_recall", http.StatusServiceUnavailable)
+			return
+		}
+		result, err := s.retrieval.recall(r.Context(), r, identity, query, maxItems)
 		if err != nil {
-			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+			status := http.StatusBadGateway
+			var ue *upstreamError
+			if errors.As(err, &ue) {
+				status = ue.status
+			}
+			http.Error(w, "recall: "+err.Error(), status)
 			return
 		}
-		defer tx.Rollback()
-		if err := setPrincipalContext(ctx, tx, identity); err != nil {
-			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		memories, err := searchMemories(ctx, tx, identity.TenantID, query, maxItems)
-		if err != nil {
-			http.Error(w, "search memories: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, map[string]any{"tool": req.Tool, "recall": memories})
+		writeJSON(w, map[string]any{"tool": req.Tool, "served_by": "retrieval-orchestrator", "retrieval_run_id": result.RetrievalRunID, "recall": result.Memories})
 	default:
 		// The inspection and correction tools are owned by
 		// memory-intelligence; execute them there and return its answer.
