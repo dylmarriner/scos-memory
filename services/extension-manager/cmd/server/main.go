@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,7 @@ type extServer struct {
 	skills     map[string]*Skill
 	hooks      map[string][]*Hook // event -> hooks
 	receipts   []*InstallationReceipt
+	executions []*HookExecution
 	history    map[string][]ExtensionManifest
 	// canaries holds side-by-side candidate versions, one per package (§22.3).
 	canaries  map[string]*CanaryDeployment
@@ -157,6 +159,7 @@ type persistedExtensionState struct {
 	Skills     map[string]*Skill              `json:"skills"`
 	Hooks      map[string][]*Hook             `json:"hooks"`
 	Receipts   []*InstallationReceipt         `json:"receipts"`
+	Executions []*HookExecution               `json:"hook_executions,omitempty"`
 	History    map[string][]ExtensionManifest `json:"history"`
 	Canaries   map[string]*CanaryDeployment   `json:"canaries,omitempty"`
 	NextID     int                            `json:"next_id"`
@@ -226,6 +229,7 @@ func main() {
 	// Hooks
 	mux.HandleFunc("/v1/hooks", srv.handleHooks)
 	mux.HandleFunc("/v1/hooks/dispatch", srv.handleHookDispatch)
+	mux.HandleFunc("/v1/hooks/executions", srv.handleHookExecutions)
 	mux.HandleFunc("/v1/hooks/", srv.handleHookByEvent)
 
 	// Installation
@@ -281,6 +285,9 @@ func (s *extServer) applyState(state persistedExtensionState) {
 	if state.Receipts != nil {
 		s.receipts = state.Receipts
 	}
+	if state.Executions != nil {
+		s.executions = state.Executions
+	}
 	if state.History != nil {
 		s.history = state.History
 		if state.Canaries != nil {
@@ -319,6 +326,9 @@ func (s *extServer) loadState(ctx context.Context) error {
 	if state.Receipts != nil {
 		s.receipts = state.Receipts
 	}
+	if state.Executions != nil {
+		s.executions = state.Executions
+	}
 	if state.History != nil {
 		s.history = state.History
 		if state.Canaries != nil {
@@ -342,6 +352,7 @@ func (s *extServer) persist(ctx context.Context) error {
 		Skills:     s.skills,
 		Hooks:      s.hooks,
 		Receipts:   s.receipts,
+		Executions: s.executions,
 		History:    s.history,
 		Canaries:   s.canaries,
 		NextID:     s.nextID,
@@ -656,9 +667,74 @@ type hookDispatchRequest struct {
 }
 
 type hookDispatchResult struct {
-	ExtensionID string `json:"extension_id"`
-	Status      string `json:"status"`
-	Reason      string `json:"reason,omitempty"`
+	ExtensionID string  `json:"extension_id"`
+	Status      string  `json:"status"`
+	Reason      string  `json:"reason,omitempty"`
+	DurationMs  float64 `json:"duration_ms"`
+}
+
+// HookExecution is one recorded hook dispatch outcome, kept as a bounded
+// history and served at GET /v1/hooks/executions.
+type HookExecution struct {
+	ID          string  `json:"id"`
+	Event       string  `json:"event"`
+	ExtensionID string  `json:"extension_id,omitempty"`
+	TenantID    string  `json:"tenant_id"`
+	Status      string  `json:"status"`
+	Reason      string  `json:"reason,omitempty"`
+	DurationMs  float64 `json:"duration_ms"`
+	StartedAt   string  `json:"started_at"`
+}
+
+const maxHookExecutions = 2000
+
+func (s *extServer) recordExecutions(execs []*HookExecution) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range execs {
+		s.nextID++
+		e.ID = fmt.Sprintf("hookexec-%d", s.nextID)
+		s.executions = append(s.executions, e)
+	}
+	if len(s.executions) > maxHookExecutions {
+		s.executions = s.executions[len(s.executions)-maxHookExecutions:]
+	}
+}
+
+// handleHookExecutions lists the caller tenant's hook executions, newest
+// first. ?event= filters by event; ?limit= bounds the page (default 100).
+func (s *extServer) handleHookExecutions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	identity, status, msg := resolveIdentity(r, "", "")
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > maxHookExecutions {
+			http.Error(w, "limit must be between 1 and 2000", http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
+	event := r.URL.Query().Get("event")
+	s.mu.RLock()
+	out := make([]*HookExecution, 0)
+	for i := len(s.executions) - 1; i >= 0 && len(out) < limit; i-- {
+		e := s.executions[i]
+		if e.TenantID != identity.TenantID || (event != "" && e.Event != event) {
+			continue
+		}
+		cp := *e
+		out = append(out, &cp)
+	}
+	s.mu.RUnlock()
+	writeJSON(w, out)
 }
 
 type requestIdentity struct {
@@ -725,6 +801,19 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	req.TenantID, req.PrincipalID = identity.TenantID, identity.PrincipalID
 	dispatchStarted := time.Now()
 	results, err := s.dispatchHooks(r.Context(), req)
+	startedAt := dispatchStarted.UTC().Format(time.RFC3339Nano)
+	if err != nil {
+		s.recordExecutions([]*HookExecution{{Event: req.Event, TenantID: req.TenantID, Status: "aborted", Reason: err.Error(), DurationMs: float64(time.Since(dispatchStarted).Microseconds()) / 1000, StartedAt: startedAt}})
+	} else {
+		execs := make([]*HookExecution, 0, len(results))
+		for _, result := range results {
+			execs = append(execs, &HookExecution{Event: req.Event, ExtensionID: result.ExtensionID, TenantID: req.TenantID, Status: result.Status, Reason: result.Reason, DurationMs: result.DurationMs, StartedAt: startedAt})
+		}
+		s.recordExecutions(execs)
+	}
+	if persistErr := s.persist(r.Context()); persistErr != nil {
+		log.Printf("persist hook executions: %v", persistErr)
+	}
 	// §32 hook latency and failure. Latency covers the whole bounded dispatch;
 	// failures are counted per hook so one failing extension is attributable.
 	serviceMetrics.Observe(telemetry.MetricHookLatency, time.Since(dispatchStarted),
@@ -752,16 +841,21 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 	s.mu.RUnlock()
 	results := make([]hookDispatchResult, 0, len(hooks))
 	for _, hook := range hooks {
+		hookStarted := time.Now()
+		done := func(result hookDispatchResult) {
+			result.DurationMs = float64(time.Since(hookStarted).Microseconds()) / 1000
+			results = append(results, result)
+		}
 		if hook.Endpoint == "" {
 			if hook.FallbackPolicy == "fail_closed" {
 				return nil, fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID)
 			}
-			results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "skipped", Reason: "hook endpoint is not declared"})
+			done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "skipped", Reason: "hook endpoint is not declared"})
 			continue
 		}
 		if hook.CircuitOpenUntil != "" {
 			if until, err := time.Parse(time.RFC3339, hook.CircuitOpenUntil); err == nil && time.Now().UTC().Before(until) {
-				results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "circuit_open", Reason: "hook circuit breaker is open"})
+				done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "circuit_open", Reason: "hook circuit breaker is open"})
 				continue
 			}
 		}
@@ -801,7 +895,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			hook.ConsecutiveFailures = 0
 			hook.CircuitOpenUntil = ""
 			s.mu.Unlock()
-			results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "succeeded"})
+			done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "succeeded"})
 			continue
 		}
 		s.mu.Lock()
@@ -814,7 +908,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		if fallback == "fail_closed" {
 			return nil, fmt.Errorf("critical hook %s failed", hook.ExtensionID)
 		}
-		results = append(results, hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})
+		done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})
 	}
 	if err := s.persist(parent); err != nil {
 		return nil, err
