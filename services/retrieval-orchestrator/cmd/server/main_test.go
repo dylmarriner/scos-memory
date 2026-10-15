@@ -384,3 +384,19 @@ func TestAssembleSectionsIsAnEmptyListWhenNothingMatched(t *testing.T) {
 		t.Fatalf("sections = %#v, want an empty list", got)
 	}
 }
+
+func TestFusionKeepsAStrongerLexicalMatchAboveAWeakerOneWithMoreAuthority(t *testing.T) {
+	weak := RetrievalResult{MemoryID: "weak", RawLexicalScore: 0.025, Authority: 90, Confidence: 0.95}
+	strong := RetrievalResult{MemoryID: "strong", RawLexicalScore: 0.076, Authority: 70, Confidence: 0.75}
+	ranked := applyGovernanceWeighting(fuseResults(rrfK, nil, []RetrievalResult{weak, strong}))
+	if ranked[0].MemoryID != "strong" {
+		t.Fatalf("a memory matching three times as strongly must lead, got %s first", ranked[0].MemoryID)
+	}
+	equal := applyGovernanceWeighting(fuseResults(rrfK, nil, []RetrievalResult{
+		{MemoryID: "low", RawLexicalScore: 0.05, Authority: 40, Confidence: 0.5},
+		{MemoryID: "high", RawLexicalScore: 0.05, Authority: 90, Confidence: 0.95},
+	}))
+	if equal[0].MemoryID != "high" {
+		t.Fatalf("equally relevant memories are ordered by governance, got %s first", equal[0].MemoryID)
+	}
+}

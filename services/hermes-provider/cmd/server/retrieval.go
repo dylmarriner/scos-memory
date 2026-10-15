@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,13 +58,17 @@ type RecalledMemory struct {
 // RecallResult is the scos_recall answer: the ranked memories and the
 // retrieval run that produced them, for audit and explanation.
 type RecallResult struct {
-	RetrievalRunID string           `json:"retrieval_run_id"`
-	Memories       []RecalledMemory `json:"memories"`
+	RetrievalRunID  string           `json:"retrieval_run_id"`
+	Memories        []RecalledMemory `json:"memories"`
+	DegradedSources []string         `json:"degraded_sources"`
+	DegradedModels  []string         `json:"degraded_models"`
 }
 
 type retrievalResponse struct {
-	RetrievalRunID string `json:"retrieval_run_id"`
-	Sections       []struct {
+	RetrievalRunID  string   `json:"retrieval_run_id"`
+	DegradedSources []string `json:"degraded_sources"`
+	DegradedModels  []string `json:"degraded_models"`
+	Sections        []struct {
 		Heading string `json:"heading"`
 		Items   []struct {
 			MemoryID      string  `json:"memory_id"`
@@ -103,7 +108,17 @@ func (o *retrievalOrchestrator) recall(ctx context.Context, src *http.Request, i
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return RecallResult{}, fmt.Errorf("retrieval-orchestrator returned invalid JSON: %w", err)
 	}
-	out := RecallResult{RetrievalRunID: resp.RetrievalRunID, Memories: make([]RecalledMemory, 0)}
+	out := RecallResult{RetrievalRunID: resp.RetrievalRunID, Memories: make([]RecalledMemory, 0),
+		DegradedSources: nonNilStrings(resp.DegradedSources), DegradedModels: nonNilStrings(resp.DegradedModels)}
+	// Sections group memories by class for prompt assembly; recall answers
+	// in the orchestrator's overall rank order, so a working-state or
+	// governance memory never precedes a more relevant fact just because
+	// its section comes first.
+	type ranked struct {
+		rank int
+		mem  RecalledMemory
+	}
+	var all []ranked
 	seen := make(map[string]bool)
 	for _, section := range resp.Sections {
 		for _, item := range section.Items {
@@ -111,17 +126,35 @@ func (o *retrievalOrchestrator) recall(ctx context.Context, src *http.Request, i
 				continue
 			}
 			seen[item.MemoryID] = true
-			out.Memories = append(out.Memories, RecalledMemory{
+			all = append(all, ranked{rank: item.Rank, mem: RecalledMemory{
 				ID: item.MemoryID, Title: item.Title, Summary: item.Summary, Content: item.Content,
 				Type: item.MemoryClass, NamespaceID: item.NamespaceID, ConfidenceScore: item.Confidence,
-				AuthorityLevel: item.Authority, Rank: len(out.Memories) + 1, FusedScore: item.FusedScore,
+				AuthorityLevel: item.Authority, FusedScore: item.FusedScore,
 				LexicalScore: item.LexicalScore, SemanticScore: item.SemanticScore,
 				RerankerScore: item.RerankerScore, Provenance: item.Provenance,
-			})
-			if len(out.Memories) == maxItems {
-				return out, nil
-			}
+			}})
 		}
 	}
+	rankKey := func(r int) int {
+		if r <= 0 {
+			return int(^uint(0) >> 1)
+		}
+		return r
+	}
+	sort.SliceStable(all, func(i, j int) bool { return rankKey(all[i].rank) < rankKey(all[j].rank) })
+	for _, r := range all {
+		if len(out.Memories) == maxItems {
+			break
+		}
+		r.mem.Rank = len(out.Memories) + 1
+		out.Memories = append(out.Memories, r.mem)
+	}
 	return out, nil
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }

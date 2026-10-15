@@ -22,7 +22,7 @@ func TestScosRecallRunsGovernedRetrieval(t *testing.T) {
 				{"memory_id":"m2","title":"Cache","content":"Redis is not used","memory_class":"semantic","fused_score":0.02,"rank":2}]},
 			{"heading":"Recent","items":[
 				{"memory_id":"m1","title":"DB","content":"PostgreSQL with pgvector","fused_score":0.031},
-				{"memory_id":"m3","title":"Queue","content":"outbox jobs","fused_score":0.01}]}]}`)
+				{"memory_id":"m3","title":"Queue","content":"outbox jobs","fused_score":0.01,"rank":3}]}]}`)
 	}))
 	defer ro.Close()
 
@@ -73,5 +73,26 @@ func TestScosRecallSurfacesRetrievalFailure(t *testing.T) {
 	w = post(t, unconfigured.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_recall", "arguments": map[string]any{"query": "x"}})
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 without a retrieval client, got %d", w.Code)
+	}
+}
+
+func TestRecallFollowsOverallRankNotSectionOrder(t *testing.T) {
+	ro := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"retrieval_run_id":"run-2","degraded_sources":["relation"],"sections":[
+			{"heading":"Active Task State","items":[{"memory_id":"state","content":"draft in progress","rank":2}]},
+			{"heading":"Confirmed Facts","items":[{"memory_id":"fact","content":"answers the question","rank":1}]}]}`)
+	}))
+	defer ro.Close()
+	o := &retrievalOrchestrator{baseURL: ro.URL, controlPlaneToken: "cp", client: ro.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	out, err := o.recall(r.Context(), r, requestIdentity{TenantID: testTenantID, PrincipalID: testPrincipalID}, "q", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Memories) != 2 || out.Memories[0].ID != "fact" || out.Memories[0].Rank != 1 {
+		t.Fatalf("recall must follow the orchestrator's rank: %+v", out.Memories)
+	}
+	if len(out.DegradedSources) != 1 || out.DegradedSources[0] != "relation" {
+		t.Fatalf("a failed retrieval lane must be reported: %+v", out.DegradedSources)
 	}
 }

@@ -357,7 +357,8 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "recall: "+err.Error(), status)
 			return
 		}
-		writeJSON(w, map[string]any{"tool": req.Tool, "served_by": "retrieval-orchestrator", "retrieval_run_id": result.RetrievalRunID, "recall": result.Memories})
+		writeJSON(w, map[string]any{"tool": req.Tool, "served_by": "retrieval-orchestrator", "retrieval_run_id": result.RetrievalRunID, "recall": result.Memories,
+			"degraded_sources": result.DegradedSources, "degraded_models": result.DegradedModels})
 	default:
 		// The inspection and correction tools are owned by
 		// memory-intelligence; execute them there and return its answer.

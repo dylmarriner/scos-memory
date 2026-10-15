@@ -857,10 +857,13 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 	var results []RetrievalResult
 	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
 		rows, err := q.Query(ctx, `
-			SELECT DISTINCT mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
+			SELECT id, title, canonical_summary, content, type, authority_level, confidence_score, sensitivity, namespace_id, evidence, conflicts
+			FROM (
+			SELECT DISTINCT ON (mi.id) mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
 			       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
-			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb),
-			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb)
+			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb) AS evidence,
+			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb) AS conflicts,
+			       array_position($3::uuid[], rel.source_memory_id) AS seed_pos
 			FROM memory_relations rel
 			JOIN memory_items mi ON mi.id=rel.target_memory_id
 			LEFT JOIN memory_versions mv ON mv.id=mi.current_version_id
@@ -869,7 +872,15 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 			WHERE mi.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
 			  AND mi.sensitivity <= $4 AND (mi.valid_from IS NULL OR mi.valid_from <= now())
 			  AND (mi.valid_until IS NULL OR mi.valid_until > now()) AND (mi.expires_at IS NULL OR mi.expires_at > now())
-			  AND n.canonical_name=ANY($5::text[]) LIMIT $6`, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit)
+			  AND n.canonical_name=ANY($5::text[])
+			  -- Expansion reaches memories the direct lanes missed. A direct
+			  -- hit re-found as its neighbour's neighbour would count twice,
+			  -- so mutually related weak matches outranked a strong one.
+			  AND NOT (mi.id = ANY($3::uuid[]))
+			ORDER BY mi.id, seed_pos
+			) expanded
+			ORDER BY seed_pos, authority_level DESC
+			LIMIT $6`, req.TenantID, req.PrincipalID, ids, sensitivityMax, namespaces, limit)
 		if err != nil {
 			return err
 		}
@@ -1045,9 +1056,25 @@ func fuseResults(k float64, sets ...[]RetrievalResult) []RetrievalResult {
 		}
 	}
 
+	// Rank fusion keeps only order, so the first and second full-text hits
+	// differ by under 2% however much better the first one matched, and the
+	// governance weighting applied after fusion could then put a memory
+	// that shares one query word above one that answers the question. A
+	// bounded lexical-strength term -- at most one top rank's worth, scaled
+	// by how strongly a memory matched relative to the best match -- keeps
+	// that magnitude.
+	var maxLexical float64
+	for _, sr := range seen {
+		if sr.result.RawLexicalScore > maxLexical {
+			maxLexical = sr.result.RawLexicalScore
+		}
+	}
 	var fused []RetrievalResult
 	for _, sr := range seen {
 		var total float64
+		if maxLexical > 0 {
+			total += (sr.result.RawLexicalScore / maxLexical) / k
+		}
 		var lanes []string
 		for _, name := range allSources {
 			if score, ok := sr.rankScores[name]; ok {
