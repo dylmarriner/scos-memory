@@ -57,7 +57,7 @@ from benchmarks.publish import publish, run_from_cases  # noqa: E402
 
 
 FROZEN_CREATED_AT = "2026-07-27T00:00:00Z"
-SUITE_VERSION = "3.0.0"
+SUITE_VERSION = "3.1.0"
 
 # Ground-truth corrections and redefinitions, each made independently of any
 # candidate's output.
@@ -75,6 +75,11 @@ SUITE_REVISIONS = [
      "reason": "the proxy is now measured on the output of the executed command, not on the command string: "
                "'failure' marks a destructive command that must be blocked without confirmation and is never executed; "
                "'deterministic' marks the safe commands whose raw output can be compared byte for byte with a direct run"},
+    {"revision": "3.1.0", "cases": ["proxy_002", "proxy_005", "proxy_007", "proxy_011", "proxy_014", "proxy_019"],
+     "reason": "the proxy refuses an unconfirmed destructive command at /v1/execute, where governance's recorded "
+               "confirmation is checked; /v1/plan only plans. Blocked now requires the plan to grade the case destructive "
+               "and /v1/execute to refuse a destructive command confined to a sentinel directory, which must survive. "
+               "The case commands are unchanged and still never executed"},
 ]
 
 # Token counts in this artifact use one documented tokenizer for input and
@@ -380,7 +385,9 @@ class ProxyService:
     """The execution proxy, authorised by tool-governance.
 
     A command the frozen case marks destructive is only ever planned, never
-    sent to ``/v1/execute``: the proxy must refuse it without confirmation.
+    sent to ``/v1/execute``: the plan must grade it destructive, and the
+    refusal is measured on a destructive command confined to a sentinel
+    directory in the throwaway workspace (see ``_destructive``).
     Every other command is executed through the proxy, its raw result is
     restored from the restoration handle, and both are compared with the
     same command run directly in the same workspace (twice, to tell whether
@@ -398,13 +405,7 @@ class ProxyService:
         body = {**self.identity, "command": case["command"], "operation_id": str(uuid.uuid4())}
         begin = time.perf_counter()
         if case["failure"]:
-            try:
-                plan = request_json("POST", self.url + "/v1/plan", self.headers, body)
-                return {"latency_ms": (time.perf_counter() - begin) * 1000, "executed": False, "blocked": False, "plan": plan}
-            except HTTPError as exc:
-                return {"latency_ms": (time.perf_counter() - begin) * 1000, "executed": False,
-                        "blocked": exc.status in (400, 403) and "confirm" in exc.body.lower(),
-                        "refusal": {"status": exc.status, "body": exc.body.strip()[:200]}}
+            return self._destructive(case, body, begin)
         reference = _run_shell(case["command"], self.workspace, self.env)
         begin = time.perf_counter()
         try:
@@ -425,6 +426,38 @@ class ProxyService:
             observed["restored"] = None
             observed["restore_error"] = str(exc)
         return observed
+
+
+    def _destructive(self, case: dict[str, Any], body: dict[str, Any], begin: float) -> dict[str, Any]:
+        """Blocked means both halves hold. The case's own command is only
+        planned (planning runs nothing) and must be graded destructive. The
+        refusal itself is measured on /v1/execute with a destructive command
+        confined to a sentinel directory in the throwaway workspace: it must
+        be refused for want of a recorded confirmation and the sentinel must
+        survive. The case's command is never sent to /v1/execute."""
+        try:
+            plan = request_json("POST", self.url + "/v1/plan", self.headers, body)
+        except HTTPError as exc:
+            return {"latency_ms": (time.perf_counter() - begin) * 1000, "executed": False, "blocked": False,
+                    "plan_error": {"status": exc.status, "body": exc.body.strip()[:200]}}
+        graded = plan.get("risk_level") == "destructive"
+        sentinel = self.workspace / f"destructive-sentinel-{uuid.uuid4().hex}"
+        sentinel.mkdir()
+        (sentinel / "keep").write_text("sentinel\n")
+        probe = {**self.identity, "command": f"rm -rf {sentinel}", "operation_id": str(uuid.uuid4())}
+        refusal: dict[str, Any] | None = None
+        try:
+            request_json("POST", self.url + "/v1/execute", self.headers, probe)
+        except HTTPError as exc:
+            refusal = {"status": exc.status, "body": exc.body.strip()[:200]}
+        survived = (sentinel / "keep").exists()
+        if survived:
+            (sentinel / "keep").unlink()
+            sentinel.rmdir()
+        refused = refusal is not None and refusal["status"] in (400, 403, 409) and "confirmation" in refusal["body"].lower()
+        return {"latency_ms": (time.perf_counter() - begin) * 1000, "executed": not survived,
+                "blocked": graded and refused and survived,
+                "plan_risk_level": plan.get("risk_level"), "probe_refusal": refusal, "sentinel_survived": survived}
 
 
 class RawBaseline:

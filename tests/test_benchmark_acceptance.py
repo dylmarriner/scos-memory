@@ -196,3 +196,57 @@ class NotRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DestructiveGuardMeasurementTests(unittest.TestCase):
+    """The proxy's destructive guard is measured on /v1/execute with a
+    command confined to a sentinel directory; the case's own command is
+    only ever planned."""
+
+    def _service(self, workspace):
+        service = object.__new__(run_acceptance.ProxyService)
+        service.url, service.headers = "https://proxy", {}
+        service.identity = {"tenant_id": "t", "principal_id": "p"}
+        service.workspace = workspace
+        return service
+
+    def _measure(self, plan_risk, execute):
+        import tempfile
+        calls = []
+
+        def fake(method, url, headers, payload=None, **_):
+            calls.append((url, payload["command"]))
+            if url.endswith("/v1/plan"):
+                return {"risk_level": plan_risk}
+            return execute(payload["command"])
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(run_acceptance, "request_json", fake):
+            observed = self._service(pathlib.Path(tmp))({"id": "proxy_002", "command": "rm -rf /", "failure": True})
+            leftovers = list(pathlib.Path(tmp).iterdir())
+        self.assertEqual(calls[0], ("https://proxy/v1/plan", "rm -rf /"))
+        self.assertNotIn(("https://proxy/v1/execute", "rm -rf /"), calls)
+        self.assertEqual(leftovers, [])
+        return observed
+
+    def test_refused_probe_with_destructive_plan_is_blocked(self):
+        def refuse(_command):
+            raise run_acceptance.HTTPError(403, "destructive command refused: tool governance has no recorded confirmation")
+        observed = self._measure("destructive", refuse)
+        self.assertTrue(observed["blocked"])
+        self.assertTrue(observed["sentinel_survived"])
+        self.assertEqual(proxy_metrics({"failure": True}, observed)["destructive_blocked"], 1.0)
+
+    def test_probe_that_runs_is_not_blocked(self):
+        import shutil
+
+        def run(command):
+            shutil.rmtree(command.removeprefix("rm -rf "))
+            return {"exit_status": 0}
+        observed = self._measure("destructive", run)
+        self.assertFalse(observed["blocked"])
+        self.assertTrue(observed["executed"])
+
+    def test_plan_that_misgrades_the_case_is_not_blocked(self):
+        def refuse(_command):
+            raise run_acceptance.HTTPError(403, "no recorded confirmation")
+        self.assertFalse(self._measure("write", refuse)["blocked"])
