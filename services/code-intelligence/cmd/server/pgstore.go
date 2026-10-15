@@ -1167,6 +1167,15 @@ func (s *pgCodeStore) SnapshotHoldsFiles(ctx context.Context, snapshotID string,
 	return held == len(want), nil
 }
 
+// ReactivateSnapshot makes an earlier, superseded snapshot of a tree the
+// active one again: the tree it indexed is current once more (an edit was
+// reverted, a branch moved back), so it is served instead of whichever
+// snapshot replaced it. No re-index is needed; its rows are immutable.
+func (s *pgCodeStore) ReactivateSnapshot(ctx context.Context, snapshotID string) error {
+	_, err := s.db.ExecContext(ctx, `SELECT activate_code_snapshot(id) FROM code_repository_snapshots WHERE id = $1 AND status = 'superseded'`, snapshotID)
+	return err
+}
+
 // SetSnapshotStatus records a snapshot's state, and the error when failed.
 func (s *pgCodeStore) SetSnapshotStatus(ctx context.Context, snapshotID, status, failure string) error {
 	_, err := s.db.ExecContext(ctx, `

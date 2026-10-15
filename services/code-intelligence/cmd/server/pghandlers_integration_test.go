@@ -908,3 +908,63 @@ func TestHandlePGQueryAnchorsDeclarationNames(t *testing.T) {
 		}
 	}
 }
+
+// Indexing a tree that an earlier snapshot already holds -- an edit was
+// reverted, a branch moved back -- makes that snapshot the served one
+// again; the snapshot that replaced it is never left serving.
+func TestHandlePGIndexReactivatesARevertedTree(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{"canonical_path": "/repo/" + t.Name()})
+	var repo struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	index := func(commit, path, src string) string {
+		t.Helper()
+		w := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+			"repository_id": repo.RepositoryID, "branch": "main", "commit_id": commit,
+			"files": []map[string]any{{"path": path, "language": "go", "content_hash": hashContent(src), "content": src}},
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("index %s: %d: %s", commit, w.Code, w.Body.String())
+		}
+		var out struct {
+			SnapshotID string `json:"snapshot_id"`
+			Status     string `json:"status"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.SnapshotID
+	}
+	served := func(query string) []PGSymbolVersion {
+		t.Helper()
+		w := pgRequest(t, srv, http.MethodPost, "/v2/code/query", tenant, map[string]any{"repository_id": repo.RepositoryID, "branch": "main", "query": query})
+		var out struct {
+			Results []PGSymbolVersion `json:"results"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Results
+	}
+
+	original := index("tree-a", "pkg/a.go", "package pkg\n\nfunc Original() {}\n")
+	edited := index("tree-b", "pkg/b.go", "package pkg\n\nfunc Edited() {}\n")
+	if got := served("Edited"); len(got) != 1 || got[0].SnapshotID != edited {
+		t.Fatalf("edit not served: %+v", got)
+	}
+	if again := index("tree-a", "pkg/a.go", "package pkg\n\nfunc Original() {}\n"); again != original {
+		t.Fatalf("reverted tree got snapshot %s, want the original %s", again, original)
+	}
+	if got := served("Original"); len(got) != 1 || got[0].SnapshotID != original {
+		t.Fatalf("reverted tree not served: %+v", got)
+	}
+	if got := served("Edited"); len(got) != 0 {
+		t.Fatalf("the reverted edit is still served: %+v", got)
+	}
+}

@@ -250,6 +250,13 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "look up snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	} else if existing != "" && status != "failed" {
+		if status == "superseded" {
+			if err := s.pgStore.ReactivateSnapshot(r.Context(), existing); err != nil {
+				http.Error(w, "reactivate snapshot: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			status = "active"
+		}
 		writeJSON(w, map[string]any{"snapshot_id": existing, "status": status, "unchanged": true,
 			"branch": branch, "commit_id": commit, "git_commit": head, "file_count": len(files)})
 		return
@@ -426,13 +433,19 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 		if err := s.pgStore.DeleteFailedSnapshot(ctx, existing); err != nil {
 			return nil, fmt.Errorf("clear failed snapshot: %w", err)
 		}
-	case status == "ready" || status == "active":
+	case status == "ready" || status == "active" || status == "superseded":
 		same, err := s.pgStore.SnapshotHoldsFiles(ctx, existing, files)
 		if err != nil {
 			return nil, fmt.Errorf("compare snapshot files: %w", err)
 		}
 		if !same {
 			return nil, fmt.Errorf("%w: snapshot %s already holds different files for commit %q", errSnapshotConflict, existing, commit)
+		}
+		if status == "superseded" {
+			if err := s.pgStore.ReactivateSnapshot(ctx, existing); err != nil {
+				return nil, fmt.Errorf("reactivate snapshot: %w", err)
+			}
+			status = "active"
 		}
 		var symbols int
 		if err := s.pgStore.db.QueryRowContext(ctx,
