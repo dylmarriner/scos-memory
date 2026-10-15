@@ -77,9 +77,12 @@ The frozen retrieval/acceptance benchmark has grown across several
 generations under this process, from an initial nine-case corpus up to the
 current 24/19/20/24-case corpus (context optimisation / code intelligence /
 execution proxy / control-plane routing) recorded in
-`benchmarks/acceptance-results.json` and independently reproduced
-byte-for-byte by re-running `benchmarks/run_acceptance.py` (see
-`docs/governance-audit-current.md`, which supersedes the earlier
+`benchmarks/acceptance-results.json`. Since suite 3.0.0 every candidate is
+the service itself -- the binaries built from the checkout, run with a
+disposable PostgreSQL by `benchmarks/local_services.py` -- so re-running
+`benchmarks/run_acceptance.py` reproduces the scores (apart from proxy
+commands that read live system state) but not the measured latencies, and a domain whose service cannot start is recorded as not run
+(see `docs/governance-audit-current.md`, which supersedes the earlier
 `docs/governance-implementation-audit.md` and `docs/governance-audit-full.md`
 audit documents that tracked this corpus's growth over time). This is a
 real step up in scale and diversity from the original nine-case generation,

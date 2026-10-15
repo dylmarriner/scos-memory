@@ -2222,7 +2222,7 @@ func governedTools() []map[string]any {
 		}, "entries"),
 		tool("scos_observability_targets", "Get observability SLO targets", map[string]any{}),
 		tool("scos_observability_export_status", "Get OTLP export configuration status", map[string]any{}),
-		tool("scos_benchmarks", "Run and report frozen retrieval benchmark cases", map[string]any{}),
+		tool("scos_benchmarks", "List recorded benchmark runs (per suite: latest run, pass rate, latency, scores) from observability. Runs are produced by benchmarks/run_acceptance.py and benchmarks/run_deployed.py; this tool does not start one", map[string]any{}),
 	)
 
 	return tools

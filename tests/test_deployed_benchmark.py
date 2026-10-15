@@ -1,12 +1,21 @@
+import io
 import json
 import os
+import pathlib
+import sys
+import tempfile
 import threading
+import time
 import unittest
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from benchmarks.deployed import BenchmarkConfig, DeployedCodeClient, config_from_environment
-from benchmarks.run_deployed import fixture_files, fixture_identity
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from benchmarks.deployed import BenchmarkConfig, DeployedCodeClient, config_from_environment  # noqa: E402
+from benchmarks.run_deployed import NOT_RUN_EXIT, fixture_files, fixture_identity, run  # noqa: E402
+from benchmarks.run_deployed import main as run_deployed_main  # noqa: E402
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -130,6 +139,107 @@ class DeployedFixtureTests(unittest.TestCase):
             repository_path="benchmark/repo",
         )
         self.assertEqual(fixture_identity(config), fixture_identity(config))
+
+
+class _CodeService(BaseHTTPRequestHandler):
+    """A code service with per-branch snapshots: exact path matches, lexical
+    fallback over content, rename diffs and idempotent re-indexing. With
+    ``leak`` set, a query on any branch also searches every other branch."""
+    leak = False
+    delay: dict = {}
+    branches: dict = {}
+    snapshots: dict = {}
+
+    def _send(self, payload):
+        data = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        self._send({"status": "ok", "version": "v", "source_sha": "sha", "build_time": "now"})
+
+    def do_POST(self):  # noqa: N802
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+        time.sleep(self.delay.get(self.path, 0))
+        if self.path == "/v2/code/repos":
+            return self._send({"repository_id": "repo-1"})
+        if self.path == "/v2/code/index":
+            snapshot_id = f"{body['branch']}@{body['commit_id']}"
+            if snapshot_id not in self.snapshots:
+                files = {f["path"]: f for f in body["files"]}
+                self.snapshots[snapshot_id] = {"files": files, "parent": self.branches.get(body["branch"])}
+            self.branches[body["branch"]] = snapshot_id
+            return self._send({"snapshot_id": snapshot_id})
+        if self.path == "/v2/code/snapshots/diff":
+            snapshot = self.snapshots[body["snapshot_id"]]
+            previous = self.snapshots[snapshot["parent"]]["files"] if snapshot["parent"] else {}
+            renamed = [{"Path": path, "PreviousPath": old}
+                       for path, f in snapshot["files"].items() if path not in previous
+                       for old, g in previous.items()
+                       if old not in snapshot["files"] and g["content_hash"] == f["content_hash"]]
+            return self._send({"Renamed": renamed})
+        if self.path == "/v2/code/query":
+            searched = list(self.branches.values()) if self.leak else [self.branches[body["branch"]]]
+            files = {}
+            for snapshot_id in searched:
+                files.update(self.snapshots[snapshot_id]["files"])
+            if body["query"] in files:
+                return self._send({"results": [{"Path": body["query"], "MatchType": "exact"}], "retrieval_mode": "exact"})
+            word = body["query"].split(".")[0].lower()
+            hits = [{"Path": p, "MatchType": "lexical"} for p, f in files.items() if word in f["content"].lower()]
+            return self._send({"results": hits, "retrieval_mode": "lexical"})
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *_args):
+        return
+
+
+class DeployedRunTests(unittest.TestCase):
+    def setUp(self):
+        _CodeService.leak = False
+        _CodeService.delay = {}
+        _CodeService.branches = {}
+        _CodeService.snapshots = {}
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _CodeService)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.config = BenchmarkConfig(endpoint=f"http://127.0.0.1:{self.server.server_port}", token="t",
+                                      tenant_id="tenant-1", principal_id="principal-1")
+
+    def test_cases_pass_against_a_correct_service_and_are_timed_individually(self):
+        _CodeService.delay = {"/v2/code/snapshots/diff": 0.2}
+        artifact = run(self.config, run_nonce="n1")
+        self.assertEqual({c["case_id"]: c["passed"] for c in artifact["cases"]},
+                         {"exact_symbol_lookup": True, "rename_lineage": True, "branch_isolation": True,
+                          "retry_idempotency": True})
+        latencies = {c["case_id"]: c["latency_ms"] for c in artifact["cases"]}
+        # Only rename_lineage asks for a diff, so only it carries the delay.
+        self.assertGreaterEqual(latencies["rename_lineage"], 200)
+        self.assertLess(latencies["exact_symbol_lookup"], 200)
+        self.assertLess(latencies["branch_isolation"], 200)
+
+    def test_branch_isolation_fails_when_files_cross_branches(self):
+        _CodeService.leak = True
+        cases = {c["case_id"]: c for c in run(self.config, run_nonce="n2")["cases"]}
+        self.assertFalse(cases["branch_isolation"]["passed"])
+        self.assertEqual(cases["branch_isolation"]["details"]["branch_file_on_main"], ["branch.go"])
+
+    def test_unconfigured_deployment_is_recorded_as_not_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "out.json"
+            argv = ["run_deployed", "--output", str(output)]
+            with patch.dict(os.environ, {}, clear=True), patch.object(sys, "argv", argv):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(run_deployed_main(), NOT_RUN_EXIT)
+            artifact = json.loads(output.read_text())
+        self.assertEqual(artifact["status"], "not_run")
+        self.assertIn("SCOS_BENCHMARK_ENDPOINT", artifact["reason"])
+        self.assertEqual(artifact["cases"], [])
 
 
 if __name__ == "__main__":

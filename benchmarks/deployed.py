@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +25,10 @@ class BenchmarkConfig:
     principal_id: str
     repository_path: str = "scos-benchmark-fixtures"
     timeout_seconds: float = 10.0
+    # A service reached directly (not through an ingress that adds it) is
+    # wrapped in auth.ControlPlaneHandler and needs the control-plane token.
+    control_plane_token: str = ""
+    ca_file: str = ""
 
     def __post_init__(self) -> None:
         endpoint = self.endpoint.rstrip("/")
@@ -45,6 +50,7 @@ class BenchmarkConfig:
             "principal_id": self.principal_id,
             "repository_path": self.repository_path,
             "timeout_seconds": self.timeout_seconds,
+            "control_plane_token_configured": bool(self.control_plane_token),
         }
 
 
@@ -71,32 +77,41 @@ def config_from_environment() -> BenchmarkConfig:
         principal_id=required["SCOS_BENCHMARK_PRINCIPAL_ID"],
         repository_path=os.getenv("SCOS_BENCHMARK_REPOSITORY_PATH", "scos-benchmark-fixtures").strip(),
         timeout_seconds=timeout,
+        control_plane_token=os.getenv("SCOS_BENCHMARK_CONTROL_PLANE_TOKEN", "").strip(),
+        ca_file=os.getenv("SCOS_BENCHMARK_CA_FILE", os.getenv("SCOS_TLS_CA_FILE", "")).strip(),
     )
 
 
 class DeployedCodeClient:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
+        self.context = ssl.create_default_context(cafile=config.ca_file) if config.ca_file else None
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload, sort_keys=True).encode("utf-8")
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.config.token}",
+            "Content-Type": "application/json",
+            "X-SCOS-Tenant-ID": self.config.tenant_id,
+            "X-SCOS-Principal-ID": self.config.principal_id,
+        }
+        if self.config.control_plane_token:
+            headers["X-SCOS-Control-Plane-Token"] = self.config.control_plane_token
         request = urllib.request.Request(
             f"{self.config.endpoint}/{path.lstrip('/')}",
             data=body,
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {self.config.token}",
-                "Content-Type": "application/json",
-                "X-SCOS-Tenant-ID": self.config.tenant_id,
-                "X-SCOS-Principal-ID": self.config.principal_id,
-            },
+            headers=headers,
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds, context=self.context) as response:
                 if response.status < 200 or response.status >= 300:
                     raise RuntimeError(f"deployed benchmark HTTP status {response.status}")
                 raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace").strip()[:300]
+            raise RuntimeError(f"deployed benchmark request failed: {method} {path}: HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"deployed benchmark request failed: {method} {path}") from exc
         try:

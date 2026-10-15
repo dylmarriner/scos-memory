@@ -2,18 +2,39 @@
 """
 Benchmark harness (§33 Quality evaluation).
 
-Measures Recall@K, Precision@K, MRR, nDCG, citation accuracy, authority
-accuracy, conflict detection, duplicate rate, stale-hit rate, promotion
-precision/recall, token efficiency and answer regression.
+Measures Recall@K, Precision@K, MRR, nDCG, authority accuracy, conflict
+detection, duplicate rate, stale-hit rate and answer regression from what a
+retrieval system actually returns. Citation accuracy, promotion
+precision/recall and token efficiency are computed only when the system
+under test reports citations, promotion decisions or token usage; a run that
+observes none of them reports none of them, rather than a constant.
+
+Usage::
+
+    python3 benchmarks/harness.py --endpoint https://127.0.0.1:8098/mcp --ca-file ca.crt
+    python3 benchmarks/harness.py --suite path/to/suite.json --endpoint ...
+    python3 benchmarks/harness.py            # lexical baseline only
+
+With ``--endpoint`` the suite corpus is seeded into a deployed SCOS through
+its MCP gateway (``scos_remember``), every case is answered by
+``scos_recall``, and the seeded memories are removed (``scos_forget``)
+afterwards.
 """
+from __future__ import annotations
+
+import argparse
 import json
 import math
 import platform
 import random
+import ssl
 import statistics
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -28,13 +49,10 @@ class BenchmarkCase:
     # project_isolation, multi_turn, recovery, stale, prompt_injection
     category: str
     context: dict[str, Any] = field(default_factory=dict)
-    # Ids within expected_ids (or the corpus generally) that carry the
-    # additional semantics needed by the §33 metrics beyond plain
-    # relevance -- which ones must be cited, which are authoritative,
-    # which pair off as an active/stale contradiction, which are known
-    # duplicates or known-stale, whether this case's memory should be
-    # promoted, an approximate token budget, and whether the frozen
-    # baseline answered it correctly (for regression tracking).
+    # Ground-truth semantics beyond plain relevance: which ids must be
+    # cited, which are authoritative, which pair off as an active/stale
+    # contradiction, which are known duplicates or known-stale, whether this
+    # case's memory should be promoted, and an approximate token budget.
     citation_ids: list[str] = field(default_factory=list)
     authoritative_ids: list[str] = field(default_factory=list)
     conflicting_ids: list[str] = field(default_factory=list)
@@ -42,7 +60,17 @@ class BenchmarkCase:
     stale_ids: list[str] = field(default_factory=list)
     promotion_expected: bool = False
     token_budget: int = 0
-    baseline_correct: bool = True
+
+
+@dataclass
+class RetrievalOutcome:
+    """What a system under test returned for one case. Fields other than
+    ``ids`` are None when the system does not report that signal."""
+    ids: list[str]
+    cited_ids: list[str] | None = None
+    promoted: bool | None = None
+    tokens_used: int | None = None
+
 
 @dataclass
 class BenchmarkResult:
@@ -50,12 +78,14 @@ class BenchmarkResult:
     retrieved_ids: list[str]
     latency_ms: float
     scores: dict[str, float] = field(default_factory=dict)
-    # Populated by callers that track these signals; left empty (and thus
-    # scored as "no evidence" rather than a fabricated pass) otherwise.
-    cited_ids: list[str] = field(default_factory=list)
-    promoted: bool = False
-    tokens_used: int = 0
-    answer_correct: bool = True
+    # None means the system under test did not report the signal; such
+    # results are left out of the corresponding metric.
+    cited_ids: list[str] | None = None
+    promoted: bool | None = None
+    tokens_used: int | None = None
+    # Computed from the retrieved ids: every expected answer was returned.
+    answer_correct: bool = False
+
 
 @dataclass
 class BenchmarkSuite:
@@ -63,6 +93,7 @@ class BenchmarkSuite:
     version: str
     cases: list[BenchmarkCase]
     created_at: str = ""
+    corpus: dict[str, str] = field(default_factory=dict)
 
 
 FROZEN_CORPUS: dict[str, str] = {
@@ -118,13 +149,14 @@ def ndcg(expected: set[str], retrieved: list[str], k: int) -> float:
 
     return dcg / idcg if idcg > 0 else 0.0
 
-def citation_accuracy(citation_ids: list[str], cited_ids: list[str]) -> float | None:
-    """Fraction of asserted citations that are actually correct.
+def citation_accuracy(citation_ids: list[str], cited_ids: list[str] | None) -> float | None:
+    """Fraction of reported citations that are correct.
 
-    Returns None (not 0.0/1.0) when a case makes no citation assertion, so
-    callers can exclude it from the average rather than fabricate a score.
+    None when the case makes no citation assertion or the system reported no
+    citations at all (``cited_ids is None``), so it is left out of the
+    average rather than scored as a fabricated pass or fail.
     """
-    if not citation_ids:
+    if not citation_ids or cited_ids is None:
         return None
     if not cited_ids:
         return 0.0
@@ -171,19 +203,22 @@ def stale_hit_rate(stale_ids: list[str], retrieved: list[str]) -> float | None:
     stale = sum(1 for r in retrieved if r in stale_ids)
     return stale / len(retrieved)
 
-def token_efficiency(token_budget: int, tokens_used: int) -> float | None:
+def token_efficiency(token_budget: int, tokens_used: int | None) -> float | None:
     """Ratio of the case's token budget to tokens actually consumed,
     capped at 1.0 so under-budget answers don't inflate the average.
-    None when no budget/usage was tracked for this case."""
-    if token_budget <= 0 or tokens_used <= 0:
+    None when no budget is set or the system reported no usage."""
+    if token_budget <= 0 or not tokens_used or tokens_used <= 0:
         return None
     return min(1.0, token_budget / tokens_used)
 
 def answer_regression(baseline_correct: bool, answer_correct: bool) -> float:
-    """1.0 marks a regression: the frozen baseline got this case right and
-    the current run does not. 0.0 covers every other combination (no
-    regression, or a case the baseline never got right to begin with)."""
+    """1.0 marks a regression: the baseline run answered this case and the
+    current run does not. 0.0 covers every other combination."""
     return 1.0 if baseline_correct and not answer_correct else 0.0
+
+def task_succeeded(expected: set[str], retrieved: list[str]) -> bool:
+    """A retrieval task succeeds only when every required answer is returned."""
+    return bool(expected) and expected.issubset(set(retrieved))
 
 def compute_scores(expected: set[str], retrieved: list[str],
                    case: "BenchmarkCase | None" = None,
@@ -213,16 +248,16 @@ def compute_scores(expected: set[str], retrieved: list[str],
     for name, value in optional.items():
         if value is not None:
             scores[name] = value
-    scores["answer_regression"] = answer_regression(case.baseline_correct, result.answer_correct)
     return scores
 
 def promotion_precision_recall(cases: list["BenchmarkCase"],
                                results: list["BenchmarkResult"]) -> dict[str, float]:
-    """Suite-level promotion precision/recall: whether the system promoted
-    memory exactly for the cases whose case definition expects promotion.
-    This is a corpus-wide measure (needs both true and predicted labels
-    across cases), unlike the per-case metrics above."""
-    by_id = {r.case_id: r for r in results}
+    """Suite-level promotion precision/recall over the results whose system
+    reported a promotion decision. Empty when none did: there is nothing to
+    score. A ratio with an empty denominator is left out, not set to 0."""
+    by_id = {r.case_id: r for r in results if r.promoted is not None}
+    if not by_id:
+        return {}
     true_positive = false_positive = false_negative = 0
     for case in cases:
         result = by_id.get(case.id)
@@ -234,14 +269,12 @@ def promotion_precision_recall(cases: list["BenchmarkCase"],
             false_positive += 1
         elif case.promotion_expected and not result.promoted:
             false_negative += 1
-    precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) else 0.0
-    recall = true_positive / (true_positive + false_negative) if (true_positive + false_negative) else 0.0
-    return {"promotion_precision": precision, "promotion_recall": recall}
-
-
-def task_succeeded(expected: set[str], retrieved: list[str]) -> bool:
-    """A retrieval task succeeds only when every required answer is returned."""
-    return bool(expected) and expected.issubset(set(retrieved))
+    stats = {}
+    if true_positive + false_positive:
+        stats["promotion_precision"] = true_positive / (true_positive + false_positive)
+    if true_positive + false_negative:
+        stats["promotion_recall"] = true_positive / (true_positive + false_negative)
+    return stats
 
 
 def deterministic_interval(values: list[float], seed: int = 1729,
@@ -279,65 +312,83 @@ def runtime_metadata() -> dict[str, Any]:
 
 def compare_baseline(results: list[BenchmarkResult],
                      baseline_results: list[BenchmarkResult]) -> dict[str, Any]:
-    """Compare against a frozen baseline corpus."""
-    comparisons = {}
+    """Compare per-case scores against a baseline run."""
+    comparisons: dict[str, dict[str, int]] = {}
+    baseline_by_id = {b.case_id: b for b in baseline_results}
     for r in results:
-        if r.case_id not in {b.case_id for b in baseline_results}:
+        base = baseline_by_id.get(r.case_id)
+        if base is None:
             continue
-        base = next(b for b in baseline_results if b.case_id == r.case_id)
         for metric, value in r.scores.items():
-            base_val = base.scores.get(metric, 0.0)
-            if metric not in comparisons:
-                comparisons[metric] = {"improvements": 0, "regressions": 0, "unchanged": 0}
+            if metric not in base.scores:
+                continue
+            base_val = base.scores[metric]
+            counts = comparisons.setdefault(metric, {"improvements": 0, "regressions": 0, "unchanged": 0})
             if value > base_val:
-                comparisons[metric]["improvements"] += 1
+                counts["improvements"] += 1
             elif value < base_val:
-                comparisons[metric]["regressions"] += 1
+                counts["regressions"] += 1
             else:
-                comparisons[metric]["unchanged"] += 1
+                counts["unchanged"] += 1
     return comparisons
 
 # ── candidate runner ─────────────────────────────────────────────────────
+
+RetrieveFn = Callable[[str, dict[str, Any]], "list[str] | RetrievalOutcome"]
+
 
 class BenchmarkRunner:
     def __init__(self, suite: BenchmarkSuite):
         self.suite = suite
         self.results: list[BenchmarkResult] = []
 
-    def run_single(self, case: BenchmarkCase,
-                   retrieve_fn: callable) -> BenchmarkResult:
-        start = time.time()
-        retrieved = retrieve_fn(case.query, case.context)
-        elapsed = (time.time() - start) * 1000
+    def run_single(self, case: BenchmarkCase, retrieve_fn: RetrieveFn) -> BenchmarkResult:
+        start = time.perf_counter()
+        outcome = retrieve_fn(case.query, case.context)
+        elapsed = (time.perf_counter() - start) * 1000
+        if not isinstance(outcome, RetrievalOutcome):
+            outcome = RetrievalOutcome(ids=list(outcome))
         result = BenchmarkResult(
             case_id=case.id,
-            retrieved_ids=[r for r in retrieved],
+            retrieved_ids=list(outcome.ids),
             latency_ms=elapsed,
+            cited_ids=outcome.cited_ids,
+            promoted=outcome.promoted,
+            tokens_used=outcome.tokens_used,
+            answer_correct=task_succeeded(set(case.expected_ids), outcome.ids),
         )
         result.scores = compute_scores(set(case.expected_ids), result.retrieved_ids, case, result)
         self.results.append(result)
         return result
 
-    def run(self, retrieve_fn: callable) -> list[BenchmarkResult]:
+    def run(self, retrieve_fn: RetrieveFn) -> list[BenchmarkResult]:
         self.results = []
         for case in self.suite.cases:
             self.run_single(case, retrieve_fn)
         return self.results
 
-    def summary(self) -> dict[str, Any]:
+    def summary(self, baseline_results: list[BenchmarkResult] | None = None) -> dict[str, Any]:
+        """Average every metric over the cases that measured it.
+
+        ``answer_regression`` is reported only when a baseline run of the
+        same suite is supplied: the share of cases the baseline answered
+        that this run does not.
+        """
         if not self.results:
             return {"error": "no results"}
-        avg_scores: dict[str, float] = {}
+        collected: dict[str, list[float]] = {}
         for r in self.results:
             for metric, value in r.scores.items():
-                avg_scores.setdefault(metric, []).append(value)
-        average_scores = {
-            metric: sum(vals) / len(vals)
-            for metric, vals in avg_scores.items()
-        }
-        # Promotion precision/recall is a corpus-wide label comparison, not
-        # a per-case score, so it is computed once over the whole suite.
+                collected.setdefault(metric, []).append(value)
+        average_scores = {metric: sum(vals) / len(vals) for metric, vals in collected.items()}
         average_scores.update(promotion_precision_recall(self.suite.cases, self.results))
+        average_scores["task_success"] = sum(r.answer_correct for r in self.results) / len(self.results)
+        if baseline_results is not None:
+            baseline_by_id = {b.case_id: b for b in baseline_results}
+            flags = [answer_regression(baseline_by_id[r.case_id].answer_correct, r.answer_correct)
+                     for r in self.results if r.case_id in baseline_by_id]
+            if flags:
+                average_scores["answer_regression"] = sum(flags) / len(flags)
         categories = sorted({case.category for case in self.suite.cases})
         return {
             "suite": self.suite.name,
@@ -345,6 +396,7 @@ class BenchmarkRunner:
             "total_cases": len(self.results),
             "categories": categories,
             "average_scores": average_scores,
+            "metric_case_counts": {metric: len(vals) for metric, vals in collected.items()},
             "total_latency_ms": sum(r.latency_ms for r in self.results),
             "avg_latency_ms": sum(r.latency_ms for r in self.results) / len(self.results),
         }
@@ -373,12 +425,14 @@ class DeterministicLexicalBaseline:
         ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
         return [identifier for overlap, _, identifier in ranked if overlap > 0]
 
+
 def create_default_frozen_suite() -> BenchmarkSuite:
     """Generate the baseline frozen benchmark suite covering §33 quality criteria."""
     return BenchmarkSuite(
         name="scos_governance_quality_baseline",
-        version="1.4.0",
+        version="2.0.0",
         created_at="2026-08-04T00:00:00Z",
+        corpus=dict(FROZEN_CORPUS),
         cases=[
             BenchmarkCase(
                 id="case_001",
@@ -390,7 +444,6 @@ def create_default_frozen_suite() -> BenchmarkSuite:
                 stale_ids=["stale_hook_sig_v1"],
                 promotion_expected=True,
                 token_budget=200,
-                baseline_correct=True,
             ),
             BenchmarkCase(
                 id="case_002",
@@ -460,64 +513,162 @@ def create_default_frozen_suite() -> BenchmarkSuite:
     )
 
 
-class LiveRetrievalAdapter:
-    """Production live retrieval adapter interacting with HTTP services or local memory evaluation."""
+_CASE_FIELDS = {"id", "query", "expected_ids", "category", "context", "citation_ids", "authoritative_ids",
+                "conflicting_ids", "duplicate_ids", "stale_ids", "promotion_expected", "token_budget"}
 
-    def __init__(self, endpoint_url: str = "http://127.0.0.1:8080"):
-        self.endpoint_url = endpoint_url.rstrip("/")
-        self.last_source = "local_fallback"
+
+def load_suite(path: str) -> BenchmarkSuite:
+    """Load a suite from JSON: ``{"name", "version", "created_at", "corpus":
+    {id: text}, "cases": [{"id", "query", "expected_ids", "category", ...}]}``.
+    Every expected or labelled id must name a corpus document."""
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("a suite file must hold a JSON object")
+    for key in ("name", "version", "corpus", "cases"):
+        if key not in data:
+            raise ValueError(f"suite file is missing {key!r}")
+    corpus = data["corpus"]
+    if not isinstance(corpus, dict) or not corpus or not all(isinstance(v, str) for v in corpus.values()):
+        raise ValueError("suite corpus must map document ids to text")
+    cases = []
+    for raw in data["cases"]:
+        unknown = set(raw) - _CASE_FIELDS
+        if unknown:
+            raise ValueError(f"case {raw.get('id')!r} has unknown fields {sorted(unknown)}")
+        case = BenchmarkCase(**raw)
+        labelled = set(case.expected_ids) | set(case.citation_ids) | set(case.authoritative_ids) \
+            | set(case.conflicting_ids) | set(case.duplicate_ids) | set(case.stale_ids)
+        missing = labelled - set(corpus)
+        if missing:
+            raise ValueError(f"case {case.id!r} names ids not in the corpus: {sorted(missing)}")
+        cases.append(case)
+    if not cases:
+        raise ValueError("suite has no cases")
+    return BenchmarkSuite(name=data["name"], version=data["version"], cases=cases,
+                          created_at=data.get("created_at", ""), corpus=dict(corpus))
+
+
+class GatewayMemoryAdapter:
+    """Answer cases with a deployed SCOS through its MCP gateway.
+
+    The suite corpus is saved with ``scos_remember``; each saved document
+    carries a run tag so it can be told apart from memories that already
+    existed. Each case is a ``scos_recall``; recalled memories map back to
+    corpus ids through the fact ids the gateway returned when they were
+    saved, and anything else recalled is kept as ``foreign:<memory id>`` so
+    it still counts against precision. On exit every memory this run
+    created is removed with ``scos_forget``; a document the gateway merged
+    into a memory that existed before the run is left alone.
+    """
+
+    def __init__(self, endpoint: str, corpus: dict[str, str], ca_file: str | None = None,
+                 max_items: int = 10, timeout: float = 30.0):
+        if not endpoint.startswith(("https://", "http://")):
+            raise RuntimeError("gateway endpoint must be an HTTP(S) URL")
+        self.endpoint = endpoint
+        self.corpus = corpus
+        self.max_items = max_items
+        self.timeout = timeout
+        self.context = ssl.create_default_context(cafile=ca_file) if ca_file else None
+        self.run_tag = f"[benchmark run {uuid.uuid4().hex[:12]}]"
+        self.fact_to_corpus: dict[str, str] = {}
+        self.created: list[str] = []
+        self.merged: dict[str, str] = {}
+        self.forget_failures: list[str] = []
+        self._rpc_id = 0
+
+    def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._rpc_id += 1
+        payload = json.dumps({"jsonrpc": "2.0", "id": self._rpc_id, "method": "tools/call",
+                              "params": {"name": tool, "arguments": arguments}}).encode("utf-8")
+        request = urllib.request.Request(self.endpoint, data=payload, method="POST",
+                                         headers={"Content-Type": "application/json", "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout, context=self.context) as response:
+                envelope = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise RuntimeError(f"live benchmark gateway unavailable: {self.endpoint}: {exc}") from exc
+        if "error" in envelope:
+            raise RuntimeError(f"{tool} failed: {envelope['error']}")
+        content = envelope.get("result", {}).get("content") or []
+        if not content or "text" not in content[0]:
+            raise RuntimeError(f"{tool} returned no content")
+        try:
+            return json.loads(content[0]["text"])
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{tool} returned non-JSON content: {content[0]['text'][:200]}") from exc
+
+    def __enter__(self) -> "GatewayMemoryAdapter":
+        try:
+            for corpus_id, text in self.corpus.items():
+                saved = self._call("scos_remember", {"content": f"{text} {self.run_tag}"})
+                fact = saved.get("fact") or {}
+                fact_id = fact.get("id")
+                if not fact_id:
+                    raise RuntimeError(f"scos_remember returned no fact id for {corpus_id}")
+                if fact_id in self.fact_to_corpus:
+                    self.merged[corpus_id] = self.fact_to_corpus[fact_id]
+                    continue
+                self.fact_to_corpus[fact_id] = corpus_id
+                if self.run_tag in str(fact.get("content", "")):
+                    self.created.append(fact_id)
+                else:
+                    self.merged[corpus_id] = f"pre-existing memory {fact_id}"
+        except BaseException:
+            self.cleanup()
+            raise
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        while self.created:
+            fact_id = self.created.pop()
+            try:
+                self._call("scos_forget", {"memory_id": fact_id})
+            except RuntimeError as exc:
+                self.forget_failures.append(f"{fact_id}: {exc}")
+
+    def seed_report(self) -> dict[str, Any]:
+        return {"run_tag": self.run_tag, "seeded": len(self.fact_to_corpus), "merged_on_save": self.merged,
+                "forget_failures": self.forget_failures}
 
     def __call__(self, query: str, context: dict[str, Any]) -> list[str]:
-        import urllib.request
-        import urllib.parse
-        req_payload = json.dumps({"query": query, "context": context}).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.endpoint_url}/v1/code/query",
-            data=req_payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                self.last_source = "http"
-                if isinstance(data, dict) and "matches" in data:
-                    return [m.get("id", str(m)) for m in data["matches"]]
-                if isinstance(data, list):
-                    return [item.get("id", str(item)) for item in data if isinstance(item, dict)]
-        except Exception as exc:
-            self.last_source = "unavailable"
-            raise RuntimeError(
-                f"live benchmark endpoint unavailable: {self.endpoint_url}"
-            ) from exc
-
-        self.last_source = "invalid_response"
-        raise RuntimeError("live benchmark endpoint returned an unsupported response")
+        recalled = self._call("scos_recall", {"query": query, "max_items": self.max_items})
+        ids = []
+        for item in recalled.get("recall") or []:
+            memory_id = item.get("memory_id", "")
+            ids.append(self.fact_to_corpus.get(memory_id, f"foreign:{memory_id}"))
+        return ids
 
 
 # ── main ─────────────────────────────────────────────────────────────────
 
-def main():
-    suite_path = None
-    if len(sys.argv) >= 3 and sys.argv[1] == "--suite":
-        suite_path = sys.argv[2]
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--suite", default="default", help="suite JSON file, or 'default' for the frozen suite")
+    parser.add_argument("--endpoint", help="MCP gateway URL of a deployed SCOS, e.g. https://127.0.0.1:8098/mcp")
+    parser.add_argument("--ca-file", help="CA bundle for an HTTPS gateway")
+    args = parser.parse_args(argv)
 
-    if suite_path and suite_path != "default":
-        suite = load_suite(suite_path)
+    suite = create_default_frozen_suite() if args.suite == "default" else load_suite(args.suite)
+    baseline = BenchmarkRunner(suite)
+    baseline.run(DeterministicLexicalBaseline(suite.corpus))
+    report: dict[str, Any] = {"baseline": {"name": DeterministicLexicalBaseline.name, "summary": baseline.summary()}}
+    if args.endpoint:
+        with GatewayMemoryAdapter(args.endpoint, suite.corpus, ca_file=args.ca_file) as adapter:
+            runner = BenchmarkRunner(suite)
+            runner.run(adapter)
+            report["seeding"] = adapter.seed_report()
+        report["system_under_test"] = {"endpoint": args.endpoint, "summary": runner.summary(baseline_results=baseline.results),
+                                       "comparison": compare_baseline(runner.results, baseline.results)}
     else:
-        suite = create_default_frozen_suite()
-
-    adapter_url = "http://127.0.0.1:8080"
-    if len(sys.argv) >= 5 and sys.argv[3] == "--endpoint":
-        adapter_url = sys.argv[4]
-
-    adapter = LiveRetrievalAdapter(adapter_url)
-    runner = BenchmarkRunner(suite)
-    results = runner.run(adapter)
-    summary = runner.summary()
-    print(json.dumps(summary, indent=2))
-    sys.exit(0)
+        report["system_under_test"] = {"status": "not_run", "reason": "no --endpoint given; only the lexical baseline was measured"}
+    print(json.dumps(report, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
