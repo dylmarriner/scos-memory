@@ -1134,17 +1134,8 @@ func allocateBudget(totalBudget int, profile string, segments []Segment) BudgetA
 		}
 	}
 
-	// Background segments draw on the evidence allocation.
-	otherTokens := 0
-	for _, seg := range segments {
-		switch seg.Class {
-		case "governing_policy", "current_user_instruction", "active_task_state", "acceptance_criteria",
-			"confirmed_memory", "evidence", "code_symbol", "code_dependency", "tool_schema":
-		default:
-			otherTokens += seg.OriginalTokens
-		}
-	}
-	allocation.Evidence += otherTokens
+	// Background segments share the evidence allocation (classBudgetFor);
+	// the budget is the caller's, never grown to fit whatever was sent.
 	return allocation
 }
 
@@ -1177,17 +1168,43 @@ func transformed(seg Segment, content, transformation string, retained int) Segm
 
 func compressSegments(segments []Segment, profile string, allocation BudgetAllocation) (string, []Segment) {
 	var compressed []Segment
-	totalUsed := 0
+	// Each class bucket spends its own allocation; a segment that does not
+	// fit its bucket may draw on the shared reserve, which is then spent.
+	used := map[string]int{}
 	reserveRemaining := allocation.Reserve
+	fits := func(seg Segment) bool {
+		bucket := budgetBucket(seg.Class)
+		budget := classBudgetFor(seg.Class, allocation)
+		if budget <= 0 {
+			return false
+		}
+		over := used[bucket] + seg.OriginalTokens - budget
+		return over <= 0 || over <= reserveRemaining
+	}
+	spend := func(seg Segment, tokens int) {
+		bucket := budgetBucket(seg.Class)
+		budget := classBudgetFor(seg.Class, allocation)
+		before := used[bucket] - budget
+		used[bucket] += tokens
+		after := used[bucket] - budget
+		if after > 0 {
+			drawn := after
+			if before > 0 {
+				drawn = after - before
+			}
+			reserveRemaining -= drawn
+			if reserveRemaining < 0 {
+				reserveRemaining = 0
+			}
+		}
+	}
 
 	for _, seg := range segments {
-		// Determine budget for this segment's class
-		classBudget := classBudgetFor(seg.Class, allocation)
 
 		// Never drop non-droppable classes
 		if !seg.Droppable {
 			compressed = append(compressed, passThrough(seg))
-			totalUsed += seg.OriginalTokens
+			spend(seg, seg.OriginalTokens)
 			continue
 		}
 
@@ -1197,37 +1214,39 @@ func compressSegments(segments []Segment, profile string, allocation BudgetAlloc
 			// Only canonicalisation and exact deduplication; segment content
 			// is never altered.
 			compressed = append(compressed, passThrough(seg))
-			totalUsed += seg.OriginalTokens
+			spend(seg, seg.OriginalTokens)
 
 		case "balanced":
-			if classBudget > 0 && totalUsed+seg.OriginalTokens <= classBudget+reserveRemaining {
+			if fits(seg) {
 				if len(seg.Content) > 1000 {
 					cut := runeBoundary(seg.Content, 1000)
 					next := transformed(seg, seg.Content[:cut]+truncationMarker, transformTruncation, cut)
 					compressed = append(compressed, next)
-					totalUsed += next.CompiledTokens
+					spend(seg, next.CompiledTokens)
 				} else {
 					compressed = append(compressed, passThrough(seg))
-					totalUsed += seg.OriginalTokens
+					spend(seg, seg.OriginalTokens)
 				}
 			} else {
 				// Droppable class, over budget → replace with reference
 				ref := "[Reference: " + seg.Class + " hash=" + sha256Hex([]byte(seg.Content))[:12] + "]"
 				next := transformed(seg, ref, transformReference, 0)
 				compressed = append(compressed, next)
-				totalUsed += next.CompiledTokens
+				spend(seg, next.CompiledTokens)
 			}
 
 		case "aggressive":
-			// Strong reduction: summarise to one line per segment
-			if classBudget > 0 && totalUsed+seg.OriginalTokens <= classBudget+reserveRemaining {
+			// Strong reduction: every droppable segment longer than one
+			// summary is summarised, whether or not it would have fitted;
+			// only short segments that fit are kept whole.
+			if seg.OriginalTokens <= aggressiveKeepTokens && fits(seg) {
 				compressed = append(compressed, passThrough(seg))
-				totalUsed += seg.OriginalTokens
+				spend(seg, seg.OriginalTokens)
 			} else {
 				summary, kept := summarise(seg.Content, seg.Class)
 				next := transformed(seg, summary, transformSummary, kept)
 				compressed = append(compressed, next)
-				totalUsed += next.CompiledTokens
+				spend(seg, next.CompiledTokens)
 			}
 
 		default: // adaptive — bounded deterministic policy selection per segment
@@ -1235,10 +1254,10 @@ func compressSegments(segments []Segment, profile string, allocation BudgetAlloc
 				summary, kept := summarise(seg.Content, seg.Class)
 				next := transformed(seg, summary, transformSummary, kept)
 				compressed = append(compressed, next)
-				totalUsed += next.CompiledTokens
+				spend(seg, next.CompiledTokens)
 			} else {
 				compressed = append(compressed, passThrough(seg))
-				totalUsed += seg.OriginalTokens
+				spend(seg, seg.OriginalTokens)
 			}
 		}
 	}
@@ -1504,6 +1523,27 @@ func runeBoundary(s string, n int) int {
 		n--
 	}
 	return n
+}
+
+// aggressiveKeepTokens is the largest droppable segment the aggressive
+// profile keeps verbatim; anything longer is summarised.
+const aggressiveKeepTokens = 60
+
+// budgetBucket names the allocation a class spends, so classes sharing an
+// allocation share its accounting.
+func budgetBucket(class string) string {
+	switch class {
+	case "governing_policy":
+		return "governing"
+	case "current_user_instruction":
+		return "request"
+	case "active_task_state", "acceptance_criteria":
+		return "task_state"
+	case "code_symbol", "code_dependency", "tool_schema":
+		return "code_tools"
+	default:
+		return "evidence"
+	}
 }
 
 func classBudgetFor(class string, alloc BudgetAllocation) int {

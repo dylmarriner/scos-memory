@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -949,5 +950,37 @@ func TestCompileAcceptsControlPlanePayload(t *testing.T) {
 	}
 	if got := resolveProfile(req); got != "conservative" {
 		t.Fatalf("critical/restricted request resolved to %q", got)
+	}
+}
+
+func TestAggressiveCompressesBackgroundThatWouldHaveFitted(t *testing.T) {
+	long := strings.Repeat("This background paragraph explains history. ", 40)
+	segments := []Segment{{Class: "optional_background", Content: long, OriginalTokens: estimateTokens(long), Droppable: true}}
+	alloc := allocateBudget(100000, "aggressive", segments)
+	_, out := compressSegments(segments, "aggressive", alloc)
+	if out[0].Transformation != transformSummary || out[0].CompiledTokens >= out[0].OriginalTokens {
+		t.Fatalf("aggressive must summarise a long droppable segment even with budget to spare: %+v", out[0])
+	}
+}
+
+func TestBudgetIsNotGrownToFitTheInput(t *testing.T) {
+	var segments []Segment
+	for i := 0; i < 6; i++ {
+		content := strings.Repeat(fmt.Sprintf("background %d sentence. ", i), 60)
+		segments = append(segments, Segment{Class: "optional_background", Content: content, OriginalTokens: estimateTokens(content), Droppable: true})
+	}
+	alloc := allocateBudget(800, "balanced", segments)
+	if alloc.Evidence != percentOf(800, 25) {
+		t.Fatalf("evidence budget must be the caller's share, got %d", alloc.Evidence)
+	}
+	_, out := compressSegments(segments, "balanced", alloc)
+	refs := 0
+	for _, seg := range out {
+		if seg.Transformation == transformReference {
+			refs++
+		}
+	}
+	if refs == 0 {
+		t.Fatalf("background beyond the evidence budget and reserve must be replaced by references: %+v", out)
 	}
 }
