@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -207,7 +208,7 @@ func TestApplyFindingsIsDependencyAware(t *testing.T) {
 	if status.Phase != "recovery" || status.Checklist[0].Status != "ok" {
 		t.Fatalf("expected database-backed recovery phase, got %q", status.Phase)
 	}
-	if status.Checklist[4].Status != "verifying" || status.Checklist[6].Detail != "2 pending outbox jobs discovered" {
+	if status.Checklist[4].Status != "verifying" || !strings.Contains(status.Checklist[6].Detail, "2 pending jobs available to workers") {
 		t.Fatalf("expected discovered work in checklist: %+v", status.Checklist)
 	}
 	if checklistReady(status.Checklist) {
@@ -224,6 +225,10 @@ func TestApplyFindingsResolvesOKFCheckpointsAndLeases(t *testing.T) {
 		okfDetail:        "OKF repository synced at commit abc123",
 		checkpointDetail: "3 checkpoint(s) loaded, latest at 2026-01-01T00:00:00Z",
 		leasesReset:      2,
+		storageOK:        true,
+		storageDetail:    "database writable (1.0 MiB)",
+		staleRequeued:    1,
+		runsSuperseded:   1,
 	})
 	if status.Checklist[2].Status != "ok" || status.Checklist[2].Detail != "OKF repository synced at commit abc123" {
 		t.Fatalf("expected OKF step resolved, got %+v", status.Checklist[2])
@@ -234,8 +239,17 @@ func TestApplyFindingsResolvesOKFCheckpointsAndLeases(t *testing.T) {
 	if status.Checklist[7].Detail != "2 abandoned leases reset" {
 		t.Fatalf("expected lease reset detail, got %+v", status.Checklist[7])
 	}
-	if status.Checklist[1].Status != "skipped" || status.Checklist[8].Status != "skipped" {
-		t.Fatalf("expected steps 2 and 9 to remain deployment-owned skips, got %+v", status.Checklist)
+	if status.Checklist[1].Status != "ok" || status.Checklist[1].Detail != "database writable (1.0 MiB)" {
+		t.Fatalf("expected verified storage step, got %+v", status.Checklist[1])
+	}
+	if status.Checklist[6].Detail != "1 stale job requeued from expired worker leases; 0 pending jobs available to workers" {
+		t.Fatalf("unexpected outbox detail %q", status.Checklist[6].Detail)
+	}
+	if status.Checklist[8].Detail != "recovery state cache rebuilt; 1 abandoned recovery run superseded" {
+		t.Fatalf("unexpected cache detail %q", status.Checklist[8].Detail)
+	}
+	if !checklistReady(status.Checklist) {
+		t.Fatalf("all verified steps should be ready: %+v", status.Checklist)
 	}
 }
 
@@ -309,7 +323,7 @@ func TestRecoveryStartFailsCleanlyWhenDiscoveryIsKilledMidFlight(t *testing.T) {
 	s := newRecoveryServer()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // simulate the process/dependency being killed before discovery returns
-	s.discover = func(ctx context.Context) (recoveryFindings, error) {
+	s.discover = func(ctx context.Context, _ string) (recoveryFindings, error) {
 		if err := ctx.Err(); err != nil {
 			return recoveryFindings{}, err
 		}
@@ -353,7 +367,7 @@ func TestRecoveryStartFailsCleanlyWhenDiscoveryIsKilledMidFlight(t *testing.T) {
 func TestRecoveryStartConcurrentRetriesDoNotDuplicateSideEffects(t *testing.T) {
 	s := newRecoveryServer()
 	var discoverCalls int32
-	s.discover = func(ctx context.Context) (recoveryFindings, error) {
+	s.discover = func(ctx context.Context, _ string) (recoveryFindings, error) {
 		atomic.AddInt32(&discoverCalls, 1)
 		return recoveryFindings{pendingOutbox: 1}, nil
 	}
