@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -722,6 +723,112 @@ func (c *controlPlane) persistRouteDB(ctx context.Context, req RouteRequest, dec
 	return nil
 }
 
+// decisionSelect is the projection scanRouteDecision reads.
+const decisionSelect = `
+		SELECT d.decision_id, r.interaction_id, d.intent_labels, d.risk_class,
+		       COALESCE(d.freshness_requirement, 'none'), d.selected_plan,
+		       d.reason_codes, d.confidence, d.policy_version,
+		       d.registry_generation, d.actual_outcome, d.created_at
+		FROM routing_decisions d
+		JOIN orchestration_runs r ON r.id = d.orchestration_run_id`
+
+func scanRouteDecision(row pgx.Row) (RouteDecision, error) {
+	var (
+		decision             RouteDecision
+		intentLabels, plan   []byte
+		reasonCodes, outcome []byte
+		registryGeneration   string
+	)
+	if err := row.Scan(
+		&decision.DecisionID, &decision.InteractionID, &intentLabels,
+		&decision.RiskClass, &decision.FreshnessRequirement, &plan,
+		&reasonCodes, &decision.Confidence, &decision.PolicyVersion,
+		&registryGeneration, &outcome, &decision.CreatedAt); err != nil {
+		return RouteDecision{}, err
+	}
+	if err := json.Unmarshal(intentLabels, &decision.IntentLabels); err != nil {
+		return RouteDecision{}, err
+	}
+	if err := json.Unmarshal(plan, &decision.SelectedPlan); err != nil {
+		return RouteDecision{}, err
+	}
+	if err := json.Unmarshal(reasonCodes, &decision.ReasonCodes); err != nil {
+		return RouteDecision{}, err
+	}
+	if registryGeneration != "" {
+		gen, err := strconv.ParseInt(registryGeneration, 10, 64)
+		if err != nil {
+			return RouteDecision{}, err
+		}
+		decision.RegistryGeneration = gen
+	}
+	if len(outcome) > 0 {
+		var state struct {
+			ConfirmationRequired bool `json:"confirmation_required"`
+		}
+		if err := json.Unmarshal(outcome, &state); err != nil {
+			return RouteDecision{}, err
+		}
+		decision.ConfirmationRequired = state.ConfirmationRequired
+	}
+	return decision, nil
+}
+
+// recentDecisions lists the newest route decisions, newest first. With
+// tenantWide false only the actor's own decisions are returned; tenantWide
+// is reserved for operator callers holding the control-plane token.
+func (c *controlPlane) recentDecisions(ctx context.Context, tenantID, actorID string, tenantWide bool, limit int) ([]RouteDecision, error) {
+	if c == nil || (c.db == nil && c.store == nil) {
+		return nil, errors.New("control-plane persistence is unavailable")
+	}
+	if c.db == nil {
+		return c.store.recentDecisions(tenantID, actorID, tenantWide, limit), nil
+	}
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT set_config('scos.tenant_id',$1,true)`, tenantID); err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT set_config('scos.principal_id',$1,true)`, actorID); err != nil {
+		return nil, err
+	}
+	query := decisionSelect + ` WHERE d.tenant_id=$1 AND d.actor_id=$2 ORDER BY d.created_at DESC LIMIT $3`
+	args := []any{tenantID, actorID, limit}
+	if tenantWide {
+		query = decisionSelect + ` WHERE d.tenant_id=$1 ORDER BY d.created_at DESC LIMIT $2`
+		args = []any{tenantID, limit}
+	}
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RouteDecision, 0, limit)
+	for rows.Next() {
+		d, err := scanRouteDecision(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, tx.Commit(ctx)
+}
+
+// hasControlPlaneToken reports whether the request carries the configured
+// control-plane operator token.
+func hasControlPlaneToken(r *http.Request) bool {
+	expected := strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN"))
+	provided := strings.TrimSpace(r.Header.Get("X-SCOS-Control-Plane-Token"))
+	return expected != "" && provided != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(provided)) == 1
+}
+
 func (c *controlPlane) decisionForInteraction(ctx context.Context, tenantID, actorID, interactionID string) (RouteDecision, error) {
 	if c == nil || (c.db == nil && c.store == nil) {
 		return RouteDecision{}, errors.New("control-plane persistence is unavailable")
@@ -745,13 +852,7 @@ func (c *controlPlane) decisionForInteraction(ctx context.Context, tenantID, act
 		return RouteDecision{}, err
 	}
 
-	var (
-		decision             RouteDecision
-		intentLabels, plan   []byte
-		reasonCodes, outcome []byte
-		registryGeneration   string
-	)
-	err = tx.QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 		SELECT d.decision_id, r.interaction_id, d.intent_labels, d.risk_class,
 		       COALESCE(d.freshness_requirement, 'none'), d.selected_plan,
 		       d.reason_codes, d.confidence, d.policy_version,
@@ -760,40 +861,13 @@ func (c *controlPlane) decisionForInteraction(ctx context.Context, tenantID, act
 		JOIN orchestration_runs r ON r.id = d.orchestration_run_id
 		WHERE d.tenant_id=$1 AND d.actor_id=$2 AND r.interaction_id=$3
 		ORDER BY d.created_at DESC
-		LIMIT 1`, tenantID, actorID, interactionID).Scan(
-		&decision.DecisionID, &decision.InteractionID, &intentLabels,
-		&decision.RiskClass, &decision.FreshnessRequirement, &plan,
-		&reasonCodes, &decision.Confidence, &decision.PolicyVersion,
-		&registryGeneration, &outcome, &decision.CreatedAt)
+		LIMIT 1`, tenantID, actorID, interactionID)
+	decision, err := scanRouteDecision(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return RouteDecision{}, pgx.ErrNoRows
 		}
 		return RouteDecision{}, err
-	}
-	if err = json.Unmarshal(intentLabels, &decision.IntentLabels); err != nil {
-		return RouteDecision{}, err
-	}
-	if err = json.Unmarshal(plan, &decision.SelectedPlan); err != nil {
-		return RouteDecision{}, err
-	}
-	if err = json.Unmarshal(reasonCodes, &decision.ReasonCodes); err != nil {
-		return RouteDecision{}, err
-	}
-	if registryGeneration != "" {
-		decision.RegistryGeneration, err = strconv.ParseInt(registryGeneration, 10, 64)
-		if err != nil {
-			return RouteDecision{}, err
-		}
-	}
-	if len(outcome) > 0 {
-		var state struct {
-			ConfirmationRequired bool `json:"confirmation_required"`
-		}
-		if err = json.Unmarshal(outcome, &state); err != nil {
-			return RouteDecision{}, err
-		}
-		decision.ConfirmationRequired = state.ConfirmationRequired
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return RouteDecision{}, err
@@ -1252,6 +1326,28 @@ func main() {
 		interactionID := strings.TrimPrefix(r.URL.Path, "/v1/control/decisions/")
 		if interactionID == r.URL.Path {
 			interactionID = r.URL.Query().Get("interaction_id")
+		}
+		if strings.TrimSpace(interactionID) == "" {
+			// No interaction selected: list recent decisions. Tenant-wide
+			// visibility requires the control-plane operator token; any
+			// other caller sees only its own decisions.
+			limit := 50
+			if raw := r.URL.Query().Get("limit"); raw != "" {
+				n, err := strconv.Atoi(raw)
+				if err != nil || n < 1 || n > 500 {
+					writeControlError(w, http.StatusBadRequest, "limit must be between 1 and 500")
+					return
+				}
+				limit = n
+			}
+			tenantWide := hasControlPlaneToken(r)
+			decisions, err := plane.recentDecisions(r.Context(), tenantID, actorID, tenantWide, limit)
+			if err != nil {
+				writeControlError(w, http.StatusServiceUnavailable, "list route decisions: "+err.Error())
+				return
+			}
+			writeControlJSON(w, http.StatusOK, decisions)
+			return
 		}
 		decision, err := plane.decisionForInteraction(r.Context(), tenantID, actorID, interactionID)
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -167,6 +168,26 @@ func (s *localStateStore) decision(tenantID, actorID, interactionID string) (Rou
 		return RouteDecision{}, errLocalStateNotFound
 	}
 	return decision, nil
+}
+
+// recentDecisions lists stored decisions newest first, scoped to the actor
+// unless tenantWide.
+func (s *localStateStore) recentDecisions(tenantID, actorID string, tenantWide bool, limit int) []RouteDecision {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]RouteDecision, 0)
+	for key, decision := range s.data.Decisions {
+		parts := strings.SplitN(key, "\x00", 3)
+		if len(parts) != 3 || parts[0] != tenantID || (!tenantWide && parts[1] != actorID) {
+			continue
+		}
+		out = append(out, decision)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 func (s *localStateStore) markReplay(tenantID, actorID, interactionID string) error {

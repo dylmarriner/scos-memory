@@ -256,26 +256,10 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				// The routing view has no list endpoint: the control plane
-				// requires an interaction_id per decision, which a system-level
-				// dashboard does not carry. Its "required" response is a valid
-				// empty state, not a broken view.
-				if name == "routing" && strings.Contains(err.Error(), "required") {
-					result[name] = json.RawMessage("[]")
-					return
-				}
 				errored[name] = err.Error()
 				return
 			}
 			if status/100 != 2 {
-				// The routing view has no list endpoint: the control plane
-				// requires an interaction_id per decision, which a system-level
-				// dashboard does not carry. Its 401 "required" response is a
-				// valid empty state, not a broken view.
-				if name == "routing" && status == http.StatusUnauthorized && strings.Contains(string(body), "required") {
-					result[name] = json.RawMessage("[]")
-					return
-				}
 				errored[name] = fmt.Sprintf("upstream returned status %d", status)
 				return
 			}
