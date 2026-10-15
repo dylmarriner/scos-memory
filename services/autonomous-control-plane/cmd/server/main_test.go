@@ -326,12 +326,22 @@ func (d testDispatcher) Dispatch(_ context.Context, _ agentRequest) (agentReply,
 	return agentReply{Content: d.content}, nil
 }
 
+// receiptCommitter is a test double for the memory-gateway committer: it
+// records what was committed and returns the receipt a gateway would.
+type receiptCommitter struct{ commits *[]string }
+
+func (c receiptCommitter) Commit(_ context.Context, req RouteRequest, reply agentReply) (turnCommitReceipt, error) {
+	*c.commits = append(*c.commits, req.InteractionID+":"+reply.Content)
+	return turnCommitReceipt{MessageID: "msg-" + req.InteractionID, CheckpointID: "ckpt-" + req.InteractionID}, nil
+}
+
 func TestAgentLifecycleCapturesReplyAndCommitsBeforeReturn(t *testing.T) {
 	store, err := newLocalStateStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}}
+	var commits []string
+	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}, committer: receiptCommitter{&commits}}
 	req := RouteRequest{TenantID: "tenant", ActorID: "actor", AgentID: "agent", InteractionID: "lifecycle", Input: "hello"}
 	decision := RouteDecision{DecisionID: "decision", InteractionID: req.InteractionID, SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}, {Order: 2, System: "turn-coordinator", Action: "complete", Required: true}}}
 	if err := store.saveRoute(req.TenantID, req.ActorID, decision); err != nil {
@@ -344,6 +354,26 @@ func TestAgentLifecycleCapturesReplyAndCommitsBeforeReturn(t *testing.T) {
 	persisted := store.data.Lifecycles[stateKey(req.TenantID, req.ActorID, req.InteractionID)]
 	if persisted.Reply.Status != "completed" || persisted.Checkpoint.Status != "completed" || persisted.Outbox.Status != "completed" {
 		t.Fatalf("durability was not committed: %+v", persisted)
+	}
+	if len(commits) != 1 || commits[0] != "lifecycle:captured reply" || persisted.Checkpoint.ID != "ckpt-lifecycle" {
+		t.Fatalf("reply was not committed through the committer: %v %+v", commits, persisted.Checkpoint)
+	}
+}
+
+func TestAgentLifecycleWithoutCommitterIsDegraded(t *testing.T) {
+	store, err := newLocalStateStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "reply"}}
+	req := RouteRequest{TenantID: "tenant", ActorID: "actor", AgentID: "agent", InteractionID: "no-commit", Input: "hello"}
+	decision := RouteDecision{DecisionID: "d", InteractionID: req.InteractionID, SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}, {Order: 2, System: "turn-coordinator", Action: "complete", Required: true}}}
+	if err := store.saveRoute(req.TenantID, req.ActorID, decision); err != nil {
+		t.Fatal(err)
+	}
+	status, lifecycle := plane.executeRoute(context.Background(), req, decision)
+	if status != "degraded" || lifecycle.Reply.Status == "completed" {
+		t.Fatalf("an uncommitted reply must not be reported complete: %s %+v", status, lifecycle)
 	}
 }
 
@@ -444,7 +474,8 @@ func TestAgentLifecycleDispatchesGovernedHookStages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}}
+	var hookCommits []string
+	plane := &controlPlane{store: store, dispatcher: testDispatcher{content: "captured reply"}, committer: receiptCommitter{&hookCommits}}
 	req := RouteRequest{TenantID: "tenant", ActorID: "actor", AgentID: "agent", InteractionID: "hook-lifecycle", Input: "hello"}
 	decision := RouteDecision{DecisionID: "decision", InteractionID: req.InteractionID, SelectedPlan: []RouteStep{{Order: 1, System: "agent-router", Action: "dispatch", Required: true}, {Order: 2, System: "turn-coordinator", Action: "complete", Required: true}}}
 	if err := store.saveRoute(req.TenantID, req.ActorID, decision); err != nil {

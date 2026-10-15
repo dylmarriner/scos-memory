@@ -223,11 +223,6 @@ func (c *controlPlane) commitReply(ctx context.Context, req RouteRequest, reply 
 	if c.committer != nil {
 		return c.committer.Commit(ctx, req, reply)
 	}
-	// A local store plus an injected dispatcher is intentionally a test seam,
-	// not a production persistence fallback.
-	if c.db == nil && c.store != nil && c.dispatcher != nil {
-		return turnCommitReceipt{MessageID: "test-message-" + req.InteractionID, CheckpointID: "test-checkpoint-" + req.InteractionID}, nil
-	}
 	return turnCommitReceipt{}, errors.New("authoritative turn commit is not configured")
 }
 

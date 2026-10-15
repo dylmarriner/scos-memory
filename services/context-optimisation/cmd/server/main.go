@@ -224,10 +224,16 @@ func (s *fileSourceStore) Get(objectID, version string) (string, error) {
 	return string(b), nil
 }
 
+// defaultSourceStorePath is the durable location both reference deployments
+// (Compose volume and native systemd units) mount. The store is the
+// authority for context restoration, so it must never default to a
+// temporary directory that is lost on restart.
+const defaultSourceStorePath = "/var/lib/scos/context/sources"
+
 func defaultSourceStore() SourceStore {
 	root := os.Getenv("SCOS_CONTEXT_SOURCE_STORE")
 	if root == "" {
-		root = filepath.Join(os.TempDir(), "scos-context-sources")
+		root = defaultSourceStorePath
 	}
 	return newFileSourceStore(root)
 }
