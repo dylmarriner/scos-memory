@@ -204,6 +204,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
+	if err := database.RequireNoBypassRLS(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	defer db.Close()
 	srv.db = db
 	if err := srv.loadState(context.Background()); err != nil {

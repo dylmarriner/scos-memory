@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,6 +36,26 @@ var ErrConnectingRoleBypassesRLS = fmt.Errorf("connecting database role has BYPA
 func requireNoBypassRLS(ctx context.Context, pool *pgxpool.Pool) error {
 	var bypass bool
 	if err := pool.QueryRow(ctx, bypassRLSQuery).Scan(&bypass); err != nil {
+		return fmt.Errorf("checking connecting role's BYPASSRLS attribute: %w", err)
+	}
+	if bypass {
+		return ErrConnectingRoleBypassesRLS
+	}
+	return nil
+}
+
+// RequireNoBypassRLS applies the same startup guard to a pgx pool that was
+// built with pgxpool.NewWithConfig (to set connection runtime parameters)
+// instead of NewPool.
+func RequireNoBypassRLS(ctx context.Context, pool *pgxpool.Pool) error {
+	return requireNoBypassRLS(ctx, pool)
+}
+
+// RequireNoBypassRLSDB is the guard for services that use database/sql with
+// the pgx stdlib driver. Call it once at startup, after sql.Open.
+func RequireNoBypassRLSDB(ctx context.Context, db *sql.DB) error {
+	var bypass bool
+	if err := db.QueryRowContext(ctx, bypassRLSQuery).Scan(&bypass); err != nil {
 		return fmt.Errorf("checking connecting role's BYPASSRLS attribute: %w", err)
 	}
 	if bypass {

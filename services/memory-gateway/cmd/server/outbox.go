@@ -120,7 +120,18 @@ func (s server) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.db.QueryContext(r.Context(), `
+	// Both tables are under FORCE RLS; read inside the tenant context.
+	tx, err := s.db.BeginTx(r.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list dead letters"})
+		return
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(r.Context(), tx, rc); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list dead letters"})
+		return
+	}
+	rows, err := tx.QueryContext(r.Context(), `
 		SELECT d.id, d.job_id, j.job_type, d.attempts, d.failure_reason, d.created_at
 		FROM outbox_dead_letters d
 		JOIN outbox_jobs j ON j.id = d.job_id
@@ -153,6 +164,11 @@ func (s server) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
 		letters = append(letters, d)
 	}
 	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read dead letters"})
+		return
+	}
+	rows.Close()
+	if err := tx.Commit(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read dead letters"})
 		return
 	}

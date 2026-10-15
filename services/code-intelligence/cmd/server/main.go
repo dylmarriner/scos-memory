@@ -403,6 +403,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	database.TuneSQLDB(db)
 	srv.pgStore = newPGCodeStore(db)
 

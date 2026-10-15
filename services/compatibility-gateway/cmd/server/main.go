@@ -301,6 +301,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	database.TuneSQLDB(db)
 	defer db.Close()
 
@@ -362,12 +365,14 @@ func (s *compatServer) adapterHealthStatus(ctx context.Context, tenantID, bounda
 		return "experimental_untested"
 	}
 	var lastSeen sql.NullTime
-	err := s.db.QueryRowContext(ctx, `
-		SELECT MAX(ai.last_seen_at)
-		FROM adapter_instances ai
-		JOIN agent_adapters aa ON aa.id = ai.adapter_id
-		WHERE ai.tenant_id = $1 AND aa.boundary = $2 AND ai.status = 'active'
-	`, tenantID, boundary).Scan(&lastSeen)
+	err := withTenantRead(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT MAX(ai.last_seen_at)
+			FROM adapter_instances ai
+			JOIN agent_adapters aa ON aa.id = ai.adapter_id
+			WHERE ai.tenant_id = $1 AND aa.boundary = $2 AND ai.status = 'active'
+		`, tenantID, boundary).Scan(&lastSeen)
+	})
 	if err != nil || !lastSeen.Valid {
 		return "no_recent_traffic"
 	}

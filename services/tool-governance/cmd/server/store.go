@@ -138,7 +138,17 @@ func loadToolByName(ctx context.Context, tx *sql.Tx, tenantID, name string) (*To
 }
 
 func listTools(ctx context.Context, db *sql.DB, tenantID string) ([]*ToolDefinition, error) {
-	rows, err := db.QueryContext(ctx, `
+	// tool_definitions and operations are under FORCE RLS: read inside a
+	// transaction carrying the tenant context.
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true)`, tenantID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `
 		SELECT id, name, description, version, properties, state, COALESCE(owner_principal_id::text,''), created_at, updated_at
 		FROM tool_definitions WHERE tenant_id=$1 ORDER BY created_at ASC
 	`, tenantID)
@@ -161,7 +171,11 @@ func listTools(ctx context.Context, db *sql.DB, tenantID string) ([]*ToolDefinit
 		t.CreatedAt, t.UpdatedAt = createdAt, updatedAt
 		tools = append(tools, &t)
 	}
-	return tools, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	return tools, tx.Commit()
 }
 
 func transitionTool(ctx context.Context, tx *sql.Tx, tenantID, toolID string, newState ToolState) error {
@@ -255,7 +269,17 @@ type operationResponse struct {
 }
 
 func listOperations(ctx context.Context, db *sql.DB, tenantID string) ([]*ToolOperation, error) {
-	rows, err := db.QueryContext(ctx, `
+	// tool_definitions and operations are under FORCE RLS: read inside a
+	// transaction carrying the tenant context.
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true)`, tenantID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `
 		SELECT id, tool_name, status, request, response, created_at
 		FROM operations WHERE tenant_id=$1 ORDER BY created_at ASC
 	`, tenantID)
@@ -283,7 +307,11 @@ func listOperations(ctx context.Context, db *sql.DB, tenantID string) ([]*ToolOp
 		op.StartedAt = startedAt
 		ops = append(ops, &op)
 	}
-	return ops, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	return ops, tx.Commit()
 }
 
 // completeOperation moves an executing operation to a terminal (or

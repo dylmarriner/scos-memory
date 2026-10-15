@@ -67,6 +67,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	database.TuneSQLDB(db)
 	defer db.Close()
 	client, err := tlsserve.TrustedClient(30 * time.Second)

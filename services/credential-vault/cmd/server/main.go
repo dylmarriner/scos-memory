@@ -593,6 +593,10 @@ func main() {
 		logger.Error("connect to database", "error", err)
 		os.Exit(1)
 	}
+	if err := database.RequireNoBypassRLSDB(context.Background(), db); err != nil {
+		logger.Error("refusing to start", "error", err)
+		os.Exit(1)
+	}
 	database.TuneSQLDB(db)
 	defer db.Close()
 
