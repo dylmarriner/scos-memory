@@ -60,6 +60,12 @@ set_var SCOS_APP_DATABASE_URL "postgres://scos_app:${SCOS_APP_PASSWORD}@postgres
 # Only consulted by autonomous-control-plane if it's ever asked to dispatch
 # without DEEPSEEK_API_KEY set; compose still requires a non-empty value.
 set_var SCOS_AGENT_ENDPOINT "disabled"
+# Local backups: backup-manager takes real pg_dump archives into its volume and
+# restore-drills them into a temporary database. pg_dump must see every row,
+# so it connects as the owner role, not the RLS-bound runtime role.
+set_var SCOS_BACKUP_PROVIDER local
+set_var SCOS_BACKUP_DATABASE_URL "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require"
+set_var SCOS_BACKUP_RESTORE_DATABASE_URL "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/postgres?sslmode=require"
 set_var GRAPHIFY_WORKSPACE_HOST_PATH "$WORKSPACE_DIR"
 # cloud-control-plane is not started locally, but compose interpolates every
 # service's environment, so its required public URL must still resolve: the
