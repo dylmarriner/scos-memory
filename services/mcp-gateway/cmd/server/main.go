@@ -718,8 +718,6 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	// ── security-gate ────────────────────────────────────────────────────
 	case "scos_auth_validate":
 		return s.forwardPOST(ctx, r, s.securityGateURL+"/v1/auth/validate", args)
-	case "scos_auth_issue":
-		return s.forwardPOST(ctx, r, s.securityGateURL+"/v1/auth/issue", args)
 	case "scos_auth_revoke":
 		return s.forwardPOST(ctx, r, s.securityGateURL+"/v1/auth/revoke", args)
 	case "scos_permission_check":
@@ -803,7 +801,18 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_observability_export_status":
 		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/export/status")
 	case "scos_benchmarks":
-		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/benchmarks")
+		q := url.Values{}
+		if suite := stringArg(args, "suite"); suite != "" {
+			q.Set("suite", suite)
+		}
+		if limit, ok := args["limit"].(float64); ok {
+			q.Set("limit", fmt.Sprintf("%d", int(limit)))
+		}
+		u := s.observabilityURL + "/v1/benchmarks"
+		if encoded := q.Encode(); encoded != "" {
+			u += "?" + encoded
+		}
+		return s.forwardGET(ctx, r, u)
 	}
 	return nil, errUnreachable("unhandled tool: " + tool)
 }
@@ -816,11 +825,16 @@ func (s *gatewayServer) callHermesProvider(ctx context.Context, r *http.Request,
 		"arguments":    args,
 	}
 	if tool == "scos_recall" {
-		sessionID, _ := args["session_id"].(string)
-		if sessionID == "" {
-			sessionID = deriveSessionID(identity.TenantID, identity.PrincipalID)
+		// A caller-named session scopes the recall's session lane to that
+		// session (hermes-provider asks retrieval for include_session). With
+		// no session named, recall is long-term memory only: no session is
+		// invented for the caller.
+		if sessionID := strings.TrimSpace(stringArg(args, "session_id")); sessionID != "" {
+			if !isUUID(sessionID) {
+				return nil, fmt.Errorf("session_id must be a session UUID")
+			}
+			body["session_id"] = sessionID
 		}
-		body["session_id"] = sessionID
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -1163,17 +1177,6 @@ func resolveIdentity(r *http.Request) (requestIdentity, int, string) {
 	return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
 }
 
-// deriveSessionID gives scos_recall a stable UUID-shaped session bucket per
-// (tenant, principal) when the caller supplies none -- MCP tool calls have
-// no notion of a session the way the hermes stdio bridge's per-agent name
-// does. Deterministic, not random: repeat calls from the same identity land
-// in the same bucket.
-func deriveSessionID(tenantID, principalID string) string {
-	sum := sha256.Sum256([]byte("scos-mcp-gateway|" + tenantID + "|" + principalID))
-	hexed := hex.EncodeToString(sum[:16])
-	return hexed[0:8] + "-" + hexed[8:12] + "-" + hexed[12:16] + "-" + hexed[16:20] + "-" + hexed[20:32]
-}
-
 func writeRPCResult(w http.ResponseWriter, id any, result any) {
 	writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 }
@@ -1290,8 +1293,9 @@ func governedTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"query":     map[string]any{"type": "string", "description": "Search query"},
-					"max_items": map[string]any{"type": "integer", "description": "Max results"},
+					"query":      map[string]any{"type": "string", "description": "Search query"},
+					"max_items":  map[string]any{"type": "integer", "description": "Max results"},
+					"session_id": map[string]any{"type": "string", "description": "Session UUID; when given, the session's working and episodic memories are recalled alongside long-term memory"},
 				},
 				"required": []string{"query"},
 			},
@@ -1730,20 +1734,20 @@ func governedTools() []map[string]any {
 	tools = append(tools,
 		tool("scos_backup_list", "List backups", map[string]any{}),
 		tool("scos_backup_get", "Get a backup by ID", map[string]any{"id": strField("Backup ID")}, "id"),
-		tool("scos_backup_start", "Start a new backup", map[string]any{"type": strField("Backup type")}),
-		tool("scos_backup_complete", "Verify and complete a backup", map[string]any{
+		tool("scos_backup_start", "Take a base backup (pg_dump archive plus a data fingerprint of the same snapshot), verify it as stored, then apply retention; requires backups:admin", map[string]any{"type": strField("Backup type; only base_backup is implemented")}),
+		tool("scos_backup_complete", "Re-verify a stored backup against its manifest (backups are completed when taken); requires backups:admin", map[string]any{
 			"backup_id": strField("Backup ID"),
 		}, "backup_id"),
 		tool("scos_restore_test_list", "List restore-test results", map[string]any{}),
-		tool("scos_restore_test_start", "Start a restore drill", map[string]any{
-			"test_type": strField("Restore test type"),
-			"backup_id": strField("Backup ID"),
-		}, "test_type", "backup_id"),
-		tool("scos_restore_test_complete", "Complete a restore drill", map[string]any{
+		tool("scos_restore_test_start", "Run a restore drill to completion: automated_integrity (archive and table of contents), monthly_restore (restore and validate key tables) or quarterly_full_recovery (restore and validate every table and the schema); requires backups:admin", map[string]any{
+			"test_type": strField("automated_integrity, monthly_restore or quarterly_full_recovery"),
+			"backup_id": strField("Backup ID; defaults to the newest verified backup"),
+		}, "test_type"),
+		tool("scos_restore_test_complete", "Return a recorded restore drill result (drills run to completion when started); requires backups:admin", map[string]any{
 			"test_id": strField("Restore test ID"),
 		}, "test_id"),
-		tool("scos_restore_cadence", "Check restore-test cadence status against §31 targets", map[string]any{}),
-		tool("scos_backup_plan", "Get the backup coverage plan", map[string]any{}),
+		tool("scos_restore_cadence", "Check restore-test cadence status against §31 targets, each from passing drills of its own type", map[string]any{}),
+		tool("scos_backup_plan", "Get §31 backup coverage, each item derived from current evidence with the reason when not covered", map[string]any{}),
 		tool("scos_backup_retention", "Get the retention policy", map[string]any{}),
 	)
 
@@ -2069,14 +2073,11 @@ func governedTools() []map[string]any {
 	// ── security-gate ────────────────────────────────────────────────────
 	tools = append(tools,
 		tool("scos_auth_validate", "Validate an auth token", map[string]any{"token": strField("Bearer token")}, "token"),
-		tool("scos_auth_issue", "Issue an auth token (requires issuer secret header)", map[string]any{
-			"principal":          strField("Principal UUID"),
-			"agent_id":           strField("Agent ID"),
-			"tenant":             strField("Tenant UUID"),
-			"session_id":         strField("Session ID"),
-			"max_data_class":     strField("Max data classification"),
-			"expires_in_seconds": intField("Token lifetime in seconds"),
-		}, "principal", "tenant"),
+		// Token issuance (security-gate /v1/auth/issue) is deliberately not a
+		// tool: it is authorised by the fabric's issuer secret, which mints
+		// any identity, and an MCP tool argument lands in agent transcripts
+		// and model context. Tokens are issued by the operator or the cloud
+		// control plane, never through this gateway.
 		tool("scos_auth_revoke", "Revoke an auth token", map[string]any{"token": strField("Bearer token")}, "token"),
 		tool("scos_permission_check", "Check whether a principal may perform an action on a resource; decided against the principal's grants (or a delegation and its delegator's grants), denying unknown data classes", map[string]any{
 			"principal":           strField("Principal"),
@@ -2222,7 +2223,10 @@ func governedTools() []map[string]any {
 		}, "entries"),
 		tool("scos_observability_targets", "Get observability SLO targets", map[string]any{}),
 		tool("scos_observability_export_status", "Get OTLP export configuration status", map[string]any{}),
-		tool("scos_benchmarks", "List recorded benchmark runs (per suite: latest run, pass rate, latency, scores) from observability. Runs are produced by benchmarks/run_acceptance.py and benchmarks/run_deployed.py; this tool does not start one", map[string]any{}),
+		tool("scos_benchmarks", "Report recorded benchmark runs: the latest run per suite and a newest-first run history, as published to observability by the benchmark harnesses (benchmarks/run_deployed.py, benchmarks/run_acceptance.py). This tool does not run benchmarks; it returns an empty history when none has been published.", map[string]any{
+			"suite": strField("Only runs of this suite"),
+			"limit": intField("Maximum history entries, 1-500 (default 100)"),
+		}),
 	)
 
 	return tools

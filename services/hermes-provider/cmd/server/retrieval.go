@@ -90,17 +90,25 @@ type retrievalResponse struct {
 }
 
 // recall runs a governed retrieval for query as the caller and flattens the
-// ranked sections into one list, each memory once, in rank order.
-func (o *retrievalOrchestrator) recall(ctx context.Context, src *http.Request, identity requestIdentity, query string, maxItems int) (RecallResult, error) {
+// ranked sections into one list, each memory once, in rank order. A
+// non-empty sessionID turns on retrieval's session lane for that session
+// (include_session), so the session's working and episodic memories are
+// recalled alongside long-term memory.
+func (o *retrievalOrchestrator) recall(ctx context.Context, src *http.Request, identity requestIdentity, query string, maxItems int, sessionID string) (RecallResult, error) {
 	if maxItems <= 0 || maxItems > 100 {
 		maxItems = 10
 	}
-	raw, _, err := callService(ctx, o.client, "retrieval-orchestrator", o.baseURL, o.controlPlaneToken, src, identity, http.MethodPost, "/v1/retrieve", map[string]any{
+	body := map[string]any{
 		"tenant_id":    identity.TenantID,
 		"principal_id": identity.PrincipalID,
 		"query":        query,
 		"max_results":  maxItems,
-	})
+	}
+	if sessionID != "" {
+		body["session_id"] = sessionID
+		body["include_session"] = true
+	}
+	raw, _, err := callService(ctx, o.client, "retrieval-orchestrator", o.baseURL, o.controlPlaneToken, src, identity, http.MethodPost, "/v1/retrieve", body)
 	if err != nil {
 		return RecallResult{}, err
 	}

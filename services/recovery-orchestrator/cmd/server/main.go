@@ -8,6 +8,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -48,6 +49,7 @@ type RecoveryStatus struct {
 	Phase            string            `json:"phase"` // startup, recovery, completed, failed
 	Checklist        RecoveryChecklist `json:"checklist"`
 	InterruptedTurns []string          `json:"interrupted_turns"`
+	ResumePoints     []ResumePoint     `json:"resume_points"`
 	OpenOperations   []string          `json:"open_operations"`
 	PendingOutbox    int               `json:"pending_outbox_jobs"`
 	RecoveryStarted  string            `json:"recovery_started"`
@@ -63,11 +65,15 @@ type recoveryServer struct {
 	// discover runs every recovery check and corrective action for one
 	// service and reports what it found and did.
 	discover func(ctx context.Context, serviceID string) (recoveryFindings, error)
-	db       *pgxpool.Pool
+	// rebuildCache rebuilds the orchestrator's recovery-state cache from
+	// the persisted runs (step 9) and reports how many runs it loaded.
+	rebuildCache func(ctx context.Context) (int, error)
+	db           *pgxpool.Pool
 }
 
 type recoveryFindings struct {
 	interruptedTurns []string
+	resumePoints     []ResumePoint
 	openOperations   []string
 	pendingOutbox    int
 	staleRequeued    int
@@ -76,9 +82,12 @@ type recoveryFindings struct {
 	storageDetail    string
 	okfOK            bool
 	okfDetail        string
+	checkpointsOK    bool
 	checkpointDetail string
 	leasesReset      int
 	runsSuperseded   int
+	cacheRebuilt     bool
+	cacheDetail      string
 }
 
 func newRecoveryServer() *recoveryServer {
@@ -108,6 +117,7 @@ func main() {
 		s.discover = func(ctx context.Context, serviceID string) (recoveryFindings, error) {
 			return discoverRecoveryFindings(ctx, db, serviceID)
 		}
+		s.rebuildCache = s.rebuildStatusCache
 		defer db.Close()
 		loadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if err := s.loadPersistedStatuses(loadCtx); err != nil {
@@ -208,6 +218,7 @@ func (s *recoveryServer) handleRecoveryStart(w http.ResponseWriter, r *http.Requ
 			status.Checklist[0].Status = "failed"
 			status.Checklist[0].Detail = err.Error()
 		} else {
+			findings.cacheRebuilt, findings.cacheDetail = s.rebuildRecoveryCache(r.Context(), findings.runsSuperseded)
 			applyFindings(status, findings)
 		}
 	}
@@ -344,43 +355,59 @@ func (s *recoveryServer) handleRecoveryComplete(w http.ResponseWriter, r *http.R
 		return
 	}
 	s.mu.Lock()
-	status, ok := s.statuses[req.ServiceID]
+	current, ok := s.statuses[req.ServiceID]
 	if !ok {
 		s.mu.Unlock()
 		http.Error(w, "service not found", http.StatusNotFound)
 		return
 	}
-	if !checklistReady(status.Checklist) {
+	if !checklistReady(current.Checklist) {
 		s.mu.Unlock()
 		http.Error(w, "mandatory recovery checks are not complete", http.StatusConflict)
 		return
 	}
+	// The completion is prepared on a copy and only becomes the served
+	// status once it is durable: a refused replay must not leave the cache
+	// reporting a completion the database never recorded.
+	status := *current
+	status.Checklist = append(RecoveryChecklist(nil), current.Checklist...)
+	s.mu.Unlock()
 	status.Phase = "completed"
 	status.RecoveryEnded = time.Now().UTC().Format(time.RFC3339)
-	setRecoveryItem(status, 10, "ok", "all recovery checks verified; readiness marked")
-	interrupted := len(status.InterruptedTurns)
+	setRecoveryItem(&status, 10, "ok", "all recovery checks verified; readiness marked")
+	if err := s.persistRecoveryStatus(r.Context(), &status, "recovery_completed"); err != nil {
+		var re *replayError
+		if errors.As(err, &re) {
+			http.Error(w, "recovery event replay refused completion: "+err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, "persist recovery completion: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.mu.Lock()
+	s.statuses[req.ServiceID] = &status
 	s.mu.Unlock()
 	// §32 recoveries: count each completed recovery, labelled by whether it
 	// had interrupted turns to reconcile.
 	serviceMetrics.Count(telemetry.MetricRecoveries, map[string]string{
 		"service":           req.ServiceID,
-		"had_interruptions": strconv.FormatBool(interrupted > 0),
+		"had_interruptions": strconv.FormatBool(len(status.InterruptedTurns) > 0),
 	}, telemetry.Correlation{})
-	if err := s.persistRecoveryStatus(r.Context(), status, "recovery_completed"); err != nil {
-		http.Error(w, "persist recovery completion: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, status)
+	writeJSON(w, &status)
 }
 
 func applyFindings(status *RecoveryStatus, findings recoveryFindings) {
 	status.InterruptedTurns = findings.interruptedTurns
+	status.ResumePoints = findings.resumePoints
+	if status.ResumePoints == nil {
+		status.ResumePoints = []ResumePoint{}
+	}
 	status.OpenOperations = findings.openOperations
 	status.PendingOutbox = findings.pendingOutbox
 	setRecoveryItem(status, 1, "ok", "database and schema available")
 	setRecoveryItem(status, 2, okOrFailed(findings.storageOK), findings.storageDetail)
 	setRecoveryItem(status, 3, okOrFailed(findings.okfOK), findings.okfDetail)
-	setRecoveryItem(status, 4, "ok", findings.checkpointDetail)
+	setRecoveryItem(status, 4, okOrFailed(findings.checkpointsOK), findings.checkpointDetail)
 	setRecoveryItem(status, 5, findingStatus(len(findings.interruptedTurns)), countDetail(len(findings.interruptedTurns), "interrupted turn"))
 	setRecoveryItem(status, 6, findingStatus(len(findings.openOperations)), countDetail(len(findings.openOperations), "open operation"))
 	outbox := fmt.Sprintf("%s requeued from expired worker leases; %s available to workers",
@@ -390,7 +417,7 @@ func applyFindings(status *RecoveryStatus, findings recoveryFindings) {
 	}
 	setRecoveryItem(status, 7, "ok", outbox)
 	setRecoveryItem(status, 8, "ok", leaseResetDetail(findings.leasesReset))
-	setRecoveryItem(status, 9, "ok", fmt.Sprintf("recovery state cache rebuilt; %s superseded", countNoun(findings.runsSuperseded, "abandoned recovery run")))
+	setRecoveryItem(status, 9, okOrFailed(findings.cacheRebuilt), findings.cacheDetail)
 	setRecoveryItem(status, 10, "pending", "complete recovery checks before marking readiness")
 	status.Phase = "recovery"
 }
@@ -474,12 +501,10 @@ func discoverRecoveryFindings(ctx context.Context, db *pgxpool.Pool, serviceID s
 		return findings, fmt.Errorf("read recovery findings: %w", err)
 	}
 	var fabric struct {
-		InterruptedTurns []string   `json:"interrupted_turns"`
-		OpenOperations   []string   `json:"open_operations"`
-		PendingOutbox    int        `json:"pending_outbox"`
-		DeadLetters      int        `json:"dead_letters"`
-		CheckpointCount  int        `json:"checkpoint_count"`
-		LatestCheckpoint *time.Time `json:"latest_checkpoint"`
+		InterruptedTurns []string `json:"interrupted_turns"`
+		OpenOperations   []string `json:"open_operations"`
+		PendingOutbox    int      `json:"pending_outbox"`
+		DeadLetters      int      `json:"dead_letters"`
 		OKFLatest        *struct {
 			CommitHash string          `json:"commit_hash"`
 			Errors     json.RawMessage `json:"errors"`
@@ -512,12 +537,17 @@ func discoverRecoveryFindings(ctx context.Context, db *pgxpool.Pool, serviceID s
 		}
 	}
 
-	// Step 4: checkpoints available to resume from.
-	if fabric.CheckpointCount == 0 || fabric.LatestCheckpoint == nil {
-		findings.checkpointDetail = "no checkpoints recorded"
-	} else {
-		findings.checkpointDetail = fmt.Sprintf("%d checkpoint(s) loaded, latest at %s", fabric.CheckpointCount, fabric.LatestCheckpoint.UTC().Format(time.RFC3339))
+	// Step 4: load every session's latest checkpoint and verify it against
+	// its turn's event history; map interrupted turns to resume points.
+	var checkpointsRaw []byte
+	if err := db.QueryRow(ctx, `SELECT scos_recovery_checkpoints()`).Scan(&checkpointsRaw); err != nil {
+		return findings, fmt.Errorf("load checkpoints: %w", err)
 	}
+	ok, detail, resume, err := loadCheckpoints(checkpointsRaw)
+	if err != nil {
+		return findings, err
+	}
+	findings.checkpointsOK, findings.checkpointDetail, findings.resumePoints = ok, detail, resume
 
 	// Step 2: storage the fabric writes to must accept writes.
 	findings.storageOK, findings.storageDetail = verifyStorage(ctx, db, requiredStoragePaths())
@@ -639,6 +669,13 @@ func (s *recoveryServer) persistRecoveryStatus(ctx context.Context, status *Reco
 			return err
 		}
 	} else {
+		if eventType == "recovery_completed" {
+			// Replay the run's log before completing it: it must reproduce
+			// the run row as it stands, or the completion is refused.
+			if _, err := replayRunEvents(ctx, tx, status.RecoveryRunID); err != nil {
+				return &replayError{err: err}
+			}
+		}
 		_, err = tx.Exec(ctx, `UPDATE recovery_runs SET phase=$2, status=$3, checklist=$4,
 			interrupted_turn_count=$5, open_operation_count=$6, pending_outbox_count=$7,
 			recovery_ended=NULLIF($8,'')::timestamptz, error_detail=NULLIF($9,'') WHERE id=$1`,
@@ -650,7 +687,7 @@ func (s *recoveryServer) persistRecoveryStatus(ctx context.Context, status *Reco
 	payload, err := json.Marshal(map[string]any{
 		"phase": status.Phase, "checklist": status.Checklist,
 		"interrupted_turns": status.InterruptedTurns, "open_operations": status.OpenOperations,
-		"pending_outbox_jobs": status.PendingOutbox,
+		"resume_points": status.ResumePoints, "pending_outbox_jobs": status.PendingOutbox,
 	})
 	if err != nil {
 		return err
@@ -661,12 +698,19 @@ func (s *recoveryServer) persistRecoveryStatus(ctx context.Context, status *Reco
 		return err
 	}
 	if eventType == "recovery_completed" {
+		// The completion event joins the log; the whole log is replayed
+		// once more (it must still fold to the completed row) and exactly
+		// the events applied are marked replayed, up to the cursor.
+		replayed, err := replayRunEvents(ctx, tx, status.RecoveryRunID)
+		if err != nil {
+			return &replayError{err: err}
+		}
 		_, err = tx.Exec(ctx, `UPDATE recovery_events SET replay_state='replayed', replayed_at=now()
-			WHERE recovery_run_id=$1 AND replay_state='pending'`, status.RecoveryRunID)
+			WHERE recovery_run_id=$1 AND replay_state='pending' AND sequence <= $2`, status.RecoveryRunID, replayed.LastSequence)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE recovery_runs SET replay_cursor=COALESCE((SELECT max(sequence) FROM recovery_events WHERE recovery_run_id=$1),0) WHERE id=$1`, status.RecoveryRunID)
+		_, err = tx.Exec(ctx, `UPDATE recovery_runs SET replay_cursor=$2 WHERE id=$1`, status.RecoveryRunID, replayed.LastSequence)
 		if err != nil {
 			return err
 		}
@@ -680,21 +724,55 @@ func (s *recoveryServer) persistRecoveryStatus(ctx context.Context, status *Reco
 // from the database, so the status, checklist and interrupted work a
 // recovery reported are still served after the orchestrator restarts.
 func (s *recoveryServer) loadPersistedStatuses(ctx context.Context) error {
+	_, err := s.rebuildStatusCache(ctx)
+	return err
+}
+
+// rebuildStatusCache discards the orchestrator's recovery-state cache and
+// rebuilds it from the latest persisted run of every service, so the cache
+// holds exactly what the database records (including runs just superseded).
+// It returns the number of runs loaded.
+func (s *recoveryServer) rebuildStatusCache(ctx context.Context) (int, error) {
 	var raw []byte
 	if err := s.db.QueryRow(ctx, `SELECT scos_recovery_latest_runs()`).Scan(&raw); err != nil {
-		return err
+		return 0, err
 	}
 	statuses, err := decodePersistedRuns(raw)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	rebuilt := make(map[string]*RecoveryStatus, len(statuses))
+	for _, st := range statuses {
+		rebuilt[st.ServiceID] = st
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, st := range statuses {
-		s.statuses[st.ServiceID] = st
-	}
-	return nil
+	s.statuses = rebuilt
+	s.mu.Unlock()
+	return len(statuses), nil
 }
+
+// rebuildRecoveryCache runs step 9 and describes exactly what it rebuilt.
+// The orchestrator's recovery-state cache is its only temporary cache;
+// caches other services hold are theirs to rebuild, and the detail says so
+// rather than implying this step reached them.
+func (s *recoveryServer) rebuildRecoveryCache(ctx context.Context, superseded int) (bool, string) {
+	if s.rebuildCache == nil {
+		return false, "recovery state cache not rebuilt: no recovery database is configured"
+	}
+	n, err := s.rebuildCache(ctx)
+	if err != nil {
+		return false, "recovery state cache rebuild failed: " + err.Error()
+	}
+	return true, fmt.Sprintf("recovery state cache rebuilt from %s; %s superseded; caches held by other services are rebuilt by those services, not by this step",
+		countNoun(n, "persisted recovery run"), countNoun(superseded, "abandoned recovery run"))
+}
+
+// replayError marks a completion refused because the run's event log did
+// not replay to its recorded state.
+type replayError struct{ err error }
+
+func (e *replayError) Error() string { return e.err.Error() }
+func (e *replayError) Unwrap() error { return e.err }
 
 // decodePersistedRuns turns scos_recovery_latest_runs() output back into
 // statuses. The run row holds the phase and checklist; the identifiers of
@@ -709,8 +787,9 @@ func decodePersistedRuns(raw []byte) ([]*RecoveryStatus, error) {
 		RecoveryStarted string            `json:"recovery_started"`
 		RecoveryEnded   string            `json:"recovery_ended"`
 		LatestEvent     *struct {
-			InterruptedTurns []string `json:"interrupted_turns"`
-			OpenOperations   []string `json:"open_operations"`
+			InterruptedTurns []string      `json:"interrupted_turns"`
+			OpenOperations   []string      `json:"open_operations"`
+			ResumePoints     []ResumePoint `json:"resume_points"`
 		} `json:"latest_event"`
 	}
 	if err := json.Unmarshal(raw, &runs); err != nil {
@@ -722,11 +801,14 @@ func decodePersistedRuns(raw []byte) ([]*RecoveryStatus, error) {
 			RecoveryRunID: run.RecoveryRunID, ServiceID: run.ServiceID, Phase: run.Phase,
 			Checklist: run.Checklist, PendingOutbox: run.PendingOutbox,
 			RecoveryStarted: run.RecoveryStarted, RecoveryEnded: run.RecoveryEnded,
-			InterruptedTurns: []string{}, OpenOperations: []string{},
+			InterruptedTurns: []string{}, OpenOperations: []string{}, ResumePoints: []ResumePoint{},
 		}
 		if run.LatestEvent != nil {
 			if run.LatestEvent.InterruptedTurns != nil {
 				st.InterruptedTurns = run.LatestEvent.InterruptedTurns
+			}
+			if run.LatestEvent.ResumePoints != nil {
+				st.ResumePoints = run.LatestEvent.ResumePoints
 			}
 			if run.LatestEvent.OpenOperations != nil {
 				st.OpenOperations = run.LatestEvent.OpenOperations

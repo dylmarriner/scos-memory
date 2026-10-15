@@ -54,11 +54,27 @@ func (s *server) okfDocuments(w http.ResponseWriter, r *http.Request) {
 // query-only API: there is no passive "list the whole graph" view, so the
 // dashboard exposes these as a live ask/explain panel instead of a browsable
 // list, matching what the service actually does.
+// Both are gated on the account's plan including graphify, exactly as the
+// hosted MCP graphify tools are.
 func (s *server) graphifyQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if !s.requireFeature(w, r, featureGraphify) {
+		return
+	}
 	s.proxyTenantScopedPost(w, r, s.graphifyURL, "/v1/graphify/query", "dashboard-graphify-query")
 }
 
 func (s *server) graphifyExplain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if !s.requireFeature(w, r, featureGraphify) {
+		return
+	}
 	s.proxyTenantScopedPost(w, r, s.graphifyURL, "/v1/graphify/explain", "dashboard-graphify-explain")
 }
 

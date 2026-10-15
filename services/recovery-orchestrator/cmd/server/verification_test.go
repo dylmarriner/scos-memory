@@ -15,6 +15,7 @@ func newStartedServer(t *testing.T, findings *recoveryFindings) *recoveryServer 
 	t.Helper()
 	s := newRecoveryServer()
 	s.discover = func(context.Context, string) (recoveryFindings, error) { return *findings, nil }
+	s.rebuildCache = func(context.Context) (int, error) { return 1, nil }
 	res := httptest.NewRecorder()
 	s.handleRecoveryStart(res, httptest.NewRequest(http.MethodPost, "/v1/recovery/start", bytes.NewBufferString(`{"service_id":"svc"}`)))
 	if res.Code != http.StatusOK {
@@ -30,7 +31,7 @@ func update(s *recoveryServer, body string) *httptest.ResponseRecorder {
 }
 
 func TestChecklistOkIsReverifiedNotTrusted(t *testing.T) {
-	findings := &recoveryFindings{interruptedTurns: []string{"turn-1"}, storageOK: true, okfOK: true}
+	findings := &recoveryFindings{interruptedTurns: []string{"turn-1"}, storageOK: true, okfOK: true, checkpointsOK: true}
 	s := newStartedServer(t, findings)
 
 	if res := update(s, `{"service_id":"svc","step":5,"status":"ok"}`); res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), "1 interrupted turn") {

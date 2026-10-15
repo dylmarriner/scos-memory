@@ -180,7 +180,7 @@ func (s *okfServer) loadProposalsFromDB(ctx context.Context) error {
 	if s.db == nil {
 		return nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT id,path,base_commit,base_hash,content,diff,status,proposer,COALESCE(reviewer,''),COALESCE(review_role,''),COALESCE(decision,''),reason,created_at,COALESCE(reviewed_at,'epoch'),COALESCE(merged_commit,''),COALESCE(indexed_at,'epoch'),diverged FROM okf_proposals`)
+	rows, err := s.db.Query(ctx, `SELECT id,path,base_commit,base_hash,content,diff,status,proposer,COALESCE(reviewer,''),COALESCE(review_role,''),COALESCE(decision,''),reason,created_at,COALESCE(reviewed_at,'epoch'),COALESCE(merged_commit,''),COALESCE(indexed_at,'epoch'),diverged,COALESCE(merged_by,''),COALESCE(merge_role,'') FROM okf_proposals`)
 	if err != nil {
 		return err
 	}
@@ -188,7 +188,7 @@ func (s *okfServer) loadProposalsFromDB(ctx context.Context) error {
 	for rows.Next() {
 		var p OKFProposal
 		var created, reviewed, indexed time.Time
-		if err := rows.Scan(&p.ID, &p.Path, &p.BaseCommit, &p.BaseHash, &p.Content, &p.Diff, &p.Status, &p.Proposer, &p.Reviewer, &p.ReviewRole, &p.Decision, &p.Reason, &created, &reviewed, &p.MergedCommit, &indexed, &p.Diverged); err != nil {
+		if err := rows.Scan(&p.ID, &p.Path, &p.BaseCommit, &p.BaseHash, &p.Content, &p.Diff, &p.Status, &p.Proposer, &p.Reviewer, &p.ReviewRole, &p.Decision, &p.Reason, &created, &reviewed, &p.MergedCommit, &indexed, &p.Diverged, &p.MergedBy, &p.MergeRole); err != nil {
 			return err
 		}
 		p.CreatedAt = created.UTC().Format(time.RFC3339)

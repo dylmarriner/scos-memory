@@ -33,8 +33,11 @@ class ComposeSecurityTests(unittest.TestCase):
         self.assertIn("SCOS_DATABASE_URL:?", COMPOSE)
         self.assertIn("wal_level=replica", COMPOSE)
         self.assertIn("archive_mode=on", COMPOSE)
-        self.assertIn("SCOS_BACKUP_PROVIDER_VERIFIED", COMPOSE)
-        self.assertIn("SCOS_BACKUP_OFF_HOST_VERIFIED", COMPOSE)
+        # Backup coverage is derived from evidence by backup-manager; a
+        # flag asserting it would be a claim nothing checks.
+        for asserted in ("SCOS_BACKUP_PROVIDER_VERIFIED", "SCOS_BACKUP_OFF_HOST_VERIFIED", "SCOS_PITR_ENABLED", "SCOS_OKF_GIT_MIRROR_VERIFIED"):
+            self.assertNotIn(asserted, COMPOSE)
+            self.assertNotIn(asserted, ENV_EXAMPLE)
         self.assertIn("SCOS_SECRET_MANAGER", COMPOSE)
         self.assertIn("SCOS_BACKUP_ENCRYPTION_KEY_REF", COMPOSE)
         self.assertNotIn("SCOS_BACKUP_ENCRYPTION_KEY:", COMPOSE)

@@ -13,8 +13,8 @@ import (
 
 func TestGovernedToolsListsAllGovernedTools(t *testing.T) {
 	tools := governedTools()
-	if len(tools) != 155 {
-		t.Fatalf("expected 155 governed tools, got %d", len(tools))
+	if len(tools) != 154 {
+		t.Fatalf("expected 154 governed tools, got %d", len(tools))
 	}
 	names := governedToolNames()
 	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_remember", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain"} {
@@ -47,8 +47,8 @@ func TestHandleMCPToolsList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(resp.Result.Tools) != 155 {
-		t.Fatalf("expected 155 tools in tools/list response, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 154 {
+		t.Fatalf("expected 154 tools in tools/list response, got %d", len(resp.Result.Tools))
 	}
 }
 
@@ -200,38 +200,88 @@ func TestResolveIdentityLocalAuthModeIgnoresClaimsAndHeaders(t *testing.T) {
 	}
 }
 
-func TestDeriveSessionIDIsDeterministicAndValidUUIDShape(t *testing.T) {
-	a := deriveSessionID("tenant-1", "principal-1")
-	b := deriveSessionID("tenant-1", "principal-1")
-	if a != b {
-		t.Fatalf("expected deterministic session id, got %q vs %q", a, b)
+// TestRecallForwardsOnlyACallerNamedSession: a session_id the caller names
+// reaches hermes-provider (which scopes the session lane to it); with none
+// named, no session is invented; a malformed one is refused.
+func TestRecallForwardsOnlyACallerNamedSession(t *testing.T) {
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/provider/tool_call" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]any{"recall": []any{}})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{hermesURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	identity := requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}
+	const session = "8b2f0c8e-1d7a-4c56-9a0b-2f6e8d1c3b4a"
+	if _, err := s.dispatchTool(r.Context(), r, identity, "scos_recall", map[string]any{"query": "deploy target", "session_id": session}); err != nil {
+		t.Fatal(err)
 	}
-	if !isUUIDShape(a) {
-		t.Fatalf("expected UUID-shaped session id, got %q", a)
+	if got["session_id"] != session {
+		t.Fatalf("named session not forwarded: %v", got)
 	}
-	c := deriveSessionID("tenant-1", "principal-2")
-	if a == c {
-		t.Fatalf("expected different principals to derive different session ids")
+	if _, err := s.dispatchTool(r.Context(), r, identity, "scos_recall", map[string]any{"query": "deploy target"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := got["session_id"]; has {
+		t.Fatalf("a session was invented for a recall that named none: %v", got)
+	}
+	got = nil
+	if _, err := s.dispatchTool(r.Context(), r, identity, "scos_recall", map[string]any{"query": "q", "session_id": "not-a-uuid"}); err == nil {
+		t.Fatal("a malformed session_id must be refused")
+	}
+	if got != nil {
+		t.Fatal("a refused recall reached hermes-provider")
 	}
 }
 
-func isUUIDShape(s string) bool {
-	if len(s) != 36 {
-		return false
+// TestAuthIssueIsNotAGatewayTool: token issuance needs the issuer secret,
+// which must never travel as an agent tool argument.
+func TestAuthIssueIsNotAGatewayTool(t *testing.T) {
+	if governedToolNames()["scos_auth_issue"] {
+		t.Fatal("scos_auth_issue must not be offered")
 	}
-	for i, r := range s {
-		switch i {
-		case 8, 13, 18, 23:
-			if r != '-' {
-				return false
-			}
-		default:
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
-				return false
+	s := &gatewayServer{}
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "scos_auth_issue", "arguments": map[string]any{}}})
+	rec := httptest.NewRecorder()
+	s.handleMCP(rec, httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body)))
+	if !strings.Contains(rec.Body.String(), "unknown tool") {
+		t.Fatalf("scos_auth_issue call = %s", rec.Body.String())
+	}
+}
+
+// TestBenchmarksReportsRecordedRuns: the tool reads recorded history (with
+// its suite and limit filters) and says it does not run benchmarks.
+func TestBenchmarksReportsRecordedRuns(t *testing.T) {
+	var query string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/benchmarks" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		query = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{"history": []any{}})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{observabilityURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	if _, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "t", PrincipalID: "p"}, "scos_benchmarks", map[string]any{"suite": "deployed", "limit": float64(5)}); err != nil {
+		t.Fatal(err)
+	}
+	if query != "limit=5&suite=deployed" {
+		t.Fatalf("query = %q", query)
+	}
+	for _, tool := range governedTools() {
+		if tool["name"] == "scos_benchmarks" {
+			desc := tool["description"].(string)
+			if strings.Contains(desc, "Run and report") || !strings.Contains(desc, "does not run benchmarks") {
+				t.Fatalf("scos_benchmarks description = %q", desc)
 			}
 		}
 	}
-	return true
 }
 
 func TestDispatchCodeRegisterReturnsLegacyAndDurableIDs(t *testing.T) {

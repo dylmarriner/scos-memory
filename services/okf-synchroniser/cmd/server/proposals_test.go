@@ -344,7 +344,8 @@ func TestMergeMarksRootedDocumentDiverged(t *testing.T) {
 	runGit(t, root, "add", "policy.md")
 	runGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
 
-	s := &okfServer{documents: map[string]*OKFDocument{}, projections: map[string]*IndexProjection{}, proposals: map[string]*OKFProposal{}, okfRoot: root, statePath: filepath.Join(t.TempDir(), "projections.json")}
+	s := &okfServer{documents: map[string]*OKFDocument{}, projections: map[string]*IndexProjection{}, proposals: map[string]*OKFProposal{}, okfRoot: root, statePath: filepath.Join(t.TempDir(), "projections.json"),
+		governanceRoles: staticRoles(map[string][]string{"carol": {"knowledge_curator"}})}
 	s.synchronise(context.Background())
 	p, err := s.createProposal(okfProposalRequest{Path: "policy.md", Content: "# new\n", Proposer: "alice"})
 	if err != nil {
@@ -355,7 +356,7 @@ func TestMergeMarksRootedDocumentDiverged(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# edited outside the workflow\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.mergeProposal(context.Background(), p.ID); err == nil {
+	if _, err := s.mergeProposal(context.Background(), p.ID, "carol"); err == nil {
 		t.Fatal("merge over a diverged working tree must fail")
 	}
 	if !p.Diverged {
@@ -366,5 +367,64 @@ func TestMergeMarksRootedDocumentDiverged(t *testing.T) {
 	}
 	if proj := s.projections[path]; proj == nil || proj.ImportStatus != "diverged" {
 		t.Fatalf("projection not marked diverged: %#v", proj)
+	}
+}
+
+// approvedOverHTTP takes a proposal by alice through independent review and
+// approval by bob, in a harness whose OKF root is a git repository so the
+// protected-branch merge can actually commit.
+func approvedOverHTTP(t *testing.T, roles map[string][]string) (*proposalHarness, string) {
+	t.Helper()
+	t.Setenv("SCOS_OKF_PROTECTED_BRANCH", "main")
+	h := newProposalHarness(t, roles)
+	root := h.server.okfRoot
+	runGit(t, root, "init")
+	runGit(t, root, "add", "policy.md")
+	runGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	id := h.createDiffed("alice")
+	h.expect(h.post("bob", "/v1/proposals/"+id+"/review", nil), http.StatusOK, "review")
+	h.expect(h.post("bob", "/v1/proposals/"+id+"/approve", map[string]string{"reason": "reviewed"}), http.StatusOK, "approve")
+	return h, id
+}
+
+// TestMergeRequiresAMergeRole: an approved proposal is not mergeable by any
+// token holder. The anonymous static token, a principal with no role, and
+// a principal holding only review roles (auditor, memory_steward) are all
+// refused, and the proposal stays approved with nothing committed.
+func TestMergeRequiresAMergeRole(t *testing.T) {
+	h, id := approvedOverHTTP(t, map[string][]string{
+		"bob":     {"knowledge_curator"},
+		"mallory": {"auditor", "memory_steward"},
+	})
+	before := gitCommit(h.server.okfRoot)
+	h.expect(h.post("", "/v1/proposals/"+id+"/merge", nil), http.StatusForbidden, "static token merge")
+	h.expect(h.post("eve", "/v1/proposals/"+id+"/merge", nil), http.StatusForbidden, "roleless merge")
+	h.expect(h.post("mallory", "/v1/proposals/"+id+"/merge", nil), http.StatusForbidden, "review-only role merge")
+	if p := h.server.proposals[id]; p.Status != "approved" || p.MergedBy != "" {
+		t.Fatalf("refused merge changed the proposal: %#v", p)
+	}
+	if after := gitCommit(h.server.okfRoot); after != before {
+		t.Fatalf("refused merge committed: %s -> %s", before, after)
+	}
+}
+
+// TestMergeIsAttributedToTheMerger: the merge transition names the principal
+// who merged and the role they merged under, not the reviewer.
+func TestMergeIsAttributedToTheMerger(t *testing.T) {
+	h, id := approvedOverHTTP(t, map[string][]string{
+		"bob":   {"knowledge_curator"},
+		"olive": {"system_owner"},
+	})
+	rec := h.post("olive", "/v1/proposals/"+id+"/merge", nil)
+	h.expect(rec, http.StatusOK, "system owner merge")
+	var p OKFProposal
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Status != "indexed" || p.MergedBy != "olive" || p.MergeRole != "system_owner" || p.Reviewer != "bob" {
+		t.Fatalf("merge not attributed to olive as system_owner: %#v", p)
+	}
+	if p.MergedCommit == "" || p.MergedCommit != gitCommit(h.server.okfRoot) {
+		t.Fatalf("merge did not commit: %#v", p)
 	}
 }

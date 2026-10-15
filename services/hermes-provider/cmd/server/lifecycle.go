@@ -338,11 +338,23 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 				maxItems = int(n)
 			}
 		}
+		// The session a recall is scoped to is the one the caller named
+		// (request field, or the tool argument); none named means
+		// long-term memory only.
+		sessionID := strings.TrimSpace(req.SessionID)
+		if sessionID == "" {
+			sessionID, _ = req.Arguments["session_id"].(string)
+			sessionID = strings.TrimSpace(sessionID)
+		}
+		if sessionID != "" && !isUUID(sessionID) {
+			http.Error(w, "session_id must be a session UUID", http.StatusBadRequest)
+			return
+		}
 		if s.retrieval == nil {
 			http.Error(w, "retrieval-orchestrator is not configured for scos_recall", http.StatusServiceUnavailable)
 			return
 		}
-		result, err := s.retrieval.recall(r.Context(), r, identity, query, maxItems)
+		result, err := s.retrieval.recall(r.Context(), r, identity, query, maxItems, sessionID)
 		if err != nil {
 			status := http.StatusBadGateway
 			var ue *upstreamError

@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -52,11 +53,22 @@ type identity struct {
 	PlatformRole string `json:"platform_role"`
 }
 
+// planDefinition is a plan as the pricing page shows it. Perks begins with
+// the quota and feature lines generated from Limits (what is enforced),
+// followed by the plan's free-text perks.
 type planDefinition struct {
-	ID    string   `json:"id"`
-	Name  string   `json:"name"`
-	Price string   `json:"price"`
-	Perks []string `json:"perks"`
+	ID     string     `json:"id"`
+	Name   string     `json:"name"`
+	Price  string     `json:"price"`
+	Perks  []string   `json:"perks"`
+	Limits planLimits `json:"limits"`
+}
+
+// planLimits are a plan's enforced limits; a null limit is unlimited.
+type planLimits struct {
+	MonthlyMCPRequests *int64   `json:"monthly_mcp_requests"`
+	StorageBytes       *int64   `json:"storage_bytes"`
+	Features           []string `json:"features"`
 }
 
 func main() {
@@ -244,12 +256,18 @@ func userSearchFilter(q, plan, role string) (string, []any) {
 	return strings.Join(clauses, " AND "), args
 }
 
-// validPerks rejects the empty/oversized inputs a creator-console form could
-// submit; the DB column has no such constraint so the API is the only gate.
+// enforcedPerkTerms mark free-text perk lines that would restate a quota or a
+// gated feature. Those lines are generated from the plan's enforced limits
+// (planLines), so a hand-written one could only ever drift from what is
+// enforced; "retrieval" and "retention" name capabilities no plan gates.
+var enforcedPerkTerms = []string{"request", "storage", "graphify", "retrieval", "retention", "quota"}
+
+// validPerks rejects the blank/oversized inputs a creator-console form could
+// submit, and any line that restates a quota or feature; the DB column has
+// no such constraint so the API is the only gate. Perks are the free-text
+// lines shown after the generated quota and feature lines, so a plan may
+// have none.
 func validPerks(perks []string) error {
-	if len(perks) == 0 {
-		return errors.New("at least one perk is required")
-	}
 	if len(perks) > 20 {
 		return errors.New("no more than 20 perks are allowed")
 	}
@@ -258,15 +276,52 @@ func validPerks(perks []string) error {
 		if p == "" || len(p) > 160 {
 			return errors.New("each perk must be 1-160 characters")
 		}
+		lower := strings.ToLower(p)
+		for _, term := range enforcedPerkTerms {
+			if strings.Contains(lower, term) {
+				return fmt.Errorf("perk %q restates a quota or feature; set the plan's limits instead, its quota and feature lines are generated from them", p)
+			}
+		}
 	}
 	return nil
 }
 
+// planLimitsInput sets a plan's enforced limits. A null limit is unlimited.
+type planLimitsInput struct {
+	MonthlyMCPRequests *int64   `json:"monthly_mcp_requests"`
+	StorageBytes       *int64   `json:"storage_bytes"`
+	Features           []string `json:"features"`
+}
+
 type planUpdateInput struct {
-	ID    string   `json:"id"`
-	Name  string   `json:"name"`
-	Price string   `json:"price"`
-	Perks []string `json:"perks"`
+	ID     string           `json:"id"`
+	Name   string           `json:"name"`
+	Price  string           `json:"price"`
+	Perks  []string         `json:"perks"`
+	Limits *planLimitsInput `json:"limits,omitempty"`
+}
+
+func validLimits(in *planLimitsInput) error {
+	if in == nil {
+		return nil
+	}
+	if in.MonthlyMCPRequests != nil && *in.MonthlyMCPRequests < 0 {
+		return errors.New("monthly_mcp_requests must be non-negative or null for unlimited")
+	}
+	if in.StorageBytes != nil && *in.StorageBytes < 0 {
+		return errors.New("storage_bytes must be non-negative or null for unlimited")
+	}
+	seen := map[string]bool{}
+	for _, f := range in.Features {
+		if _, ok := knownFeatures[f]; !ok {
+			return fmt.Errorf("unknown feature %q", f)
+		}
+		if seen[f] {
+			return fmt.Errorf("duplicate feature %q", f)
+		}
+		seen[f] = true
+	}
+	return nil
 }
 
 func validPlanUpdate(in planUpdateInput) error {
@@ -278,6 +333,9 @@ func validPlanUpdate(in planUpdateInput) error {
 	}
 	if strings.TrimSpace(in.Price) == "" || len(in.Price) > 40 {
 		return errors.New("price must be 1-40 characters")
+	}
+	if err := validLimits(in.Limits); err != nil {
+		return err
 	}
 	return validPerks(in.Perks)
 }
@@ -643,7 +701,7 @@ func (s *server) billing(w http.ResponseWriter, r *http.Request) {
 // plans is public: pricing copy is read by anonymous visitors on the portal
 // as well as by the logged-in dashboard.
 func (s *server) plans(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,price,perks FROM cloud_plan_definitions ORDER BY sort_order`)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,price,perks,monthly_mcp_requests,storage_bytes,features FROM cloud_plan_definitions ORDER BY sort_order`)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
@@ -651,14 +709,47 @@ func (s *server) plans(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []planDefinition{}
 	for rows.Next() {
-		var p planDefinition
-		var perks []byte
-		if rows.Scan(&p.ID, &p.Name, &p.Price, &perks) == nil {
-			p.Perks = decodePerks(perks)
-			out = append(out, p)
+		p, err := scanPlanDefinition(rows)
+		if err != nil {
+			http.Error(w, "database unavailable", 503)
+			return
 		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
 	}
 	jsonWrite(w, 200, out)
+}
+
+type rowScanner interface{ Scan(dest ...any) error }
+
+// scanPlanDefinition reads id,name,price,perks,monthly_mcp_requests,
+// storage_bytes,features and renders the advertised lines from the limits.
+func scanPlanDefinition(row rowScanner) (planDefinition, error) {
+	var p planDefinition
+	var perks, features []byte
+	var requests, storage sql.NullInt64
+	if err := row.Scan(&p.ID, &p.Name, &p.Price, &perks, &requests, &storage, &features); err != nil {
+		return p, err
+	}
+	if requests.Valid {
+		v := requests.Int64
+		p.Limits.MonthlyMCPRequests = &v
+	}
+	if storage.Valid {
+		v := storage.Int64
+		p.Limits.StorageBytes = &v
+	}
+	p.Limits.Features = []string{}
+	if len(features) > 0 {
+		if err := json.Unmarshal(features, &p.Limits.Features); err != nil {
+			return p, err
+		}
+	}
+	p.Perks = append(planLines(p.Limits.MonthlyMCPRequests, p.Limits.StorageBytes, p.Limits.Features), decodePerks(perks)...)
+	return p, nil
 }
 
 func (s *server) validPlanID(ctx context.Context, id string) bool {
@@ -834,28 +925,48 @@ func (s *server) adminPlanUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	if in.Perks == nil {
+		in.Perks = []string{}
+	}
 	perksJSON, err := json.Marshal(in.Perks)
 	if err != nil {
 		http.Error(w, "invalid perks", 400)
 		return
 	}
-	var before planDefinition
-	var beforePerks []byte
-	_ = s.db.QueryRowContext(r.Context(), `SELECT name,price,perks FROM cloud_plan_definitions WHERE id=$1`, in.ID).Scan(&before.Name, &before.Price, &beforePerks)
-	before.ID, before.Perks = in.ID, decodePerks(beforePerks)
-	res, err := s.db.ExecContext(r.Context(), `UPDATE cloud_plan_definitions SET name=$1,price=$2,perks=$3,updated_at=now() WHERE id=$4`, strings.TrimSpace(in.Name), strings.TrimSpace(in.Price), perksJSON, in.ID)
+	const planColumns = `id,name,price,perks,monthly_mcp_requests,storage_bytes,features`
+	before, err := scanPlanDefinition(s.db.QueryRowContext(r.Context(), `SELECT `+planColumns+` FROM cloud_plan_definitions WHERE id=$1`, in.ID))
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "plan not found", 404)
+		return
+	}
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	limits := before.Limits
+	if in.Limits != nil {
+		limits = planLimits{MonthlyMCPRequests: in.Limits.MonthlyMCPRequests, StorageBytes: in.Limits.StorageBytes, Features: in.Limits.Features}
+		if limits.Features == nil {
+			limits.Features = []string{}
+		}
+	}
+	featuresJSON, err := json.Marshal(limits.Features)
+	if err != nil {
+		http.Error(w, "invalid features", 400)
+		return
+	}
+	after, err := scanPlanDefinition(s.db.QueryRowContext(r.Context(), `UPDATE cloud_plan_definitions SET name=$1,price=$2,perks=$3,monthly_mcp_requests=$4,storage_bytes=$5,features=$6,updated_at=now() WHERE id=$7 RETURNING `+planColumns,
+		strings.TrimSpace(in.Name), strings.TrimSpace(in.Price), perksJSON, limits.MonthlyMCPRequests, limits.StorageBytes, featuresJSON, in.ID))
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "plan not found", 404)
 		return
 	}
-	after := planDefinition{ID: in.ID, Name: strings.TrimSpace(in.Name), Price: strings.TrimSpace(in.Price), Perks: in.Perks}
+	if err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
 	s.recordAudit(r.Context(), actor.UserID, "plan.updated", in.ID, map[string]any{"before": before, "after": after})
-	jsonWrite(w, 200, map[string]any{"ok": true, "id": in.ID})
+	jsonWrite(w, 200, map[string]any{"ok": true, "id": in.ID, "plan": after})
 }
 
 func (s *server) auditLog(w http.ResponseWriter, r *http.Request) {
@@ -915,15 +1026,65 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "API key required", 401)
 		return
 	}
+	// The key must belong to an active account; the account's platform role
+	// decides whether the call carries the fabric operator scopes.
 	var id identity
-	err := s.db.QueryRowContext(r.Context(), `SELECT user_id,tenant_id,principal_id FROM cloud_api_keys WHERE key_hash=$1 AND revoked_at IS NULL`, hash(h)).Scan(&id.UserID, &id.TenantID, &id.PrincipalID)
+	err := s.db.QueryRowContext(r.Context(), `SELECT k.user_id,k.tenant_id,k.principal_id,u.platform_role FROM cloud_api_keys k JOIN cloud_users u ON u.id=k.user_id WHERE k.key_hash=$1 AND k.revoked_at IS NULL AND u.status='active'`, hash(h)).Scan(&id.UserID, &id.TenantID, &id.PrincipalID, &id.PlatformRole)
 	if err != nil {
 		http.Error(w, "invalid API key", 401)
 		return
 	}
+	// The request is read whole (bounded) before anything is proxied: the
+	// plan's feature gates and storage quota are decided on the tools it
+	// calls, and a refused request must never reach the gateway.
+	var requestBody []byte
+	if r.Body != nil {
+		requestBody, err = io.ReadAll(io.LimitReader(r.Body, maxProxiedBody+1))
+		if err != nil {
+			http.Error(w, "invalid request body", 400)
+			return
+		}
+		if len(requestBody) > maxProxiedBody {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
+	plan, err := loadEntitlements(r.Context(), s.db, id.TenantID)
+	if errors.Is(err, errNoSubscription) {
+		writeMCPRefusal(w, requestBody, &quotaError{status: http.StatusForbidden, code: "no_subscription", msg: "this workspace has no subscription"})
+		return
+	}
+	if err != nil {
+		http.Error(w, "billing unavailable", 503)
+		return
+	}
+	if plan.SubscriptionStatus != "active" {
+		writeMCPRefusal(w, requestBody, &quotaError{status: http.StatusPaymentRequired, code: "subscription_inactive", msg: "the " + plan.Plan + " subscription is " + plan.SubscriptionStatus})
+		return
+	}
+	measure := func(ctx context.Context) (int64, error) {
+		return s.measureBytesStored(ctx, id.TenantID, id.PrincipalID)
+	}
+	if err := checkToolEntitlements(r.Context(), plan, calledTools(requestBody), measure); err != nil {
+		var qe *quotaError
+		if errors.As(err, &qe) {
+			writeMCPRefusal(w, requestBody, qe)
+			return
+		}
+		http.Error(w, "usage unavailable", 503)
+		return
+	}
+	if err := s.admitMCPRequest(r.Context(), id.TenantID, plan.MonthlyMCPRequests); err != nil {
+		var qe *quotaError
+		if errors.As(err, &qe) {
+			writeMCPRefusal(w, requestBody, qe)
+			return
+		}
+		http.Error(w, "usage unavailable", 503)
+		return
+	}
 	_, _ = s.db.ExecContext(r.Context(), `UPDATE cloud_api_keys SET last_used_at=now() WHERE key_hash=$1`, hash(h))
-	_, _ = s.db.ExecContext(r.Context(), `INSERT INTO cloud_usage_daily(tenant_id,usage_date,api_requests) VALUES($1,current_date,1) ON CONFLICT (tenant_id,usage_date) DO UPDATE SET api_requests=cloud_usage_daily.api_requests+1`, id.TenantID)
-	claims := auth.Claims{TenantID: id.TenantID, PrincipalID: id.PrincipalID, Subject: id.UserID, JTI: hash(h)[:32], Scopes: []string{"memory:read", "memory:write"}, ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
+	claims := auth.Claims{TenantID: id.TenantID, PrincipalID: id.PrincipalID, Subject: id.UserID, JTI: hash(h)[:32], Scopes: hostedScopes(id.PlatformRole), ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
 	token, err := auth.SignClaims(claims, s.issuerSecret)
 	if err != nil {
 		http.Error(w, "authentication unavailable", 503)
@@ -934,12 +1095,13 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gateway unavailable", 503)
 		return
 	}
-	// Keep a bounded copy of the request for usage metering while the full
-	// body is still streamed to the gateway.
-	var requestCopy bytes.Buffer
+	requestCopy := requestBody
+	if len(requestCopy) > maxMeteredBody {
+		requestCopy = requestCopy[:maxMeteredBody]
+	}
 	var body io.Reader
 	if r.Body != nil {
-		body = io.TeeReader(r.Body, &limitedBuffer{buf: &requestCopy, limit: maxMeteredBody})
+		body = bytes.NewReader(requestBody)
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), body)
 	if err != nil {
@@ -961,7 +1123,7 @@ func (s *server) mcp(w http.ResponseWriter, r *http.Request) {
 	var responseCopy bytes.Buffer
 	_, _ = io.Copy(flushWriter{w}, io.TeeReader(resp.Body, &limitedBuffer{buf: &responseCopy, limit: maxMeteredBody}))
 	if resp.StatusCode/100 == 2 {
-		reads, writes := countMemoryOps(requestCopy.Bytes(), responseCopy.Bytes(), resp.Header.Get("Content-Type"))
+		reads, writes := countMemoryOps(requestCopy, responseCopy.Bytes(), resp.Header.Get("Content-Type"))
 		if err := s.recordMemoryOps(context.WithoutCancel(r.Context()), id.TenantID, reads, writes); err != nil {
 			log.Printf("record memory usage for tenant %s: %v", id.TenantID, err)
 		}
