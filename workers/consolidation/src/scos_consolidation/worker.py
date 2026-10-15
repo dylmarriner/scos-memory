@@ -92,49 +92,47 @@ def main() -> None:
 
 
 def _process_cycle(conn: psycopg.Connection) -> None:
-    """Claim and process up to MAX_JOBS_PER_CYCLE outbox jobs."""
-    jobs = _claim_jobs(conn)
-    if not jobs:
-        return
+    """Claim and process up to MAX_JOBS_PER_CYCLE outbox jobs.
 
+    Claiming is fabric-wide (scos_worker_claim_outbox_jobs); each job is then
+    processed in its own transaction acting as the job's tenant and
+    principal, so every read and write goes through the ordinary RLS
+    policies.
+    """
+    jobs = _claim_jobs(conn)
+    conn.commit()
     for job in jobs:
         try:
+            _act_as(conn, job["tenant_id"], job.get("principal_id"))
             _process_job(conn, job)
+            conn.commit()
         except Exception:
             logger.exception("job %s failed", job["id"])
-            _mark_failed(conn, job)
+            conn.rollback()
+            try:
+                _act_as(conn, job["tenant_id"], job.get("principal_id"))
+                _mark_failed(conn, job)
+                conn.commit()
+            except Exception:
+                logger.exception("job %s could not be marked failed", job["id"])
+                conn.rollback()
 
-    conn.commit()
+
+def _act_as(conn: psycopg.Connection, tenant_id: Any, principal_id: Any) -> None:
+    """Set the transaction-local RLS identity for the current transaction."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT set_config('scos.tenant_id', %s, true), set_config('scos.principal_id', %s, true)",
+            (str(tenant_id), str(principal_id) if principal_id else ""),
+        )
 
 
 def _claim_jobs(conn: psycopg.Connection) -> list[dict[str, Any]]:
-    """Claim pending outbox_jobs for turn.completed events."""
-    now = datetime.now(timezone.utc)
-    lease_until = now + timedelta(seconds=LEASE_SECONDS)
-
+    """Claim pending turn jobs across tenants, with the principal each runs as."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            """
-            UPDATE outbox_jobs
-            SET status = 'processing',
-                lease_owner = 'consolidation-worker',
-                lease_expires_at = %s,
-                attempts = attempts + 1,
-                updated_at = %s
-            WHERE id IN (
-                SELECT id FROM outbox_jobs
-                WHERE status IN ('pending', 'retryable')
-                  AND job_type IN ('turn.completed', 'turn.accepted')
-                  AND available_at <= %s
-                  AND (lease_expires_at IS NULL OR lease_expires_at < %s)
-                ORDER BY available_at ASC
-                LIMIT %s
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING id, tenant_id, operation_id, job_type, payload, attempts,
-                      lease_expires_at
-            """,
-            (lease_until, now, now, now, MAX_JOBS_PER_CYCLE),
+            "SELECT * FROM scos_worker_claim_outbox_jobs(%s, %s, %s, %s)",
+            ("consolidation-worker", ["turn.completed", "turn.accepted"], MAX_JOBS_PER_CYCLE, LEASE_SECONDS),
         )
         return cur.fetchall()
 
@@ -142,7 +140,7 @@ def _claim_jobs(conn: psycopg.Connection) -> list[dict[str, Any]]:
 def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
     """Process one outbox job end-to-end."""
     job_id = job["id"]
-    tenant_id = UUID(job["tenant_id"])
+    tenant_id = UUID(str(job["tenant_id"]))
     payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
 
     turn_id = payload.get("turn_id")
@@ -328,13 +326,14 @@ def _load_existing_memory(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT id, title, content, authority_level, confidence_score,
-                   sensitivity, status, metadata
-            FROM memory_items
-            WHERE tenant_id = %s
-              AND namespace_id = %s
-              AND status = 'active'
-            ORDER BY authority_level DESC, confidence_score DESC
+            SELECT mi.id, mi.title, COALESCE(mv.content, mi.canonical_summary) AS content,
+                   mi.authority_level, mi.confidence_score, mi.sensitivity, mi.status, mi.metadata
+            FROM memory_items mi
+            LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
+            WHERE mi.tenant_id = %s
+              AND mi.namespace_id = %s
+              AND mi.status = 'active'
+            ORDER BY mi.authority_level DESC, mi.confidence_score DESC
             LIMIT 100
             """,
             (tenant_id, namespace_id),

@@ -147,19 +147,25 @@ def _call_deepseek(api_key: str, base_url: str, model: str, facts: list[dict], t
 
 
 def _eligible_namespaces(conn: psycopg.Connection) -> list[dict]:
+    """Namespaces with enough active facts, across tenants, each with the
+    principal synthesis acts as (scos_worker_synthesis_namespaces)."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            """
-            SELECT mi.namespace_id, mi.tenant_id, n.owner_principal_id, COUNT(*) AS fact_count
-            FROM memory_items mi
-            JOIN namespaces n ON n.id = mi.namespace_id
-            WHERE mi.status = 'active'
-            GROUP BY mi.namespace_id, mi.tenant_id, n.owner_principal_id
-            HAVING COUNT(*) >= %s
-            """,
+            "SELECT * FROM scos_worker_synthesis_namespaces(%s)",
             (MIN_FACTS_FOR_SYNTHESIS,),
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+    conn.commit()
+    return [r for r in rows if r.get("acting_principal_id")]
+
+
+def _act_as(conn: psycopg.Connection, tenant_id, principal_id) -> None:
+    """Set the transaction-local RLS identity for the current transaction."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT set_config('scos.tenant_id', %s, true), set_config('scos.principal_id', %s, true)",
+            (str(tenant_id), str(principal_id)),
+        )
 
 
 def _due_for_synthesis(conn: psycopg.Connection, namespace_id) -> bool:
@@ -266,7 +272,9 @@ def run_synthesis_cycle(conn: psycopg.Connection) -> int:
     for ns in _eligible_namespaces(conn):
         namespace_id = ns["namespace_id"]
         if not _due_for_synthesis(conn, namespace_id):
+            conn.rollback()
             continue
+        _act_as(conn, ns["tenant_id"], ns["acting_principal_id"])
         facts = _load_facts_for_synthesis(conn, namespace_id)
         pattern_count = 0
         try:
@@ -278,7 +286,7 @@ def run_synthesis_cycle(conn: psycopg.Connection) -> int:
                 if len(source_ids) < MIN_SOURCE_FACTS_PER_PATTERN or not content:
                     continue
                 _insert_pattern_fact(
-                    conn, ns["tenant_id"], namespace_id, ns["owner_principal_id"],
+                    conn, ns["tenant_id"], namespace_id, ns["acting_principal_id"],
                     content, source_ids, pattern.get("confidence", 0.6),
                 )
                 pattern_count += 1

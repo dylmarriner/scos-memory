@@ -269,22 +269,16 @@ def _unembedded_batch(
     limit: int,
     space_id: str,
 ) -> list[dict[str, Any]]:
-    """Return memory versions missing the exact active embedding space."""
+    """Return memory versions missing the exact active embedding space.
+
+    memory_versions is tenant-scoped under RLS and this worker runs as the
+    restricted role across all tenants, so the scan goes through the
+    scos_worker_unembedded_versions SECURITY DEFINER function
+    (migrations/000043); queried directly it would always see nothing.
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
-            SELECT mv.id::text AS id, mv.content
-            FROM memory_versions mv
-            WHERE NOT EXISTS (
-                SELECT 1 FROM memory_embeddings me
-                WHERE me.memory_version_id = mv.id
-                  AND me.embedding_space_id = %s::uuid
-                  AND me.chunk_number = 0
-                  AND me.embedding IS NOT NULL
-            )
-            ORDER BY mv.created_at ASC
-            LIMIT %s
-            """,
+            "SELECT id::text AS id, content FROM scos_worker_unembedded_versions(%s::uuid, %s)",
             (space_id, limit),
         )
         return cur.fetchall()
@@ -308,24 +302,15 @@ def _replace_embedding(
     model: str,
     revision: str,
 ) -> None:
-    """Upsert one projection without deleting any historical embedding spaces."""
+    """Upsert one projection without deleting any historical embedding spaces.
+
+    Written through scos_worker_store_embedding (the row's RLS visibility
+    chains to the owning memory item, which this fabric worker does not act
+    as)."""
     dimensions = len(embedding)
     with conn.cursor() as cur:
         cur.execute(
-            """
-            INSERT INTO memory_embeddings
-                (memory_version_id, embedding_space_id, provider, model, model_revision,
-                 dimensions, chunk_number, chunk_content_hash, embedding)
-            VALUES (%s, %s::uuid, %s, %s, %s, %s, 0, %s, %s::vector)
-            ON CONFLICT (memory_version_id, embedding_space_id, chunk_number)
-            DO UPDATE SET embedding = EXCLUDED.embedding,
-                          provider = EXCLUDED.provider,
-                          model = EXCLUDED.model,
-                          model_revision = EXCLUDED.model_revision,
-                          dimensions = EXCLUDED.dimensions,
-                          chunk_content_hash = EXCLUDED.chunk_content_hash,
-                          created_at = now()
-            """,
+            "SELECT scos_worker_store_embedding(%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s)",
             (
                 version_id,
                 space_id,

@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -107,9 +108,14 @@ class RemainingBatchTests(unittest.TestCase):
         conn = FakeConn()
         rows = worker._unembedded_batch(conn, 10, "space-1")
         self.assertEqual(len(rows), 1)
-        self.assertIn("me.embedding_space_id = %s::uuid", conn._sql)
-        self.assertNotIn("me.model = %s", conn._sql)
+        self.assertIn("scos_worker_unembedded_versions(%s::uuid, %s)", conn._sql)
         self.assertEqual(conn._params, ("space-1", 10))
+        # The scan itself lives in the migration: it must match the exact
+        # embedding space, never just the model name.
+        migration = (Path(__file__).resolve().parents[3] / "database/migrations/000043_worker_functions.sql").read_text()
+        scan = migration[migration.index("FUNCTION scos_worker_unembedded_versions"):migration.index("FUNCTION scos_worker_store_embedding")]
+        self.assertIn("me.embedding_space_id = p_space_id", scan)
+        self.assertNotIn("me.model", scan)
 
 
 class EmbedTextsTests(unittest.TestCase):
@@ -191,12 +197,13 @@ class ReplacementTests(unittest.TestCase):
         )
         self.assertEqual(len(conn.cur.calls), 1)
         sql, params = conn.cur.calls[0]
-        self.assertNotIn("DELETE FROM memory_embeddings", sql)
-        self.assertIn("embedding_space_id", sql)
-        self.assertIn(
-            "ON CONFLICT (memory_version_id, embedding_space_id, chunk_number)", sql
-        )
-        self.assertIn("space-1", params)
+        self.assertIn("scos_worker_store_embedding", sql)
+        self.assertEqual(params[:2], ("v1", "space-1"))
+        self.assertEqual(params[5], 3)
+        migration = (Path(__file__).resolve().parents[3] / "database/migrations/000043_worker_functions.sql").read_text()
+        store = migration[migration.index("FUNCTION scos_worker_store_embedding"):migration.index("FUNCTION scos_worker_expire_memories")]
+        self.assertNotIn("DELETE FROM memory_embeddings", store)
+        self.assertIn("ON CONFLICT (memory_version_id, embedding_space_id, chunk_number)", store)
 
 
 class RunCycleTests(unittest.TestCase):

@@ -352,7 +352,8 @@ func (s journalStore) appendMessage(ctx context.Context, rc requestContext, sess
 	if _, err = appendEvent(ctx, tx, s.validator, rc.TenantID, turnID, "turn.message_accepted", "turn/"+turnID, rc.PrincipalID, map[string]any{"session_id": sessionID, "message_id": messageID, "role": req.Role, "sequence": sequence}); err != nil {
 		return appendMessageResponse{}, err
 	}
-	jobPayload, err := json.Marshal(map[string]string{"turn_id": turnID, "message_id": messageID})
+	// principal_id lets workers act as the turn's author under RLS.
+	jobPayload, err := json.Marshal(map[string]string{"turn_id": turnID, "message_id": messageID, "session_id": sessionID, "principal_id": rc.PrincipalID})
 	if err != nil {
 		return appendMessageResponse{}, err
 	}
@@ -593,7 +594,7 @@ func (s journalStore) completeTurn(ctx context.Context, rc requestContext, turnI
 	if _, err = tx.ExecContext(ctx, `INSERT INTO checkpoints (id,tenant_id,session_id,turn_id,last_event_sequence,state,content_hash) VALUES ($1,$2,$3,$4,(SELECT last_sequence FROM aggregate_sequences WHERE aggregate_id=$4),$5,$6)`, checkpointID, rc.TenantID, sessionID, turnID, state, stateHash); err != nil {
 		return completeTurnResponse{}, err
 	}
-	jobPayload, err := json.Marshal(map[string]string{"turn_id": turnID, "message_id": messageID, "checkpoint_id": checkpointID})
+	jobPayload, err := json.Marshal(map[string]string{"turn_id": turnID, "message_id": messageID, "checkpoint_id": checkpointID, "session_id": sessionID, "principal_id": rc.PrincipalID})
 	if err != nil {
 		return completeTurnResponse{}, err
 	}
