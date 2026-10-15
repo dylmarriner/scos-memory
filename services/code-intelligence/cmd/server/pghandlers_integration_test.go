@@ -778,3 +778,27 @@ func TestHandlePGQueryFusesStructuralAndPageRankSignals(t *testing.T) {
 		t.Fatalf("expected structural/PageRank provenance in results: %+v", out.Results)
 	}
 }
+
+func TestHandlePGIndexRefusesAContentHashThatDoesNotMatchTheContent(t *testing.T) {
+	store, db := testPGStore(t)
+	tenant := testTenant(t, db)
+	repoID, err := store.EnsureRepository(t.Context(), tenant, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "package a\nfunc A() {}\n"
+	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": repoID, "branch": "main", "commit_id": "c1",
+		"files": []map[string]any{{"path": "a.go", "language": "go", "content": content, "content_hash": hashContent("something else")}},
+	})
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "does not match") {
+		t.Fatalf("mismatched hash must be refused, got %d %s", resp.Code, resp.Body.String())
+	}
+	resp = pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": repoID, "branch": "main", "commit_id": "c1",
+		"files": []map[string]any{{"path": "a.go", "language": "go", "content": content, "content_hash": hashContent(content)}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("matching hash must be indexed, got %d %s", resp.Code, resp.Body.String())
+	}
+}

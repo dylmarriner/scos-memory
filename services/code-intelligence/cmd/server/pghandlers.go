@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -201,6 +203,16 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(f.Path) == "" || strings.TrimSpace(f.ContentHash) == "" {
 			http.Error(w, "every file requires a path and a content_hash", http.StatusBadRequest)
 			return
+		}
+		// The hash is the file's identity across snapshots (rename and
+		// unchanged-file detection key on it), so one that does not match
+		// the content sent with it is refused rather than stored.
+		if f.Content != "" {
+			sum := sha256.Sum256([]byte(f.Content))
+			if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimSpace(f.ContentHash)) {
+				http.Error(w, "content_hash for "+f.Path+" does not match its content (sha256 hex expected)", http.StatusBadRequest)
+				return
+			}
 		}
 	}
 	if req.ExtractorVersion == "" {
