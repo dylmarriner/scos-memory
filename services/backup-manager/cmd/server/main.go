@@ -1108,7 +1108,7 @@ func (s *backupServer) verifyProductionBackup(id string) (*BackupRecord, error) 
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	data, _ := json.Marshal(m)
-	return &BackupRecord{ID: id, Type: m.Type, Status: "completed", SizeBytes: m.SizeBytes, Location: path, Encrypted: true, Production: true, StartedAt: m.CreatedAt, CompletedAt: now, VerifiedAt: now, ManifestHash: hashString(string(data)), ContentHash: m.ContentHash}, nil
+	return &BackupRecord{ID: id, Type: m.Type, Status: "completed", SizeBytes: m.SizeBytes, Location: path, Encrypted: true, Production: true, StartedAt: m.CreatedAt, CompletedAt: m.CreatedAt, VerifiedAt: now, ManifestHash: hashString(string(data)), ContentHash: m.ContentHash}, nil
 }
 
 func (s *backupServer) readProductionBackups() ([]*BackupRecord, error) {
@@ -1225,7 +1225,7 @@ func (s *backupServer) verifyBackup(id string) (*BackupRecord, error) {
 		return nil, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	return &BackupRecord{ID: id, Type: m.Type, Status: "completed", Production: m.Production, SizeBytes: m.SizeBytes, Location: s.dumpPath(id), StartedAt: m.CreatedAt, CompletedAt: now, VerifiedAt: now, ManifestHash: hashManifest(m), ContentHash: m.ContentHash}, nil
+	return &BackupRecord{ID: id, Type: m.Type, Status: "completed", Production: m.Production, SizeBytes: m.SizeBytes, Location: s.dumpPath(id), StartedAt: m.CreatedAt, CompletedAt: m.CreatedAt, VerifiedAt: now, ManifestHash: hashManifest(m), ContentHash: m.ContentHash}, nil
 }
 
 func (s *backupServer) readBackup(id string) (*BackupRecord, error) { return s.verifyBackup(id) }
@@ -1297,21 +1297,24 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// newestVerifiedBackupAge returns the age of the most recently verified
-// backup. It reports false when no verified backup exists, so the caller
-// emits nothing rather than a misleading zero age (§42).
+// newestVerifiedBackupAge returns the age of the newest backup that passes
+// verification, measured from when that backup was taken. Every read
+// re-verifies each archive, so VerifiedAt is always "just now"; measuring
+// from it made every backup look zero seconds old and the stale-backup
+// alert could never fire. It reports false when no verified backup exists,
+// so the caller emits nothing rather than a misleading zero age (§42).
 func newestVerifiedBackupAge(backups []*BackupRecord, now time.Time) (time.Duration, bool) {
 	var newest time.Time
 	for _, b := range backups {
-		if b == nil || b.VerifiedAt == "" {
+		if b == nil || b.VerifiedAt == "" || b.Status != "completed" {
 			continue
 		}
-		verified, err := time.Parse(time.RFC3339, b.VerifiedAt)
+		taken, err := time.Parse(time.RFC3339, b.CompletedAt)
 		if err != nil {
 			continue
 		}
-		if verified.After(newest) {
-			newest = verified
+		if taken.After(newest) {
+			newest = taken
 		}
 	}
 	if newest.IsZero() {

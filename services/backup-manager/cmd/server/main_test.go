@@ -545,3 +545,21 @@ func TestProductionRestoreDrillRequiresTemporaryDatabase(t *testing.T) {
 		t.Fatalf("expected unavailable restore source, got %v", err)
 	}
 }
+
+func TestNewestVerifiedBackupAgeMeasuresFromWhenTheBackupWasTaken(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	verifiedNow := now.Format(time.RFC3339)
+	backups := []*BackupRecord{
+		{Status: "completed", CompletedAt: now.Add(-72 * time.Hour).Format(time.RFC3339), VerifiedAt: verifiedNow},
+		{Status: "completed", CompletedAt: now.Add(-26 * time.Hour).Format(time.RFC3339), VerifiedAt: verifiedNow},
+		// Newer, but never verified: it must not make the stack look fresh.
+		{Status: "completed", CompletedAt: now.Add(-1 * time.Hour).Format(time.RFC3339)},
+	}
+	age, ok := newestVerifiedBackupAge(backups, now)
+	if !ok || age != 26*time.Hour {
+		t.Fatalf("age = %v, %v; a backup re-verified just now but taken 26h ago is 26h old", age, ok)
+	}
+	if _, ok := newestVerifiedBackupAge(nil, now); ok {
+		t.Fatal("no verified backup must report no age")
+	}
+}
