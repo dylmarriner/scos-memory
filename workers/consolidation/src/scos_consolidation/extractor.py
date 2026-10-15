@@ -317,7 +317,7 @@ def _resolve_namespace(
 
     The worker attaches the turn's session namespace as ``namespace_id`` on
     the event; an explicit namespace in the event data takes precedence. A
-    memory with no resolvable namespace is an error, never a placeholder ID.
+    memory with no resolvable namespace is an error, never an invented ID.
     """
     del messages
     data = event.get("data", {})
