@@ -750,9 +750,18 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/operations")
 	case "scos_operation_get":
 		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/operations/"+stringArg(args, "id"))
-	case "scos_operation_start":
-		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/start", args)
-	case "scos_operation_prepare":
+	case "scos_operation_start", "scos_operation_prepare":
+		// Governance acts on the confirmation recorded with the operation,
+		// and every service reaches it with the same control-plane
+		// credential, so the agent boundary is where a self-asserted one is
+		// stopped: confirmation comes only from the principal's answer to
+		// scos_control_confirm, which the control plane carries itself.
+		if confirmed, _ := args["confirmed"].(bool); confirmed {
+			return nil, fmt.Errorf("%s cannot assert confirmation; route the operation with scos_control_route and confirm it with scos_control_confirm", tool)
+		}
+		if tool == "scos_operation_start" {
+			return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/start", args)
+		}
 		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/prepare", args)
 	case "scos_operation_complete":
 		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/operations/complete", args)
@@ -2136,22 +2145,20 @@ func governedTools() []map[string]any {
 		}, "tool_id", "new_state"),
 		tool("scos_operation_list", "List governed tool operations", map[string]any{}),
 		tool("scos_operation_get", "Get a governed tool operation by ID", map[string]any{"id": strField("Operation ID")}, "id"),
-		tool("scos_operation_start", "Start a governed operation for a registered, authorised tool, named by tool_id or tool_name; the risk and plan are checked against the tool's declared properties (requires Idempotency-Key header)", map[string]any{
+		tool("scos_operation_start", "Start a governed operation for a registered, authorised tool, named by tool_id or tool_name; the risk and plan are checked against the tool's declared properties (requires Idempotency-Key header). A destructive or confirmation-gated operation is refused here; route it with scos_control_route and confirm it with scos_control_confirm", map[string]any{
 			"tool_id":      strField("Tool ID (or give tool_name)"),
 			"tool_name":    strField("Tool name (or give tool_id)"),
 			"operation_id": strField("Operation ID (UUID); required for a side-effecting operation on a non-idempotent tool"),
 			"input":        objField("Operation input"),
 			"risk":         strField("Declared risk: read, test, write, or destructive (required unless the plan names a command)"),
 			"plan":         objField("Operation plan (original_request, executed_request, working_directory, risk_level, mode, dry_run)"),
-			"confirmed":    boolField("Explicit confirmation; required for destructive operations and confirmation-gated tools"),
 		}),
-		tool("scos_operation_prepare", "Prepare a governed operation for a registered, authorised tool or a built-in tool; unknown tools are refused, and the risk and plan are checked against the tool's declared properties (requires Idempotency-Key header)", map[string]any{
+		tool("scos_operation_prepare", "Prepare a governed operation for a registered, authorised tool or a built-in tool; unknown tools are refused, and the risk and plan are checked against the tool's declared properties (requires Idempotency-Key header). A destructive or confirmation-gated operation is refused here; route it with scos_control_route and confirm it with scos_control_confirm", map[string]any{
 			"tool_name":    strField("Tool name"),
 			"operation_id": strField("Operation ID (UUID); required for a side-effecting operation on a non-idempotent tool"),
 			"input":        objField("Operation input"),
 			"risk":         strField("Declared risk: read, test, write, or destructive (required unless the plan names a command)"),
 			"plan":         objField("Operation plan (original_request, executed_request, working_directory, risk_level, mode, dry_run)"),
-			"confirmed":    boolField("Explicit confirmation; required for destructive operations and confirmation-gated tools"),
 		}, "tool_name"),
 		tool("scos_operation_complete", "Complete a governed operation (requires Idempotency-Key header)", map[string]any{
 			"operation_id": strField("Operation ID"),

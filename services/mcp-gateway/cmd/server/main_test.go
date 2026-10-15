@@ -478,6 +478,38 @@ func TestDispatchControlConfirmForwardsThePrincipalsAnswer(t *testing.T) {
 	}
 }
 
+func TestDispatchOperationStartAndPrepareRefuseSelfAssertedConfirmation(t *testing.T) {
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{"operation_id": "op-1"})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{toolGovernanceURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	id := requestIdentity{TenantID: "t", PrincipalID: "p"}
+	for _, name := range []string{"scos_operation_start", "scos_operation_prepare"} {
+		_, err := s.dispatchTool(r.Context(), r, id, name, map[string]any{"tool_name": "execution-proxy", "risk": "destructive", "confirmed": true})
+		if err == nil || !strings.Contains(err.Error(), "scos_control_confirm") {
+			t.Fatalf("%s: self-asserted confirmation was not refused: %v", name, err)
+		}
+		if _, err := s.dispatchTool(r.Context(), r, id, name, map[string]any{"tool_name": "execution-proxy", "risk": "read"}); err != nil {
+			t.Fatalf("%s: unconfirmed operation was not forwarded: %v", name, err)
+		}
+	}
+	if len(paths) != 2 || paths[0] != "/v1/operations/start" || paths[1] != "/v1/operations/prepare" {
+		t.Fatalf("governance calls = %v", paths)
+	}
+	for _, tool := range governedTools() {
+		if tool["name"] != "scos_operation_start" && tool["name"] != "scos_operation_prepare" {
+			continue
+		}
+		if _, ok := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)["confirmed"]; ok {
+			t.Fatalf("%s still advertises a confirmed argument", tool["name"])
+		}
+	}
+}
+
 func TestDispatchExecExecuteRefusesSelfAssertedConfirmation(t *testing.T) {
 	called := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
