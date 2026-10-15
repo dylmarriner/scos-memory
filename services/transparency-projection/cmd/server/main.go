@@ -711,20 +711,18 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 // mintServiceToken creates a claims-bearing JWT for this service so the
 // dashboard can render without the caller supplying a bearer token. The
 // projection itself holds the issuer secret, so it can authenticate its own
-// upstream fetches. Env overrides allow a deployment to pin the identity;
-// the fallbacks are the standard local fabric tenant/principal.
+// upstream fetches. The identity is the deployment's: an invented fallback
+// tenant owns no data, so a dashboard minted for it renders empty panels
+// that look like a working system with nothing in it.
 func mintServiceToken() (string, error) {
 	secret := strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET"))
 	if secret == "" {
 		return "", errors.New("SCOS_SECURITY_ISSUER_SECRET must be configured")
 	}
 	tenantID := strings.TrimSpace(os.Getenv("SCOS_SERVICE_TENANT_ID"))
-	if tenantID == "" {
-		tenantID = "11111111-2222-3333-4444-555555555555"
-	}
 	principalID := strings.TrimSpace(os.Getenv("SCOS_SERVICE_PRINCIPAL_ID"))
-	if principalID == "" {
-		principalID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	if tenantID == "" || principalID == "" {
+		return "", errors.New("SCOS_SERVICE_TENANT_ID and SCOS_SERVICE_PRINCIPAL_ID must name the identity the dashboard shows")
 	}
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payload, err := json.Marshal(map[string]any{

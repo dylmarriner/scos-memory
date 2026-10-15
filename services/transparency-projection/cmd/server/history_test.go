@@ -9,6 +9,8 @@ import (
 
 func TestHistoryProxiesWhitelistedViewsOnly(t *testing.T) {
 	t.Setenv("SCOS_SECURITY_ISSUER_SECRET", "test-secret")
+	t.Setenv("SCOS_SERVICE_TENANT_ID", "00000000-0000-0000-0000-000000000001")
+	t.Setenv("SCOS_SERVICE_PRINCIPAL_ID", "00000000-0000-0000-0000-000000000001")
 	var gotURI, gotAuth string
 	obs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotURI, gotAuth = r.URL.RequestURI(), r.Header.Get("Authorization")
@@ -67,5 +69,14 @@ func TestHistoryPropagatesUpstreamErrors(t *testing.T) {
 	s.history(res, httptest.NewRequest(http.MethodGet, "/v1/transparency/history/flows?range=900d", nil))
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("status %d", res.Code)
+	}
+}
+
+func TestMintServiceTokenRefusesAnUnconfiguredIdentity(t *testing.T) {
+	t.Setenv("SCOS_SECURITY_ISSUER_SECRET", "test-secret")
+	t.Setenv("SCOS_SERVICE_TENANT_ID", "")
+	t.Setenv("SCOS_SERVICE_PRINCIPAL_ID", "")
+	if _, err := mintServiceToken(); err == nil {
+		t.Fatal("a dashboard identity must be configured, never invented")
 	}
 }
