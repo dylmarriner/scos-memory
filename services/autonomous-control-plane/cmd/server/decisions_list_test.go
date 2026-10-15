@@ -15,7 +15,7 @@ func TestRecentDecisionsScopesToActorUnlessOperator(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	mustSave := func(tenant, actor, interaction string, at time.Time) {
-		if err := store.saveRoute(tenant, actor, RouteDecision{DecisionID: "d-" + interaction, InteractionID: interaction, CreatedAt: at}); err != nil {
+		if err := store.saveRoute(tenant, actor, RouteRequest{InteractionID: interaction}, RouteDecision{DecisionID: "d-" + interaction, InteractionID: interaction, CreatedAt: at}); err != nil {
 			t.Fatal(err)
 		}
 	}

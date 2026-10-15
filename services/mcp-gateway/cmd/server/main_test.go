@@ -13,8 +13,8 @@ import (
 
 func TestGovernedToolsListsAllGovernedTools(t *testing.T) {
 	tools := governedTools()
-	if len(tools) != 153 {
-		t.Fatalf("expected 153 governed tools, got %d", len(tools))
+	if len(tools) != 154 {
+		t.Fatalf("expected 154 governed tools, got %d", len(tools))
 	}
 	names := governedToolNames()
 	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_remember", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain"} {
@@ -47,8 +47,8 @@ func TestHandleMCPToolsList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(resp.Result.Tools) != 153 {
-		t.Fatalf("expected 153 tools in tools/list response, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 154 {
+		t.Fatalf("expected 154 tools in tools/list response, got %d", len(resp.Result.Tools))
 	}
 }
 
@@ -399,5 +399,61 @@ func TestDispatchRememberSavesAnExplicitFact(t *testing.T) {
 func TestUpstreamErrorsNameTheServiceThatFailed(t *testing.T) {
 	if got := upstreamName("https://backup-manager:8095/v1/backups/start"); got != "backup-manager" {
 		t.Fatalf("upstreamName = %q", got)
+	}
+}
+
+func TestDispatchControlConfirmForwardsThePrincipalsAnswer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/control/confirm" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["interaction_id"] != "i-1" || body["decision_id"] != "d-1" || body["resolution"] != "confirmed" {
+			t.Fatalf("body %#v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{controlPlaneURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	got, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "t", PrincipalID: "p"}, "scos_control_confirm", map[string]any{"interaction_id": "i-1", "decision_id": "d-1", "resolution": "confirmed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.(map[string]any)["status"] != "completed" {
+		t.Fatalf("result %#v", got)
+	}
+}
+
+func TestDispatchExecExecuteRefusesSelfAssertedConfirmation(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{executionProxyURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	_, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "t", PrincipalID: "p"}, "scos_exec_execute", map[string]any{"command": "rm -rf /srv/build", "confirmed": true})
+	if err == nil || !strings.Contains(err.Error(), "scos_control_confirm") {
+		t.Fatalf("self-asserted confirmation was not refused: %v", err)
+	}
+	if called {
+		t.Fatal("the execution proxy was called with a self-asserted confirmation")
+	}
+	if _, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "t", PrincipalID: "p"}, "scos_exec_execute", map[string]any{"command": "ls"}); err != nil || !called {
+		t.Fatalf("an unconfirmed command was not forwarded: %v", err)
+	}
+	for _, tool := range governedTools() {
+		if tool["name"] != "scos_exec_execute" {
+			continue
+		}
+		properties := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
+		if _, ok := properties["confirmed"]; ok {
+			t.Fatal("scos_exec_execute still advertises a confirmed argument")
+		}
 	}
 }

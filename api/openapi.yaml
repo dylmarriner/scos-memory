@@ -215,7 +215,10 @@ paths:
         content:
           application/json: {schema: {type: object}}
       responses:
-        '200': {description: Explainable route decision}
+        '200': {description: Explainable route decision, executed and completed}
+        '202': {description: Decision requires confirmation; status awaiting_confirmation, nothing executed until /v1/control/confirm}
+        '403': {description: Execution blocked because tool governance did not authorise the operation}
+        '502': {description: Executed but not completed; body carries the lifecycle}
   /v1/control/ingest:
     post:
       operationId: controlIngest
@@ -224,7 +227,10 @@ paths:
         content:
           application/json: {schema: {type: object}}
       responses:
-        '200': {description: Persisted control-plane route decision}
+        '200': {description: Persisted control-plane route decision, executed and completed}
+        '202': {description: Decision requires confirmation; status awaiting_confirmation, nothing executed until /v1/control/confirm}
+        '403': {description: Execution blocked because tool governance did not authorise the operation}
+        '502': {description: Executed but not completed; body carries the lifecycle}
   /v1/control/decisions:
     get:
       operationId: listControlDecisions
@@ -255,7 +261,39 @@ paths:
         content:
           application/json: {schema: {type: object}}
       responses:
-        '202': {description: Recovery state transition accepted}
+        '200': {description: Running or interrupted run resumed from its persisted route request and re-executed; body carries the resulting status and lifecycle}
+        '403': {description: Resumed run was blocked by tool governance}
+        '404': {description: Interaction not found for the authenticated principal}
+        '409': {description: Run is not running or interrupted, or its execution-proxy stage was in flight so it now requires reconciliation (status reconciliation_required)}
+  /v1/control/confirm:
+    post:
+      operationId: controlConfirm
+      description: >-
+        Records the requesting principal's answer to a route decision that is
+        awaiting_confirmation. Only the principal that requested the action,
+        using its own non-delegated credential, may answer, and only for the
+        decision_id it was shown. A confirmation executes the request frozen at
+        ingress; a rejection ends the run without executing anything.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [interaction_id, decision_id, resolution]
+              properties:
+                tenant_id: {type: string}
+                actor_id: {type: string}
+                interaction_id: {type: string}
+                decision_id: {type: string}
+                resolution: {type: string, enum: [confirmed, rejected]}
+      responses:
+        '200': {description: Confirmed action executed and completed, or action rejected}
+        '403': {description: Caller is not the requesting principal, uses a delegated credential, or the confirmed run was blocked by tool governance}
+        '404': {description: Interaction not found for the authenticated principal}
+        '409': {description: Interaction is not awaiting confirmation for this decision_id}
+        '502': {description: Confirmed run executed but did not complete; body carries the lifecycle}
   /v1/control/status:
     get:
       operationId: getControlLifecycleStatus

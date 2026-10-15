@@ -538,6 +538,8 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/control/replay", args)
 	case "scos_control_recover":
 		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/control/recover", args)
+	case "scos_control_confirm":
+		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/control/confirm", args)
 	case "scos_control_status_get":
 		return s.forwardGET(ctx, r, s.controlPlaneURL+"/v1/control/status/"+stringArg(args, "interaction_id"))
 	case "scos_control_trigger":
@@ -603,6 +605,14 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_exec_plan":
 		return s.forwardPOST(ctx, r, s.executionProxyURL+"/v1/plan", args)
 	case "scos_exec_execute":
+		// The proxy runs a destructive command only when its caller asserts
+		// confirmation. A tool argument is the agent's own claim, not the
+		// principal's confirmation, so this route never carries one: a
+		// command that needs confirmation goes through scos_control_route and
+		// runs after the principal answers with scos_control_confirm.
+		if confirmed, _ := args["confirmed"].(bool); confirmed {
+			return nil, fmt.Errorf("scos_exec_execute cannot assert confirmation; route the command with scos_control_route and confirm it with scos_control_confirm")
+		}
 		return s.forwardPOST(ctx, r, s.executionProxyURL+"/v1/execute", args)
 	case "scos_exec_results_list":
 		return s.forwardGET(ctx, r, s.executionProxyURL+"/v1/results")
@@ -1661,7 +1671,7 @@ func governedTools() []map[string]any {
 		tool("scos_control_decision_get", "Get the route decision for an interaction", map[string]any{
 			"interaction_id": strField("Interaction ID"),
 		}, "interaction_id"),
-		tool("scos_control_route", "Route an interaction through the autonomous control plane", map[string]any{
+		tool("scos_control_route", "Route an interaction through the autonomous control plane. A decision that requires confirmation returns status awaiting_confirmation and runs nothing until scos_control_confirm", map[string]any{
 			"interaction_id":      strField("Interaction ID"),
 			"actor_id":            strField("Actor ID"),
 			"agent_id":            strField("Agent ID"),
@@ -1691,9 +1701,14 @@ func governedTools() []map[string]any {
 			"interaction_id": strField("Interaction ID"),
 			"decision_id":    strField("Decision ID"),
 		}, "interaction_id"),
-		tool("scos_control_recover", "Begin recovery for an interrupted interaction", map[string]any{
+		tool("scos_control_recover", "Resume an interrupted interaction from its persisted state; reports reconciliation_required when its command may already have run", map[string]any{
 			"interaction_id": strField("Interaction ID"),
 		}, "interaction_id"),
+		tool("scos_control_confirm", "Confirm or reject a routed action that is awaiting_confirmation. Only the principal that requested it may answer, and only for the exact decision_id it was shown; a confirmation runs the action", map[string]any{
+			"interaction_id": strField("Interaction ID"),
+			"decision_id":    strField("Decision ID returned with the awaiting_confirmation route"),
+			"resolution":     strField("confirmed or rejected"),
+		}, "interaction_id", "decision_id", "resolution"),
 		tool("scos_control_status_get", "Get lifecycle status for an interaction", map[string]any{
 			"interaction_id": strField("Interaction ID"),
 		}, "interaction_id"),
@@ -1829,7 +1844,7 @@ func governedTools() []map[string]any {
 			"explain":           boolField("Include rule explanations"),
 			"confirmed":         boolField("Caller has confirmed execution"),
 		}, "command"),
-		tool("scos_exec_execute", "Execute a governed command through the execution proxy", map[string]any{
+		tool("scos_exec_execute", "Execute a governed command through the execution proxy. Commands that need confirmation (destructive commands) are refused here: route them with scos_control_route and answer with scos_control_confirm", map[string]any{
 			"tenant_id":         strField("Tenant ID"),
 			"principal_id":      strField("Principal ID"),
 			"agent_id":          strField("Agent ID"),
@@ -1841,7 +1856,6 @@ func governedTools() []map[string]any {
 			"mode":              strField("bypass, observe, safe, adaptive, or forensic"),
 			"dry_run":           boolField("Dry run"),
 			"explain":           boolField("Include rule explanations"),
-			"confirmed":         boolField("Caller has confirmed execution"),
 		}, "command"),
 		tool("scos_exec_results_list", "List recent execution results", map[string]any{}),
 		tool("scos_exec_result_get", "Get an execution result by operation ID", map[string]any{

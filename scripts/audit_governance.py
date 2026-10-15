@@ -96,6 +96,7 @@ REQUIRED_INTERFACE_PATHS = {
     "/v1/control/decisions",
     "/v1/control/replay",
     "/v1/control/recover",
+    "/v1/control/confirm",
     "/v1/capabilities",
     "/v1/triggers",
     "/v1/context/compile",
