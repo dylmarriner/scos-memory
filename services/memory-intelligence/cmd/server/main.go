@@ -55,6 +55,13 @@ const (
 	NetworkNegative   MemoryNetwork = "negative"
 )
 
+// Defaults for a fact the user stated explicitly, matching the semantic
+// class in the consolidation worker's promotion policy.
+const (
+	explicitFactAuthority  = 70
+	explicitFactConfidence = 0.75
+)
+
 type Fact struct {
 	ID           string        `json:"id"`
 	Network      MemoryNetwork `json:"network"`
@@ -517,17 +524,41 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "content required", http.StatusBadRequest)
 			return
 		}
-		if fact.NamespaceID == "" {
-			http.Error(w, "namespace_id is required", http.StatusBadRequest)
-			return
-		}
 		identity, status, msg := resolveIdentity(r, fact.TenantID, fact.PrincipalID)
 		if status != 0 {
 			http.Error(w, msg, status)
 			return
 		}
+		if fact.NamespaceID == "" {
+			// An agent saying "remember this" names no namespace: the fact
+			// goes to the caller's own writable namespace.
+			ns, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) (string, error) {
+				return defaultWritableNamespace(r.Context(), q, identity)
+			})
+			if err != nil {
+				http.Error(w, "resolve namespace: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if ns == "" {
+				http.Error(w, "namespace_id is required: the caller owns no namespace and is not a writing member of one", http.StatusBadRequest)
+				return
+			}
+			fact.NamespaceID = ns
+		}
 		if fact.Network == "" {
 			fact.Network = NetworkWorld
+		}
+		if fact.Source == "explicit" {
+			// A fact the user stated outright carries the same authority and
+			// confidence the consolidation worker assigns semantic knowledge
+			// (workers/consolidation promoter: authority 70, confidence 0.75)
+			// unless the caller set them.
+			if fact.Authority == 0 {
+				fact.Authority = explicitFactAuthority
+			}
+			if fact.Confidence == 0 {
+				fact.Confidence = explicitFactConfidence
+			}
 		}
 		if fact.Scope == "" {
 			fact.Scope = "global"

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/release"
@@ -1242,17 +1243,26 @@ func (s *server) lookupStandingAnswer(ctx context.Context, tenantID, principalID
 	return answer, err
 }
 
+// toTSQuery turns a natural-language query into a prefix-matching tsquery
+// that matches any of its terms. Requiring every word ("which database do
+// we use") vetoed relevant memories over filler words; ts_rank still orders
+// memories that match more of the terms first. Terms are split on anything
+// but letters and digits, so tsquery operators in user text ("c++", "a:b",
+// "x|y") can never make the query invalid.
 func toTSQuery(input string) string {
-	words := strings.Fields(strings.ToLower(input))
+	words := strings.FieldsFunc(strings.ToLower(input), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	seen := make(map[string]bool, len(words))
 	var parts []string
 	for _, w := range words {
-		w = strings.Trim(w, ".,!?;:'\"()[]{}")
-		if w == "" || len(w) > 50 {
+		if len(w) > 50 || seen[w] {
 			continue
 		}
+		seen[w] = true
 		parts = append(parts, w+":*")
 	}
-	return strings.Join(parts, " & ")
+	return strings.Join(parts, " | ")
 }
 
 func estimateTokens(text string) int {

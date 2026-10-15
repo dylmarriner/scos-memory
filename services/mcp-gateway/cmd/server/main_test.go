@@ -12,11 +12,11 @@ import (
 
 func TestGovernedToolsListsAllGovernedTools(t *testing.T) {
 	tools := governedTools()
-	if len(tools) != 147 {
-		t.Fatalf("expected 147 governed tools, got %d", len(tools))
+	if len(tools) != 148 {
+		t.Fatalf("expected 148 governed tools, got %d", len(tools))
 	}
 	names := governedToolNames()
-	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain"} {
+	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_remember", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain"} {
 		if !names[want] {
 			t.Fatalf("expected governed tool %q to be present", want)
 		}
@@ -46,8 +46,8 @@ func TestHandleMCPToolsList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(resp.Result.Tools) != 147 {
-		t.Fatalf("expected 147 tools in tools/list response, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 148 {
+		t.Fatalf("expected 148 tools in tools/list response, got %d", len(resp.Result.Tools))
 	}
 }
 
@@ -324,4 +324,37 @@ func TestSCOSRetrieveSchemaExposesDurableRepositoryContext(t *testing.T) {
 		return
 	}
 	t.Fatal("scos_retrieve not found")
+}
+
+func TestDispatchRememberSavesAnExplicitFact(t *testing.T) {
+	var got map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/facts" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]any{"fact": map[string]any{"id": "fact-1"}})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{memoryIntelligenceURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	identity := requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}
+	if _, err := s.dispatchTool(r.Context(), r, identity, "scos_remember", map[string]any{"content": "  The API uses PostgreSQL 17.  ", "network": "world"}); err != nil {
+		t.Fatal(err)
+	}
+	if got["content"] != "The API uses PostgreSQL 17." || got["source"] != "explicit" || got["network"] != "world" {
+		t.Fatalf("forwarded fact = %v", got)
+	}
+	if _, has := got["namespace_id"]; has {
+		t.Fatalf("an unset namespace must be resolved by memory-intelligence, not sent empty: %v", got)
+	}
+	if _, err := s.dispatchTool(r.Context(), r, identity, "scos_remember", map[string]any{"content": "  "}); err == nil {
+		t.Fatal("empty content must be rejected before forwarding")
+	}
+}
+
+func TestUpstreamErrorsNameTheServiceThatFailed(t *testing.T) {
+	if got := upstreamName("https://backup-manager:8095/v1/backups/start"); got != "backup-manager" {
+		t.Fatalf("upstreamName = %q", got)
+	}
 }

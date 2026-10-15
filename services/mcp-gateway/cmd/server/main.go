@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,6 +66,7 @@ type gatewayServer struct {
 	graphifyProviderURL       string
 	credentialVaultURL        string
 	controlPlaneToken         string
+	localBearer               localIdentityToken
 	client                    *http.Client
 	startTime                 time.Time
 }
@@ -121,6 +123,9 @@ func main() {
 
 	var handler http.Handler = mux
 	if isLocalAuthMode() {
+		if _, err := s.localBearer.token(); err != nil {
+			log.Fatalf("mcp-gateway: SCOS_AUTH_MODE=local needs SCOS_SECURITY_ISSUER_SECRET to present the local identity to the services behind it: %v", err)
+		}
 		log.Printf("mcp-gateway (%s): SCOS_AUTH_MODE=local -- no bearer token required, every caller resolves to the reserved local-mode tenant %s", version, localModeTenantID)
 	} else {
 		handler = auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
@@ -249,6 +254,17 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	// header still reaches the services behind this one.
 	r.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
 	r.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
+	if isLocalAuthMode() {
+		// A local-mode caller presents no token, so the services behind
+		// this gateway would see an anonymous request and answer 401 to
+		// every tool. Present the local identity to them as a signed claims
+		// token, exactly as an authenticated caller's token would be.
+		token, err := s.localBearer.token()
+		if err != nil {
+			return nil, fmt.Errorf("local identity token: %w", err)
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 	switch tool {
 	case "scos_status", "scos_recall":
 		return s.callHermesProvider(ctx, r, identity, tool, args)
@@ -358,6 +374,18 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			"link_type":              stringArg(args, "link_type"),
 			"confidence":             args["confidence"],
 		})
+	case "scos_remember":
+		content := strings.TrimSpace(stringArg(args, "content"))
+		if content == "" {
+			return nil, fmt.Errorf("content is required")
+		}
+		fact := map[string]any{"content": content, "source": "explicit"}
+		for _, key := range []string{"network", "namespace_id", "scope", "valid_until"} {
+			if value := strings.TrimSpace(stringArg(args, key)); value != "" {
+				fact[key] = value
+			}
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts", fact)
 	case "scos_correct":
 		memoryID := stringArg(args, "memory_id")
 		if memoryID == "" {
@@ -746,7 +774,7 @@ func (s *gatewayServer) forwardGET(ctx context.Context, r *http.Request, url str
 	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
+		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -754,7 +782,7 @@ func (s *gatewayServer) forwardGET(ctx context.Context, r *http.Request, url str
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errUnreachable("memory-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+		return nil, errUnreachable(upstreamName(url) + " returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -785,7 +813,7 @@ func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url st
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, errUnreachable("code-intelligence unavailable: " + err.Error())
+		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -793,7 +821,7 @@ func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url st
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errUnreachable("code-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+		return nil, errUnreachable(upstreamName(url) + " returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -814,7 +842,7 @@ func (s *gatewayServer) forwardDELETE(ctx context.Context, r *http.Request, url 
 	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
+		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -822,7 +850,7 @@ func (s *gatewayServer) forwardDELETE(ctx context.Context, r *http.Request, url 
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errUnreachable("memory-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+		return nil, errUnreachable(upstreamName(url) + " returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -844,7 +872,7 @@ func (s *gatewayServer) forwardWithBody(ctx context.Context, r *http.Request, me
 	s.copyIdentityHeaders(r, req)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, errUnreachable("memory-intelligence unavailable: " + err.Error())
+		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -852,7 +880,7 @@ func (s *gatewayServer) forwardWithBody(ctx context.Context, r *http.Request, me
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, errUnreachable("memory-intelligence returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
+		return nil, errUnreachable(upstreamName(url) + " returned " + resp.Status + ": " + strings.TrimSpace(string(body)))
 	}
 	var result any
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -874,6 +902,15 @@ func queryFromArgs(args map[string]any, keys ...string) string {
 		}
 	}
 	return values.Encode()
+}
+
+// upstreamName names the service a forwarded call went to, from its URL
+// host, so a failure is attributed to the service that produced it.
+func upstreamName(target string) string {
+	if u, err := url.Parse(target); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return "upstream"
 }
 
 type errUnreachable string
@@ -915,6 +952,40 @@ const (
 	localModeTenantID    = "00000000-0000-0000-0000-000000000001"
 	localModePrincipalID = "00000000-0000-0000-0000-000000000001"
 )
+
+// localIdentityToken mints and caches the claims token that carries the
+// local-mode identity to downstream services. The local user owns the
+// whole installation, so the token also carries the operator scopes the
+// backup and recovery routes require.
+type localIdentityToken struct {
+	mu      sync.Mutex
+	value   string
+	expires time.Time
+}
+
+const localTokenTTL = time.Hour
+
+func (l *localIdentityToken) token() (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.value != "" && time.Until(l.expires) > 5*time.Minute {
+		return l.value, nil
+	}
+	expires := time.Now().Add(localTokenTTL)
+	value, err := auth.SignClaims(auth.Claims{
+		TenantID:    localModeTenantID,
+		PrincipalID: localModePrincipalID,
+		Subject:     localModePrincipalID,
+		AgentID:     "mcp-gateway-local",
+		ExpiresAt:   expires,
+		Scopes:      []string{"backups:admin", "recovery:admin"},
+	}, os.Getenv("SCOS_SECURITY_ISSUER_SECRET"))
+	if err != nil {
+		return "", err
+	}
+	l.value, l.expires = value, expires
+	return value, nil
+}
 
 func isLocalAuthMode() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_AUTH_MODE")), "local")
@@ -998,6 +1069,7 @@ var memoryTierToolNames = map[string]bool{
 	"scos_explain":          true,
 	"scos_user_model":       true,
 	"scos_memory_graph":     true,
+	"scos_remember":         true,
 	"scos_correct":          true,
 	"scos_forget":           true,
 	"scos_graphify_query":   true,
@@ -1253,6 +1325,20 @@ func governedTools() []map[string]any {
 					"confidence":             map[string]any{"type": "number", "description": "0-1, defaults to 1.0"},
 				},
 				"required": []string{"fact_id", "code_symbol_version_id"},
+			},
+		},
+		{
+			"name":        "scos_remember",
+			"description": "Save a fact to long-term memory now. Use when the user states something to remember or a durable decision is made. Duplicates merge into the existing memory and contradictions are flagged; the stored fact is returned with its id for later scos_correct/scos_forget",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"content":      map[string]any{"type": "string", "description": "The fact, stated as a standalone sentence"},
+					"network":      map[string]any{"type": "string", "enum": []string{"world", "experience", "entity", "belief", "procedure", "negative"}, "description": "Kind of memory; defaults to world (facts about the world/project)"},
+					"namespace_id": map[string]any{"type": "string", "description": "Namespace to store in; defaults to the caller's own namespace"},
+					"valid_until":  map[string]any{"type": "string", "description": "RFC 3339 time after which the fact no longer holds"},
+				},
+				"required": []string{"content"},
 			},
 		},
 		{

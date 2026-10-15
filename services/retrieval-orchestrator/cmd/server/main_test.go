@@ -138,6 +138,13 @@ func TestToTSQueryBuildsValidQuery(t *testing.T) {
 	}
 }
 
+func TestToTSQueryMatchesAnyTermAndNeutralisesOperators(t *testing.T) {
+	q := toTSQuery("Which database do we use? c++ a:b x|y (test) test")
+	if q != "which:* | database:* | do:* | we:* | use:* | c:* | a:* | b:* | x:* | y:* | test:*" {
+		t.Fatalf("tsquery = %q", q)
+	}
+}
+
 func TestToTSQueryEmptyInput(t *testing.T) {
 	q := toTSQuery("")
 	if q != "" {

@@ -101,7 +101,11 @@ RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client 
         /var/lib/scos/observability \
         /var/lib/scos/okf \
         /var/lib/scos/wal-archive \
-    && chown -R scos:scos /var/lib/scos
+        # graphify-provider's per-repo AST cache (compose mounts the
+        # graphify-cache volume here); without it the volume is seeded
+        # root-owned and every graphify query fails creating its cache.
+        /var/lib/graphify-cache \
+    && chown -R scos:scos /var/lib/scos /var/lib/graphify-cache
 
 COPY --from=build /out/ /usr/local/bin/
 

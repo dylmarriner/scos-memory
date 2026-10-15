@@ -1131,3 +1131,22 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// defaultWritableNamespace is the namespace a fact goes to when the caller
+// names none: the one they own, else one they may write candidates to,
+// preferring namespaces they administer. Empty when there is none.
+func defaultWritableNamespace(ctx context.Context, q querier, id requestIdentity) (string, error) {
+	var ns string
+	err := q.QueryRowContext(ctx, `
+		SELECT n.id::text
+		  FROM namespaces n
+		  LEFT JOIN namespace_memberships m ON m.namespace_id = n.id AND m.principal_id = $2::uuid
+		 WHERE n.tenant_id = $1::uuid
+		   AND (n.owner_principal_id = $2::uuid OR m.can_write_candidates)
+		 ORDER BY (n.owner_principal_id = $2::uuid) DESC, m.can_administer DESC NULLS LAST, n.created_at ASC
+		 LIMIT 1`, id.TenantID, id.PrincipalID).Scan(&ns)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return ns, err
+}
