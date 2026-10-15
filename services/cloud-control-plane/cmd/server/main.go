@@ -40,7 +40,16 @@ type credentials struct {
 	Password    string `json:"password"`
 	DisplayName string `json:"display_name"`
 }
-type identity struct{ UserID, TenantID, PrincipalID, DisplayName, Email, PlatformRole string }
+// identity is the signed-in account; its JSON shape matches the session
+// response issueSession writes and the dashboard's account views read.
+type identity struct {
+	UserID       string `json:"user_id"`
+	TenantID     string `json:"tenant_id"`
+	PrincipalID  string `json:"principal_id"`
+	DisplayName  string `json:"display_name"`
+	Email        string `json:"email"`
+	PlatformRole string `json:"platform_role"`
+}
 
 type planDefinition struct {
 	ID    string   `json:"id"`
@@ -297,10 +306,16 @@ func (s *server) signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == nil {
-		err = tx.QueryRowContext(r.Context(), `INSERT INTO tenants(name) VALUES($1) RETURNING id`, strings.TrimSpace(in.DisplayName)+"'s workspace").Scan(&tid)
+		tid, err = createTenant(r.Context(), tx, strings.TrimSpace(in.DisplayName)+"'s workspace")
+	}
+	if err == nil {
+		err = actAs(r.Context(), tx, tid, "")
 	}
 	if err == nil {
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES($1,'human',$2,$3) RETURNING id`, tid, uid, in.DisplayName).Scan(&pid)
+	}
+	if err == nil {
+		err = actAs(r.Context(), tx, tid, pid)
 	}
 	if err == nil {
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO workspaces(tenant_id,name) VALUES($1,$2) RETURNING id`, tid, "Memory workspace").Scan(&wid)
@@ -324,6 +339,21 @@ func (s *server) signup(w http.ResponseWriter, r *http.Request) {
 	s.issueSession(w, r, identity{UserID: uid, TenantID: tid, PrincipalID: pid, DisplayName: in.DisplayName, Email: in.Email, PlatformRole: "user"})
 }
 
+// createTenant creates a tenant row through scos_cloud_create_tenant: the
+// runtime role has no INSERT policy on tenants (migrations/000042).
+func createTenant(ctx context.Context, tx *sql.Tx, name string) (string, error) {
+	var id string
+	err := tx.QueryRowContext(ctx, `SELECT scos_cloud_create_tenant($1)::text`, name).Scan(&id)
+	return id, err
+}
+
+// actAs sets the transaction-local RLS identity, so the remaining
+// provisioning writes pass the ordinary tenant and namespace policies.
+func actAs(ctx context.Context, tx *sql.Tx, tenantID, principalID string) error {
+	_, err := tx.ExecContext(ctx, `SELECT set_config('scos.tenant_id',$1,true), set_config('scos.principal_id',$2,true)`, tenantID, principalID)
+	return err
+}
+
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -336,7 +366,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	var id identity
 	var pw, status string
-	err := s.db.QueryRowContext(r.Context(), `SELECT u.id,u.password_hash,u.display_name,u.email,u.status,u.platform_role,p.id,p.tenant_id FROM cloud_users u JOIN principals p ON p.external_id=u.id::text JOIN tenants t ON t.id=p.tenant_id WHERE lower(u.email)=lower($1) LIMIT 1`, in.Email).Scan(&id.UserID, &pw, &id.DisplayName, &id.Email, &status, &id.PlatformRole, &id.PrincipalID, &id.TenantID)
+	err := s.db.QueryRowContext(r.Context(), `SELECT u.id,u.password_hash,u.display_name,u.email,u.status,u.platform_role,p.principal_id,p.tenant_id FROM cloud_users u CROSS JOIN LATERAL scos_cloud_user_principal(u.id::text) p WHERE lower(u.email)=lower($1) LIMIT 1`, in.Email).Scan(&id.UserID, &pw, &id.DisplayName, &id.Email, &status, &id.PlatformRole, &id.PrincipalID, &id.TenantID)
 	if err != nil || status != "active" || bcrypt.CompareHashAndPassword([]byte(pw), []byte(in.Password)) != nil {
 		http.Error(w, "invalid email or password", 401)
 		return
@@ -364,7 +394,7 @@ func (s *server) current(r *http.Request) (identity, error) {
 		return identity{}, err
 	}
 	var id identity
-	err = s.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.platform_role,p.tenant_id,p.id FROM cloud_sessions cs JOIN cloud_users u ON u.id=cs.user_id JOIN principals p ON p.external_id=u.id::text WHERE cs.token_hash=$1 AND cs.revoked_at IS NULL AND cs.expires_at>now() AND u.status='active' LIMIT 1`, hash(c.Value)).Scan(&id.UserID, &id.Email, &id.DisplayName, &id.PlatformRole, &id.TenantID, &id.PrincipalID)
+	err = s.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.platform_role,p.tenant_id,p.principal_id FROM cloud_sessions cs JOIN cloud_users u ON u.id=cs.user_id CROSS JOIN LATERAL scos_cloud_user_principal(u.id::text) p WHERE cs.token_hash=$1 AND cs.revoked_at IS NULL AND cs.expires_at>now() AND u.status='active' LIMIT 1`, hash(c.Value)).Scan(&id.UserID, &id.Email, &id.DisplayName, &id.PlatformRole, &id.TenantID, &id.PrincipalID)
 	if err == nil {
 		_, _ = s.db.ExecContext(r.Context(), `UPDATE cloud_sessions SET last_seen_at=now() WHERE token_hash=$1`, hash(c.Value))
 	}
@@ -685,7 +715,10 @@ func (s *server) adminOverview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	_ = s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM tenants`).Scan(&tenants)
+	if err := s.db.QueryRowContext(r.Context(), `SELECT scos_cloud_tenant_count()`).Scan(&tenants); err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
 	_ = s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM cloud_api_keys WHERE revoked_at IS NULL`).Scan(&keys)
 	jsonWrite(w, 200, map[string]int{"users": users, "tenants": tenants, "active_api_keys": keys})
 }
@@ -698,7 +731,7 @@ func (s *server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	where, args := userSearchFilter(r.URL.Query().Get("q"), r.URL.Query().Get("plan"), r.URL.Query().Get("role"))
 	limit, offset := paginationParams(r.URL.Query())
 	args = append(args, limit, offset)
-	query := `SELECT u.id,u.email,u.display_name,u.platform_role,u.status,cs.plan,p.tenant_id FROM cloud_users u JOIN principals p ON p.external_id=u.id::text JOIN cloud_subscriptions cs ON cs.tenant_id=p.tenant_id WHERE ` + where +
+	query := `SELECT u.id,u.email,u.display_name,u.platform_role,u.status,cs.plan,p.tenant_id FROM cloud_users u CROSS JOIN LATERAL scos_cloud_user_principal(u.id::text) p JOIN cloud_subscriptions cs ON cs.tenant_id=p.tenant_id WHERE ` + where +
 		` ORDER BY u.created_at DESC LIMIT $` + strconv.Itoa(len(args)-1) + ` OFFSET $` + strconv.Itoa(len(args))
 	rows, err := s.db.QueryContext(r.Context(), query, args...)
 	if err != nil {

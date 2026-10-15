@@ -7,6 +7,9 @@ DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'scos_app') THEN
         GRANT EXECUTE ON FUNCTION scos_security_token_lookup(text) TO scos_app;
+        GRANT EXECUTE ON FUNCTION scos_cloud_create_tenant(text) TO scos_app;
+        GRANT EXECUTE ON FUNCTION scos_cloud_user_principal(text) TO scos_app;
+        GRANT EXECUTE ON FUNCTION scos_cloud_tenant_count() TO scos_app;
     END IF;
 END
 $$;
