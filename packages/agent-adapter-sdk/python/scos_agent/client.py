@@ -3,132 +3,110 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 
 
 @dataclass
-class PortableEnvelope:
-    envelope_id: str
-    session_id: str
-    tenant_id: str
+class ContextEnvelope:
+    """Portable context envelope (§23.5) as served by GET /v1/envelope."""
+
     agent_id: str
-    context_items: list[str] = field(default_factory=list)
-    permissions: list[str] = field(default_factory=list)
-    metadata: dict[str, str] = field(default_factory=dict)
-    generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    session_id: str
+    format: str
+    tenant_id: str = ""
+    principal_id: str = ""
+    governing_constraints: str = ""
+    user_model: str = ""
+    task_state: str = ""
+    facts: list[str] = field(default_factory=list)
+    learnings: list[str] = field(default_factory=list)
+    episodic_history: list[str] = field(default_factory=list)
+    contradictions: list[str] = field(default_factory=list)
+    code_references: list[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
+    restoration_references: list[str] = field(default_factory=list)
 
 
-class EnvelopeRenderError(RuntimeError):
-    """Raised when the gateway did not return a governed envelope.
-
-    An envelope carries the permissions an agent may exercise, so it is only
-    ever taken from the gateway. When the gateway cannot be reached, refuses
-    the request or answers with something that is not an envelope, the caller
-    gets this error and no permissions at all.
-    """
+class EnvelopeError(RuntimeError):
+    """Raised when the gateway did not return the requested envelope."""
 
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status
 
 
-_REQUIRED_FIELDS = ("envelope_id", "session_id", "tenant_id", "agent_id")
-_KNOWN_FIELDS = frozenset(f.name for f in fields(PortableEnvelope))
+class EnvelopeNotFound(EnvelopeError):
+    """The gateway holds no envelope for the session under the caller's tenant."""
 
 
-def _string_list(data: dict, name: str) -> list[str]:
-    value = data.get(name)
-    if value is None:
-        return []
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise EnvelopeRenderError(f"gateway envelope field {name!r} is not a list of strings")
-    return list(value)
+_STRING_FIELDS = ("tenant_id", "principal_id", "governing_constraints", "user_model", "task_state", "format")
+_LIST_FIELDS = (
+    "facts", "learnings", "episodic_history", "contradictions",
+    "code_references", "artifacts", "sources", "restoration_references",
+)
 
 
-def _parse_envelope(data: object, session_id: str, tenant_id: str, agent_id: str) -> PortableEnvelope:
+def _parse_envelope(data: object, session_id: str, agent_id: str) -> ContextEnvelope:
     if not isinstance(data, dict):
-        raise EnvelopeRenderError("gateway response is not a JSON object")
-    missing = [name for name in _REQUIRED_FIELDS if not isinstance(data.get(name), str) or not data.get(name)]
-    if missing:
-        raise EnvelopeRenderError(f"gateway response is not an envelope: missing {', '.join(missing)}")
-    # The gateway must answer for the identity that was asked about; an
-    # envelope for another session, tenant or agent is never accepted.
-    for name, expected in (("session_id", session_id), ("tenant_id", tenant_id), ("agent_id", agent_id)):
-        if data[name] != expected:
-            raise EnvelopeRenderError(
-                f"gateway envelope {name} {data[name]!r} does not match the requested {expected!r}"
-            )
-
-    metadata = data.get("metadata") or {}
-    if not isinstance(metadata, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in metadata.items()
-    ):
-        raise EnvelopeRenderError("gateway envelope field 'metadata' is not a string map")
-
-    raw_generated = data.get("generated_at")
-    if not isinstance(raw_generated, str) or not raw_generated:
-        raise EnvelopeRenderError("gateway envelope has no generated_at timestamp")
-    try:
-        generated_at = datetime.fromisoformat(raw_generated.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise EnvelopeRenderError(f"gateway envelope generated_at is not a timestamp: {raw_generated!r}") from exc
-
-    unknown = sorted(set(data) - _KNOWN_FIELDS)
-    if unknown:
-        raise EnvelopeRenderError(f"gateway envelope has unexpected fields: {', '.join(unknown)}")
-
-    return PortableEnvelope(
-        envelope_id=data["envelope_id"],
-        session_id=data["session_id"],
-        tenant_id=data["tenant_id"],
-        agent_id=data["agent_id"],
-        context_items=_string_list(data, "context_items"),
-        permissions=_string_list(data, "permissions"),
-        metadata=dict(metadata),
-        generated_at=generated_at,
-    )
+        raise EnvelopeError("gateway response is not a JSON object")
+    for name, expected in (("session_id", session_id), ("agent_id", agent_id)):
+        if data.get(name) != expected:
+            raise EnvelopeError(f"gateway envelope {name} {data.get(name)!r} does not match the requested {expected!r}")
+    values: dict = {"agent_id": agent_id, "session_id": session_id}
+    for name in _STRING_FIELDS:
+        value = data.get(name) or ""
+        if not isinstance(value, str):
+            raise EnvelopeError(f"gateway envelope field {name!r} is not a string")
+        values[name] = value
+    for name in _LIST_FIELDS:
+        value = data.get(name) or []
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise EnvelopeError(f"gateway envelope field {name!r} is not a list of strings")
+        values[name] = list(value)
+    return ContextEnvelope(**values)
 
 
 class AgentAdapterClient:
-    def __init__(self, agent_id: str, gateway_url: str = "http://127.0.0.1:8080", timeout: float = 3.0):
+    def __init__(self, agent_id: str, gateway_url: str, bearer_token: str, timeout: float = 5.0):
         if not agent_id:
             raise ValueError("agent_id is required")
+        if not gateway_url:
+            raise ValueError("gateway_url is required")
+        if not bearer_token:
+            raise ValueError("bearer_token is required")
         self.agent_id = agent_id
         self.gateway_url = gateway_url.rstrip("/")
+        self.bearer_token = bearer_token
         self.timeout = timeout
 
-    def render_envelope(self, session_id: str, tenant_id: str) -> PortableEnvelope:
-        """Ask the gateway to compile the governed envelope for a session.
+    def fetch_envelope(self, session_id: str) -> ContextEnvelope:
+        """Read the stored context envelope for ``session_id``.
 
-        Raises ``EnvelopeRenderError`` on any failure; there is no local
-        fallback, because a fabricated envelope would grant permissions the
-        gateway never issued.
+        The gateway resolves tenant and principal from the bearer token. Any
+        failure raises ``EnvelopeError`` (``EnvelopeNotFound`` for 404).
         """
-        payload = json.dumps({
-            "agent_id": self.agent_id,
-            "session_id": session_id,
-            "tenant_id": tenant_id,
-        }).encode("utf-8")
-
+        if not session_id:
+            raise ValueError("session_id is required")
         req = urllib.request.Request(
-            f"{self.gateway_url}/v1/envelope/render",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            f"{self.gateway_url}/v1/envelope?session_id={urllib.parse.quote(session_id, safe='')}",
+            headers={"Authorization": f"Bearer {self.bearer_token}", "Accept": "application/json"},
+            method="GET",
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read()
         except urllib.error.HTTPError as exc:
-            raise EnvelopeRenderError(f"gateway returned {exc.code} {exc.reason}", status=exc.code) from exc
+            detail = exc.read(4096).decode("utf-8", "replace").strip()
+            cls = EnvelopeNotFound if exc.code == 404 else EnvelopeError
+            raise cls(f"gateway returned {exc.code}: {detail}", status=exc.code) from exc
         except (urllib.error.URLError, OSError) as exc:
-            raise EnvelopeRenderError(f"render governed envelope: {exc}") from exc
-
+            raise EnvelopeError(f"fetch envelope: {exc}") from exc
         try:
             data = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise EnvelopeRenderError(f"failed to decode gateway response: {exc}") from exc
-        return _parse_envelope(data, session_id, tenant_id, self.agent_id)
+            raise EnvelopeError(f"failed to decode gateway response: {exc}") from exc
+        return _parse_envelope(data, session_id, self.agent_id)

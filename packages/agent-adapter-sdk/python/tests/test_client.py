@@ -3,20 +3,19 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from scos_agent.client import AgentAdapterClient, EnvelopeRenderError
+from scos_agent.client import AgentAdapterClient, EnvelopeError, EnvelopeNotFound
 
 
 class _Gateway:
-    """A local HTTP server answering /v1/envelope/render with a fixed reply."""
+    """A local HTTP server answering GET /v1/envelope with a fixed reply."""
 
     def __init__(self, status: int, body: bytes):
         gateway = self
         self.requests = []
 
         class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", "0"))
-                gateway.requests.append((self.path, json.loads(self.rfile.read(length))))
+            def do_GET(self):
+                gateway.requests.append((self.path, self.headers.get("Authorization")))
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -37,71 +36,68 @@ class _Gateway:
 
 def _envelope(**overrides):
     body = {
-        "envelope_id": "env-42",
-        "session_id": "sess-1",
         "tenant_id": "tenant-1",
         "agent_id": "agent-1",
-        "context_items": ["item-a"],
-        "permissions": ["read"],
-        "generated_at": "2026-10-15T09:30:00.123456789Z",
+        "session_id": "sess 1",
+        "facts": ["fact-a"],
+        "code_references": ["a.go:10"],
+        "task_state": "reviewing",
+        "format": "json",
     }
     body.update(overrides)
     return json.dumps(body).encode("utf-8")
 
 
 class AgentClientTests(unittest.TestCase):
-    def gateway(self, status, body):
+    def client(self, status, body):
         gw = _Gateway(status, body)
         self.addCleanup(gw.close)
-        return gw
+        return gw, AgentAdapterClient("agent-1", gw.url + "/", "tok-1")
 
-    def test_render_envelope_returns_the_gateway_envelope(self):
-        gw = self.gateway(200, _envelope())
-        env = AgentAdapterClient("agent-1", gw.url).render_envelope("sess-1", "tenant-1")
-        self.assertEqual(env.envelope_id, "env-42")
-        self.assertEqual(env.permissions, ["read"])
-        self.assertEqual(env.context_items, ["item-a"])
-        self.assertEqual(env.generated_at.year, 2026)
-        path, sent = gw.requests[0]
-        self.assertEqual(path, "/v1/envelope/render")
-        self.assertEqual(sent, {"agent_id": "agent-1", "session_id": "sess-1", "tenant_id": "tenant-1"})
+    def test_fetch_envelope_returns_stored_envelope(self):
+        gw, cli = self.client(200, _envelope())
+        env = cli.fetch_envelope("sess 1")
+        self.assertEqual(env.facts, ["fact-a"])
+        self.assertEqual(env.code_references, ["a.go:10"])
+        self.assertEqual(env.task_state, "reviewing")
+        self.assertEqual(env.learnings, [])
+        self.assertEqual(gw.requests[0], ("/v1/envelope?session_id=sess%201", "Bearer tok-1"))
 
-    def test_unreachable_gateway_raises_and_grants_nothing(self):
+    def test_not_found(self):
+        _, cli = self.client(404, b"envelope not found")
+        with self.assertRaises(EnvelopeNotFound) as ctx:
+            cli.fetch_envelope("sess 1")
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_refusal_is_surfaced_with_status(self):
+        _, cli = self.client(401, b"authenticated token has no tenant and principal claims")
+        with self.assertRaises(EnvelopeError) as ctx:
+            cli.fetch_envelope("sess 1")
+        self.assertEqual(ctx.exception.status, 401)
+        self.assertIn("no tenant", str(ctx.exception))
+
+    def test_unreachable_gateway_raises(self):
         gw = _Gateway(200, b"{}")
         url = gw.url
         gw.close()
-        with self.assertRaises(EnvelopeRenderError):
-            AgentAdapterClient("agent-1", url, timeout=1).render_envelope("sess-1", "tenant-1")
+        with self.assertRaises(EnvelopeError):
+            AgentAdapterClient("agent-1", url, "tok", timeout=1).fetch_envelope("s")
 
-    def test_gateway_refusal_is_surfaced_with_status(self):
-        gw = self.gateway(403, b'{"error":"forbidden"}')
-        with self.assertRaises(EnvelopeRenderError) as ctx:
-            AgentAdapterClient("agent-1", gw.url).render_envelope("sess-1", "tenant-1")
-        self.assertEqual(ctx.exception.status, 403)
+    def test_envelope_for_other_agent_or_session_is_rejected(self):
+        for body in (_envelope(agent_id="agent-2"), _envelope(session_id="other"), b"not json", b"[]"):
+            _, cli = self.client(200, body)
+            with self.assertRaises(EnvelopeError):
+                cli.fetch_envelope("sess 1")
 
-    def test_non_envelope_response_is_rejected(self):
-        gw = self.gateway(200, b'{"format":"markdown","content":"# ctx"}')
-        with self.assertRaises(EnvelopeRenderError):
-            AgentAdapterClient("agent-1", gw.url).render_envelope("sess-1", "tenant-1")
+    def test_malformed_fields_are_rejected(self):
+        _, cli = self.client(200, _envelope(facts="all"))
+        with self.assertRaises(EnvelopeError):
+            cli.fetch_envelope("sess 1")
 
-    def test_malformed_json_is_rejected(self):
-        gw = self.gateway(200, b"not json")
-        with self.assertRaises(EnvelopeRenderError):
-            AgentAdapterClient("agent-1", gw.url).render_envelope("sess-1", "tenant-1")
-
-    def test_envelope_for_another_identity_is_rejected(self):
-        gw = self.gateway(200, _envelope(tenant_id="tenant-2"))
-        with self.assertRaises(EnvelopeRenderError):
-            AgentAdapterClient("agent-1", gw.url).render_envelope("sess-1", "tenant-1")
-
-    def test_malformed_permissions_are_rejected(self):
-        gw = self.gateway(200, _envelope(permissions="admin"))
-        with self.assertRaises(EnvelopeRenderError):
-            AgentAdapterClient("agent-1", gw.url).render_envelope("sess-1", "tenant-1")
-
-    def test_agent_id_is_required(self):
-        with self.assertRaises(ValueError):
-            AgentAdapterClient("")
+    def test_required_config(self):
+        for args in (("", "http://x", "t"), ("a", "", "t"), ("a", "http://x", "")):
+            with self.assertRaises(ValueError):
+                AgentAdapterClient(*args)
 
 
 if __name__ == "__main__":

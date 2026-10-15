@@ -1,3 +1,3 @@
-from .client import PortableEnvelope, AgentAdapterClient, EnvelopeRenderError
+from .client import AgentAdapterClient, ContextEnvelope, EnvelopeError, EnvelopeNotFound
 
-__all__ = ["PortableEnvelope", "AgentAdapterClient", "EnvelopeRenderError"]
+__all__ = ["AgentAdapterClient", "ContextEnvelope", "EnvelopeError", "EnvelopeNotFound"]
