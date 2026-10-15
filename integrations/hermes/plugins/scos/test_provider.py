@@ -160,6 +160,33 @@ class ScosMemoryProviderV2Tests(unittest.TestCase):
         provider.shutdown()
         self.assertEqual(len(calls), 2)
 
+    def test_sync_turn_records_real_tool_calls(self):
+        provider = self.make_provider()
+        posted = []
+        provider._provider_post = lambda path, payload, timeout=8: posted.append(payload) or {"synced": True}
+        provider._gateway_rpc = lambda method, params, timeout=8: {"result": {"content": [{"type": "text", "text": "{}"}]}}
+
+        provider.handle_tool_call("scos_recall", {"query": "deploys"})
+        transcript = [
+            {"role": "user", "content": "earlier"},
+            {"role": "assistant", "tool_calls": [{"id": "old", "function": {"name": "stale", "arguments": "{}"}}]},
+            {"role": "user", "content": "check the build"},
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{\"cmd\": \"make\"}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "assistant", "content": "build passes"},
+        ]
+        provider.sync_turn("check the build", "build passes", messages=transcript)
+        provider.sync_turn("next", "answer")
+        provider.shutdown()
+
+        first, second = posted
+        names = [(c["source"], c["name"]) for c in first["tool_calls"]]
+        self.assertEqual(names, [("transcript", "terminal"), ("scos_provider", "scos_recall")])
+        self.assertEqual(first["tool_calls"][0]["arguments"], {"cmd": "make"})
+        self.assertEqual(first["tool_calls"][0]["result"], "ok")
+        self.assertEqual(first["tool_calls"][1]["status"], "ok")
+        self.assertEqual(second["tool_calls"], [], "executed calls are attributed to one turn only")
+
     def test_queue_prefetch_and_session_end_use_lifecycle_service(self):
         provider = self.make_provider()
         calls = []
