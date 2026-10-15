@@ -1,4 +1,4 @@
-.PHONY: fmt test integration-test failure-injection validate audit audit-runtime code-index deployed-benchmark compose-up compose-down db-shell
+.PHONY: fmt test integration-test rls-integration-test failure-injection validate audit audit-runtime code-index deployed-benchmark compose-up compose-down db-shell
 
 code-index:
 	python3 scripts/generate_code_index.py
@@ -17,6 +17,7 @@ fmt:
 test:
 	go test ./...
 	python3 -m unittest discover -s workers/consolidation/tests -v
+	python3 -m unittest discover -s workers/embeddings/tests -v
 	python3 -m unittest discover -s workers/index-maintenance -p "test_*.py" -v
 	python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
 	python3 -m unittest discover -s integrations/hermes/plugins/scos -p "test_*.py" -v
@@ -33,6 +34,15 @@ integration-test:
 	  test -n "$$db_host" || (printf '%s\n' 'could not determine PostgreSQL container IP' >&2; exit 1); \
 	  until bash -c ":</dev/tcp/$$db_host/5432" >/dev/null 2>&1; do sleep 1; done; \
 	  test -n "$${DATABASE_URL}" || (printf '%s\n' 'DATABASE_URL must be set with sslmode=require, verify-ca, or verify-full for integration tests' >&2; exit 1); DATABASE_URL="$${DATABASE_URL}" go test -tags=integration ./database/integration -count=1 -v
+
+# Runtime-role suite against an already-migrated database: DATABASE_URL is
+# the migration-owning role (seeding only), SCOS_APP_TEST_DATABASE_URL the
+# restricted scos_app role every service and worker runs as.
+rls-integration-test:
+	@test -n "$${DATABASE_URL}" || (printf '%s\n' 'DATABASE_URL (migration owner) must be set' >&2; exit 1)
+	@test -n "$${SCOS_APP_TEST_DATABASE_URL}" || (printf '%s\n' 'SCOS_APP_TEST_DATABASE_URL (scos_app runtime role) must be set' >&2; exit 1)
+	go test -tags=integration -count=1 ./database/integration ./services/security-gate/cmd/server ./services/recovery-orchestrator/cmd/server ./services/cloud-control-plane/cmd/server
+	python3 -m unittest discover -s tests/integration -p 'test_*.py' -v
 
 failure-injection:
 	@test -n "$${SCOS_INTERNAL_SERVICE_TOKEN}" || (printf '%s\n' 'SCOS_INTERNAL_SERVICE_TOKEN must be set; source .env first' >&2; exit 1)

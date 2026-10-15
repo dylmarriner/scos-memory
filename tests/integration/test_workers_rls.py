@@ -136,6 +136,49 @@ class WorkerRLSTests(unittest.TestCase):
         self.assertEqual(status, "expired")
         self.assertGreaterEqual(result["stale_items_pruned"], 1)
 
+    def test_policy_evaluation_judges_recorded_outcomes(self):
+        policy_main = _load("policy_evaluation_main", ROOT / "workers/policy-evaluation/main.py")
+
+        fx = Fixture(self.admin)
+        started = datetime.now(timezone.utc) - timedelta(hours=2)
+        # Baseline: every routed turn completed. Candidate: half degraded.
+        for version, offset, outcomes in (
+            ("policy-a", 0, [True] * 25),
+            ("policy-b", 60, [True] * 12 + [False] * 13),
+        ):
+            for i, success in enumerate(outcomes):
+                run = str(uuid.uuid4())
+                self.admin.execute(
+                    """INSERT INTO orchestration_runs (id, tenant_id, interaction_id, status, current_stage, policy_version, registry_generation, started_at)
+                       VALUES (%s, %s, %s, %s, 'turn-coordinator', %s, 1, %s)""",
+                    (run, fx.tenant, f"{version}-{i}", "completed" if success else "degraded", version,
+                     started + timedelta(minutes=offset, seconds=i)))
+                self.admin.execute(
+                    """INSERT INTO routing_decisions (tenant_id, actor_id, orchestration_run_id, decision_id, intent_labels, resolved_scope,
+                           risk_class, candidate_capabilities, selected_plan, reason_codes, confidence, policy_version, registry_generation, actual_outcome)
+                       VALUES (%s, %s, %s, %s, '[]', '{}', 'low', '[]', '[]', '[]', 0.9, %s, '1', %s)""",
+                    (fx.tenant, fx.principal, run, "dec-" + run, version,
+                     json.dumps({"confirmation_required": False, "success": success,
+                                 "status": "completed" if success else "degraded"})))
+        self.admin.commit()
+
+        app = psycopg.connect(APP_URL, autocommit=True)
+        try:
+            results = policy_main.run_evaluation_cycle(app)
+        finally:
+            app.close()
+        mine = [r for r in results if str(r["tenant_id"]) == fx.tenant]
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(mine[0]["policy"], "policy-b")
+        self.assertEqual(mine[0]["baseline_sample_size"], 25)
+        self.assertEqual(mine[0]["candidate_sample_size"], 25)
+        self.assertEqual(mine[0]["eval_status"], "regression_detected")
+        audit = self.admin.execute(
+            "SELECT decision, details->>'evaluation' FROM audit_entries WHERE tenant_id = %s AND action = 'policy_shadow_evaluation'",
+            (fx.tenant,)).fetchall()
+        self.admin.commit()
+        self.assertEqual(audit, [("rollback", "regression_detected")])
+
 
 if __name__ == "__main__":
     unittest.main()

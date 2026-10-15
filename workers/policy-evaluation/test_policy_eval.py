@@ -90,6 +90,7 @@ class DbHelperTests(unittest.TestCase):
         conn = MagicMock()
         conn.execute.return_value = fake_cursor(rows=[("t1",), ("t2",)])
         self.assertEqual(list_tenant_ids(conn), ["t1", "t2"])
+        self.assertIn("scos_worker_policy_tenants()", conn.execute.call_args.args[0])
 
     def test_list_policy_versions(self):
         conn = MagicMock()
@@ -101,6 +102,9 @@ class DbHelperTests(unittest.TestCase):
         conn.execute.return_value = fake_cursor(rows=[({"success": True},), ({"success": False},)])
         outcomes = fetch_policy_outcomes(conn, "t1", "v2")
         self.assertEqual(outcomes, [{"success": True}, {"success": False}])
+        sql = conn.execute.call_args.args[0]
+        self.assertIn("rd.actual_outcome", sql)
+        self.assertIn("? 'success'", sql)
 
 
 class EvaluatePolicyCandidateTests(unittest.TestCase):
@@ -137,10 +141,26 @@ class RunEvaluationCycleTests(unittest.TestCase):
         conn = MagicMock()
         conn.execute.side_effect = [
             fake_cursor(rows=[("t1",)]),  # list_tenant_ids
+            fake_cursor(),  # set_tenant
             fake_cursor(rows=[("v1",)]),  # list_policy_versions for t1 -> only 1
         ]
         results = run_evaluation_cycle(conn)
         self.assertEqual(results, [])
+        self.assertEqual(conn.transaction.call_count, 1)
+
+    def test_binds_each_tenant_inside_its_own_transaction(self):
+        conn = MagicMock()
+        conn.execute.side_effect = [
+            fake_cursor(rows=[("t1",), ("t2",)]),
+            fake_cursor(),
+            fake_cursor(rows=[("v1",)]),
+            fake_cursor(),
+            fake_cursor(rows=[("v1",)]),
+        ]
+        run_evaluation_cycle(conn)
+        self.assertEqual(conn.transaction.call_count, 2)
+        binds = [c.args[1] for c in conn.execute.call_args_list if "set_config" in c.args[0]]
+        self.assertEqual(binds, [("t1",), ("t2",)])
 
 
 if __name__ == "__main__":

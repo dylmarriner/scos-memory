@@ -653,6 +653,15 @@ func (c *controlPlane) persistLifecycleDB(ctx context.Context, req RouteRequest,
 	if _, err = tx.Exec(ctx, `UPDATE orchestration_runs SET status=$1,current_stage=$2,checkpoint=$3,completed_at=CASE WHEN $1 IN ('completed','degraded') THEN now() ELSE completed_at END WHERE tenant_id=$4 AND interaction_id=$5`, lifecycle.Status, lastStage(decision), checkpoint, req.TenantID, req.InteractionID); err != nil {
 		return err
 	}
+	// The executed result is the outcome policy evaluation judges each
+	// policy version by: success only when every stage of the plan completed.
+	executed, err := json.Marshal(map[string]any{"success": lifecycle.Status == "completed", "status": lifecycle.Status})
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE routing_decisions SET actual_outcome = COALESCE(actual_outcome,'{}'::jsonb) || $1::jsonb WHERE decision_id=$2 AND orchestration_run_id=(SELECT id FROM orchestration_runs WHERE tenant_id=$3 AND interaction_id=$4)`, executed, decision.DecisionID, req.TenantID, req.InteractionID); err != nil {
+		return err
+	}
 	for _, stage := range lifecycle.Stages {
 		dbStatus := stage.Status
 		if dbStatus == "degraded" {
