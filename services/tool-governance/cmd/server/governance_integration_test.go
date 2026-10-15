@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
+	executionadapters "github.com/dylmarriner/scos-memory/packages/execution-adapters"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -365,5 +366,98 @@ func TestStartResolvesTheBuiltinExecutionProxyTool(t *testing.T) {
 	}
 	if status, body := f.serviceCall("/v1/operations/start", map[string]any{"tool_name": "not-a-tool", "risk": "read"}); status != http.StatusForbidden {
 		t.Fatalf("an unknown tool must still be refused, got %d %s", status, body)
+	}
+}
+
+// TestExecutorRunsOnlyUnderTheRecordedConfirmation covers the hand-over
+// from the control plane to execution-proxy: the proxy names the operation
+// the control plane started, and governance answers with the confirmation
+// and risk recorded on that operation -- not one the proxy asserts. The
+// operation is handed over once, only to its own tool, principal and
+// command.
+func TestExecutorRunsOnlyUnderTheRecordedConfirmation(t *testing.T) {
+	f := newGovernanceFixture(t)
+	command := "rm -rf ./build-output"
+	confirmedOp, _ := newID()
+	if status, body := f.serviceCall("/v1/operations/start", map[string]any{
+		"tool_name": "execution-proxy", "operation_id": confirmedOp, "confirmed": true,
+		"plan": map[string]any{"original_request": command, "executed_request": command},
+	}); status != http.StatusOK {
+		t.Fatalf("confirmed start: %d %s", status, body)
+	}
+	prepare := func(opID, cmd string, extra map[string]any) (int, []byte) {
+		risk := executionadapters.ClassifyRisk(cmd)
+		body := map[string]any{
+			"tool_name": "execution-proxy", "operation_id": opID, "risk": risk,
+			"plan": map[string]any{"original_request": cmd, "executed_request": cmd, "risk_level": risk, "mode": "forensic"},
+		}
+		for k, v := range extra {
+			body[k] = v
+		}
+		return f.serviceCall("/v1/operations/prepare", body)
+	}
+
+	// Another principal of the tenant cannot take the operation.
+	otherID, _ := newID()
+	if _, err := f.admin.Exec(`INSERT INTO principals (id, tenant_id, kind, external_id, display_name) VALUES ($2, $1, 'human', 'tg-it-other', 'Other')`, f.identity.TenantID, otherID); err != nil {
+		t.Fatal(err)
+	}
+	owner := f.identity
+	f.identity.PrincipalID = otherID
+	if status, body := prepare(confirmedOp, command, nil); status != http.StatusForbidden {
+		t.Fatalf("another principal's prepare: expected 403, got %d %s", status, body)
+	}
+	f.identity = owner
+
+	// The operation's confirmation covers only the command it was started for.
+	if status, body := prepare(confirmedOp, "rm -rf /", nil); status != http.StatusConflict {
+		t.Fatalf("a different command: expected 409, got %d %s", status, body)
+	}
+
+	// The executor asserts nothing and receives the recorded confirmation.
+	status, body := prepare(confirmedOp, command, nil)
+	if status != http.StatusOK {
+		t.Fatalf("executor prepare of the confirmed operation: %d %s", status, body)
+	}
+	resp := decodePrepared(t, body)
+	if resp.OperationID != confirmedOp || !resp.Confirmed || resp.RiskLevel != "destructive" {
+		t.Fatalf("expected the recorded confirmation and risk, got %+v", resp)
+	}
+	var claimed bool
+	if err := f.admin.QueryRow(`SELECT executor_claimed_at IS NOT NULL FROM tool_executions WHERE operation_id = $1`, confirmedOp).Scan(&claimed); err != nil || !claimed {
+		t.Fatalf("claim not recorded: %v %v", claimed, err)
+	}
+
+	// One confirmation authorises one execution.
+	if status, body := prepare(confirmedOp, command, nil); status != http.StatusConflict {
+		t.Fatalf("a second executor prepare: expected 409, got %d %s", status, body)
+	}
+	if status, body := f.serviceCall("/v1/operations/reconcile", map[string]any{"operation_id": confirmedOp, "result": "succeeded"}); status != http.StatusOK {
+		t.Fatalf("reconcile the executed operation: %d %s", status, body)
+	}
+
+	// An operation started without confirmation never runs a destructive
+	// plan, whatever the executor claims.
+	unconfirmedOp, _ := newID()
+	if status, body := f.serviceCall("/v1/operations/start", map[string]any{
+		"tool_name": "execution-proxy", "operation_id": unconfirmedOp,
+		"plan": map[string]any{"original_request": "make clean", "executed_request": "make clean"},
+	}); status != http.StatusOK {
+		t.Fatalf("unconfirmed start: %d %s", status, body)
+	}
+	if status, body := prepare(unconfirmedOp, "make clean", map[string]any{"risk": "destructive", "plan": map[string]any{"original_request": "make clean", "executed_request": "make clean"}, "confirmed": true}); status != http.StatusForbidden {
+		t.Fatalf("a destructive plan under an unconfirmed operation: expected 403, got %d %s", status, body)
+	}
+	if op := f.getOperation(unconfirmedOp); op.Confirmed {
+		t.Fatal("an executor's confirmed flag was recorded on the operation")
+	}
+
+	// An operation an executor prepared for itself is already taken.
+	ownOp, _ := newID()
+	if status, body := prepare(ownOp, "ls -la", nil); status != http.StatusOK {
+		t.Fatalf("executor's own prepare: %d %s", status, body)
+	}
+	if status, body := prepare(ownOp, "ls -la", nil); status != http.StatusConflict {
+		t.Fatalf("a prepared operation named again: expected 409, got %d %s", status, body)
 	}
 }

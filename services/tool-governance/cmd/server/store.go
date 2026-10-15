@@ -235,8 +235,12 @@ func transitionTool(ctx context.Context, tx *sql.Tx, tenantID, toolID string, ne
 // design: a snapshot bound to the operation, independent of later changes
 // to the tool catalog) together with the governance decision: the plan,
 // the risk the caller declared, the risk governance decided on, and
-// whether the caller confirmed the operation.
-func startOperation(ctx context.Context, tx *sql.Tx, id requestIdentity, opID, toolName, toolVersion, idempotencyKey string, input any, declaredProps ToolProperties, decision operationDecision) (*ToolOperation, error) {
+// whether the caller confirmed the operation. The row also records the
+// principal that started it and, when claimed is set (an operation its
+// executor prepares for itself), that its executor has already taken it;
+// an operation started unclaimed waits for its executor to claim it with
+// claimStartedOperation.
+func startOperation(ctx context.Context, tx *sql.Tx, id requestIdentity, opID, toolName, toolVersion, idempotencyKey string, input any, declaredProps ToolProperties, decision operationDecision, claimed bool) (*ToolOperation, error) {
 	requestBody, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
@@ -264,9 +268,9 @@ func startOperation(ctx context.Context, tx *sql.Tx, id requestIdentity, opID, t
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO tool_executions (id, operation_id, tool_identity, declared_properties, input_hash, plan, requested_risk_level, risk_level, confirmed)
-		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9)
-	`, execID, opID, toolName, declared, requestHash, plan, decision.RequestedRisk, decision.EffectiveRisk, decision.Confirmed); err != nil {
+		INSERT INTO tool_executions (id, operation_id, tool_identity, declared_properties, input_hash, plan, requested_risk_level, risk_level, confirmed, started_by, executor_claimed_at)
+		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,CASE WHEN $11::boolean THEN now() END)
+	`, execID, opID, toolName, declared, requestHash, plan, decision.RequestedRisk, decision.EffectiveRisk, decision.Confirmed, id.PrincipalID, claimed); err != nil {
 		return nil, fmt.Errorf("insert tool execution: %w", err)
 	}
 	planCopy := decision.Plan
@@ -275,6 +279,60 @@ func startOperation(ctx context.Context, tx *sql.Tx, id requestIdentity, opID, t
 		Plan: &planCopy, RequestedRisk: decision.RequestedRisk, RiskLevel: decision.EffectiveRisk,
 		Confirmed: decision.Confirmed, DeclaredProperties: &declaredProps,
 	}, nil
+}
+
+// startedOperation is an existing operation as an executor sees it when it
+// asks to run under it: the operation with its recorded governance
+// decision, the principal that started it, and whether an executor has
+// already taken it.
+type startedOperation struct {
+	*ToolOperation
+	StartedBy string
+	Claimed   bool
+}
+
+// loadStartedOperation reads opID for an executor's claim, locking its
+// tool_executions row so concurrent claims of one operation serialise.
+// sql.ErrNoRows means no operation by that ID exists in the tenant.
+func loadStartedOperation(ctx context.Context, tx *sql.Tx, tenantID, opID string) (*startedOperation, error) {
+	op, err := loadOperation(ctx, tx, tenantID, opID)
+	if err != nil {
+		return nil, err
+	}
+	started := &startedOperation{ToolOperation: op}
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(started_by,''), executor_claimed_at IS NOT NULL
+		FROM tool_executions WHERE operation_id=$1
+		FOR UPDATE
+	`, opID).Scan(&started.StartedBy, &started.Claimed)
+	if err == sql.ErrNoRows {
+		// An operation without a governance snapshot was never started
+		// through decideOperation; it can be claimed by no executor.
+		started.Claimed = true
+		return started, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return started, nil
+}
+
+// claimStartedOperation hands an unclaimed operation to its executor and
+// records the risk the executor's plan was decided at. It reports false
+// when another executor claimed the operation first.
+func claimStartedOperation(ctx context.Context, tx *sql.Tx, opID, effectiveRisk string) (bool, error) {
+	res, err := tx.ExecContext(ctx, `
+		UPDATE tool_executions SET executor_claimed_at=now(), risk_level=$2
+		WHERE operation_id=$1 AND executor_claimed_at IS NULL
+	`, opID, effectiveRisk)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // operationExists reports whether opID already names an operation in the

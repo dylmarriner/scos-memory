@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -65,7 +66,12 @@ type ExecuteRequest struct {
 	Mode          string `json:"mode,omitempty"`           // bypass, observe, safe, adaptive, forensic (§20.9)
 	DryRun        bool   `json:"dry_run,omitempty"`
 	Explain       bool   `json:"explain,omitempty"`
-	Confirmed     bool   `json:"confirmed,omitempty"`
+	// Confirmed is decoded so callers that still send it are not refused,
+	// but it authorises nothing: a caller holding the control-plane token
+	// could assert it for any command. A destructive command runs only
+	// when tool governance's record for the operation it runs under says
+	// that operation was confirmed (see requireRecordedConfirmation).
+	Confirmed bool `json:"confirmed,omitempty"`
 }
 
 // Required safety modes (§20.9). High-impact and incident-response
@@ -106,9 +112,8 @@ func reducesOutput(mode string) bool {
 }
 
 // rewriteEligible reports whether rewriting may be attempted at all for a
-// mode, and whether it must be restricted to lossless/low-risk ("read")
-// transforms only.
-func rewriteEligible(mode string) (allowed bool, lossyOnly bool) {
+// mode, and whether it must be restricted to lossless rules only.
+func rewriteEligible(mode string) (allowed bool, losslessOnly bool) {
 	switch mode {
 	case modeBypass, modeObserve, modeForensic:
 		return false, false
@@ -128,6 +133,12 @@ type GovernedOperation struct {
 	// RiskLevel is the risk tool-governance decided on, which may be higher
 	// than the plan's own classification.
 	RiskLevel string `json:"risk_level,omitempty"`
+	// Confirmed is the confirmation tool governance recorded for the
+	// operation: for an operation the autonomous control plane started
+	// after the requesting principal confirmed it, the confirmation stored
+	// on that operation's tool_executions row. It is the only confirmation
+	// the proxy acts on.
+	Confirmed bool `json:"confirmed"`
 	// TenantID and PrincipalID are the identity the operation was prepared
 	// for; reconciliation must act as the same identity. They are set by
 	// the client, never read from the governance response.
@@ -160,11 +171,17 @@ type toolGovernanceClient struct {
 // seeds it into builtin_tool_definitions with its declared properties).
 const executionProxyToolName = "execution-proxy"
 
+// AuthorizeAndPrepare asks tool governance for the operation this command
+// runs under. The request asserts no confirmation: when it names an
+// operation governance already started (the autonomous control plane's
+// governed operation for a confirmed decision), governance answers with
+// the confirmation and risk it recorded for that operation; any other
+// operation is new and carries no confirmation.
 func (c toolGovernanceClient) AuthorizeAndPrepare(ctx context.Context, req ExecuteRequest, plan CommandPlan) (GovernedOperation, error) {
 	payload, err := json.Marshal(map[string]any{
 		"tenant_id": req.TenantID, "principal_id": req.PrincipalID, "operation_id": req.OperationID,
 		"tool_name": executionProxyToolName, "input": req,
-		"plan": plan, "risk": plan.RiskLevel, "confirmed": req.Confirmed,
+		"plan": plan, "risk": plan.RiskLevel,
 	})
 	if err != nil {
 		return GovernedOperation{}, err
@@ -280,11 +297,86 @@ type rawRestorationMetadata struct {
 	Path   string `json:"path"`
 }
 
+// RewriteRule rewrites a command before it runs (§20.3).
+//
+// Pattern is a regular expression matched against the whole command; its
+// first match is replaced by Replacement, which may refer to the match's
+// capture groups ($1, ${name}), and the text outside the match is kept, so
+// a rule rewrites what it matched and nothing else. Unless, when set, is a
+// regular expression that keeps the rule from applying to a command that
+// already says what the rule would add. A rule applies only to commands the
+// shared classifier grades at its RiskClass. Lossless declares that the
+// rewritten command runs the same work and its output keeps everything the
+// original's did (colour codes removed, columns untruncated, nothing cut or
+// limited); safe mode applies only lossless rules.
 type RewriteRule struct {
 	Pattern     string `json:"pattern"`
 	Replacement string `json:"replacement"`
+	Unless      string `json:"unless,omitempty"`
 	RiskClass   string `json:"risk_class"`
+	Lossless    bool   `json:"lossless"`
 	Description string `json:"description"`
+
+	pattern *regexp.Regexp
+	unless  *regexp.Regexp
+}
+
+// compileRewriteRule validates a rule and compiles its expressions. Only
+// read, test and write commands are ever rewritten: destructive commands
+// always pass through unchanged.
+func compileRewriteRule(rule RewriteRule) (RewriteRule, error) {
+	if strings.TrimSpace(rule.Pattern) == "" || strings.TrimSpace(rule.Replacement) == "" {
+		return RewriteRule{}, fmt.Errorf("pattern and replacement required")
+	}
+	if rule.RiskClass == "" {
+		rule.RiskClass = executionadapters.RiskRead
+	}
+	switch rule.RiskClass {
+	case executionadapters.RiskRead, executionadapters.RiskTest, executionadapters.RiskWrite:
+	default:
+		return RewriteRule{}, fmt.Errorf("risk_class must be read, test or write; destructive commands are never rewritten")
+	}
+	pattern, err := regexp.Compile(rule.Pattern)
+	if err != nil {
+		return RewriteRule{}, fmt.Errorf("pattern: %w", err)
+	}
+	rule.pattern = pattern
+	if rule.Unless != "" {
+		unless, err := regexp.Compile(rule.Unless)
+		if err != nil {
+			return RewriteRule{}, fmt.Errorf("unless: %w", err)
+		}
+		rule.unless = unless
+	}
+	return rule, nil
+}
+
+func mustCompileRewriteRule(rule RewriteRule) RewriteRule {
+	compiled, err := compileRewriteRule(rule)
+	if err != nil {
+		panic("invalid default rewrite rule " + rule.Pattern + ": " + err.Error())
+	}
+	return compiled
+}
+
+// appliesTo reports whether the rule rewrites command, a command of the
+// given risk class.
+func (r RewriteRule) appliesTo(command, riskLevel string) bool {
+	if r.pattern == nil || r.RiskClass != riskLevel || !r.pattern.MatchString(command) {
+		return false
+	}
+	return r.unless == nil || !r.unless.MatchString(command)
+}
+
+// rewrite replaces the rule's first match in command with its expanded
+// replacement, keeping the rest of the command.
+func (r RewriteRule) rewrite(command string) string {
+	match := r.pattern.FindStringSubmatchIndex(command)
+	if match == nil {
+		return command
+	}
+	replacement := r.pattern.ExpandString(nil, r.Replacement, command, match)
+	return command[:match[0]] + string(replacement) + command[match[1]:]
 }
 
 // ── server state ─────────────────────────────────────────────────────────
@@ -475,55 +567,71 @@ func checkProxyStoreWritable(path string) error {
 // ── default rewrite rules (§20.3) ────────────────────────────────────────
 
 func (s *proxyServer) registerDefaultRules() {
+	// Presentation flags are added only where the command does not already
+	// choose them; limits are inserted where the tool accepts them (find's
+	// depth after its paths, so the paths still come first).
+	colourFlag := `(^|\s)--colou?r(=|\s|$)`
 	s.rewriteRules = []RewriteRule{
-		{
-			Pattern:     `^ls\b`,
-			Replacement: `ls --color=never -CF`,
-			RiskClass:   "read",
-			Description: "Add bounded output flags to ls",
-		},
-		{
-			Pattern:     `^git log\b`,
-			Replacement: `git log --oneline --no-decorate -20`,
-			RiskClass:   "read",
-			Description: "Limit git log output",
-		},
-		{
-			Pattern:     `^find\b`,
-			Replacement: `find -maxdepth 3`,
-			RiskClass:   "read",
-			Description: "Limit find depth",
-		},
-		{
-			Pattern:     `^grep\b`,
-			Replacement: `grep --color=never`,
-			RiskClass:   "read",
-			Description: "Remove colour from grep",
-		},
-		{
-			Pattern:     `^docker ps\b`,
-			Replacement: `docker ps --no-trunc`,
-			RiskClass:   "read",
-			Description: "No truncation in docker ps",
-		},
-		{
-			Pattern:     `^go test\b.*-v`,
-			Replacement: `go test -v -count=1`,
-			RiskClass:   "test",
-			Description: "Add -count=1 to go test to avoid cache",
-		},
-		{
-			Pattern:     `^npm test\b`,
+		mustCompileRewriteRule(RewriteRule{
+			Pattern:     `^ls(\s|$)`,
+			Replacement: `ls --color=never$1`,
+			Unless:      colourFlag,
+			RiskClass:   executionadapters.RiskRead,
+			Lossless:    true,
+			Description: "Remove colour codes from ls",
+		}),
+		mustCompileRewriteRule(RewriteRule{
+			Pattern:     `^git log(\s|$)`,
+			Replacement: `git log --oneline --no-decorate -20$1`,
+			Unless:      `\s(-n\s*\d+|-\d+|--max-count|--oneline|--pretty|--format)(=|\s|$)`,
+			RiskClass:   executionadapters.RiskRead,
+			Description: "Limit git log to the 20 newest commits, one line each",
+		}),
+		mustCompileRewriteRule(RewriteRule{
+			Pattern:     `^find((?:\s+[^\s\-(!]\S*)*)(\s|$)`,
+			Replacement: `find${1} -maxdepth 3${2}`,
+			Unless:      `\s-maxdepth(\s|$)`,
+			RiskClass:   executionadapters.RiskRead,
+			Description: "Limit find to three directory levels",
+		}),
+		mustCompileRewriteRule(RewriteRule{
+			Pattern:     `^grep(\s|$)`,
+			Replacement: `grep --color=never$1`,
+			Unless:      colourFlag,
+			RiskClass:   executionadapters.RiskRead,
+			Lossless:    true,
+			Description: "Remove colour codes from grep",
+		}),
+		mustCompileRewriteRule(RewriteRule{
+			Pattern:     `^docker ps(\s|$)`,
+			Replacement: `docker ps --no-trunc$1`,
+			Unless:      `\s--no-trunc(\s|$)`,
+			RiskClass:   executionadapters.RiskRead,
+			Lossless:    true,
+			Description: "Show docker ps columns untruncated",
+		}),
+		mustCompileRewriteRule(RewriteRule{
+			// -count=1 re-runs tests whose cached result would otherwise be
+			// replayed; that changes what runs, so it is not lossless.
+			Pattern:     `^go test(\s(?:.*\s)?-v(?:\s.*)?)$`,
+			Replacement: `go test -count=1${1}`,
+			Unless:      `\s-count=`,
+			RiskClass:   executionadapters.RiskTest,
+			Description: "Bypass the go test result cache for verbose runs",
+		}),
+		mustCompileRewriteRule(RewriteRule{
+			Pattern:     `^npm test\s*$`,
 			Replacement: `npm test -- --bail`,
-			RiskClass:   "test",
-			Description: "Add --bail to npm test",
-		},
-		{
-			Pattern:     `^cat\b`,
-			Replacement: `head -100`,
-			RiskClass:   "read",
-			Description: "Limit cat to 100 lines",
-		},
+			RiskClass:   executionadapters.RiskTest,
+			Description: "Stop npm test at the first failing suite",
+		}),
+		mustCompileRewriteRule(RewriteRule{
+			// Truncation drops output, so this rule is never lossless.
+			Pattern:     `^cat\s+([^\s;&|<>$` + "`" + `]+)\s*$`,
+			Replacement: `head -n 100 $1`,
+			RiskClass:   executionadapters.RiskRead,
+			Description: "Show only the first 100 lines of a single file",
+		}),
 	}
 }
 
@@ -599,10 +707,10 @@ func validateExecutionRequest(r *http.Request, req ExecuteRequest) error {
 	if req.Mode != "" && !validModes()[req.Mode] {
 		return fmt.Errorf("mode must be one of bypass, observe, safe, adaptive, forensic")
 	}
+	// Confirmation is not checked here: the caller's confirmed flag is only
+	// its own claim. Execution checks the confirmation tool governance
+	// recorded for the operation (requireRecordedConfirmation).
 	risk := classifyRisk(req.Command)
-	if risk == "destructive" && !req.Confirmed {
-		return fmt.Errorf("explicit confirmation is required for destructive commands")
-	}
 	if risk != "read" && req.OperationID == "" {
 		return fmt.Errorf("operation_id is required for side-effecting commands")
 	}
@@ -708,6 +816,10 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "operation must be prepared and authorised by tool governance", http.StatusForbidden)
 		return
 	}
+	if err := requireRecordedConfirmation(req, plan, governed); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	opID := governed.OperationID
 
 	now := time.Now().UTC()
@@ -793,7 +905,7 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	serviceMetrics.Count(telemetry.MetricProxyBypassRate,
 		map[string]string{"mode": plan.Mode, "reduced": strconv.FormatBool(reducesOutput(plan.Mode))}, proxyCorr)
 	serviceMetrics.Gauge(telemetry.MetricDiagnosticRetention,
-		diagnosticRetention(stderr, result), "ratio", map[string]string{"mode": plan.Mode}, proxyCorr)
+		diagnosticRetention(stdout, stderr, result), "ratio", map[string]string{"mode": plan.Mode}, proxyCorr)
 	if err := s.persistRaw(result.RestorationHandle, rawArtifact{Stdout: stdout, Stderr: stderr}); err != nil {
 		http.Error(w, "persist raw output: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -816,6 +928,37 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	writeJSON(w, result)
+}
+
+// requireRecordedConfirmation checks the operation tool governance issued
+// against the command about to run. The operation must be the one the
+// request named, and a destructive command -- by the proxy's own grade or
+// governance's -- runs only when governance recorded that operation as
+// confirmed. The request's own confirmed flag plays no part.
+func requireRecordedConfirmation(req ExecuteRequest, plan CommandPlan, governed GovernedOperation) error {
+	if req.OperationID != "" && !sameOperationID(governed.OperationID, req.OperationID) {
+		return fmt.Errorf("tool governance issued operation %s, not the requested operation %s", governed.OperationID, req.OperationID)
+	}
+	destructive := plan.RiskLevel == executionadapters.RiskDestructive || governed.RiskLevel == executionadapters.RiskDestructive
+	if destructive && !governed.Confirmed {
+		return fmt.Errorf("destructive command refused: tool governance has no recorded confirmation for operation %s; route the command through the autonomous control plane and confirm it with /v1/control/confirm", governed.OperationID)
+	}
+	return nil
+}
+
+// sameOperationID reports whether two operation IDs name the same
+// operation. Tool governance stores operation IDs as UUIDs and answers in
+// the canonical hyphenated form, while the autonomous control plane names
+// its operations by the 32 bare hex digits of the same UUID.
+func sameOperationID(a, b string) bool {
+	canonical := func(id string) string {
+		bare := strings.ToLower(strings.ReplaceAll(id, "-", ""))
+		if len(bare) != 32 || strings.Trim(bare, "0123456789abcdef") != "" {
+			return id
+		}
+		return bare
+	}
+	return canonical(a) == canonical(b)
 }
 
 // ── result endpoints ─────────────────────────────────────────────────────
@@ -926,12 +1069,10 @@ func (s *proxyServer) handleRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid rule: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if rule.Pattern == "" || rule.Replacement == "" {
-			http.Error(w, "pattern and replacement required", http.StatusBadRequest)
+		rule, err := compileRewriteRule(rule)
+		if err != nil {
+			http.Error(w, "invalid rule: "+err.Error(), http.StatusBadRequest)
 			return
-		}
-		if rule.RiskClass == "" {
-			rule.RiskClass = "read"
 		}
 		s.mu.Lock()
 		s.rewriteRules = append(s.rewriteRules, rule)
@@ -969,7 +1110,7 @@ func (s *proxyServer) planCommand(req ExecuteRequest) CommandPlan {
 	if riskTolerance == "" {
 		riskTolerance = "normal"
 	}
-	modeAllowsRewrite, lossyOnly := rewriteEligible(mode)
+	modeAllowsRewrite, losslessOnly := rewriteEligible(mode)
 
 	// Destructive commands always pass through unless explicitly allowed
 	if riskLevel == "destructive" {
@@ -981,7 +1122,7 @@ func (s *proxyServer) planCommand(req ExecuteRequest) CommandPlan {
 
 	// 4. Apply rewrites if allowed by both the caller and the safety mode
 	if allowRewrite && modeAllowsRewrite && riskLevel != "destructive" {
-		rewritten, summary := s.applyRewritesForMode(req.Command, riskLevel, lossyOnly)
+		rewritten, summary := s.applyRewritesForMode(req.Command, riskLevel, losslessOnly)
 		if rewritten != req.Command {
 			plan.ExecutedRequest = rewritten
 			plan.RewriteSummary = summary
@@ -1008,27 +1149,26 @@ func (s *proxyServer) applyRewrites(command string, riskLevel string) (string, s
 	return s.applyRewritesForMode(command, riskLevel, false)
 }
 
-// applyRewritesForMode applies the registered rewrite rules, optionally
-// restricted to lossless/low-risk ("read") transforms only. `safe` mode
+// applyRewritesForMode applies, in order, every registered rule that
+// applies to the command, each to the command as the rules before it left
+// it. losslessOnly restricts the rules to lossless ones: `safe` mode
 // (§20.9) SHALL apply only lossless and proven low-risk transforms.
-func (s *proxyServer) applyRewritesForMode(command string, riskLevel string, lossyOnly bool) (string, string) {
+func (s *proxyServer) applyRewritesForMode(command string, riskLevel string, losslessOnly bool) (string, string) {
 	s.mu.RLock()
 	rules := s.rewriteRules
 	s.mu.RUnlock()
 
 	rewritten := command
 	var descriptions []string
-	cmdWord := firstWord(command)
-
 	for _, rule := range rules {
-		if lossyOnly && rule.RiskClass != "read" {
+		if losslessOnly && !rule.Lossless {
 			continue
 		}
-		ruleWord := firstWord(rule.Pattern)
-		if strings.EqualFold(cmdWord, ruleWord) {
-			// Replace only the first word of the command with the first word of the replacement
-			firstWordRewritten := strings.Fields(rule.Replacement)[0]
-			rewritten = strings.Replace(rewritten, cmdWord, firstWordRewritten, 1)
+		if !rule.appliesTo(rewritten, riskLevel) {
+			continue
+		}
+		if next := rule.rewrite(rewritten); next != rewritten {
+			rewritten = next
 			descriptions = append(descriptions, rule.Description)
 		}
 	}
@@ -1042,11 +1182,10 @@ func (s *proxyServer) applyRewritesForMode(command string, riskLevel string, los
 func (s *proxyServer) applicableRules(command string) []RewriteRule {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	riskLevel := classifyRisk(command)
 	var matches []RewriteRule
-	cmdWord := firstWord(command)
 	for _, rule := range s.rewriteRules {
-		ruleWord := firstWord(rule.Pattern)
-		if strings.EqualFold(cmdWord, ruleWord) {
+		if rule.appliesTo(command, riskLevel) {
 			matches = append(matches, rule)
 		}
 	}
@@ -1055,25 +1194,14 @@ func (s *proxyServer) applicableRules(command string) []RewriteRule {
 
 func (s *proxyServer) explainRules(command string) []string {
 	var explanations []string
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	cmdWord := firstWord(command)
-	for _, rule := range s.rewriteRules {
-		ruleWord := firstWord(rule.Pattern)
-		if strings.EqualFold(cmdWord, ruleWord) {
-			explanations = append(explanations, fmt.Sprintf("%s → %s (%s)", rule.Pattern, rule.Replacement, rule.Description))
+	for _, rule := range s.applicableRules(command) {
+		kind := "lossy"
+		if rule.Lossless {
+			kind = "lossless"
 		}
+		explanations = append(explanations, fmt.Sprintf("%s → %s (%s; %s)", command, rule.rewrite(command), rule.Description, kind))
 	}
 	return explanations
-}
-
-func firstWord(s string) string {
-	s = strings.TrimLeft(s, "^\\")
-	idx := strings.IndexAny(s, " \t\\$")
-	if idx < 0 {
-		return s
-	}
-	return s[:idx]
 }
 
 // ── output reduction pipeline (§20.5) ────────────────────────────────────
@@ -1256,17 +1384,46 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
-// diagnosticRetention reports the share of critical diagnostics that survived
-// output reduction. When the raw stream carried no diagnostics there is
-// nothing to lose and retention is complete by definition.
-func diagnosticRetention(stderr string, result *ExecutionResult) float64 {
-	expected := len(extractErrors(stderr)) + len(extractWarnings(stderr))
-	if expected == 0 {
+// diagnosticRetention reports the share of the raw output's critical
+// diagnostics -- the distinct error and warning lines on stdout and stderr
+// -- that the delivered result still carries verbatim, in its stdout and
+// stderr summaries, its groups, or its errors and warnings. It compares
+// what the command wrote with what the caller receives, so a reduction
+// that drops or rewrites a diagnostic lowers it. When the raw output
+// carried no diagnostics there is nothing to lose and retention is
+// complete by definition.
+func diagnosticRetention(stdout, stderr string, result *ExecutionResult) float64 {
+	raw := map[string]bool{}
+	for _, stream := range []string{stdout, stderr} {
+		for _, line := range extractErrors(stream) {
+			raw[line] = true
+		}
+		for _, line := range extractWarnings(stream) {
+			raw[line] = true
+		}
+	}
+	if len(raw) == 0 {
 		return 1
 	}
-	retained := len(result.Errors) + len(result.Warnings)
-	if retained > expected {
-		retained = expected
+	delivered := map[string]bool{}
+	for _, text := range []string{result.StdoutSummary, result.StderrSummary} {
+		for _, line := range strings.Split(text, "\n") {
+			delivered[line] = true
+		}
 	}
-	return float64(retained) / float64(expected)
+	for _, group := range result.Groups {
+		for _, line := range group.Items {
+			delivered[line] = true
+		}
+	}
+	for _, line := range append(append([]string(nil), result.Errors...), result.Warnings...) {
+		delivered[line] = true
+	}
+	retained := 0
+	for line := range raw {
+		if delivered[line] {
+			retained++
+		}
+	}
+	return float64(retained) / float64(len(raw))
 }

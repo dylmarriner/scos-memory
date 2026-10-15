@@ -249,8 +249,13 @@ func TestConfirmedActionExecutesFrozenRequestAndAssertsConfirmation(t *testing.T
 	if proxy == nil {
 		t.Fatalf("confirmed action was not executed: %v", f.calls)
 	}
-	if proxy["confirmed"] != true || proxy["command"] != "rm -rf /srv/build" || proxy["principal_id"] != "actor" {
+	// The proxy runs under the operation governance started confirmed; it is
+	// handed no confirmation of its own to trust.
+	if proxy["operation_id"] != "op-77" || proxy["command"] != "rm -rf /srv/build" || proxy["principal_id"] != "actor" {
 		t.Fatalf("proxy request = %+v", proxy)
+	}
+	if _, asserted := proxy["confirmed"]; asserted {
+		t.Fatalf("the proxy request asserts a confirmation: %+v", proxy)
 	}
 
 	lifecycle := plane.lifecycle(context.Background(), "tenant", "actor", "confirm-1", RouteDecision{})
@@ -355,9 +360,15 @@ func TestRouteWithoutConfirmationNeverAssertsOne(t *testing.T) {
 	if response.Code != http.StatusOK || payload["status"] != runCompleted {
 		t.Fatalf("ingest = %d; body=%s", response.Code, response.Body.String())
 	}
+	if governed := f.body("/v1/operations/start"); governed == nil || governed["confirmed"] != false {
+		t.Fatalf("governance start = %+v", governed)
+	}
 	proxy := f.body("/v1/proxy/execute")
-	if proxy == nil || proxy["confirmed"] != false {
+	if proxy == nil || proxy["operation_id"] != "op-77" {
 		t.Fatalf("proxy request = %+v", proxy)
+	}
+	if _, asserted := proxy["confirmed"]; asserted {
+		t.Fatalf("the proxy request asserts a confirmation: %+v", proxy)
 	}
 }
 
@@ -409,7 +420,7 @@ func TestGovernanceFailureBlocksExecution(t *testing.T) {
 func TestStagesReportOnlyWorkTheyDid(t *testing.T) {
 	plane := &controlPlane{}
 	req := RouteRequest{TenantID: "tenant", ActorID: "actor", InteractionID: "honest", Input: "hello"}
-	decision := RouteDecision{DecisionID: "decision", PolicyVersion: "1.1.0", SelectedPlan: []RouteStep{
+	decision := RouteDecision{DecisionID: "decision", PolicyVersion: "1.1.0", ResolvedScope: RouteScope{TenantID: "tenant", PrincipalID: "actor", RepositoryScope: repositoryScopeNone, DataClassification: "confidential"}, SelectedPlan: []RouteStep{
 		{Order: 1, System: "journal", Action: "commit_ingress", Required: true},
 		{Order: 2, System: "capability-router", Action: "select_current_authoritative_source", Required: true},
 		{Order: 3, System: "recovery-orchestrator", Action: "rehydrate_checkpoint_and_reconcile", Required: true},

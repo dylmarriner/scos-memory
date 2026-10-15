@@ -259,8 +259,13 @@ func (c *controlPlane) abandonExecution(req RouteRequest, decision RouteDecision
 }
 
 // runStage performs one plan stage. A stage reports completed only when its
-// work was done and verified; a stage with no executor reports skipped.
+// work was done and verified; a stage with no executor reports skipped, and
+// so does a stage whose capability the decision's capability selection
+// rejected.
 func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision RouteDecision, step RouteStep, state *executionState, lifecycle *lifecycleResponse) stageResult {
+	if reasons, rejected := rejectedStageCapability(decision, step); rejected {
+		return skippedStage("not run: capability " + stepCapabilities[step.System] + " was rejected by capability selection (" + strings.Join(reasons, ", ") + ")")
+	}
 	switch step.System {
 	case "journal":
 		return c.verifyIngressStage(ctx, req, decision)
@@ -372,7 +377,11 @@ func verifyIdentityAndPolicyStage(req RouteRequest, decision RouteDecision) stag
 	if strings.TrimSpace(decision.PolicyVersion) == "" || strings.TrimSpace(decision.DecisionID) == "" {
 		return degradedStage("the decision carries no policy version")
 	}
-	return completedStage("tenant " + req.TenantID + ", principal " + req.ActorID + ", policy " + decision.PolicyVersion + ", risk " + decision.RiskClass)
+	scope := decision.ResolvedScope
+	if scope.TenantID != req.TenantID || scope.PrincipalID != req.ActorID {
+		return degradedStage("the decision's resolved scope (tenant " + scope.TenantID + ", principal " + scope.PrincipalID + ") is not the authenticated identity")
+	}
+	return completedStage("tenant " + req.TenantID + ", principal " + req.ActorID + ", repository scope " + scope.RepositoryScope + ", data " + scope.DataClassification + ", policy " + decision.PolicyVersion + ", risk " + decision.RiskClass)
 }
 
 // authoritativeSourceStage reports the capability selection made for fresh
@@ -428,8 +437,8 @@ func (c *controlPlane) startGovernedOperation(ctx context.Context, req RouteRequ
 	// execution proxy (the built-in governed tool), so that is the tool
 	// governance must have registered and authorised for the tenant. The
 	// plan names the command so governance grades its risk with the shared
-	// classifier, and confirmation is the recorded one, exactly as the proxy
-	// receives it.
+	// classifier, and confirmation is the recorded one: governance stores it
+	// on the operation, and the proxy acts on governance's record of it.
 	body, err := c.callService(ctx, "tool-governance", "/v1/operations/start", map[string]any{
 		"tool_name": executionProxyToolName, "input": map[string]any{"interaction_id": req.InteractionID, "input": req.Input},
 		"plan": map[string]any{
@@ -455,9 +464,11 @@ func (c *controlPlane) startGovernedOperation(ctx context.Context, req RouteRequ
 	return operation.ID, nil
 }
 
-// executionProxyStage runs the proposed command. It never runs without an
-// operation tool governance started in this run, and it asserts confirmation
-// to the proxy only when a recorded confirmation of this decision exists.
+// executionProxyStage runs the proposed command under the operation tool
+// governance started in this run. It asserts no confirmation to the proxy:
+// the proxy reads the confirmation governance recorded on that operation,
+// which the governance stage started confirmed only when a recorded
+// confirmation of this decision exists.
 func (c *controlPlane) executionProxyStage(ctx context.Context, req RouteRequest, decision RouteDecision, state *executionState) stageResult {
 	if state.governedOperationID == "" {
 		return blockedStage("execution requires an operation started by tool governance earlier in this run")
@@ -470,8 +481,7 @@ func (c *controlPlane) executionProxyStage(ctx context.Context, req RouteRequest
 	}
 	body, err := c.callService(ctx, "adaptive-execution-proxy", "/v1/proxy/execute", map[string]any{
 		"tenant_id": req.TenantID, "principal_id": req.ActorID, "agent_id": req.AgentID,
-		"operation_id": req.InteractionID, "command": req.ProposedTool, "working_directory": req.RepositoryPath,
-		"confirmed": state.confirmed,
+		"operation_id": state.governedOperationID, "command": req.ProposedTool, "working_directory": req.RepositoryPath,
 	}, req)
 	// A command the proxy ran but that failed is a failed stage: the proxy
 	// answers 200 with the command's own exit status, which is the outcome.

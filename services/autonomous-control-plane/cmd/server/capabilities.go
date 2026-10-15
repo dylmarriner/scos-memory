@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	capabilityregistry "github.com/dylmarriner/scos-memory/packages/capability-registry"
@@ -243,16 +244,56 @@ func newPlatformRegistry() *capabilityregistry.Registry {
 	return reg
 }
 
+// stepCapabilities names the registered capability each capability-backed
+// plan step runs through. Steps absent from it (journal, identity and policy
+// resolution, agent dispatch, turn commit, consolidation, and the
+// authoritative-source step, which reports its own selection) are the
+// control plane's own work, not routed through capability selection.
+var stepCapabilities = map[string]string{
+	"memory-gateway":           "memory-gateway.retrieve",
+	"code-intelligence":        "code-intelligence.query",
+	"context-optimisation":     "context-optimisation.compile",
+	"tool-governance":          "tool-governance.authorise",
+	"adaptive-execution-proxy": "adaptive-execution-proxy.execute",
+	"recovery-orchestrator":    "recovery-orchestrator.recover",
+	"observability":            "observability.status",
+}
+
+// rejectedStageCapability reports whether capability selection rejected the
+// capability a plan step runs through, with every reason it was rejected
+// for. A capability that was selected for any intent, or that was eligible
+// and simply ranked below another for an intent, is not rejected: its step
+// runs. A rejected capability's step must not run.
+func rejectedStageCapability(decision RouteDecision, step RouteStep) ([]string, bool) {
+	capabilityID, ok := stepCapabilities[step.System]
+	if !ok {
+		return nil, false
+	}
+	for _, id := range decision.SelectedCapabilities {
+		if id == capabilityID {
+			return nil, false
+		}
+	}
+	var reasons []string
+	for _, exclusion := range decision.RejectedCapabilities {
+		if exclusion.CapabilityID == capabilityID {
+			reasons = append(reasons, exclusion.ReasonCode)
+		}
+	}
+	return reasons, len(reasons) > 0
+}
+
 // grantedPermissions returns the permissions the platform holds on behalf of a
 // request. Tool and execution permissions are only granted when the caller
 // actually proposed an operation, so a conversational turn can never select a
-// write-class capability.
+// write-class capability. A proposed tool is a command the plan hands to the
+// execution proxy, so proposing one is a request for command execution.
 func grantedPermissions(req RouteRequest, c classification) []string {
 	perms := []string{"memory:read", "code:read", "context:compile", "observability:read"}
 	if c.has("tool_operation") || c.has("command_execution") {
 		perms = append(perms, "tool:invoke")
 	}
-	if c.has("command_execution") {
+	if c.has("command_execution") || (c.has("tool_operation") && strings.TrimSpace(req.ProposedTool) != "") {
 		perms = append(perms, "execution:invoke")
 	}
 	if c.has("recovery") {

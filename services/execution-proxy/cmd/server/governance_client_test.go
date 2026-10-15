@@ -25,6 +25,7 @@ type preparedResponse struct {
 	Prepared    bool   `json:"prepared"`
 	Authorized  bool   `json:"authorized"`
 	RiskLevel   string `json:"risk_level"`
+	Confirmed   bool   `json:"confirmed"`
 }
 
 func (g *recordingGovernance) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,11 +58,14 @@ func newRecordingGovernance() *recordingGovernance {
 	}
 }
 
-// TestGovernanceClientSendsPlanRiskAndConfirmation guards the prepare
-// contract: the built-in tool name, the plan, its risk and the caller's
-// confirmation all reach tool-governance, which decides on them.
-func TestGovernanceClientSendsPlanRiskAndConfirmation(t *testing.T) {
+// TestGovernanceClientSendsPlanAndRiskButNoConfirmation guards the prepare
+// contract: the built-in tool name, the plan and its risk reach
+// tool-governance, which decides on them. The caller's confirmed flag is
+// never forwarded as a confirmation; the confirmation the proxy acts on is
+// the one governance answers with for the operation.
+func TestGovernanceClientSendsPlanAndRiskButNoConfirmation(t *testing.T) {
 	gov := newRecordingGovernance()
+	gov.prepared.RiskLevel, gov.prepared.Confirmed = "destructive", true
 	server := httptest.NewServer(gov)
 	defer server.Close()
 	client := toolGovernanceClient{baseURL: server.URL, client: server.Client()}
@@ -75,9 +79,15 @@ func TestGovernanceClientSendsPlanRiskAndConfirmation(t *testing.T) {
 	if operation.TenantID != "tenant" || operation.PrincipalID != "principal" {
 		t.Fatalf("prepared operation does not carry the caller identity: %+v", operation)
 	}
+	if !operation.Confirmed || operation.RiskLevel != "destructive" {
+		t.Fatalf("the recorded confirmation and risk were not read from governance: %+v", operation)
+	}
 	body := gov.bodies["/v1/operations/prepare"][0]
-	if body["tool_name"] != executionProxyToolName || body["risk"] != "destructive" || body["confirmed"] != true {
-		t.Fatalf("prepare body missing tool/risk/confirmation: %v", body)
+	if body["tool_name"] != executionProxyToolName || body["risk"] != "destructive" {
+		t.Fatalf("prepare body missing tool/risk: %v", body)
+	}
+	if _, asserted := body["confirmed"]; asserted {
+		t.Fatalf("prepare must not assert a confirmation: %v", body)
 	}
 	sentPlan, _ := body["plan"].(map[string]any)
 	if sentPlan["executed_request"] != "rm -rf build" || sentPlan["risk_level"] != "destructive" {

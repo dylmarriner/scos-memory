@@ -155,10 +155,118 @@ func TestModeSafeRestrictsToLosslessRules(t *testing.T) {
 	if plan.ExecutedRequest != "go test ./... -v" {
 		t.Fatalf("safe mode must only apply lossless (read) rules, got %q", plan.ExecutedRequest)
 	}
-	// "cat" rewrite rule is classified "read", so safe mode may apply it.
+	// cat -> head truncates the file, so it is lossy even though it is a
+	// read command: safe mode must not apply it.
 	plan = srv.planCommand(ExecuteRequest{Command: "cat file.txt", AllowRewrite: true, Mode: modeSafe})
-	if plan.ExecutedRequest == "cat file.txt" {
-		t.Fatal("safe mode should still apply lossless read-only rewrites")
+	if plan.ExecutedRequest != "cat file.txt" || !plan.PassThrough {
+		t.Fatalf("safe mode must not truncate cat output, got %q", plan.ExecutedRequest)
+	}
+	// Removing colour codes is lossless, so safe mode applies it.
+	plan = srv.planCommand(ExecuteRequest{Command: "ls -la", AllowRewrite: true, Mode: modeSafe})
+	if plan.ExecutedRequest != "ls --color=never -la" {
+		t.Fatalf("safe mode should apply lossless rewrites, got %q", plan.ExecutedRequest)
+	}
+	// Adaptive mode may apply the lossy rule, and applies all of it.
+	plan = srv.planCommand(ExecuteRequest{Command: "cat file.txt", AllowRewrite: true, Mode: modeAdaptive})
+	if plan.ExecutedRequest != "head -n 100 file.txt" {
+		t.Fatalf("adaptive mode should apply the cat rule in full, got %q", plan.ExecutedRequest)
+	}
+}
+
+// TestRewriteRulesApplyTheWholeReplacement covers the rule engine: a rule
+// matches its pattern (not just the command's first word), applies its
+// whole replacement, keeps the rest of the command, skips commands that
+// already choose what it would add, and applies only at its risk class.
+func TestRewriteRulesApplyTheWholeReplacement(t *testing.T) {
+	srv := newProxyServer()
+	cases := []struct{ command, want string }{
+		{"ls -la /srv", "ls --color=never -la /srv"},
+		{"ls", "ls --color=never"},
+		{"ls --color=always", "ls --color=always"},
+		{"lsof -i", "lsof -i"},
+		{"git log --stat", "git log --oneline --no-decorate -20 --stat"},
+		{"git log -n 5", "git log -n 5"},
+		{"git status", "git status"},
+		{"find . -name '*.go'", "find . -maxdepth 3 -name '*.go'"},
+		{"find src lib -type f", "find src lib -maxdepth 3 -type f"},
+		{"find", "find -maxdepth 3"},
+		{"find . -maxdepth 1", "find . -maxdepth 1"},
+		{"grep -rn TODO .", "grep --color=never -rn TODO ."},
+		{"docker ps -a", "docker ps --no-trunc -a"},
+		{"go test -v ./...", "go test -count=1 -v ./..."},
+		{"go test ./... -v", "go test -count=1 ./... -v"},
+		{"go test ./...", "go test ./..."},
+		{"go test -count=2 -v ./...", "go test -count=2 -v ./..."},
+		{"npm test", "npm test -- --bail"},
+		{"npm test -- --watch", "npm test -- --watch"},
+		{"cat a.txt b.txt", "cat a.txt b.txt"},
+	}
+	for _, tc := range cases {
+		got, _ := srv.applyRewrites(tc.command, classifyRisk(tc.command))
+		if got != tc.want {
+			t.Errorf("rewrite(%q) = %q, want %q", tc.command, got, tc.want)
+		}
+	}
+	// A read rule never touches a write command, even when its pattern
+	// matches.
+	srv.rewriteRules = append(srv.rewriteRules, mustCompileRewriteRule(RewriteRule{Pattern: `^touch(\s)`, Replacement: `touch -c$1`, RiskClass: "read"}))
+	if got, _ := srv.applyRewrites("touch x", classifyRisk("touch x")); got != "touch x" {
+		t.Fatalf("a read rule rewrote a write command: %q", got)
+	}
+}
+
+func TestRuleRegistrationValidatesTheRule(t *testing.T) {
+	srv := newProxyServer()
+	for _, body := range []string{
+		`{"pattern":"^ls(","replacement":"ls -1"}`,
+		`{"pattern":"^ls","replacement":"ls -1","unless":"(["}`,
+		`{"pattern":"^rm ","replacement":"rm -i ","risk_class":"destructive"}`,
+		`{"pattern":"","replacement":"ls"}`,
+	} {
+		rec := httptest.NewRecorder()
+		srv.handleRules(rec, httptest.NewRequest(http.MethodPost, "/v1/rules", bytes.NewBufferString(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("rule %s: expected 400, got %d", body, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.handleRules(rec, httptest.NewRequest(http.MethodPost, "/v1/rules", bytes.NewBufferString(`{"pattern":"^du(\\s|$)","replacement":"du -h$1","lossless":true,"description":"human sizes"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid rule: %d %s", rec.Code, rec.Body.String())
+	}
+	plan := srv.planCommand(ExecuteRequest{Command: "du -s .", AllowRewrite: true, Mode: modeSafe})
+	if plan.ExecutedRequest != "du -h -s ." {
+		t.Fatalf("registered lossless rule not applied in safe mode: %q", plan.ExecutedRequest)
+	}
+}
+
+func TestDiagnosticRetentionComparesRawOutputWithTheDeliveredResult(t *testing.T) {
+	stdout := "ok 1\nerror: build failed\nwarning: deprecated flag\nok 2\n"
+	stderr := "fatal: cannot open\n"
+	summary, groups := reduceOutput(stdout)
+	result := &ExecutionResult{StdoutSummary: summary, Groups: groups, StderrSummary: stderr, Errors: extractErrors(stderr)}
+	if got := diagnosticRetention(stdout, stderr, result); got != 1 {
+		t.Fatalf("every diagnostic was delivered, retention = %v", got)
+	}
+	// A result that lost the stdout warning keeps two of three diagnostics.
+	var kept []ResultGroup
+	for _, group := range groups {
+		if group.Category != "warning" {
+			kept = append(kept, group)
+		}
+	}
+	lossy := &ExecutionResult{StdoutSummary: summary, Groups: kept, StderrSummary: stderr, Errors: extractErrors(stderr)}
+	if got := diagnosticRetention(stdout, stderr, lossy); got < 0.66 || got > 0.67 {
+		t.Fatalf("one of three diagnostics lost, retention = %v", got)
+	}
+	// stderr is no longer compared with itself: a result that does not
+	// carry the stderr diagnostic loses it.
+	noStderr := &ExecutionResult{StdoutSummary: summary, Groups: groups}
+	if got := diagnosticRetention(stdout, stderr, noStderr); got >= 1 {
+		t.Fatalf("a dropped stderr diagnostic must lower retention, got %v", got)
+	}
+	if got := diagnosticRetention("all good\n", "", &ExecutionResult{}); got != 1 {
+		t.Fatalf("no diagnostics means complete retention, got %v", got)
 	}
 }
 
@@ -531,20 +639,67 @@ func TestExecutionProxyReadinessRequiresStore(t *testing.T) {
 	}
 }
 
-// TestHandleExecuteRejectsDestructiveCommandWithoutConfirmation closes a gap
-// identified in hostile-test-gap-auditor.md: validateExecutionRequest's
-// destructive-command confirmation check (main.go:555-557) was never
-// exercised through the actual HTTP handler, so a regression that dropped
-// the check would still pass the full test suite.
-func TestHandleExecuteRejectsDestructiveCommandWithoutConfirmation(t *testing.T) {
-	s := newProxyServerAt(filepath.Join(t.TempDir(), "proxy.json"))
-	r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"tenant","principal_id":"principal","operation_id":"op-1","command":"rm -rf /tmp/x"}`))
-	r.Header.Set("X-SCOS-Tenant-ID", "tenant")
-	r.Header.Set("X-SCOS-Principal-ID", "principal")
-	rec := httptest.NewRecorder()
-	s.handleExecute(rec, r)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected unconfirmed destructive command to be rejected, got %d: %s", rec.Code, rec.Body.String())
+// TestHandleExecuteRunsDestructiveCommandsOnlyUnderRecordedConfirmation
+// drives the destructive-command confirmation check through the HTTP
+// handler. The caller's confirmed flag decides nothing: the command runs
+// only when the operation tool governance issued is recorded as confirmed.
+func TestHandleExecuteRunsDestructiveCommandsOnlyUnderRecordedConfirmation(t *testing.T) {
+	t.Setenv("SCOS_PROXY_RAW_DIR", t.TempDir())
+	root := t.TempDir()
+	t.Setenv("SCOS_WORKSPACE_ROOT", root)
+	victim := filepath.Join(root, "x")
+	run := func(operation GovernedOperation, body string) (*httptest.ResponseRecorder, *testGovernance) {
+		t.Helper()
+		if err := os.MkdirAll(victim, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		governance := &testGovernance{operation: operation}
+		s := newProxyServerAtWithGovernance(filepath.Join(t.TempDir(), "proxy.json"), governance)
+		r := httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(body))
+		r.Header.Set("X-SCOS-Tenant-ID", "tenant")
+		r.Header.Set("X-SCOS-Principal-ID", "principal")
+		rec := httptest.NewRecorder()
+		s.handleExecute(rec, r)
+		return rec, governance
+	}
+	exists := func() bool {
+		_, err := os.Stat(victim)
+		return err == nil
+	}
+
+	// The body asserts confirmation; governance recorded none.
+	rec, governance := run(GovernedOperation{OperationID: "op-1", Prepared: true, Authorized: true, RiskLevel: "destructive"},
+		`{"tenant_id":"tenant","principal_id":"principal","operation_id":"op-1","command":"rm -rf ./x","confirmed":true}`)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "no recorded confirmation") {
+		t.Fatalf("expected a self-asserted confirmation to be refused, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !exists() || len(governance.outcomes) != 0 {
+		t.Fatalf("the unconfirmed destructive command ran (outcomes %v)", governance.outcomes)
+	}
+
+	// Governance graded the command lower, but the proxy's own grade still
+	// demands the recorded confirmation.
+	rec, _ = run(GovernedOperation{OperationID: "op-1", Prepared: true, Authorized: true, RiskLevel: "write"},
+		`{"tenant_id":"tenant","principal_id":"principal","operation_id":"op-1","command":"rm -rf ./x"}`)
+	if rec.Code != http.StatusForbidden || !exists() {
+		t.Fatalf("expected the proxy's destructive grade to require confirmation, got %d", rec.Code)
+	}
+
+	// A confirmed operation other than the one the request named is refused.
+	rec, _ = run(GovernedOperation{OperationID: "other-op", Prepared: true, Authorized: true, RiskLevel: "destructive", Confirmed: true},
+		`{"tenant_id":"tenant","principal_id":"principal","operation_id":"op-1","command":"rm -rf ./x"}`)
+	if rec.Code != http.StatusForbidden || !exists() {
+		t.Fatalf("expected a mismatched operation to be refused, got %d", rec.Code)
+	}
+
+	// Governance's record says the operation was confirmed: the command runs
+	// and is reconciled, without the caller asserting anything. Governance
+	// answers with the canonical form of the bare-hex UUID the control plane
+	// names its operations by.
+	rec, governance = run(GovernedOperation{OperationID: "3acb9386-6003-bb28-0047-08592e758ce8", Prepared: true, Authorized: true, RiskLevel: "destructive", Confirmed: true},
+		`{"tenant_id":"tenant","principal_id":"principal","operation_id":"3acb93866003bb28004708592e758ce8","command":"rm -rf ./x"}`)
+	if rec.Code != http.StatusOK || exists() || len(governance.outcomes) != 1 || governance.outcomes[0] != "succeeded" {
+		t.Fatalf("expected the recorded confirmation to run the command, got %d %s (outcomes %v)", rec.Code, rec.Body.String(), governance.outcomes)
 	}
 }
 

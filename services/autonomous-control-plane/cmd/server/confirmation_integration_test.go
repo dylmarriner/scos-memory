@@ -113,8 +113,29 @@ func TestConfirmationGovernanceAndRecoveryThroughRestrictedRole(t *testing.T) {
 	if code != http.StatusOK || payload["status"] != runCompleted {
 		t.Fatalf("confirm = %d %+v", code, payload)
 	}
-	if proxy := f.body("/v1/proxy/execute"); proxy == nil || proxy["confirmed"] != true || proxy["command"] != "rm -rf /srv/build" {
+	if proxy := f.body("/v1/proxy/execute"); proxy == nil || proxy["operation_id"] != "op-77" || proxy["confirmed"] != nil || proxy["command"] != "rm -rf /srv/build" {
 		t.Fatalf("proxy request = %+v", proxy)
+	}
+	if governed := f.body("/v1/operations/start"); governed == nil || governed["confirmed"] != true {
+		t.Fatalf("governance start = %+v", governed)
+	}
+	// The persisted decision reads back with its scope and capability
+	// selection.
+	persisted, err := plane.decisionForInteraction(ctx, tenant, actor, "it-confirm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ResolvedScope.TenantID != tenant || persisted.ResolvedScope.PrincipalID != actor || persisted.ResolvedScope.RepositoryPath != "/repo" ||
+		persisted.ResolvedScope.RepositoryScope != repositoryScopeDeclared || persisted.ResolvedScope.DataClassification != "confidential" {
+		t.Fatalf("persisted scope = %+v", persisted.ResolvedScope)
+	}
+	if !containsString(persisted.SelectedCapabilities, "tool-governance.authorise") || !containsString(persisted.SelectedCapabilities, "memory-gateway.retrieve") {
+		t.Fatalf("persisted selected capabilities = %v", persisted.SelectedCapabilities)
+	}
+	for _, rejected := range persisted.RejectedCapabilities {
+		if rejected.CapabilityID == "adaptive-execution-proxy.execute" {
+			t.Fatalf("the execution proxy was recorded rejected for a proposed command: %+v", persisted.RejectedCapabilities)
+		}
 	}
 	if got := adminScalar(`SELECT status || ':' || resolved_by::text FROM control_confirmations WHERE decision_id=$1`, decisionID); got != confirmationConfirmed+":"+actor {
 		t.Fatalf("confirmation record = %s", got)
@@ -138,12 +159,45 @@ func TestConfirmationGovernanceAndRecoveryThroughRestrictedRole(t *testing.T) {
 		}
 	}
 
+	// Capability selection persisted with the decision still governs the
+	// run the confirmation executes: secret data may reach none of the
+	// tool capabilities, so neither governance nor the proxy is called and
+	// each step is reported skipped with the rejection reason.
+	proxyBefore := f.proxyCount()
+	code, payload = call(plane.handleIngest, "/v1/control/ingest", actor,
+		`{"interaction_id":"it-secret","input":"Clean the build output","agent_id":"agent","turn_id":"turn-it-s","repository_path":"/repo","proposed_tool":"rm -rf /srv/build","data_classification":"secret"}`)
+	if code != http.StatusAccepted || payload["status"] != runAwaitingConfirmation {
+		t.Fatalf("secret ingest = %d %+v", code, payload)
+	}
+	secretDecision := payload["decision_id"].(string)
+	persisted, err = plane.decisionForInteraction(ctx, tenant, actor, "it-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectedReasons := map[string]string{}
+	for _, rejected := range persisted.RejectedCapabilities {
+		rejectedReasons[rejected.CapabilityID] = rejected.ReasonCode
+	}
+	if rejectedReasons["adaptive-execution-proxy.execute"] != "data_classification_exceeded" || rejectedReasons["tool-governance.authorise"] != "data_classification_exceeded" || persisted.ResolvedScope.DataClassification != "secret" {
+		t.Fatalf("persisted rejections = %+v scope = %+v", persisted.RejectedCapabilities, persisted.ResolvedScope)
+	}
+	code, payload = call(plane.handleConfirm, "/v1/control/confirm", actor, `{"interaction_id":"it-secret","decision_id":"`+secretDecision+`","resolution":"confirmed"}`)
+	if payload["status"] != runDegraded {
+		t.Fatalf("secret confirm = %d %+v", code, payload)
+	}
+	if f.proxyCount() != proxyBefore {
+		t.Fatal("the proxy ran although its capability was rejected")
+	}
+	if got := adminScalar(`SELECT status || '|' || error_detail FROM lifecycle_stages WHERE tenant_id=$1 AND input_reference='it-secret' AND stage_name LIKE 'adaptive-execution-proxy:%'`, tenant); !strings.Contains(got, "adaptive-execution-proxy.execute was rejected by capability selection (data_classification_exceeded)") {
+		t.Fatalf("proxy stage = %s", got)
+	}
+
 	// A governance failure blocks the run and records why.
 	f.setGovernance(func(w http.ResponseWriter) {
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`tool must be authorised before execution`))
 	})
-	proxyBefore := f.proxyCount()
+	proxyBefore = f.proxyCount()
 	code, payload = call(plane.handleIngest, "/v1/control/ingest", actor,
 		`{"interaction_id":"it-blocked","input":"Run the tests in this Go repository","agent_id":"agent","turn_id":"turn-it2","repository_path":"/repo","proposed_tool":"go test ./..."}`)
 	if code != http.StatusForbidden || payload["status"] != runBlocked {

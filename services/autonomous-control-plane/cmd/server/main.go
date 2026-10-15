@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -533,6 +534,25 @@ func (c *controlPlane) persistRouteDB(ctx context.Context, req RouteRequest, dec
 	if err != nil {
 		return err
 	}
+	scope, err := json.Marshal(decision.ResolvedScope)
+	if err != nil {
+		return err
+	}
+	capabilities, err := json.Marshal(decisionCapabilities{
+		Selected:          nonNilStrings(decision.SelectedCapabilities),
+		ReservedFallbacks: nonNilStrings(decision.ReservedFallbacks),
+	})
+	if err != nil {
+		return err
+	}
+	rejected := decision.RejectedCapabilities
+	if rejected == nil {
+		rejected = []capabilityregistry.Exclusion{}
+	}
+	rejectedAlternatives, err := json.Marshal(rejected)
+	if err != nil {
+		return err
+	}
 	outcome, err := json.Marshal(map[string]bool{"confirmation_required": decision.ConfirmationRequired})
 	if err != nil {
 		return err
@@ -566,7 +586,7 @@ func (c *controlPlane) persistRouteDB(ctx context.Context, req RouteRequest, dec
 	if _, err = tx.Exec(ctx, `UPDATE control_confirmations SET status='superseded', resolved_at=now() WHERE orchestration_run_id=$1 AND status='awaiting'`, runID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO routing_decisions (tenant_id,actor_id,orchestration_run_id,decision_id,intent_labels,resolved_scope,risk_class,freshness_requirement,candidate_capabilities,selected_plan,reason_codes,confidence,policy_version,registry_generation,actual_outcome) VALUES ($1,$2,$3,$4,$5,'{}'::jsonb,$6,$7,'[]'::jsonb,$8,$9,$10,$11,$12,$13)`, req.TenantID, req.ActorID, runID, decision.DecisionID, intentLabels, decision.RiskClass, decision.FreshnessRequirement, plan, reasonCodes, decision.Confidence, decision.PolicyVersion, strconv.FormatInt(decision.RegistryGeneration, 10), outcome); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO routing_decisions (tenant_id,actor_id,orchestration_run_id,decision_id,intent_labels,resolved_scope,risk_class,freshness_requirement,candidate_capabilities,rejected_alternatives,selected_plan,reason_codes,confidence,policy_version,registry_generation,actual_outcome) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`, req.TenantID, req.ActorID, runID, decision.DecisionID, intentLabels, scope, decision.RiskClass, decision.FreshnessRequirement, capabilities, rejectedAlternatives, plan, reasonCodes, decision.Confidence, decision.PolicyVersion, strconv.FormatInt(decision.RegistryGeneration, 10), outcome); err != nil {
 		return err
 	}
 	if decision.ConfirmationRequired {
@@ -591,7 +611,8 @@ const decisionSelect = `
 		SELECT d.decision_id, r.interaction_id, d.intent_labels, d.risk_class,
 		       COALESCE(d.freshness_requirement, 'none'), d.selected_plan,
 		       d.reason_codes, d.confidence, d.policy_version,
-		       d.registry_generation, d.actual_outcome, d.created_at
+		       d.registry_generation, d.actual_outcome, d.created_at,
+		       d.resolved_scope, d.candidate_capabilities, d.rejected_alternatives
 		FROM routing_decisions d
 		JOIN orchestration_runs r ON r.id = d.orchestration_run_id`
 
@@ -600,13 +621,16 @@ func scanRouteDecision(row pgx.Row) (RouteDecision, error) {
 		decision             RouteDecision
 		intentLabels, plan   []byte
 		reasonCodes, outcome []byte
+		scope, capabilities  []byte
+		rejectedAlternatives []byte
 		registryGeneration   string
 	)
 	if err := row.Scan(
 		&decision.DecisionID, &decision.InteractionID, &intentLabels,
 		&decision.RiskClass, &decision.FreshnessRequirement, &plan,
 		&reasonCodes, &decision.Confidence, &decision.PolicyVersion,
-		&registryGeneration, &outcome, &decision.CreatedAt); err != nil {
+		&registryGeneration, &outcome, &decision.CreatedAt,
+		&scope, &capabilities, &rejectedAlternatives); err != nil {
 		return RouteDecision{}, err
 	}
 	if err := json.Unmarshal(intentLabels, &decision.IntentLabels); err != nil {
@@ -614,6 +638,21 @@ func scanRouteDecision(row pgx.Row) (RouteDecision, error) {
 	}
 	if err := json.Unmarshal(plan, &decision.SelectedPlan); err != nil {
 		return RouteDecision{}, err
+	}
+	if err := json.Unmarshal(scope, &decision.ResolvedScope); err != nil {
+		return RouteDecision{}, fmt.Errorf("decode resolved scope: %w", err)
+	}
+	// Decisions written before capability data was persisted hold an empty
+	// array here; they carry no selection to read back.
+	if trimmed := bytes.TrimSpace(capabilities); len(trimmed) > 0 && trimmed[0] == '{' {
+		var selection decisionCapabilities
+		if err := json.Unmarshal(trimmed, &selection); err != nil {
+			return RouteDecision{}, fmt.Errorf("decode candidate capabilities: %w", err)
+		}
+		decision.SelectedCapabilities, decision.ReservedFallbacks = selection.Selected, selection.ReservedFallbacks
+	}
+	if err := json.Unmarshal(rejectedAlternatives, &decision.RejectedCapabilities); err != nil {
+		return RouteDecision{}, fmt.Errorf("decode rejected capabilities: %w", err)
 	}
 	if err := json.Unmarshal(reasonCodes, &decision.ReasonCodes); err != nil {
 		return RouteDecision{}, err
@@ -715,13 +754,7 @@ func (c *controlPlane) decisionForInteraction(ctx context.Context, tenantID, act
 		return RouteDecision{}, err
 	}
 
-	row := tx.QueryRow(ctx, `
-		SELECT d.decision_id, r.interaction_id, d.intent_labels, d.risk_class,
-		       COALESCE(d.freshness_requirement, 'none'), d.selected_plan,
-		       d.reason_codes, d.confidence, d.policy_version,
-		       d.registry_generation, d.actual_outcome, d.created_at
-		FROM routing_decisions d
-		JOIN orchestration_runs r ON r.id = d.orchestration_run_id
+	row := tx.QueryRow(ctx, decisionSelect+`
 		WHERE d.tenant_id=$1 AND d.actor_id=$2 AND r.interaction_id=$3
 		ORDER BY d.created_at DESC
 		LIMIT 1`, tenantID, actorID, interactionID)
@@ -782,6 +815,48 @@ func (c *controlPlane) beginRecovery(ctx context.Context, tenantID, actorID, int
 	return runRecovering, nil
 }
 
+// RouteScope is the scope a route decision resolved: whose request it is,
+// which agent, session, project, task and artifact it acts within, which
+// repository it reads (and whether that repository was declared or only
+// inferred from the request's phrasing), and the data classification
+// capability selection was held to.
+type RouteScope struct {
+	TenantID           string `json:"tenant_id,omitempty"`
+	PrincipalID        string `json:"principal_id,omitempty"`
+	AgentID            string `json:"agent_id,omitempty"`
+	SessionID          string `json:"session_id,omitempty"`
+	ProjectID          string `json:"project_id,omitempty"`
+	TaskID             string `json:"task_id,omitempty"`
+	ArtifactID         string `json:"artifact_id,omitempty"`
+	RepositoryPath     string `json:"repository_path,omitempty"`
+	RepositoryScope    string `json:"repository_scope"`
+	DataClassification string `json:"data_classification"`
+}
+
+// Repository scopes a decision can resolve.
+const (
+	repositoryScopeDeclared = "declared"
+	repositoryScopeInferred = "inferred"
+	repositoryScopeNone     = "none"
+)
+
+// decisionCapabilities is the shape routing_decisions.candidate_capabilities
+// holds: the capabilities selection chose and the fallbacks it reserved.
+// The capabilities it rejected, with their reasons, are held in
+// rejected_alternatives.
+type decisionCapabilities struct {
+	Selected          []string `json:"selected"`
+	ReservedFallbacks []string `json:"reserved_fallbacks"`
+}
+
+// nonNilStrings persists an absent list as an empty one.
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
 type RouteStep struct {
 	Order    int    `json:"order"`
 	System   string `json:"system"`
@@ -798,6 +873,10 @@ type RouteDecision struct {
 	// applied, so the classifier never hides uncertainty (§21.5).
 	ClassifiedLabels  []LabelScore `json:"classified_labels"`
 	AlternativeLabels []LabelScore `json:"alternative_labels"`
+
+	// ResolvedScope is the identity and data scope the decision was made
+	// for (§21.8 scope resolution).
+	ResolvedScope RouteScope `json:"resolved_scope"`
 
 	RiskClass            string      `json:"risk_class"`
 	FreshnessRequirement string      `json:"freshness_requirement"`
@@ -820,8 +899,8 @@ type RouteDecision struct {
 // governanceOperationID derives the tool-governance operation ID for an
 // interaction's governance stage. It is stable, so a retried ingest names
 // the same operation (tool-governance refuses to start a second one for a
-// non-idempotent tool), and distinct from the interaction ID itself, which
-// execution-proxy prepares its own operation under.
+// non-idempotent tool). The execution proxy runs the command under this
+// operation and takes its confirmation from governance's record of it.
 func governanceOperationID(interactionID string) string {
 	digest := sha256.Sum256([]byte(interactionID + "\x00tool-governance"))
 	return hex.EncodeToString(digest[:16])
@@ -1192,13 +1271,24 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 	}
 
 	confidence := class.Confidence
-	if req.ProjectID == "" && codeIntent && req.RepositoryPath == "" {
+	repositoryScope := repositoryScopeNone
+	switch {
+	case req.RepositoryPath != "" || req.ProjectID != "":
+		repositoryScope = repositoryScopeDeclared
+	case codeIntent:
 		// The repository was inferred from phrasing rather than declared, so
 		// the decision is materially less certain than its labels suggest.
+		repositoryScope = repositoryScopeInferred
 		if confidence > 0.78 {
 			confidence = 0.78
 		}
 		reasons = append(reasons, "repository_scope_inferred")
+	}
+	scope := RouteScope{
+		TenantID: req.TenantID, PrincipalID: req.ActorID, AgentID: req.AgentID,
+		SessionID: req.SessionID, ProjectID: req.ProjectID, TaskID: req.TaskID,
+		ArtifactID: req.ArtifactID, RepositoryPath: req.RepositoryPath,
+		RepositoryScope: repositoryScope, DataClassification: dataClassificationFor(req),
 	}
 
 	freshness := "none"
@@ -1216,6 +1306,7 @@ func buildRoute(req RouteRequest) (RouteDecision, error) {
 		IntentLabels:         class.labelNames(),
 		ClassifiedLabels:     class.Labels,
 		AlternativeLabels:    class.Alternatives,
+		ResolvedScope:        scope,
 		RiskClass:            risk,
 		FreshnessRequirement: freshness,
 		SelectedPlan:         steps,
