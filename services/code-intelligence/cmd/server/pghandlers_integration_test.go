@@ -857,3 +857,55 @@ func TestHandlePGIndexSameCommitIsIdempotent(t *testing.T) {
 		t.Fatalf("different files under the same commit: %d: %s", changed.Code, changed.Body.String())
 	}
 }
+
+// A declaration named the way people write it -- bare, qualified by its
+// class, with a language keyword, or as a Go Type.Method -- anchors as an
+// exact match on the declaration the indexer recorded.
+func TestHandlePGQueryAnchorsDeclarationNames(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{"canonical_path": "/repo/" + t.Name()})
+	var repo struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	py := "class OutputReducer:\n    def reduce_output(self, text):\n        return text\n"
+	gosrc := "package proxy\n\ntype server struct{}\n\nfunc (s *server) handleRun() {}\n"
+	index := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, map[string]any{
+		"repository_id": repo.RepositoryID, "branch": "main", "commit_id": "c1",
+		"files": []map[string]any{
+			{"path": "tools/reducer.py", "language": "python", "content_hash": hashContent(py), "content": py},
+			{"path": "proxy/run.go", "language": "go", "content_hash": hashContent(gosrc), "content": gosrc},
+		},
+	})
+	if index.Code != http.StatusOK {
+		t.Fatalf("index: %d: %s", index.Code, index.Body.String())
+	}
+
+	for query, wantSuffix := range map[string]string{
+		"OutputReducer":               ".OutputReducer",
+		"class OutputReducer":         ".OutputReducer",
+		"OutputReducer.reduce_output": ".OutputReducer.reduce_output",
+		"def reduce_output":           ".OutputReducer.reduce_output",
+		"server.handleRun":            ".(*server).handleRun",
+		"func handleRun()":            ".(*server).handleRun",
+	} {
+		resp := pgRequest(t, srv, http.MethodPost, "/v2/code/query", tenant, map[string]any{
+			"repository_id": repo.RepositoryID, "branch": "main", "query": query,
+		})
+		var out struct {
+			Results       []PGSymbolVersion `json:"results"`
+			RetrievalMode string            `json:"retrieval_mode"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+			t.Fatalf("%q: %v: %s", query, err, resp.Body.String())
+		}
+		if out.RetrievalMode != "exact" || len(out.Results) != 1 || !strings.HasSuffix(out.Results[0].FullyQualifiedName, wantSuffix) {
+			t.Errorf("%q: mode %q results %+v, want one exact match ending %q", query, out.RetrievalMode, out.Results, wantSuffix)
+		}
+	}
+}

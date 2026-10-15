@@ -12,8 +12,36 @@ import (
 	"strings"
 )
 
-// bareIdentifier matches a single unqualified declaration name.
-var bareIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+// declarationName matches a declaration name, bare ("SignClaims") or
+// qualified by its enclosing type or module ("OutputReducer.reduce_output").
+var declarationName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+
+// declarationKeyword is a leading language keyword a query may name a
+// declaration with ("class OutputReducer", "func SignClaims").
+var declarationKeyword = regexp.MustCompile(`^(?:class|def|async def|func|function|fn|type|struct|interface|trait|enum)\s+`)
+
+// declarationPatterns are the qualified-name suffixes a declaration name
+// is tried against, most literal first: the name itself, then, for a Go
+// method written "Type.Method", the receiver forms Go's indexer records
+// ("pkg.(*Type).Method", "pkg.(Type).Method").
+func declarationPatterns(name string) []string {
+	patterns := []string{"%." + name}
+	if typeName, method, ok := strings.Cut(name, "."); ok && !strings.Contains(method, ".") {
+		patterns = append(patterns, "%.(*"+typeName+")."+method, "%.("+typeName+")."+method)
+	}
+	return patterns
+}
+
+// declarationQuery returns the declaration name a query anchors on, with
+// any leading declaration keyword removed, or "" when it names none.
+func declarationQuery(query string) string {
+	name := strings.TrimSpace(declarationKeyword.ReplaceAllString(strings.TrimSpace(query), ""))
+	name = strings.TrimSuffix(name, "()")
+	if !declarationName.MatchString(name) {
+		return ""
+	}
+	return name
+}
 
 // v2 handlers expose pgCodeStore over HTTP, additive alongside every
 // existing /v1/* route, which keeps working unchanged against the
@@ -402,13 +430,20 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// A bare identifier ("SignClaims") names a declaration as surely as its
-	// qualified name does, so it anchors the same way when it is exactly the
-	// final segment of a function, method or type.
-	if len(exact) == 0 && bareIdentifier.MatchString(req.Query) {
-		if exact, err = s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, "%."+req.Query); err != nil {
-			http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
-			return
+	// A declaration name ("SignClaims", "OutputReducer.reduce_output",
+	// "class OutputReducer") names a declaration as surely as its fully
+	// qualified name does, so it anchors the same way when it is exactly
+	// the trailing segments of a function, method, type, class or
+	// interface's qualified name.
+	if name := declarationQuery(req.Query); len(exact) == 0 && name != "" {
+		for _, pattern := range declarationPatterns(name) {
+			if exact, err = s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, pattern); err != nil {
+				http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(exact) > 0 {
+				break
+			}
 		}
 	}
 	// Exact path/FQN matches are precision anchors. Never bury one under
