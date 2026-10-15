@@ -270,7 +270,13 @@ func (s *hermesServer) warmPrefetch(ctx context.Context, item queuedPrefetch) er
 		if item.authorization != "" {
 			src.Header.Set("Authorization", item.authorization)
 		}
-		result, err := s.retrieval.recall(ctx, src, identity, item.Query, item.MaxItems)
+		// The warm result is served with this session's context, so it is
+		// scoped to the session when its id is one retrieval can key on.
+		recallSession := ""
+		if isUUID(item.SessionID) {
+			recallSession = item.SessionID
+		}
+		result, err := s.retrieval.recall(ctx, src, identity, item.Query, item.MaxItems, recallSession)
 		if err != nil {
 			recallErr = fmt.Errorf("governed recall: %w", err)
 		} else {
