@@ -334,7 +334,7 @@ func (s *hermesServer) handlePrefetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
-		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "ensure session: "+err.Error(), sessionErrorStatus(err))
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -443,7 +443,7 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
-		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "ensure session: "+err.Error(), sessionErrorStatus(err))
 		return
 	}
 	generatedTurnID, err := newID()
@@ -598,7 +598,7 @@ func (s *hermesServer) handleSessionSwitch(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.ensureSession(ctx, tx, identity, req.ToSessionID, req.NamespaceID); err != nil {
-		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "ensure session: "+err.Error(), sessionErrorStatus(err))
 		return
 	}
 	if req.FromSessionID != "" {
@@ -662,7 +662,7 @@ func (s *hermesServer) handlePreCompress(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.ensureSession(ctx, tx, identity, req.SessionID, req.NamespaceID); err != nil {
-		http.Error(w, "ensure session: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "ensure session: "+err.Error(), sessionErrorStatus(err))
 		return
 	}
 	generatedTurnID, err := newID()

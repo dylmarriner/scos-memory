@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -62,12 +63,30 @@ func (s *hermesServer) ensureSession(ctx context.Context, tx *sql.Tx, id request
 	if exists {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, tenant_id, namespace_id, created_by) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING`,
-		sessionID, id.TenantID, namespaceID, id.PrincipalID)
+	// The id is not this tenant's. If the insert does nothing, another
+	// tenant already holds it (row security hides it from the check above):
+	// report that, rather than succeed and let the turn write fail later.
+	var created string
+	err := tx.QueryRowContext(ctx, `INSERT INTO sessions (id, tenant_id, namespace_id, created_by) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING RETURNING id`,
+		sessionID, id.TenantID, namespaceID, id.PrincipalID).Scan(&created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errSessionTaken
+	}
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
 	return nil
+}
+
+// errSessionTaken reports a session id already used by another tenant.
+var errSessionTaken = errors.New("session id is already in use; choose another session id")
+
+// sessionErrorStatus maps an ensureSession failure to its HTTP status.
+func sessionErrorStatus(err error) int {
+	if errors.Is(err, errSessionTaken) {
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
 }
 
 // idempotentReplay looks up a previously recorded response for key. found is

@@ -255,3 +255,24 @@ func TestSaveConfigAndInitializePersistPerPrincipal(t *testing.T) {
 		t.Fatalf("saved setup was not replaced: %v", again)
 	}
 }
+
+// TestSessionIDHeldByAnotherTenantIsAConflict: session ids are global, so a
+// second tenant naming one the first already uses must be told so -- not
+// accepted and then failed with a 500 when the turn is written.
+func TestSessionIDHeldByAnotherTenantIsAConflict(t *testing.T) {
+	first := newHermesFixture(t)
+	second := newHermesFixture(t)
+	session := first.newSession()
+	turn := func(f *hermesFixture) map[string]any {
+		return map[string]any{
+			"namespace_id": f.namespace, "session_id": session, "turn_id": "turn-" + f.tenant,
+			"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		}
+	}
+	if code, out := first.call(first.srv.handleSyncTurn, first.owner, "/v1/provider/sync_turn", turn(first)); code != http.StatusOK {
+		t.Fatalf("first tenant sync_turn = %d %v", code, out)
+	}
+	if code, out := second.call(second.srv.handleSyncTurn, second.owner, "/v1/provider/sync_turn", turn(second)); code != http.StatusConflict {
+		t.Fatalf("second tenant reusing the session id = %d %v, want 409", code, out)
+	}
+}
