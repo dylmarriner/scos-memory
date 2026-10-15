@@ -114,6 +114,7 @@ func main() {
 	mux.HandleFunc("/v1/transparency/login", s.login)
 	mux.HandleFunc("/v1/transparency/facts/", s.factByID)
 	mux.HandleFunc("/v1/transparency/graphify/", s.graphify)
+	mux.HandleFunc("/v1/transparency/history/", s.history)
 	authenticated := auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
 
 	// The dashboard shell carries no authoritative data of its own: every
@@ -207,28 +208,30 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	views := map[string]viewSource{
-		"system":               {s.upstream, "/v1/dashboard/system"},
-		"memory":               {s.upstream, "/v1/dashboard/memory-graph"},
-		"user_model":           {s.upstream, "/v1/dashboard/user-model"},
-		"timeline":             {s.upstream, "/v1/dashboard/timeline"},
-		"learnings":            {s.upstream, "/v1/dashboard/learnings"},
-		"contradictions":       {s.upstream, "/v1/dashboard/contradictions"},
-		"facts":                {s.upstream, "/v1/dashboard/facts"},
-		"diary":                {s.upstream, "/v1/diary"},
-		"agents":               {s.upstreams["agent_registry"], "/v1/agents"},
-		"tool_operations":      {s.upstreams["tool_governance"], "/v1/operations"},
-		"plugins":              {s.upstreams["extension_manager"], "/v1/extensions"},
-		"skills":               {s.upstreams["extension_manager"], "/v1/skills"},
-		"hooks":                {s.upstreams["extension_manager"], "/v1/hooks"},
-		"code_intelligence":    {s.upstreams["code_intelligence"], "/v1/index/status"},
-		"routing":              {s.upstreams["autonomous_control_plane"], "/v1/control/decisions"},
-		"recovery":             {s.upstreams["recovery_orchestrator"], "/v1/recovery/status"},
-		"security":             {s.upstreams["security_gate"], "/v1/audit"},
-		"token_flow":           {s.upstreams["observability"], "/v1/metrics?metric=token"},
-		"costs":                {s.upstreams["observability"], "/v1/metrics?metric=cost"},
-		"costs_and_token_flow": {s.upstreams["observability"], "/v1/metrics"},
-		"memory_summary":       {s.upstream, "/v1/dashboard/summary"},
-		"code_repos":           {s.upstreams["code_intelligence"], "/v1/repos"},
+		"system":            {s.upstream, "/v1/dashboard/system"},
+		"memory":            {s.upstream, "/v1/dashboard/memory-graph"},
+		"user_model":        {s.upstream, "/v1/dashboard/user-model"},
+		"timeline":          {s.upstream, "/v1/dashboard/timeline"},
+		"learnings":         {s.upstream, "/v1/dashboard/learnings"},
+		"contradictions":    {s.upstream, "/v1/dashboard/contradictions"},
+		"facts":             {s.upstream, "/v1/dashboard/facts"},
+		"diary":             {s.upstream, "/v1/diary"},
+		"agents":            {s.upstreams["agent_registry"], "/v1/agents"},
+		"tool_operations":   {s.upstreams["tool_governance"], "/v1/operations"},
+		"plugins":           {s.upstreams["extension_manager"], "/v1/extensions"},
+		"skills":            {s.upstreams["extension_manager"], "/v1/skills"},
+		"hooks":             {s.upstreams["extension_manager"], "/v1/hooks"},
+		"code_intelligence": {s.upstreams["code_intelligence"], "/v1/index/status"},
+		"routing":           {s.upstreams["autonomous_control_plane"], "/v1/control/decisions"},
+		"recovery":          {s.upstreams["recovery_orchestrator"], "/v1/recovery/status"},
+		"security":          {s.upstreams["security_gate"], "/v1/audit"},
+		"token_flow":        {s.upstreams["observability"], "/v1/metrics?metric=token&limit=500"},
+		"costs":             {s.upstreams["observability"], "/v1/metrics?metric=cost&limit=500"},
+		"service_flows":     {s.upstreams["observability"], "/v1/flows?range=15m"},
+		"benchmarks":        {s.upstreams["observability"], "/v1/benchmarks?limit=50"},
+		"metric_catalog":    {s.upstreams["observability"], "/v1/metrics/catalog?range=24h"},
+		"memory_summary":    {s.upstream, "/v1/dashboard/summary"},
+		"code_repos":        {s.upstreams["code_intelligence"], "/v1/repos"},
 		// credential-vault's list route returns metadata only (name,
 		// key_version, created_by, timestamps) -- never a decrypted secret
 		// value -- so it's safe to surface on this otherwise-unauthenticated
@@ -427,6 +430,91 @@ func (s *projectionServer) factByID(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 	}
 	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
+}
+
+// historyRoutes maps the public history kinds onto observability's
+// read-only aggregate routes, with the query parameters each accepts. Only
+// these are forwarded: the dashboard is an unauthenticated surface, so it
+// must not become a general proxy into the collector.
+var historyRoutes = map[string]struct {
+	path   string
+	params []string
+}{
+	"flows":      {"/v1/flows", []string{"range", "to"}},
+	"series":     {"/v1/metrics/series", []string{"name", "range", "to", "step", "group_by", "service", "caller", "route"}},
+	"catalog":    {"/v1/metrics/catalog", []string{"range"}},
+	"benchmarks": {"/v1/benchmarks", []string{"suite", "limit"}},
+}
+
+// history serves the dashboard's historic charts and flow graph:
+//
+//	GET /v1/transparency/history/{flows|series|catalog|benchmarks}
+//	GET /v1/transparency/history/benchmark-runs/{run_id}
+func (s *projectionServer) history(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	kind := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/transparency/history/"), "/")
+	var upstreamPath string
+	query := url.Values{}
+	if runID, ok := strings.CutPrefix(kind, "benchmark-runs/"); ok {
+		if runID == "" || strings.ContainsAny(runID, "/?#%") || len(runID) > 128 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid run id"})
+			return
+		}
+		upstreamPath = "/v1/benchmarks/runs/" + url.PathEscape(runID)
+	} else {
+		route, ok := historyRoutes[kind]
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown history view"})
+			return
+		}
+		upstreamPath = route.path
+		for _, name := range route.params {
+			if value := strings.TrimSpace(r.URL.Query().Get(name)); value != "" {
+				if len(value) > 256 {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": name + " is too long"})
+					return
+				}
+				query.Set(name, value)
+			}
+		}
+	}
+	target := s.upstreams["observability"] + upstreamPath
+	if encoded := query.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	// Identity only: the query was rebuilt from the whitelist above and
+	// must not be overwritten with the raw browser query.
+	s.copyIdentityHeaders(&http.Request{Header: r.Header, URL: &url.URL{}}, req)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "observability unavailable"})
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if resp.StatusCode/100 == 2 && !json.Valid(body) {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "observability returned invalid JSON"})
+		return
+	}
+	if resp.StatusCode/100 != 2 {
+		writeJSON(w, resp.StatusCode, map[string]string{"error": strings.TrimSpace(string(body))})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(body)
 }
 
