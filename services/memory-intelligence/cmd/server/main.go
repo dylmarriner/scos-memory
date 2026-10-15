@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/llmclient"
@@ -2445,11 +2446,53 @@ func significantWords(content string) []string {
 	words := strings.Fields(strings.ToLower(content))
 	out := make([]string, 0, len(words))
 	for _, w := range words {
+		// Edge punctuation is not part of the word: "scos." restates "scos".
+		w = strings.TrimFunc(w, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
 		if len(w) > 3 {
 			out = append(out, w)
 		}
 	}
 	return out
+}
+
+// mergeStopwords carry no information of their own, so a statement that
+// differs from another only by them still restates it.
+var mergeStopwords = map[string]bool{
+	"a": true, "an": true, "the": true, "is": true, "are": true, "was": true, "were": true, "be": true,
+	"of": true, "to": true, "for": true, "in": true, "on": true, "at": true, "by": true, "with": true,
+	"from": true, "as": true, "and": true, "or": true, "it": true, "its": true, "this": true, "that": true,
+}
+
+// informationTokens is every word and number in content, lower-cased,
+// short ones included (a "v1" against a "v2" is the whole difference),
+// minus mergeStopwords.
+func informationTokens(content string) map[string]bool {
+	out := map[string]bool{}
+	for _, tok := range strings.FieldsFunc(strings.ToLower(content), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if !mergeStopwords[tok] {
+			out[tok] = true
+		}
+	}
+	return out
+}
+
+// restates reports whether one statement's information tokens are all
+// contained in the other's: the two say the same thing, or one says it
+// with more detail. When each has a token the other lacks they state
+// different things, however many words they share.
+func restates(a, b string) bool {
+	at, bt := informationTokens(a), informationTokens(b)
+	subset := func(x, y map[string]bool) bool {
+		for tok := range x {
+			if !y[tok] {
+				return false
+			}
+		}
+		return true
+	}
+	return subset(at, bt) || subset(bt, at)
 }
 
 // overlapScore is the fraction of significant words (len > 3) the shorter
@@ -2531,11 +2574,16 @@ func findMergeCandidate(ctx context.Context, fact *Fact, existing []*Fact) *merg
 	if !llmClient.Enabled() {
 		// Deterministic fallback: only trust a very high heuristic overlap,
 		// and keep whichever content is longer as canonical.
-		top := candidates[0]
-		if top.score < 0.85 {
-			return nil
+		// Word overlap alone would fold "project alpha ..." into "project
+		// beta ...": the one word that differs is the information. So the
+		// fallback also requires one statement to say nothing the other
+		// does not (restates), i.e. a repeat or a strictly richer version.
+		for _, c := range candidates {
+			if c.score >= 0.85 && restates(fact.Content, c.fact.Content) {
+				return &mergeDecision{ExistingFact: c.fact, NewIsRicher: len(fact.Content) > len(c.fact.Content), Score: c.score}
+			}
 		}
-		return &mergeDecision{ExistingFact: top.fact, NewIsRicher: len(fact.Content) > len(top.fact.Content), Score: top.score}
+		return nil
 	}
 
 	var options strings.Builder
