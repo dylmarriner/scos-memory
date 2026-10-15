@@ -166,7 +166,7 @@ func TestMutatingBackupRoutesRequireAdminScope(t *testing.T) {
 }
 
 func TestOnlyImplementedProvidersExist(t *testing.T) {
-	for provider, want := range map[string]string{"disabled": "disabled", "s3": "not implemented", "gcs": "not implemented"} {
+	for provider, want := range map[string]string{"disabled": "disabled", "s3": "not supported", "gcs": "not supported"} {
 		t.Setenv("SCOS_BACKUP_PROVIDER", provider)
 		s := newBackupServerWithDir(t.TempDir())
 		if s.provider != nil || s.providerErr == nil || !strings.Contains(s.providerErr.Error(), want) {

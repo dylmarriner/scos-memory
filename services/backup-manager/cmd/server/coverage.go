@@ -141,7 +141,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 		schema.Reason = "no recent verified base backup carries the schema: " + base.Reason
 	}
 	plan.Items["schema_exports"] = schema
-	plan.Items["schema_and_migration_exports"] = Coverage{Reason: "migration exports are not implemented: the schema alone is exported, inside every base backup (see schema_exports)"}
+	plan.Items["schema_and_migration_exports"] = Coverage{Reason: "migration exports are not provided: the schema alone is exported, inside every base backup (see schema_exports)"}
 
 	// Encrypted off-host copies and a verified remote provider.
 	offHost := Coverage{}
@@ -203,8 +203,8 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 	}
 	plan.Items["remote_git_mirrors"] = mirror
 
-	plan.Items["secret_manager_recovery"] = Coverage{Reason: "secret-manager recovery procedures are not implemented or exercised by this service"}
-	plan.Items["configuration_backups"] = Coverage{Reason: "configuration backups are not implemented"}
+	plan.Items["secret_manager_recovery"] = Coverage{Reason: "secret-manager recovery procedures are not provided or exercised by this service"}
+	plan.Items["configuration_backups"] = Coverage{Reason: "configuration backups are not provided by this service"}
 
 	plan.BaseBackups = plan.Items["base_backups"].Covered
 	plan.SchemaExports = plan.Items["schema_and_migration_exports"].Covered

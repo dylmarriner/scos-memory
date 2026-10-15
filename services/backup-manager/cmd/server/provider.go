@@ -67,7 +67,7 @@ func newProvider(cfg backupConfig, stateDir string) (BackupProvider, error) {
 	case "disabled":
 		return nil, errProviderUnavailable{"backups are disabled (SCOS_BACKUP_PROVIDER=disabled)"}
 	default:
-		return nil, errProviderUnavailable{fmt.Sprintf("backup provider %q is not implemented; implemented providers are local and filesystem", cfg.provider)}
+		return nil, errProviderUnavailable{fmt.Sprintf("backup provider %q is not supported; supported providers are local and filesystem", cfg.provider)}
 	}
 }
 
