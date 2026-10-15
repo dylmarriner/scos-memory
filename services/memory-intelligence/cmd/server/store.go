@@ -344,7 +344,16 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 	}
 
 	for _, f := range facts {
-		evRows, err := db.QueryContext(ctx, `SELECT reference_id FROM memory_evidence WHERE memory_id=$1 AND evidence_kind='fact_citation'`, f.ID)
+		// Fact citations are the references a writer supplied, reported as
+		// given; every other kind (the turn events and messages a memory was
+		// consolidated from) is reported as kind:reference, so a memory
+		// learned from conversation shows where it came from.
+		evRows, err := db.QueryContext(ctx, `
+			SELECT CASE WHEN evidence_kind = 'fact_citation' THEN reference_id::text
+			            ELSE evidence_kind || ':' || reference_id::text END
+			  FROM memory_evidence
+			 WHERE memory_id = $1 AND evidence_kind <> 'fact'
+			 ORDER BY created_at, id`, f.ID)
 		if err != nil {
 			return nil, err
 		}
