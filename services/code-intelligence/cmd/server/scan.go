@@ -406,9 +406,51 @@ func (s *server) handlePGSnapshot(w http.ResponseWriter, r *http.Request) {
 // reuse declarations parsed by an older extractor.
 const scanExtractorVersion = "scan-goast-treesitter-v2"
 
+// errSnapshotConflict marks a request for a snapshot key that already
+// names a different tree, or one still being built.
+var errSnapshotConflict = errors.New("snapshot conflict")
+
 // indexDurableSnapshot creates and builds one snapshot synchronously: the
 // /v2/code/index path, whose uploads are bounded in size.
 func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID, branch, commit, extractorVersion, configurationHash string, files []PGFileInput) (map[string]any, error) {
+	// A snapshot's key names one tree. Sending the same tree again (a
+	// client retry) returns the snapshot already built; different files
+	// under a key that is already indexed are refused, never merged in.
+	existing, status, err := s.pgStore.SnapshotByKey(ctx, repositoryID, branch, commit, extractorVersion, configurationHash)
+	if err != nil {
+		return nil, fmt.Errorf("look up snapshot: %w", err)
+	}
+	switch {
+	case existing == "":
+	case status == "failed":
+		if err := s.pgStore.DeleteFailedSnapshot(ctx, existing); err != nil {
+			return nil, fmt.Errorf("clear failed snapshot: %w", err)
+		}
+	case status == "ready" || status == "active":
+		same, err := s.pgStore.SnapshotHoldsFiles(ctx, existing, files)
+		if err != nil {
+			return nil, fmt.Errorf("compare snapshot files: %w", err)
+		}
+		if !same {
+			return nil, fmt.Errorf("%w: snapshot %s already holds different files for commit %q", errSnapshotConflict, existing, commit)
+		}
+		var symbols int
+		if err := s.pgStore.db.QueryRowContext(ctx,
+			`SELECT symbol_count FROM code_repository_snapshots WHERE id = $1`, existing).Scan(&symbols); err != nil {
+			return nil, fmt.Errorf("count snapshot symbols: %w", err)
+		}
+		return map[string]any{
+			"snapshot_id":     existing,
+			"status":          status,
+			"unchanged":       true,
+			"file_count":      len(files),
+			"symbol_count":    symbols,
+			"degraded_models": []string{},
+		}, nil
+	default:
+		return nil, fmt.Errorf("%w: snapshot %s for commit %q is still %s", errSnapshotConflict, existing, commit, status)
+	}
+
 	snapshotID, err := s.pgStore.CreateSnapshot(ctx, repositoryID, tenant, branch, commit, extractorVersion, configurationHash)
 	if err != nil {
 		return nil, fmt.Errorf("create snapshot: %w", err)

@@ -245,6 +245,10 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.indexDurableSnapshot(r.Context(), tenant, req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash, files)
+	if errors.Is(err, errSnapshotConflict) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

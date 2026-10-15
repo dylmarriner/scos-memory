@@ -802,3 +802,58 @@ func TestHandlePGIndexRefusesAContentHashThatDoesNotMatchTheContent(t *testing.T
 		t.Fatalf("matching hash must be indexed, got %d %s", resp.Code, resp.Body.String())
 	}
 }
+
+// Re-sending the same tree under the same snapshot key (a client retry)
+// returns the snapshot already built; different files under that key are
+// refused with 409 instead of failing on duplicate rows.
+func TestHandlePGIndexSameCommitIsIdempotent(t *testing.T) {
+	_, db := testPGStore(t)
+	srv := &server{pgStore: newPGCodeStore(db)}
+	tenant := testTenant(t, db)
+
+	reposResp := pgRequest(t, srv, http.MethodPost, "/v2/code/repos", tenant, map[string]any{"canonical_path": "/repo/" + t.Name()})
+	var repo struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(reposResp.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	body := func(content string) map[string]any {
+		return map[string]any{
+			"repository_id": repo.RepositoryID, "branch": "main", "commit_id": "commit-1",
+			"files": []map[string]any{{"path": "pkg/a.go", "language": "go", "content_hash": hashContent(content), "content": content}},
+		}
+	}
+	type indexOut struct {
+		SnapshotID  string `json:"snapshot_id"`
+		Unchanged   bool   `json:"unchanged"`
+		SymbolCount int    `json:"symbol_count"`
+	}
+	decode := func(w *httptest.ResponseRecorder) indexOut {
+		t.Helper()
+		var out indexOut
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode %s: %v", w.Body.String(), err)
+		}
+		return out
+	}
+	src := "package pkg\n\nfunc A() {}\n"
+
+	first := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, body(src))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first index: %d: %s", first.Code, first.Body.String())
+	}
+	again := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, body(src))
+	if again.Code != http.StatusOK {
+		t.Fatalf("retry: %d: %s", again.Code, again.Body.String())
+	}
+	a, b := decode(first), decode(again)
+	if b.SnapshotID != a.SnapshotID || !b.Unchanged || b.SymbolCount != a.SymbolCount || a.Unchanged {
+		t.Fatalf("retry returned %+v, first %+v", b, a)
+	}
+
+	changed := pgRequest(t, srv, http.MethodPost, "/v2/code/index", tenant, body("package pkg\n\nfunc B() {}\n"))
+	if changed.Code != http.StatusConflict || !strings.Contains(changed.Body.String(), a.SnapshotID) {
+		t.Fatalf("different files under the same commit: %d: %s", changed.Code, changed.Body.String())
+	}
+}

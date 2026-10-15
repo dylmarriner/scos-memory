@@ -1144,6 +1144,35 @@ func (s *pgCodeStore) SnapshotByKey(ctx context.Context, repositoryID, branch, c
 	return id, status, err
 }
 
+// SnapshotHoldsFiles reports whether snapshotID holds exactly these files,
+// by path and content hash.
+func (s *pgCodeStore) SnapshotHoldsFiles(ctx context.Context, snapshotID string, files []PGFileInput) (bool, error) {
+	want := make(map[string]string, len(files))
+	for _, f := range files {
+		want[f.Path] = strings.ToLower(f.ContentHash)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT path, content_hash FROM code_file_versions WHERE snapshot_id = $1`, snapshotID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	held := 0
+	for rows.Next() {
+		var path, hash string
+		if err := rows.Scan(&path, &hash); err != nil {
+			return false, err
+		}
+		if want[path] != strings.ToLower(hash) {
+			return false, nil
+		}
+		held++
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return held == len(want), nil
+}
+
 // SetSnapshotStatus records a snapshot's state, and the error when failed.
 func (s *pgCodeStore) SetSnapshotStatus(ctx context.Context, snapshotID, status, failure string) error {
 	_, err := s.db.ExecContext(ctx, `
