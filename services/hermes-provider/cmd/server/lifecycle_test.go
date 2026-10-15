@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -199,28 +200,75 @@ func TestToolCallRejectsUnknownTool(t *testing.T) {
 	}
 }
 
-func TestToolCallServesStatusAndDelegatesOthers(t *testing.T) {
+func TestToolCallServesStatusAndExecutesDelegatedTools(t *testing.T) {
+	type seen struct{ method, uri, tenant, cp, body string }
+	var calls []seen
+	mi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		calls = append(calls, seen{r.Method, r.URL.RequestURI(), r.Header.Get("X-SCOS-Tenant-ID"), r.Header.Get("X-SCOS-Control-Plane-Token"), string(raw)})
+		if strings.HasSuffix(r.URL.Path, "/missing") {
+			http.Error(w, "fact not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"path":"`+r.URL.Path+`"}`)
+	}))
+	defer mi.Close()
+
 	srv := newHermesServer()
+	srv.memoryIntelligence = &memoryIntelligence{baseURL: mi.URL, controlPlaneToken: "cp", client: mi.Client()}
 
 	w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_status"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("scos_status failed: %d %s", w.Code, w.Body.String())
 	}
 
-	// Tools owned by memory-intelligence report the boundary rather than
-	// fabricating a local answer.
-	for _, tool := range []string{"scos_user_model", "scos_memory_graph", "scos_explain", "scos_correct", "scos_forget"} {
-		w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": tool})
+	cases := []struct {
+		tool       string
+		args       map[string]any
+		wantMethod string
+		wantURI    string
+	}{
+		{"scos_user_model", nil, http.MethodGet, "/v1/dashboard/user-model"},
+		{"scos_memory_graph", nil, http.MethodGet, "/v1/dashboard/memory-graph"},
+		{"scos_explain", map[string]any{"memory_id": "f1"}, http.MethodGet, "/v1/facts/f1"},
+		{"scos_correct", map[string]any{"memory_id": "f1", "value": "new", "reason": "typo"}, http.MethodPatch, "/v1/facts/f1"},
+		{"scos_forget", map[string]any{"memory_id": "f1", "cascade": true}, http.MethodDelete, "/v1/facts/f1?cascade=true"},
+	}
+	for _, c := range cases {
+		calls = nil
+		w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": c.tool, "arguments": c.args})
 		if w.Code != http.StatusOK {
-			t.Fatalf("%s failed: %d", tool, w.Code)
+			t.Fatalf("%s failed: %d %s", c.tool, w.Code, w.Body.String())
 		}
 		var result map[string]any
 		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-			t.Fatalf("decode %s: %v", tool, err)
+			t.Fatalf("decode %s: %v", c.tool, err)
 		}
-		if result["delegated_to"] != "memory-intelligence" {
-			t.Errorf("%s did not report its owning service: %v", tool, result)
+		if result["served_by"] != "memory-intelligence" || result["result"] == nil {
+			t.Errorf("%s returned no executed result: %v", c.tool, result)
 		}
+		if len(calls) != 1 || calls[0].method != c.wantMethod || calls[0].uri != c.wantURI || calls[0].tenant == "" || calls[0].cp != "cp" {
+			t.Fatalf("%s upstream call = %+v", c.tool, calls)
+		}
+		if c.tool == "scos_correct" && !strings.Contains(calls[0].body, `"content":"new"`) {
+			t.Fatalf("correct body = %s", calls[0].body)
+		}
+	}
+
+	w = post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_explain", "arguments": map[string]any{"memory_id": "missing"}})
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("upstream 404 should propagate, got %d", w.Code)
+	}
+	w = post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_forget"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("missing memory_id should be 400, got %d", w.Code)
+	}
+
+	unconfigured := newHermesServer()
+	w = post(t, unconfigured.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_user_model"})
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured delegation should be 503, got %d", w.Code)
 	}
 }
 

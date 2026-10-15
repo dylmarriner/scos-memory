@@ -92,6 +92,8 @@ type hermesServer struct {
 	db        *sql.DB
 	// prefetchQueue holds bounded pre-warm work for queue_prefetch (§24.3).
 	prefetchQueue prefetchQueue
+	// memoryIntelligence executes the inspection/correction tools.
+	memoryIntelligence *memoryIntelligence
 }
 
 func (s *hermesServer) readinessCheck() error {
@@ -159,6 +161,11 @@ func main() {
 
 	srv := newHermesServer()
 	srv.db = db
+	mi, err := memoryIntelligenceFromEnvironment()
+	if err != nil {
+		log.Fatalf("configure memory-intelligence client: %v", err)
+	}
+	srv.memoryIntelligence = mi
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)

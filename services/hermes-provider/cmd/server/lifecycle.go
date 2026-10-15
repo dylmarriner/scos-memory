@@ -360,16 +360,18 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]any{"tool": req.Tool, "recall": memories})
 	default:
-		// The remaining inspection and correction tools are served by
-		// memory-intelligence, which owns the user model, graph and
-		// correction paths. Report the boundary rather than fabricating a
-		// local answer (§42).
-		writeJSON(w, map[string]any{
-			"tool":             req.Tool,
-			"delegated_to":     "memory-intelligence",
-			"delegated_path":   governedToolPaths()[req.Tool],
-			"requires_routing": true,
-		})
+		// The inspection and correction tools are owned by
+		// memory-intelligence; execute them there and return its answer.
+		if s.memoryIntelligence == nil {
+			http.Error(w, "memory-intelligence is not configured for "+req.Tool, http.StatusServiceUnavailable)
+			return
+		}
+		result, status, err := s.memoryIntelligence.executeDelegatedTool(r.Context(), r, identity, req.Tool, req.Arguments)
+		if err != nil {
+			http.Error(w, err.Error(), status)
+			return
+		}
+		writeJSON(w, map[string]any{"tool": req.Tool, "served_by": "memory-intelligence", "result": result})
 	}
 }
 
