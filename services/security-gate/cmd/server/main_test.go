@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/dylmarriner/scos-memory/services/readiness"
 )
@@ -191,24 +192,28 @@ func TestTokenPublicPart(t *testing.T) {
 }
 
 func TestPermissionCheckPublic(t *testing.T) {
-	check := &PermissionCheck{
+	check := PermissionCheck{
 		Principal: "user-1", Action: "read",
 		Resource: "doc.md", DataClass: ClassPublic, Tenant: "t-1",
 	}
-	allowed := evaluatePermission(check)
-	if !allowed {
-		t.Fatal("public data should be allowed")
+	now := time.Now().UTC()
+	if d := evaluatePermission(check, permissionInputs{Now: now, TokenMaxClass: ClassInternal}); d.Allowed {
+		t.Fatalf("public data must not be allowed without a grant, got %+v", d)
+	}
+	grants := []PermissionGrant{{ID: "g-1", Principal: "user-1", Action: "read", Resource: "doc.md", MaxClass: ClassPublic}}
+	if d := evaluatePermission(check, permissionInputs{Now: now, TokenMaxClass: ClassInternal, Grants: grants}); !d.Allowed || d.GrantID != "g-1" {
+		t.Fatalf("public read covered by a grant should be allowed, got %+v", d)
 	}
 }
 
 func TestPermissionCheckSecret(t *testing.T) {
-	check := &PermissionCheck{
+	check := PermissionCheck{
 		Principal: "user-1", Action: "read",
 		Resource: "secret.doc", DataClass: ClassSecret, Tenant: "t-1",
 	}
-	allowed := evaluatePermission(check)
-	if allowed {
-		t.Fatal("secret should be denied by default")
+	grants := []PermissionGrant{{ID: "g-1", Principal: "user-1", Action: "read", Resource: "*", MaxClass: ClassRestricted}}
+	if d := evaluatePermission(check, permissionInputs{Now: time.Now().UTC(), TokenMaxClass: ClassSecret, Grants: grants}); d.Allowed {
+		t.Fatalf("secret should be denied without an explicit secret grant, got %+v", d)
 	}
 }
 

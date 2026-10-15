@@ -2051,14 +2051,14 @@ func governedTools() []map[string]any {
 			"expires_in_seconds": intField("Token lifetime in seconds"),
 		}, "principal", "tenant"),
 		tool("scos_auth_revoke", "Revoke an auth token", map[string]any{"token": strField("Bearer token")}, "token"),
-		tool("scos_permission_check", "Check whether a principal may perform an action on a resource", map[string]any{
+		tool("scos_permission_check", "Check whether a principal may perform an action on a resource; decided against the principal's grants (or a delegation and its delegator's grants), denying unknown data classes", map[string]any{
 			"principal":           strField("Principal"),
 			"action":              strField("Action"),
 			"resource":            strField("Resource"),
-			"data_class":          strField("Data classification"),
+			"data_class":          strField("Data classification: public, internal, confidential, restricted or secret"),
 			"tenant":              strField("Tenant"),
-			"delegated_authority": strField("Delegated authority"),
-			"expires_at":          strField("Expiry timestamp"),
+			"delegated_authority": strField("Delegation UUID issued to the principal; the check is then decided against that delegation and its delegator's grants"),
+			"expires_at":          strField("RFC3339 time until which the permission is needed; the covering grant must remain valid that long"),
 			"trace_id":            strField("Trace ID"),
 		}, "principal", "action", "resource", "tenant"),
 		tool("scos_permission_classify", "Classify content's data sensitivity", map[string]any{

@@ -70,20 +70,28 @@ type AuditRecord struct {
 // ── permission check ────────────────────────────────────────────────────
 
 type PermissionCheck struct {
-	Principal          string    `json:"principal"`
-	Action             string    `json:"action"`
-	Resource           string    `json:"resource"`
-	DataClass          DataClass `json:"data_class"`
-	Tenant             string    `json:"tenant"`
-	DelegatedAuthority string    `json:"delegated_authority,omitempty"`
-	ExpiresAt          string    `json:"expires_at,omitempty"`
-	TraceID            string    `json:"trace_id,omitempty"`
+	Principal string    `json:"principal"`
+	Action    string    `json:"action"`
+	Resource  string    `json:"resource"`
+	DataClass DataClass `json:"data_class"`
+	Tenant    string    `json:"tenant"`
+	// DelegatedAuthority, when set, is the id of a delegation issued to the
+	// token's principal; the check is then decided against that delegation
+	// and the delegator's grants instead of the principal's own.
+	DelegatedAuthority string `json:"delegated_authority,omitempty"`
+	// ExpiresAt, when set, is the RFC3339 time until which the caller
+	// needs the permission; the covering grant (and delegation) must
+	// remain valid at least that long.
+	ExpiresAt string `json:"expires_at,omitempty"`
+	TraceID   string `json:"trace_id,omitempty"`
 }
 
 type PermissionResult struct {
-	Allowed bool   `json:"allowed"`
-	Reason  string `json:"reason"`
-	AuditID string `json:"audit_id,omitempty"`
+	Allowed      bool   `json:"allowed"`
+	Reason       string `json:"reason"`
+	AuditID      string `json:"audit_id,omitempty"`
+	GrantID      string `json:"grant_id,omitempty"`
+	DelegationID string `json:"delegation_id,omitempty"`
 }
 
 // ── secret reference ─────────────────────────────────────────────────────
@@ -222,6 +230,10 @@ func main() {
 	// Permission
 	mux.HandleFunc("/v1/permissions/check", s.handlePermissionCheck)
 	mux.HandleFunc("/v1/permissions/classify", s.handleClassifyData)
+	mux.HandleFunc("/v1/permissions/grants", s.handlePermissionGrants)
+	mux.HandleFunc("/v1/permissions/grants/revoke", s.handlePermissionGrantRevoke)
+	mux.HandleFunc("/v1/permissions/delegations", s.handlePermissionDelegations)
+	mux.HandleFunc("/v1/permissions/delegations/revoke", s.handlePermissionDelegationRevoke)
 
 	// Audit
 	mux.HandleFunc("/v1/audit", s.handleAudit)
@@ -491,46 +503,36 @@ func (s *securityServer) handlePermissionCheck(w http.ResponseWriter, r *http.Re
 	if check.DataClass == "" {
 		check.DataClass = ClassPublic
 	}
-	if classRank(check.DataClass) > classRank(authToken.DataClass) {
-		serviceMetrics.Count(telemetry.MetricPermissionDenial,
-			map[string]string{"reason": "data_class_exceeds_token", "action": check.Action},
-			telemetry.Correlation{Tenant: check.Tenant})
-		identity := requestIdentity{TenantID: authToken.Tenant, PrincipalID: authToken.Principal}
-		auditID, err := s.insertPermissionAudit(r, identity, check, authToken, false, "requested data class exceeds token authorisation")
-		if err != nil {
-			http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, PermissionResult{Allowed: false, Reason: "requested data class exceeds token authorisation", AuditID: auditID})
+	requestedUntil, err := parseOptionalExpiry(check.ExpiresAt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
-	allowed := evaluatePermission(&check)
-	if !allowed {
-		// §32 tracks permission denial; the target is zero unauthorised
-		// retrieval, so every denial must be countable.
-		serviceMetrics.Count(telemetry.MetricPermissionDenial,
-			map[string]string{"reason": "policy_denied", "action": check.Action},
-			telemetry.Correlation{Tenant: check.Tenant})
 	}
 
 	identity := requestIdentity{TenantID: authToken.Tenant, PrincipalID: authToken.Principal}
-	record := &AuditRecord{
-		Action: check.Action, Principal: check.Principal,
-		Resource: check.Resource, DataClass: check.DataClass,
-		Tenant: check.Tenant, Result: map[bool]string{true: "allowed", false: "denied"}[allowed],
-		TraceID: check.TraceID, AgentID: authToken.AgentID, SessionID: authToken.SessionID,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	decision, err := s.decidePermission(r.Context(), identity, check, authToken, requestedUntil, time.Now().UTC())
+	if err != nil {
+		http.Error(w, "unable to evaluate permission", http.StatusInternalServerError)
+		return
 	}
-	auditID, err := insertAuditEntry(r.Context(), s.db, identity, record)
+	if !decision.Allowed {
+		// §32 tracks permission denial; the target is zero unauthorised
+		// retrieval, so every denial must be countable.
+		serviceMetrics.Count(telemetry.MetricPermissionDenial,
+			map[string]string{"reason": decision.Code, "action": check.Action},
+			telemetry.Correlation{Tenant: check.Tenant})
+	}
+	auditID, err := s.insertPermissionAudit(r, identity, check, authToken, decision.Allowed, decision.Reason)
 	if err != nil {
 		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
 		return
 	}
-
 	writeJSON(w, PermissionResult{
-		Allowed: allowed,
-		Reason:  map[bool]string{true: "permitted by policy", false: "data class exceeds authorisation"}[allowed],
-		AuditID: auditID,
+		Allowed:      decision.Allowed,
+		Reason:       decision.Reason,
+		AuditID:      auditID,
+		GrantID:      decision.GrantID,
+		DelegationID: decision.DelegationID,
 	})
 }
 
@@ -547,13 +549,6 @@ func (s *securityServer) auditAction(r *http.Request, identity requestIdentity, 
 	} // unit handlers may be exercised without PostgreSQL
 	_, err := insertAuditEntry(r.Context(), s.db, identity, &record)
 	return err
-}
-
-func evaluatePermission(check *PermissionCheck) bool {
-	if check.DataClass == ClassSecret {
-		return false // requires specific elevated grant
-	}
-	return true // basic policy: allow up to restricted
 }
 
 func classRank(class DataClass) int {
