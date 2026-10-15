@@ -70,6 +70,10 @@ type okfServer struct {
 	okfRoot     string
 	statePath   string
 	db          *pgxpool.Pool
+	// governanceRoles, when set, replaces the okf_governance_roles query in
+	// activeGovernanceRoles; tests use it to supply role assignments
+	// without Postgres. Production leaves it nil.
+	governanceRoles func(ctx context.Context, principal string) ([]string, error)
 }
 
 func (s *okfServer) readinessCheck() error {
@@ -269,7 +273,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 				ImportStatus: "synced",
 			}
 			result.Added = append(result.Added, file)
-		} else if doc := s.documentForPath(file); doc != nil && doc.ContentHash != existing.ContentHash {
+		} else if doc := s.documentForPath(file); doc != nil && indexedContentHash(doc) != existing.ContentHash {
 			// The indexed document changed independently of its last imported projection.
 			// Keep both versions and require an explicit review.
 			doc.Status = "diverged"
@@ -321,10 +325,11 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 		}
 	}
 
-	// Detect divergence between DB and filesystem
+	// Detect divergence between the indexed (DB) content and the projection
+	// of what was last imported from the repository.
 	for _, doc := range s.documents {
 		proj, ok := s.projections[doc.Path]
-		if ok && doc.ContentHash != proj.ContentHash {
+		if ok && indexedContentHash(doc) != proj.ContentHash {
 			doc.Status = "diverged"
 			proj.ImportStatus = "diverged"
 			result.Diverged = appendUnique(result.Diverged, doc.Path)
@@ -400,6 +405,16 @@ func (s *okfServer) handleDivergence(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
+
+// indexedContentHash hashes the content actually held in the index. The
+// divergence checks must use this rather than doc.ContentHash: that field is
+// loaded from the same okf_concepts.content_hash column as the projection's
+// ContentHash (loadConceptsFromDB) and is assigned alongside it on every
+// import, so comparing the two compared a value with itself and an indexed
+// document edited out of band was never reported as diverged.
+func indexedContentHash(doc *OKFDocument) string {
+	return sha256Hex([]byte(doc.Content))
+}
 
 func (s *okfServer) documentForPath(path string) *OKFDocument {
 	for _, doc := range s.documents {

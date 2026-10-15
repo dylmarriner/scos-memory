@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dylmarriner/scos-memory/packages/auth"
 	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 )
 
@@ -42,7 +43,92 @@ type OKFProposal struct {
 	Diverged     bool   `json:"diverged,omitempty"`
 }
 
-type okfProposalRequest struct{ Path, Content, Proposer, Reviewer string }
+// okfProposalRequest is the create-proposal body. Proposer is not an
+// identity input: handleProposals overwrites it with the principal resolved
+// by resolveProposer before createProposal sees it, and a body value that
+// disagrees with the authenticated caller is refused with 403 rather than
+// silently ignored, so a client that still sends one learns it was wrong.
+type okfProposalRequest struct{ Path, Content, Proposer string }
+
+// systemPrincipalPrefix namespaces the proposers an anonymous internal
+// service (one presenting only the shared static token, which carries no
+// claims) may attribute a proposal to. No system principal can hold a
+// governance role (see resolveReviewRole), so a static-token holder can
+// open proposals for curators to review but can never review, approve or
+// reject one, nor author one in a human principal's name.
+const (
+	systemPrincipalPrefix = "system:"
+	defaultSystemProposer = "system:internal-service"
+)
+
+// reviewRoles are the governance roles that may take and decide an OKF
+// review, in the order one is chosen when the reviewer does not name one.
+// knowledge_curator leads because it was the historical default.
+var reviewRoles = []string{"knowledge_curator", "memory_steward", "system_owner", "auditor"}
+
+// proposalAuthzError is a lifecycle refusal about who is asking rather than
+// what state the proposal is in, so the HTTP layer answers with its status
+// (401/403) instead of the generic 422 used for lifecycle violations.
+type proposalAuthzError struct {
+	status int
+	msg    string
+}
+
+func (e *proposalAuthzError) Error() string { return e.msg }
+
+func forbidden(msg string) error {
+	return &proposalAuthzError{status: http.StatusForbidden, msg: msg}
+}
+
+func proposalErrorStatus(err error) int {
+	var authzErr *proposalAuthzError
+	if errors.As(err, &authzErr) {
+		return authzErr.status
+	}
+	return http.StatusUnprocessableEntity
+}
+
+// resolveProposer derives the author of a new proposal from the
+// authenticated request. A claims-bearing token is the proposer, full stop;
+// an asserted body proposer must equal its principal_id. The shared static
+// service token is authenticated but anonymous, so it may only attribute
+// the proposal to a system: principal (memory-intelligence's auto-promotion
+// does this) and defaults to defaultSystemProposer when it names none.
+func resolveProposer(r *http.Request, asserted string) (string, error) {
+	asserted = strings.TrimSpace(asserted)
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		if asserted != "" && asserted != claims.PrincipalID {
+			return "", forbidden("proposer does not match the authenticated principal")
+		}
+		return claims.PrincipalID, nil
+	}
+	if auth.Identity(r.Context()) == "" {
+		return "", &proposalAuthzError{status: http.StatusUnauthorized, msg: "authentication required"}
+	}
+	if asserted == "" {
+		return defaultSystemProposer, nil
+	}
+	if !strings.HasPrefix(asserted, systemPrincipalPrefix) {
+		return "", forbidden("a token without principal claims may only propose as a " + systemPrincipalPrefix + " principal")
+	}
+	return asserted, nil
+}
+
+// resolveReviewer derives the reviewing principal from the authenticated
+// request's claims. Review decisions are attributable acts, so the
+// anonymous static service token is refused outright, and an asserted body
+// reviewer that is not the caller is refused with 403 -- it is never used
+// to choose whose authority the decision is recorded under.
+func resolveReviewer(r *http.Request, asserted string) (string, error) {
+	claims, ok := auth.CanonicalClaims(r.Context())
+	if !ok {
+		return "", forbidden("review decisions require a bearer token carrying a principal_id claim")
+	}
+	if asserted = strings.TrimSpace(asserted); asserted != "" && asserted != claims.PrincipalID {
+		return "", forbidden("reviewer does not match the authenticated principal")
+	}
+	return claims.PrincipalID, nil
+}
 
 func (s *okfServer) handleProposals(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
@@ -51,6 +137,12 @@ func (s *okfServer) handleProposals(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid proposal", 400)
 			return
 		}
+		proposer, err := resolveProposer(r, req.Proposer)
+		if err != nil {
+			http.Error(w, err.Error(), proposalErrorStatus(err))
+			return
+		}
+		req.Proposer = proposer
 		s.mu.Lock()
 		p, err := s.createProposal(req)
 		s.mu.Unlock()
@@ -90,7 +182,9 @@ func (s *okfServer) handleProposalAction(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		result := s.synchronise(r.Context())
-		if contains(result.Diverged, p.Path) {
+		// synchronise reports okfRoot-joined paths (walkOKFDir), while
+		// p.Path is relative to okfRoot, so compare like with like.
+		if contains(result.Diverged, mustProposalPath(s, p.Path)) {
 			http.Error(w, "post-merge indexing detected divergence", 422)
 			return
 		}
@@ -116,13 +210,19 @@ func (s *okfServer) handleProposalAction(w http.ResponseWriter, r *http.Request)
 	case "diff":
 		p, err = s.diffProposal(r.Context(), id)
 	case "review", "approve", "reject":
+		// Reviewer is an assertion checked against the token, never an
+		// input; Role only selects among roles the caller already holds in
+		// okf_governance_roles (see resolveReviewRole).
 		var req struct{ Reviewer, Role, Reason string }
+		var reviewer string
 		if e := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); e != nil {
 			err = e
+		} else if reviewer, err = resolveReviewer(r, req.Reviewer); err != nil {
+			break
 		} else if action == "review" {
-			p, err = s.reviewProposalAuthorized(r.Context(), id, req.Reviewer, req.Role, req.Reason)
+			p, err = s.reviewProposalAuthorized(r.Context(), id, reviewer, req.Role, req.Reason)
 		} else {
-			p, err = s.decideProposal(r.Context(), id, action == "approve", req.Reviewer, req.Role, req.Reason)
+			p, err = s.decideProposal(r.Context(), id, action == "approve", reviewer, req.Role, req.Reason)
 		}
 	case "merge":
 		p, err = s.mergeProposal(r.Context(), id)
@@ -130,7 +230,7 @@ func (s *okfServer) handleProposalAction(w http.ResponseWriter, r *http.Request)
 		err = errors.New("unknown proposal action")
 	}
 	if err != nil {
-		http.Error(w, err.Error(), 422)
+		http.Error(w, err.Error(), proposalErrorStatus(err))
 		return
 	}
 	writeJSON(w, p)
@@ -238,12 +338,9 @@ func (s *okfServer) reviewProposalAuthorized(ctx context.Context, id, reviewer, 
 		return nil, err
 	}
 	if strings.TrimSpace(reviewer) == "" || reviewer == p.Proposer {
-		return nil, errors.New("independent authorised review is required")
+		return nil, forbidden("independent authorised review is required")
 	}
-	if role == "" {
-		role = "knowledge_curator"
-	}
-	if err = s.requireRole(ctx, reviewer, role); err != nil {
+	if role, err = s.resolveReviewRole(ctx, reviewer, role); err != nil {
 		return nil, err
 	}
 	p.Status = "under_review"
@@ -261,24 +358,17 @@ func (s *okfServer) decideProposal(ctx context.Context, id string, approved bool
 	if err != nil {
 		return nil, err
 	}
-	if reviewer == "" {
-		reviewer = p.Reviewer
-	}
-	if role == "" {
-		role = p.ReviewRole
-	}
-	// reviewProposalAuthorized already rejects reviewer == p.Proposer at the
-	// 'review' step, but that only binds p.Reviewer; a caller of the
-	// 'decide' step could previously pass an explicit req.Reviewer equal to
-	// p.Proposer and, provided that principal also held a governance role,
-	// self-approve a proposal they authored -- defeating the
-	// separation-of-duties invariant the review step exists to establish,
-	// since decideProposal (unlike reviewProposalAuthorized) never checked
-	// identity against the proposer, only role membership via requireRole.
+	// The decider is whoever the HTTP layer authenticated (resolveReviewer);
+	// there is deliberately no fallback to p.Reviewer, because recording a
+	// decision under the identity of the principal who merely claimed the
+	// review would let any token holder decide in that curator's name.
+	// reviewProposalAuthorized rejects reviewer == p.Proposer at the 'review'
+	// step, but that only binds p.Reviewer, so the decision step repeats the
+	// separation-of-duties check against its own caller.
 	if strings.TrimSpace(reviewer) == "" || reviewer == p.Proposer {
-		return nil, errors.New("independent authorised review is required")
+		return nil, forbidden("independent authorised review is required")
 	}
-	if err = s.requireRole(ctx, reviewer, role); err != nil {
+	if role, err = s.resolveReviewRole(ctx, reviewer, role); err != nil {
 		return nil, err
 	}
 	p.Reviewer = reviewer
@@ -311,10 +401,11 @@ func (s *okfServer) mergeProposal(ctx context.Context, id string) (*OKFProposal,
 	current, _ := os.ReadFile(path)
 	if sha256Hex(current) != p.BaseHash {
 		p.Diverged = true
-		if doc := s.documentForPath(p.Path); doc != nil {
+		// Documents and projections are keyed by the okfRoot-joined path.
+		if doc := s.documentForPath(path); doc != nil {
 			doc.Status = "diverged"
 		}
-		if proj := s.projections[p.Path]; proj != nil {
+		if proj := s.projections[path]; proj != nil {
 			proj.ImportStatus = "diverged"
 		}
 		_ = s.persistProposal(ctx, p, p.Status, p.Proposer, p.ReviewRole, "working tree diverged; explicit re-review required")
@@ -349,22 +440,64 @@ func (s *okfServer) proposal(id, status string) (*OKFProposal, error) {
 	}
 	return p, nil
 }
-func (s *okfServer) requireRole(ctx context.Context, principal, role string) error {
-	if role != "system_owner" && role != "knowledge_curator" && role != "auditor" && role != "memory_steward" {
-		return errors.New("unsupported governance role")
+
+// resolveReviewRole establishes, from okf_governance_roles alone, the role a
+// reviewer acts under. A requested role is only a selector: it must be a
+// review role the principal actively holds, otherwise the request is
+// refused (403) rather than recorded under an authority the caller lacks.
+// With no request the first held role in reviewRoles order is used.
+func (s *okfServer) resolveReviewRole(ctx context.Context, principal, requested string) (string, error) {
+	if strings.HasPrefix(principal, systemPrincipalPrefix) {
+		return "", forbidden("system principals cannot hold a governance role")
+	}
+	requested = strings.TrimSpace(requested)
+	if requested != "" && !contains(reviewRoles, requested) {
+		return "", forbidden("unsupported governance role")
+	}
+	held, err := s.activeGovernanceRoles(ctx, principal)
+	if err != nil {
+		return "", err
+	}
+	if requested != "" {
+		if !contains(held, requested) {
+			return "", forbidden("principal is not assigned the required governance role")
+		}
+		return requested, nil
+	}
+	for _, role := range reviewRoles {
+		if contains(held, role) {
+			return role, nil
+		}
+	}
+	return "", forbidden("principal is not assigned a governance role that may review OKF proposals")
+}
+
+// activeGovernanceRoles reads the principal's active roles. It fails closed:
+// a server with neither a role source nor a database authorises nobody.
+func (s *okfServer) activeGovernanceRoles(ctx context.Context, principal string) ([]string, error) {
+	if s.governanceRoles != nil {
+		return s.governanceRoles(ctx, principal)
 	}
 	if s.db == nil {
-		return nil
+		return nil, errors.New("governance role store is not configured")
 	}
-	var ok bool
-	err := s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM okf_governance_roles WHERE principal_id=$1 AND role=$2 AND active)`, principal, role).Scan(&ok)
+	rows, err := s.db.Query(ctx, `SELECT role FROM okf_governance_roles WHERE principal_id=$1 AND active`, principal)
 	if err != nil {
-		return fmt.Errorf("check governance role: %w", err)
+		return nil, fmt.Errorf("check governance role: %w", err)
 	}
-	if !ok {
-		return errors.New("principal is not assigned the required governance role")
+	defer rows.Close()
+	var roles []string
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil, fmt.Errorf("check governance role: %w", err)
+		}
+		roles = append(roles, role)
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("check governance role: %w", err)
+	}
+	return roles, nil
 }
 func (s *okfServer) persistProposal(ctx context.Context, p *OKFProposal, status, actor, role, reason string) error {
 	if s.db == nil {

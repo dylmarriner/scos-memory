@@ -1980,18 +1980,18 @@ func governedTools() []map[string]any {
 		tool("scos_okf_projections", "List OKF index projections", map[string]any{}),
 		tool("scos_okf_divergence", "List OKF documents that have diverged from their source", map[string]any{}),
 		tool("scos_okf_proposal_list", "List OKF change proposals", map[string]any{}),
-		tool("scos_okf_proposal_create", "Create an OKF change proposal", map[string]any{
-			"Path":     strField("Document path"),
-			"Content":  strField("Proposed content"),
-			"Proposer": strField("Proposer identity"),
-			"Reviewer": strField("Requested reviewer"),
-		}, "Path", "Content", "Proposer"),
-		tool("scos_okf_proposal_action", "Act on an OKF proposal: validate, diff, review, approve, reject, or merge", map[string]any{
-			"id":       strField("Proposal ID"),
-			"action":   strField("validate, diff, review, approve, reject, or merge"),
-			"Reviewer": strField("Reviewer identity (for review/approve/reject)"),
-			"Role":     strField("Reviewer role (for review/approve/reject)"),
-			"Reason":   strField("Reason (for review/approve/reject)"),
+		// okf-synchroniser takes proposer and reviewer identity from the
+		// forwarded bearer token's claims only, so neither is a tool argument;
+		// Role merely selects among governance roles the caller already holds.
+		tool("scos_okf_proposal_create", "Create an OKF change proposal; the authenticated caller is the proposer", map[string]any{
+			"Path":    strField("Document path"),
+			"Content": strField("Proposed content"),
+		}, "Path", "Content"),
+		tool("scos_okf_proposal_action", "Act on an OKF proposal: validate, diff, review, approve, or reject (as the authenticated caller, who must not be the proposer), or merge", map[string]any{
+			"id":     strField("Proposal ID"),
+			"action": strField("validate, diff, review, approve, reject, or merge"),
+			"Role":   strField("Governance role to act under, which the caller must hold (optional, for review/approve/reject)"),
+			"Reason": strField("Reason (for review/approve/reject)"),
 		}, "id", "action"),
 	)
 
