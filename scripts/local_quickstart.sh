@@ -61,6 +61,10 @@ set_var SCOS_APP_DATABASE_URL "postgres://scos_app:${SCOS_APP_PASSWORD}@postgres
 # without DEEPSEEK_API_KEY set; compose still requires a non-empty value.
 set_var SCOS_AGENT_ENDPOINT "disabled"
 set_var GRAPHIFY_WORKSPACE_HOST_PATH "$WORKSPACE_DIR"
+# cloud-control-plane is not started locally, but compose interpolates every
+# service's environment, so its required public URL must still resolve: the
+# local mcp-gateway is the public entry point of a local stack.
+set_var SCOS_PUBLIC_GATEWAY_URL "https://127.0.0.1:8098"
 # tunnel-client is excluded from the `up` service list below (see comment at
 # top), but `docker compose config`/`up` interpolate every service's
 # environment up front regardless of which services actually start, so its
