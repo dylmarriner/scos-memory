@@ -2143,7 +2143,7 @@
           el('path', { d, class: 'fx-edge-glow', stroke: color, 'stroke-width': width * 3 }, edgeLayer);
           const path = el('path', { d, class: 'fx-edge', stroke: color, 'stroke-width': width, opacity: 0.55 }, edgeLayer);
           const hit = el('path', { d, class: 'fx-edge-hit' }, edgeLayer);
-          const routes = (e.routes || []).slice(0, 5).map((r) => `<div style="color:var(--text-dim)">${escapeHtml(r.route)} · ${fmtNum(r.requests)}${r.errors ? ` · <span style="color:var(--red)">${r.errors} err</span>` : ''} · ${fmtMs(r.avg_ms)}</div>`).join('');
+          const routes = (e.routes || []).slice(0, 5).map((r) => `<div style="color:var(--text-dim)">${escapeHtml(r.route)} · ${fmtNum(r.requests)}${r.errors ? ` · <span style="color:var(--red)">${r.errors} err</span>` : ''} · ${r.avg_ms != null ? fmtMs(r.avg_ms) : ''}${r.streams ? `${r.avg_ms != null ? ' · ' : ''}${fmtNum(r.streams)} live stream${r.streams === 1 ? '' : 's'}` : ''}</div>`).join('');
           hit.addEventListener('mousemove', (ev) => showTip(ev, `<div><b>${escapeHtml(e.source)}</b> → <b>${escapeHtml(e.target)}</b></div><div>${fmtNum(e.requests)} req · ${fmtNum(e.rate_per_min)}/min</div><div>avg ${fmtMs(e.avg_ms)} · p95 ${fmtMs(e.p95_ms)} · max ${fmtMs(e.max_ms)}</div><div style="color:${errorColor(e.error_ratio)}">5xx ${fmtPct(e.error_ratio)} (${e.errors})</div><div style="color:var(--text-faint)">last activity ${escapeHtml(ago(e.last_activity))}</div>${routes}`));
           hit.addEventListener('mouseenter', () => path.setAttribute('opacity', '1'));
           hit.addEventListener('mouseleave', () => { path.setAttribute('opacity', '0.55'); hideTip(); });
@@ -2760,7 +2760,25 @@
       }
     }
 
+    // null until /api/deployment answers; false on a self-hosted stack that
+    // runs without the cloud control plane (no accounts to sign in to).
+    let accountsEnabled = null;
+
     async function checkSession() {
+      if (accountsEnabled === null) {
+        try {
+          accountsEnabled = (await apiFetch('/api/deployment')).accounts_enabled !== false;
+        } catch (e) {
+          accountsEnabled = true;
+        }
+        const accountBtn = document.querySelector('.tab-btn[data-tab="account"]');
+        if (accountBtn) accountBtn.hidden = !accountsEnabled;
+      }
+      if (!accountsEnabled) {
+        session = null;
+        renderAccountState();
+        return;
+      }
       try {
         session = await apiFetch('/api/me');
       } catch (e) {

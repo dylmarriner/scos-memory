@@ -126,3 +126,38 @@ func TestMiddlewareDisabledIsPassthrough(t *testing.T) {
 		t.Fatal("nil handler")
 	}
 }
+
+func TestMiddlewareRecordsStreamsSeparately(t *testing.T) {
+	var mu sync.Mutex
+	var got []MetricPoint
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var pts []MetricPoint
+		_ = json.NewDecoder(r.Body).Decode(&pts)
+		mu.Lock()
+		got = append(got, pts...)
+		mu.Unlock()
+	}))
+	defer collector.Close()
+
+	e := New("transparency-projection", collector.URL, nil)
+	defer e.Close()
+	h := e.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/transparency/stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+		}
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/transparency/stream", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/transparency/snapshot", nil))
+	if err := e.Flush(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || got[0].Name != MetricHTTPServerStream || got[1].Name != MetricHTTPServerRequest {
+		t.Fatalf("a stream must be recorded as %s and a request as %s, got %+v", MetricHTTPServerStream, MetricHTTPServerRequest, got)
+	}
+	if got[0].Labels["route"] != "/v1/transparency/stream" || got[0].Labels["caller"] != IngressCaller {
+		t.Fatalf("stream point lost its edge labels: %+v", got[0])
+	}
+}

@@ -25,6 +25,13 @@ const IngressCaller = "ingress"
 // caller->service edge.
 const MetricHTTPServerRequest = "scos.http.server.request"
 
+// MetricHTTPServerStream records a streamed (text/event-stream) response
+// with the same labels, valued at how long the connection stayed open. It is
+// a separate measure because a stream's lifetime is not request latency:
+// folding it into MetricHTTPServerRequest would report every open dashboard
+// as a multi-second request on the latency charts and percentiles.
+const MetricHTTPServerStream = "scos.http.server.stream"
+
 // callerTransport stamps CallerHeader on every outbound request that does not
 // already carry one.
 type callerTransport struct {
@@ -110,7 +117,11 @@ func (e *Emitter) Middleware(next http.Handler) http.Handler {
 		sw := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		elapsed := time.Since(started)
-		e.Record(MetricHTTPServerRequest, float64(elapsed.Microseconds())/1000, "ms", map[string]string{
+		metric := MetricHTTPServerRequest
+		if strings.HasPrefix(sw.Header().Get("Content-Type"), "text/event-stream") {
+			metric = MetricHTTPServerStream
+		}
+		e.Record(metric, float64(elapsed.Microseconds())/1000, "ms", map[string]string{
 			"caller": caller,
 			"route":  NormalizeRoute(r.URL.Path),
 			"method": r.Method,

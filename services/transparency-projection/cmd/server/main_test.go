@@ -248,3 +248,24 @@ func TestEventsResumesFromLastEventID(t *testing.T) {
 		t.Fatalf("expected resumed event in response: %s", res.Body.String())
 	}
 }
+
+func TestAccountsDisabledDeploymentAnswersPlainly(t *testing.T) {
+	s := &projectionServer{accountsDisabled: true}
+	res := httptest.NewRecorder()
+	s.deploymentInfo(res, httptest.NewRequest(http.MethodGet, "/api/deployment", nil))
+	if res.Code != http.StatusOK || strings.TrimSpace(res.Body.String()) != `{"accounts_enabled":false}` {
+		t.Fatalf("deployment info = %d %s", res.Code, res.Body.String())
+	}
+	res = httptest.NewRecorder()
+	s.cloudAPI(res, httptest.NewRequest(http.MethodGet, "/api/me", nil))
+	if res.Code != http.StatusNotFound || !strings.Contains(res.Body.String(), "accounts are not enabled") {
+		t.Fatalf("account API on an accounts-disabled deployment = %d %s", res.Code, res.Body.String())
+	}
+
+	enabled := &projectionServer{cloudControlPlaneURL: "https://cloud-control-plane:8079"}
+	res = httptest.NewRecorder()
+	enabled.deploymentInfo(res, httptest.NewRequest(http.MethodGet, "/api/deployment", nil))
+	if strings.TrimSpace(res.Body.String()) != `{"accounts_enabled":true}` {
+		t.Fatalf("deployment info with accounts = %s", res.Body.String())
+	}
+}

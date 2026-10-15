@@ -546,7 +546,7 @@ paths:
         - {name: range, in: query, required: false, schema: {type: string, example: 15m}}
         - {name: to, in: query, required: false, schema: {type: string, format: date-time}}
       responses:
-        '200': {description: 'Nodes and edges with request counts, error ratio, average and p95 latency, top routes and a sparkline'}
+        '200': {description: 'Nodes and edges with request counts, error ratio, average and p95 request latency, top routes and a sparkline. Event-stream connections (scos.http.server.stream) count as traffic on their edge and route (route.streams) but are excluded from latency figures'}
         '400': {description: Invalid window}
   /v1/proxy/restore/{restorationHandle}:
     get:

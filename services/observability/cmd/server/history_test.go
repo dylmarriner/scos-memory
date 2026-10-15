@@ -335,3 +335,43 @@ func TestBenchmarkRunsRecordAndServeHistory(t *testing.T) {
 		t.Fatalf("POST /v1/benchmarks status %d", w.Code)
 	}
 }
+
+// TestFlowsCountStreamsWithoutCountingTheirLifetimeAsLatency guards that a
+// long-lived event stream shows as traffic on its edge but never inflates
+// the edge's or service's request latency.
+func TestFlowsCountStreamsWithoutCountingTheirLifetimeAsLatency(t *testing.T) {
+	s := newTestServer(t)
+	now := time.Now().UTC()
+	stream := requestPoint(now.Add(-time.Minute), "ingress", "transparency-projection", "/v1/transparency/stream", "200", 10000)
+	stream.Name = streamMetricName
+	ingest(t, s, []MetricPoint{
+		requestPoint(now.Add(-time.Minute), "ingress", "transparency-projection", "/v1/transparency/snapshot", "200", 20),
+		requestPoint(now.Add(-time.Minute), "ingress", "transparency-projection", "/v1/transparency/snapshot", "200", 30),
+		stream,
+	})
+	w := httptest.NewRecorder()
+	s.handleFlows(w, httptest.NewRequest(http.MethodGet, "/v1/flows?range=15m", nil))
+	var resp flowResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Edges) != 1 {
+		t.Fatalf("edges = %+v", resp.Edges)
+	}
+	e := resp.Edges[0]
+	if e.Requests != 3 || e.MaxMs != 30 || e.AvgMs != 25 || e.P95Ms == nil || *e.P95Ms > 30 {
+		t.Fatalf("stream lifetime leaked into latency: %+v", e)
+	}
+	routes := map[string]flowRoute{}
+	for _, r := range e.Routes {
+		routes[r.Route] = r
+	}
+	if r := routes["/v1/transparency/stream"]; r.Requests != 1 || r.Streams != 1 || r.AvgMs != nil {
+		t.Fatalf("stream route = %+v", r)
+	}
+	for _, n := range resp.Nodes {
+		if n.ID == "transparency-projection" && (n.Inbound != 3 || n.P95Ms == nil || *n.P95Ms > 30) {
+			t.Fatalf("node = %+v", n)
+		}
+	}
+}

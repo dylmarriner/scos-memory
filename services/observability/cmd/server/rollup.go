@@ -33,6 +33,10 @@ const (
 	histogramBuckets = 20
 
 	requestMetricName = "scos.http.server.request"
+	// streamMetricName is a streamed response's connection lifetime. Flows
+	// count stream connections as traffic on their edge, but their duration
+	// is never request latency.
+	streamMetricName = "scos.http.server.stream"
 )
 
 type rollupSeriesKey struct {
@@ -220,7 +224,7 @@ func seriesKeyFor(p *MetricPoint) rollupSeriesKey {
 	key := rollupSeriesKey{Name: p.Name}
 	if p.Labels != nil {
 		key.Service = p.Labels["service"]
-		if p.Name == requestMetricName {
+		if p.Name == requestMetricName || p.Name == streamMetricName {
 			key.Caller = p.Labels["caller"]
 			key.Route = p.Labels["route"]
 		}
@@ -572,10 +576,11 @@ func (r *rollupStore) catalog(from time.Time, res string) []catalogEntry {
 // ── flows ───────────────────────────────────────────────────────────────
 
 type flowRoute struct {
-	Route    string  `json:"route"`
-	Requests int64   `json:"requests"`
-	Errors   int64   `json:"errors"`
-	AvgMs    float64 `json:"avg_ms"`
+	Route    string   `json:"route"`
+	Requests int64    `json:"requests"`
+	Errors   int64    `json:"errors"`
+	AvgMs    *float64 `json:"avg_ms,omitempty"`
+	Streams  int64    `json:"streams,omitempty"`
 }
 
 type flowEdge struct {
@@ -619,21 +624,26 @@ const flowSparkSlots = 30
 
 func (r *rollupStore) flows(from, to time.Time, res string) flowResponse {
 	type edgeAcc struct {
-		total  rollupAgg
-		routes map[string]*rollupAgg
-		spark  []int64
-		lastAt int64
+		total   rollupAgg // request latency measures only
+		streams int64     // stream connections, counted as traffic
+		sErrors int64
+		routes  map[string]*rollupAgg
+		rStream map[string]int64
+		spark   []int64
+		lastAt  int64
 	}
 	edges := map[[2]string]*edgeAcc{}
 	inbound := map[string]*rollupAgg{}
+	inboundStreams := map[string][2]int64{} // service -> {connections, errors}
 	outbound := map[string]int64{}
 	fromU, toU := from.Unix(), to.Unix()
 	span := toU - fromU + 1
 	r.mu.RLock()
 	for key, agg := range r.buckets {
-		if key.Resolution != res || key.Name != requestMetricName || key.Bucket < fromU || key.Bucket > toU || key.Service == "" {
+		if key.Resolution != res || (key.Name != requestMetricName && key.Name != streamMetricName) || key.Bucket < fromU || key.Bucket > toU || key.Service == "" {
 			continue
 		}
+		stream := key.Name == streamMetricName
 		caller := key.Caller
 		if caller == "" {
 			caller = "ingress"
@@ -641,16 +651,23 @@ func (r *rollupStore) flows(from, to time.Time, res string) flowResponse {
 		ek := [2]string{caller, key.Service}
 		e := edges[ek]
 		if e == nil {
-			e = &edgeAcc{routes: map[string]*rollupAgg{}, spark: make([]int64, flowSparkSlots), lastAt: -1}
+			e = &edgeAcc{routes: map[string]*rollupAgg{}, rStream: map[string]int64{}, spark: make([]int64, flowSparkSlots), lastAt: -1}
 			edges[ek] = e
 		}
-		e.total.merge(agg)
 		ra := e.routes[key.Route]
 		if ra == nil {
 			ra = &rollupAgg{}
 			e.routes[key.Route] = ra
 		}
-		ra.merge(agg)
+		if stream {
+			e.streams += agg.Count
+			e.sErrors += agg.Errors
+			e.rStream[key.Route] += agg.Count
+			ra.Errors += agg.Errors
+		} else {
+			e.total.merge(agg)
+			ra.merge(agg)
+		}
 		slot := int((key.Bucket - fromU) * flowSparkSlots / span)
 		if slot >= flowSparkSlots {
 			slot = flowSparkSlots - 1
@@ -664,7 +681,12 @@ func (r *rollupStore) flows(from, to time.Time, res string) flowResponse {
 			in = &rollupAgg{}
 			inbound[key.Service] = in
 		}
-		in.merge(agg)
+		if stream {
+			s := inboundStreams[key.Service]
+			inboundStreams[key.Service] = [2]int64{s[0] + agg.Count, s[1] + agg.Errors}
+		} else {
+			in.merge(agg)
+		}
 		outbound[caller] += agg.Count
 	}
 	r.mu.RUnlock()
@@ -675,27 +697,31 @@ func (r *rollupStore) flows(from, to time.Time, res string) flowResponse {
 	}
 	resp := flowResponse{From: from.UTC().Format(time.RFC3339), To: to.UTC().Format(time.RFC3339), Resolution: res, Window: to.Sub(from).String()}
 	for ek, e := range edges {
+		requests := e.total.Count + e.streams
 		fe := flowEdge{
 			Source:       ek[0],
 			Target:       ek[1],
-			Requests:     e.total.Count,
-			Errors:       e.total.Errors,
-			RatePerMin:   float64(e.total.Count) / minutes,
+			Requests:     requests,
+			Errors:       e.total.Errors + e.sErrors,
+			RatePerMin:   float64(requests) / minutes,
 			MaxMs:        e.total.Max,
 			LastActivity: time.Unix(e.lastAt, 0).UTC().Format(time.RFC3339),
 			Sparkline:    e.spark,
 		}
 		if e.total.Count > 0 {
 			fe.AvgMs = e.total.Sum / float64(e.total.Count)
-			fe.ErrorRatio = float64(e.total.Errors) / float64(e.total.Count)
+		}
+		if requests > 0 {
+			fe.ErrorRatio = float64(fe.Errors) / float64(requests)
 		}
 		if v, ok := e.total.quantile(0.95); ok {
 			fe.P95Ms = &v
 		}
 		for route, ra := range e.routes {
-			fr := flowRoute{Route: route, Requests: ra.Count, Errors: ra.Errors}
+			fr := flowRoute{Route: route, Requests: ra.Count + e.rStream[route], Errors: ra.Errors, Streams: e.rStream[route]}
 			if ra.Count > 0 {
-				fr.AvgMs = ra.Sum / float64(ra.Count)
+				avg := ra.Sum / float64(ra.Count)
+				fr.AvgMs = &avg
 			}
 			fe.Routes = append(fe.Routes, fr)
 		}
@@ -731,11 +757,14 @@ func (r *rollupStore) flows(from, to time.Time, res string) flowResponse {
 			n.Kind = "ingress"
 		}
 		if in := inbound[id]; in != nil {
-			n.Inbound = in.Count
-			n.Errors = in.Errors
+			streams := inboundStreams[id]
+			n.Inbound = in.Count + streams[0]
+			n.Errors = in.Errors + streams[1]
 			if in.Count > 0 {
 				n.AvgMs = in.Sum / float64(in.Count)
-				n.ErrorRatio = float64(in.Errors) / float64(in.Count)
+			}
+			if n.Inbound > 0 {
+				n.ErrorRatio = float64(n.Errors) / float64(n.Inbound)
 			}
 			if v, ok := in.quantile(0.95); ok {
 				n.P95Ms = &v

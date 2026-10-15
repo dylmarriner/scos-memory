@@ -33,6 +33,7 @@ type projectionServer struct {
 	upstream             string // primary dependency (memory-intelligence), used for readiness
 	upstreams            map[string]string
 	cloudControlPlaneURL string       // same-origin browser API proxy for account/admin views
+	accountsDisabled     bool         // SCOS_CLOUD_CONTROL_PLANE_URL=disabled: this deployment runs without accounts
 	controlPlaneToken    string       // forwarded to control-plane-protected upstreams (code-intelligence etc.)
 	client               *http.Client // fast client for health probes and event streaming
 	snapshotClient       *http.Client // slow client for snapshot assembly (heavyweight views)
@@ -96,6 +97,7 @@ func main() {
 		upstream:             upstreams["memory_intelligence"],
 		upstreams:            upstreams,
 		cloudControlPlaneURL: upstreams["cloud_control_plane"],
+		accountsDisabled:     strings.EqualFold(upstreams["cloud_control_plane"], "disabled"),
 		controlPlaneToken:    strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		client:               client,
 		editPassphrase:       strings.TrimSpace(os.Getenv("SCOS_DASHBOARD_EDIT_PASSPHRASE")),
@@ -143,6 +145,10 @@ func main() {
 		// requests same-origin from the browser and proxy only the cloud API
 		// namespace; the cloud service remains responsible for authentication
 		// and authorization on every endpoint.
+		if r.URL.Path == "/api/deployment" {
+			s.deploymentInfo(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			s.cloudAPI(w, r)
 			return
@@ -535,7 +541,22 @@ func (s *projectionServer) graphify(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// deploymentInfo tells the dashboard which optional features this
+// deployment runs, so it never offers account forms a self-hosted stack
+// without the cloud control plane could not serve.
+func (s *projectionServer) deploymentInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"accounts_enabled": !s.accountsDisabled})
+}
+
 func (s *projectionServer) cloudAPI(w http.ResponseWriter, r *http.Request) {
+	if s.accountsDisabled {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "accounts are not enabled on this deployment"})
+		return
+	}
 	if s.cloudControlPlaneURL == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "cloud control plane is not configured"})
 		return
