@@ -325,43 +325,86 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		}
 		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v1/repos/"+repoID)
 	case "scos_code_index":
-		if durableID := stringArg(args, "durable_repository_id"); durableID != "" {
-			branch := stringArg(args, "branch")
-			commitID := stringArg(args, "commit_id")
-			files, ok := args["files"].([]any)
-			if branch == "" || commitID == "" || !ok || len(files) == 0 {
-				return nil, fmt.Errorf("durable code index requires branch, commit_id, and structured files")
+		repositoryID, err := s.durableRepositoryID(ctx, r, args)
+		if err != nil {
+			return nil, err
+		}
+		files, hasFiles := args["files"].([]any)
+		if !hasFiles || len(files) == 0 {
+			// The repository is read from the mounted workspace by
+			// code-intelligence itself: nothing has to be uploaded.
+			return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/scan", map[string]any{"repository_id": repositoryID})
+		}
+		branch, commitID := stringArg(args, "branch"), stringArg(args, "commit_id")
+		if branch == "" || commitID == "" {
+			return nil, fmt.Errorf("uploading files requires branch and commit_id; omit files to index the repository from the workspace")
+		}
+		for _, file := range files {
+			if _, ok := file.(map[string]any); !ok {
+				return nil, fmt.Errorf("uploaded files must be objects with path, content_hash and content")
 			}
-			for _, file := range files {
-				if _, ok := file.(map[string]any); !ok {
-					return nil, fmt.Errorf("durable code index files must be objects with path and content_hash")
+		}
+		payload := map[string]any{"repository_id": repositoryID, "branch": branch, "commit_id": commitID, "files": files}
+		for _, key := range []string{"extractor_version", "configuration_hash"} {
+			if value := stringArg(args, key); value != "" {
+				payload[key] = value
+			}
+		}
+		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/index", payload)
+	case "scos_code_index_status":
+		snapshotID := stringArg(args, "snapshot_id")
+		if snapshotID == "" {
+			return nil, fmt.Errorf("snapshot_id is required (from scos_code_index)")
+		}
+		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v2/code/snapshots/"+url.PathEscape(snapshotID))
+	case "scos_code_query":
+		repositoryID, err := s.durableRepositoryID(ctx, r, args)
+		if err != nil {
+			return nil, err
+		}
+		payload := map[string]any{"repository_id": repositoryID, "query": stringArg(args, "query")}
+		if branch := stringArg(args, "branch"); branch != "" {
+			payload["branch"] = branch
+		}
+		if maxResults, ok := args["max_results"]; ok {
+			payload["max_results"] = maxResults
+		}
+		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/query", payload)
+	case "scos_code_impact":
+		repositoryID, err := s.durableRepositoryID(ctx, r, args)
+		if err != nil {
+			return nil, err
+		}
+		symbols := []string{}
+		if symbol := stringArg(args, "symbol"); symbol != "" {
+			symbols = append(symbols, symbol)
+		}
+		if list, ok := args["modified_symbols"].([]any); ok {
+			for _, item := range list {
+				if symbol, ok := item.(string); ok && symbol != "" {
+					symbols = append(symbols, symbol)
 				}
 			}
-			payload := map[string]any{"repository_id": durableID, "branch": branch, "commit_id": commitID, "files": files}
-			if value := stringArg(args, "extractor_version"); value != "" {
-				payload["extractor_version"] = value
-			}
-			if value := stringArg(args, "configuration_hash"); value != "" {
-				payload["configuration_hash"] = value
-			}
-			return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/index", payload)
 		}
-		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/index", args)
-	case "scos_code_query":
-		if durableID := stringArg(args, "durable_repository_id"); durableID != "" {
-			branch := stringArg(args, "branch")
-			if branch == "" {
-				return nil, fmt.Errorf("branch is required with durable_repository_id")
-			}
-			payload := map[string]any{"repository_id": durableID, "branch": branch, "query": stringArg(args, "query")}
-			if maxResults, ok := args["max_results"]; ok {
-				payload["max_results"] = maxResults
-			}
-			return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/query", payload)
+		if len(symbols) == 0 {
+			return nil, fmt.Errorf("symbol (or modified_symbols) is required")
 		}
-		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/query", args)
-	case "scos_code_impact":
-		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v1/impact", args)
+		impacts := make([]any, 0, len(symbols))
+		for _, symbol := range symbols {
+			payload := map[string]any{"repository_id": repositoryID, "query": symbol}
+			if branch := stringArg(args, "branch"); branch != "" {
+				payload["branch"] = branch
+			}
+			if depth, ok := args["max_depth"]; ok {
+				payload["max_depth"] = depth
+			}
+			impact, err := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/impact", payload)
+			if err != nil {
+				return nil, fmt.Errorf("impact of %s: %w", symbol, err)
+			}
+			impacts = append(impacts, map[string]any{"symbol": symbol, "impact": impact})
+		}
+		return map[string]any{"repository_id": repositoryID, "impacts": impacts}, nil
 	case "scos_link_evidence":
 		factID := stringArg(args, "fact_id")
 		symbolVersionID := stringArg(args, "code_symbol_version_id")
@@ -907,6 +950,60 @@ func (s *gatewayServer) forwardWithBody(ctx context.Context, r *http.Request, me
 	return result, nil
 }
 
+// durableRepositoryID resolves the repository a code tool names to its
+// durable (snapshot) repository id. scos_code_repo_register returns both a
+// legacy id and the durable id; either is accepted, the legacy one being
+// resolved through its canonical path.
+func (s *gatewayServer) durableRepositoryID(ctx context.Context, r *http.Request, args map[string]any) (string, error) {
+	id := stringArg(args, "durable_repository_id")
+	if id == "" {
+		id = stringArg(args, "repository_id")
+	}
+	if id == "" {
+		return "", fmt.Errorf("repository_id is required (from scos_code_repo_register)")
+	}
+	if isUUID(id) {
+		return id, nil
+	}
+	legacy, err := s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v1/repos/"+url.PathEscape(id))
+	if err != nil {
+		return "", err
+	}
+	repo, _ := legacy.(map[string]any)
+	path, _ := repo["canonical_path"].(string)
+	if path == "" {
+		return "", fmt.Errorf("repository %s has no canonical path", id)
+	}
+	durable, err := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/repos", map[string]any{"canonical_path": path})
+	if err != nil {
+		return "", err
+	}
+	dm, _ := durable.(map[string]any)
+	durableID, _ := dm["repository_id"].(string)
+	if durableID == "" {
+		return "", fmt.Errorf("code-intelligence returned no durable repository for %s", path)
+	}
+	return durableID, nil
+}
+
+func isUUID(v string) bool {
+	if len(v) != 36 {
+		return false
+	}
+	for i, c := range v {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return false
+		}
+	}
+	return true
+}
+
 func stringArg(args map[string]any, key string) string {
 	value, _ := args[key].(string)
 	return value
@@ -1279,58 +1376,59 @@ func governedTools() []map[string]any {
 		},
 		{
 			"name":        "scos_code_index",
-			"description": "Index (or re-index) files in a repository for code intelligence search",
+			"description": "Index a registered repository so it can be queried. Returns at once with a snapshot_id; follow it with scos_code_index_status. With just repository_id, code-intelligence reads the repository from the mounted workspace itself (Go AST and Tree-sitter for Python/TypeScript/JavaScript/Rust), records the branch and commit from its git checkout, and indexes only what changed since the last snapshot. Uploading files is only needed for repositories outside the workspace",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"repository_id":         map[string]any{"type": "string", "description": "Legacy repository identifier"},
-					"durable_repository_id": map[string]any{"type": "string", "description": "Durable repository UUID returned by scos_code_repo_register; supplying it activates P4 snapshot indexing"},
-					"branch":                map[string]any{"type": "string", "description": "Branch for durable snapshot indexing"},
-					"commit_id":             map[string]any{"type": "string", "description": "Commit SHA being indexed"},
-					"extractor_version":     map[string]any{"type": "string", "description": "Extractor version for durable snapshot identity"},
-					"configuration_hash":    map[string]any{"type": "string", "description": "Indexer configuration hash"},
-					"files": map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{
-						map[string]any{"type": "string"},
-						map[string]any{"type": "object", "properties": map[string]any{
-							"path": map[string]any{"type": "string"}, "language": map[string]any{"type": "string"},
-							"content_hash": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"},
-						}, "required": []string{"path", "content_hash"}},
-					}}, "description": "Legacy path strings, or structured files for durable P4 indexing"},
+					"repository_id": map[string]any{"type": "string", "description": "Repository id from scos_code_repo_register (either id it returns)"},
+					"branch":        map[string]any{"type": "string", "description": "Upload mode only: branch the files belong to"},
+					"commit_id":     map[string]any{"type": "string", "description": "Upload mode only: commit the files belong to"},
+					"files": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+						"path": map[string]any{"type": "string"}, "language": map[string]any{"type": "string"},
+						"content_hash": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"},
+					}, "required": []string{"path", "content_hash"}}, "description": "Upload mode only: files to index instead of reading the workspace"},
 				},
-				"required": []string{"repository_id", "files"},
+				"required": []string{"repository_id"},
+			},
+		},
+		{
+			"name":        "scos_code_index_status",
+			"description": "Progress of a repository index started by scos_code_index: indexing, ready (with file and symbol counts) or failed (with the reason)",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"snapshot_id": map[string]any{"type": "string", "description": "snapshot_id returned by scos_code_index"},
+				},
+				"required": []string{"snapshot_id"},
 			},
 		},
 		{
 			"name":        "scos_code_query",
-			"description": "Query indexed code by symbol, path, or natural-language intent",
+			"description": "Search an indexed repository by symbol name, qualified name, path or natural-language description; returns ranked symbols with their file, kind and signature",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"intent":                map[string]any{"type": "string", "description": "Query intent, e.g. \"definition\", \"references\", \"search\""},
-					"query":                 map[string]any{"type": "string", "description": "Search text"},
-					"repository_id":         map[string]any{"type": "string", "description": "Legacy repository identifier"},
-					"durable_repository_id": map[string]any{"type": "string", "description": "Durable repository UUID; with branch, activates P4 lexical+dense+structural+PageRank retrieval"},
-					"path":                  map[string]any{"type": "string", "description": "File path filter"},
-					"symbol_name":           map[string]any{"type": "string", "description": "Symbol name filter"},
-					"language":              map[string]any{"type": "string", "description": "Language filter"},
-					"branch":                map[string]any{"type": "string", "description": "Branch filter"},
-					"max_results":           map[string]any{"type": "integer", "description": "Max results"},
-					"include_docs":          map[string]any{"type": "boolean", "description": "Include doc comments in results"},
+					"repository_id": map[string]any{"type": "string", "description": "Repository id from scos_code_repo_register"},
+					"query":         map[string]any{"type": "string", "description": "Symbol, path or description to search for"},
+					"branch":        map[string]any{"type": "string", "description": "Defaults to the most recently indexed branch"},
+					"max_results":   map[string]any{"type": "integer", "description": "Max results"},
 				},
-				"required": []string{"intent", "query"},
+				"required": []string{"repository_id", "query"},
 			},
 		},
 		{
 			"name":        "scos_code_impact",
-			"description": "Compute the change-impact set for modified symbols in a repository",
+			"description": "What depends on a symbol: its callers and transitive dependants in the indexed call graph, and the tests that reach it. Use before changing a function or type",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"repository_id":    map[string]any{"type": "string", "description": "Repository identifier"},
-					"commit_id":        map[string]any{"type": "string", "description": "Commit SHA"},
-					"modified_symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Symbols that were modified"},
+					"repository_id":    map[string]any{"type": "string", "description": "Repository id from scos_code_repo_register"},
+					"symbol":           map[string]any{"type": "string", "description": "Symbol name or qualified name being changed"},
+					"modified_symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Several symbols at once"},
+					"branch":           map[string]any{"type": "string", "description": "Defaults to the most recently indexed branch"},
+					"max_depth":        map[string]any{"type": "integer", "description": "How far to follow dependants"},
 				},
-				"required": []string{"repository_id", "modified_symbols"},
+				"required": []string{"repository_id"},
 			},
 		},
 		{

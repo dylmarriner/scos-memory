@@ -408,6 +408,11 @@ func main() {
 	}
 	database.TuneSQLDB(db)
 	srv.pgStore = newPGCodeStore(db)
+	if n, err := srv.pgStore.FailInterruptedSnapshots(context.Background()); err != nil {
+		log.Printf("mark interrupted code snapshots failed: %v", err)
+	} else if n > 0 {
+		log.Printf("marked %d code snapshot(s) interrupted by a previous stop as failed", n)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -457,6 +462,8 @@ func main() {
 	// 503 on every route when SCOS_DATABASE_URL is not configured.
 	mux.HandleFunc("/v2/code/repos", srv.handlePGRepos)
 	mux.HandleFunc("/v2/code/index", srv.handlePGIndex)
+	mux.HandleFunc("/v2/code/scan", srv.handlePGScan)
+	mux.HandleFunc("/v2/code/snapshots/", srv.handlePGSnapshot)
 	mux.HandleFunc("/v2/code/query", srv.handlePGQuery)
 	mux.HandleFunc("/v2/code/snapshots/diff", srv.handlePGSnapshotDiff)
 	mux.HandleFunc("/v2/code/settings", srv.handlePGSettings)

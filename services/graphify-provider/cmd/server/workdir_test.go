@@ -142,3 +142,23 @@ func TestRejectFlagLike(t *testing.T) {
 		t.Fatalf("an ordinary value must be accepted: %v", err)
 	}
 }
+
+// Agents name repositories by host path; the host workspace is mounted at
+// the allowed root, so a host path maps to the same repository inside it,
+// and a host path outside the workspace is still refused.
+func TestResolveWorkDirTranslatesHostWorkspacePaths(t *testing.T) {
+	allowed := t.TempDir()
+	repo := filepath.Join(allowed, "proj")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCOS_WORKSPACE_HOST_PATH", "/home/dev/code")
+	s := &graphifyServer{allowedRoot: allowed, repoPath: allowed}
+	want, _ := filepath.EvalSymlinks(repo)
+	if got, err := s.resolveWorkDir("/home/dev/code/proj"); err != nil || got != want {
+		t.Fatalf("host path resolved to %q, %v; want %q", got, err, want)
+	}
+	if got, err := s.resolveWorkDir("/home/dev/elsewhere"); err == nil {
+		t.Fatalf("a host path outside the workspace was accepted as %q", got)
+	}
+}

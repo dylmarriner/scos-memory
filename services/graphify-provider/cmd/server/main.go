@@ -93,7 +93,15 @@ func (s *graphifyServer) resolveWorkDir(requested string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("configured allowed root is unavailable")
 	}
-	clean, err := filepath.EvalSymlinks(filepath.Clean(requested))
+	// Agents name repositories by their host path; the workspace that holds
+	// them (SCOS_WORKSPACE_HOST_PATH) is mounted at the allowed root.
+	requested = filepath.Clean(requested)
+	if host := strings.TrimSpace(os.Getenv("SCOS_WORKSPACE_HOST_PATH")); host != "" {
+		if rel, err := filepath.Rel(filepath.Clean(host), requested); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			requested = filepath.Join(s.allowedRoot, rel)
+		}
+	}
+	clean, err := filepath.EvalSymlinks(requested)
 	if err != nil {
 		return "", fmt.Errorf("repo_path %s is not an accessible directory", filepath.Clean(requested))
 	}

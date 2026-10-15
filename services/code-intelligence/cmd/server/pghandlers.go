@@ -6,8 +6,12 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 )
+
+// bareIdentifier matches a single unqualified declaration name.
+var bareIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // v2 handlers expose pgCodeStore over HTTP, additive alongside every
 // existing /v1/* route, which keeps working unchanged against the
@@ -228,40 +232,12 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		files = append(files, PGFileInput{Path: f.Path, Language: f.Language, ContentHash: f.ContentHash, Content: f.Content})
 	}
 
-	snapshotID, err := s.pgStore.CreateSnapshot(r.Context(), req.RepositoryID, tenant, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)
+	result, err := s.indexDurableSnapshot(r.Context(), tenant, req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash, files)
 	if err != nil {
-		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.pgStore.IndexSnapshot(r.Context(), snapshotID, req.RepositoryID, files); err != nil {
-		http.Error(w, "index snapshot: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	degradedModels := []string{}
-	if codeModelRuntimeConfigured() {
-		if err := s.embedCodeSnapshot(r.Context(), tenant, snapshotID); err != nil {
-			log.Printf("code embedding backfill degraded for snapshot %s: %v", snapshotID, err)
-			degradedModels = append(degradedModels, "code_embedding")
-		}
-	}
-	// The diff against whatever was previously active for this branch is
-	// returned inline rather than requiring a second round-trip: it's the
-	// cheapest possible way for a caller to confirm an incremental index
-	// actually stayed incremental (blueprint §35's completion gate -- "a
-	// one-line change in one file must not trigger a full repository
-	// re-index" -- is directly checkable from this response: Modified
-	// should have one entry, not len(files)).
-	diff, err := s.pgStore.DiffSnapshot(r.Context(), snapshotID)
-	if err != nil {
-		http.Error(w, "diff snapshot: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{
-		"snapshot_id":     snapshotID,
-		"file_count":      len(files),
-		"diff":            diff,
-		"degraded_models": degradedModels,
-	})
+	writeJSON(w, result)
 }
 
 func (s *server) handlePGSnapshotDiff(w http.ResponseWriter, r *http.Request) {
@@ -358,9 +334,25 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.RepositoryID == "" || req.Branch == "" || req.Query == "" {
-		http.Error(w, "repository_id, branch and query are required", http.StatusBadRequest)
+	if req.RepositoryID == "" || req.Query == "" {
+		http.Error(w, "repository_id and query are required", http.StatusBadRequest)
 		return
+	}
+	if req.Branch == "" {
+		branch, err := s.pgStore.LatestIndexedBranch(r.Context(), req.RepositoryID, tenant)
+		if err != nil {
+			http.Error(w, "resolve branch: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if branch == "" {
+			if building, err := s.pgStore.IndexingSnapshot(r.Context(), req.RepositoryID, tenant); err == nil && building != "" {
+				http.Error(w, "repository is still being indexed (snapshot "+building+"); check scos_code_index_status", http.StatusConflict)
+				return
+			}
+			http.Error(w, "repository has no indexed snapshot yet; run scos_code_index first", http.StatusNotFound)
+			return
+		}
+		req.Branch = branch
 	}
 	limit := req.MaxResults
 	if limit <= 0 {
@@ -393,6 +385,15 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// A bare identifier ("SignClaims") names a declaration as surely as its
+	// qualified name does, so it anchors the same way when it is exactly the
+	// final segment of a function, method or type.
+	if len(exact) == 0 && bareIdentifier.MatchString(req.Query) {
+		if exact, err = s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, "%."+req.Query); err != nil {
+			http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	// Exact path/FQN matches are precision anchors. Never bury one under
 	// learned or lexical ranking just because a model happens to like another
@@ -521,9 +522,25 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.RepositoryID == "" || req.Branch == "" || req.Query == "" {
-		http.Error(w, "repository_id, branch and query are required", http.StatusBadRequest)
+	if req.RepositoryID == "" || req.Query == "" {
+		http.Error(w, "repository_id and query are required", http.StatusBadRequest)
 		return
+	}
+	if req.Branch == "" {
+		branch, err := s.pgStore.LatestIndexedBranch(r.Context(), req.RepositoryID, tenant)
+		if err != nil {
+			http.Error(w, "resolve branch: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if branch == "" {
+			if building, err := s.pgStore.IndexingSnapshot(r.Context(), req.RepositoryID, tenant); err == nil && building != "" {
+				http.Error(w, "repository is still being indexed (snapshot "+building+"); check scos_code_index_status", http.StatusConflict)
+				return
+			}
+			http.Error(w, "repository has no indexed snapshot yet; run scos_code_index first", http.StatusNotFound)
+			return
+		}
+		req.Branch = branch
 	}
 
 	// Same tenant-ownership rule as handlePGQuery: a repository belonging

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
@@ -12,8 +13,8 @@ import (
 
 func TestGovernedToolsListsAllGovernedTools(t *testing.T) {
 	tools := governedTools()
-	if len(tools) != 150 {
-		t.Fatalf("expected 150 governed tools, got %d", len(tools))
+	if len(tools) != 151 {
+		t.Fatalf("expected 151 governed tools, got %d", len(tools))
 	}
 	names := governedToolNames()
 	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_remember", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain"} {
@@ -46,8 +47,8 @@ func TestHandleMCPToolsList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(resp.Result.Tools) != 150 {
-		t.Fatalf("expected 150 tools in tools/list response, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 151 {
+		t.Fatalf("expected 151 tools in tools/list response, got %d", len(resp.Result.Tools))
 	}
 }
 
@@ -292,19 +293,61 @@ func TestDispatchCodeQueryUsesDurableV2WhenDurableIDProvided(t *testing.T) {
 	}
 }
 
-func TestDispatchCodeQueryKeepsLegacyV1Fallback(t *testing.T) {
+func TestDispatchCodeQueryResolvesLegacyIDToDurableRepository(t *testing.T) {
+	const durable = "22222222-2222-2222-2222-222222222222"
+	var calls []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/query" {
-			t.Fatalf("path = %q", r.URL.Path)
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/v1/repos/repo-7":
+			_ = json.NewEncoder(w).Encode(map[string]any{"repository_id": "repo-7", "canonical_path": "/work/repo"})
+		case "/v2/code/repos":
+			_ = json.NewEncoder(w).Encode(map[string]any{"repository_id": durable})
+		case "/v2/code/query":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["repository_id"] != durable || body["query"] != "auth middleware" {
+				t.Fatalf("query body %#v", body)
+			}
+			if _, has := body["branch"]; has {
+				t.Fatalf("an unset branch must be left to code-intelligence: %#v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
 	}))
 	defer upstream.Close()
 	s := &gatewayServer{codeIntelligenceURL: upstream.URL, client: upstream.Client()}
 	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	_, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}, "scos_code_query", map[string]any{"intent": "search", "query": "auth middleware", "repository_id": "repo-7"})
-	if err != nil {
+	if _, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}, "scos_code_query", map[string]any{"query": "auth middleware", "repository_id": "repo-7"}); err != nil {
 		t.Fatal(err)
+	}
+	if strings.Join(calls, ",") != "GET /v1/repos/repo-7,POST /v2/code/repos,POST /v2/code/query" {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+func TestDispatchCodeIndexScansTheWorkspaceWhenNoFilesAreUploaded(t *testing.T) {
+	const durable = "33333333-3333-3333-3333-333333333333"
+	var path string
+	var body map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"snapshot_id": "s1"})
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{codeIntelligenceURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	if _, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "t", PrincipalID: "p"}, "scos_code_index", map[string]any{"repository_id": durable}); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/v2/code/scan" || body["repository_id"] != durable || len(body) != 1 {
+		t.Fatalf("scan request = %s %v", path, body)
+	}
+	if _, err := s.dispatchTool(r.Context(), r, requestIdentity{TenantID: "t", PrincipalID: "p"}, "scos_code_index", map[string]any{"repository_id": durable, "files": []any{map[string]any{"path": "a.go", "content_hash": "x"}}}); err == nil {
+		t.Fatal("uploading files without branch and commit must be refused")
 	}
 }
 

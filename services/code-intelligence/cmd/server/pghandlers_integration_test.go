@@ -752,7 +752,7 @@ func TestHandlePGQueryFusesStructuralAndPageRankSignals(t *testing.T) {
 	t.Setenv("SCOS_MODEL_CODE_DIMENSIONS", "3")
 	t.Setenv("SCOS_MODEL_CODE_GENERATION", "1")
 
-	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/query", tenant, map[string]any{"repository_id": repoID, "branch": "main", "query": "Target"})
+	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/query", tenant, map[string]any{"repository_id": repoID, "branch": "main", "query": "graph target"})
 	if resp.Code != http.StatusOK {
 		t.Fatalf("query: %d: %s", resp.Code, resp.Body.String())
 	}

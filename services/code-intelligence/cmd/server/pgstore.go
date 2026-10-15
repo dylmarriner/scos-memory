@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -201,8 +203,15 @@ func (s *pgCodeStore) EnsureRepository(ctx context.Context, tenantID, canonicalP
 // which files it can skip re-parsing (blueprint §35's "for every new
 // snapshot: find parent").
 func (s *pgCodeStore) CreateSnapshot(ctx context.Context, repositoryID, tenantID, branch, commitID, extractorVersion, configHash string) (string, error) {
-	parentID, err := s.ActiveSnapshotID(ctx, repositoryID, branch)
-	if err != nil {
+	// The parent is reused for unchanged files' parsed declarations, so it
+	// must have been built by the same extractor: a newer extractor's
+	// output (e.g. qualified call names) is never mixed with an older one's.
+	var parentID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id FROM code_repository_snapshots
+		 WHERE repository_id = $1 AND branch = $2 AND status = 'active' AND extractor_version = $3`,
+		repositoryID, branch, extractorVersion).Scan(&parentID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("resolve parent snapshot: %w", err)
 	}
 	var id string
@@ -258,7 +267,10 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE code_repository_snapshots SET file_count = $2, symbol_count = $2, status = 'ready'
+		UPDATE code_repository_snapshots
+		   SET file_count = $2,
+		       symbol_count = (SELECT count(*) FROM code_symbol_versions WHERE snapshot_id = $1),
+		       status = 'ready'
 		WHERE id = $1`, snapshotID, len(files)); err != nil {
 		return fmt.Errorf("mark snapshot ready: %w", err)
 	}
@@ -293,6 +305,9 @@ type indexedDecl struct {
 	Kind        string
 	CalledNames []string
 	Extractor   string
+	// Dir is the repository-relative directory of the declaring file: the
+	// package a qualified call's import path names.
+	Dir string
 }
 
 // insertCallEdgesLocked turns each declaration's syntactic CalledNames into
@@ -317,12 +332,30 @@ func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, d
 		targets[key] = append(targets[key], d)
 	}
 
+	// Package-level functions by name, for calls through an imported
+	// package ("auth.Sign()", recorded as "<import path>:Sign").
+	functions := make(map[string][]indexedDecl, len(decls))
+	for _, d := range decls {
+		if d.Kind == "function" {
+			functions[d.Name] = append(functions[d.Name], d)
+		}
+	}
+
 	for _, caller := range decls {
 		if caller.Kind != "function" && caller.Kind != "method" {
 			continue
 		}
 		for _, calledName := range caller.CalledNames {
-			candidates := targets[caller.Scope+"."+calledName]
+			var candidates []indexedDecl
+			if importPath, name, qualified := strings.Cut(calledName, qualifiedCallSeparator); qualified {
+				for _, d := range functions[name] {
+					if importPathNamesDir(importPath, d.Dir) {
+						candidates = append(candidates, d)
+					}
+				}
+			} else {
+				candidates = targets[caller.Scope+"."+calledName]
+			}
 			if len(candidates) != 1 {
 				continue // unresolved (0) or ambiguous (2+): no edge, not a guess
 			}
@@ -336,6 +369,47 @@ func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, d
 		}
 	}
 	return nil
+}
+
+// importPathNamesDir reports whether a Go import path refers to the
+// package in repository directory dir: the path ends with that directory
+// (module path prefix aside). The repository root package ("."), which no
+// import suffix can name unambiguously, never matches.
+func importPathNamesDir(importPath, dir string) bool {
+	if dir == "." || dir == "" {
+		return false
+	}
+	return importPath == dir || strings.HasSuffix(importPath, "/"+dir)
+}
+
+// claimSymbolLocked returns the symbol identity a file or declaration takes
+// in this snapshot. Identity is keyed on content, so a renamed or moved but
+// unchanged file keeps its symbol across snapshots. Byte-identical content
+// at two places in one snapshot (duplicated config files, identical small
+// functions) cannot share one identity -- a snapshot holds one version per
+// symbol -- so every occurrence after the first is keyed by its location
+// as well.
+func claimSymbolLocked(ctx context.Context, tx *sql.Tx, repositoryID, snapshotID, contentKey, location, kind, language string) (string, error) {
+	for _, key := range []string{contentKey, contentKey + "@" + location} {
+		var symbolID string
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO code_symbols (repository_id, stable_key, kind, language, first_snapshot_id)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
+			RETURNING id`, repositoryID, key, kind, language, snapshotID).Scan(&symbolID); err != nil {
+			return "", err
+		}
+		var taken bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (SELECT 1 FROM code_symbol_versions WHERE snapshot_id = $1 AND symbol_id = $2)`,
+			snapshotID, symbolID).Scan(&taken); err != nil {
+			return "", err
+		}
+		if !taken {
+			return symbolID, nil
+		}
+	}
+	return "", fmt.Errorf("symbol %s at %s occurs twice at the same location", contentKey, location)
 }
 
 func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID, parentSnapshotID string, f PGFileInput) ([]indexedDecl, error) {
@@ -352,13 +426,8 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		return nil, fmt.Errorf("create file version: %w", err)
 	}
 
-	var symbolID string
-	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO code_symbols (repository_id, stable_key, kind, language, first_snapshot_id)
-		VALUES ($1, $2, 'file', $3, $4)
-		ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
-		RETURNING id`,
-		repositoryID, f.ContentHash, f.Language, snapshotID).Scan(&symbolID); err != nil {
+	symbolID, err := claimSymbolLocked(ctx, tx, repositoryID, snapshotID, f.ContentHash, f.Path, "file", f.Language)
+	if err != nil {
 		return nil, fmt.Errorf("upsert symbol identity: %w", err)
 	}
 	var fileSymbolVersionID string
@@ -483,6 +552,7 @@ func (s *pgCodeStore) copyDeclarationsLocked(ctx context.Context, tx *sql.Tx, sn
 			Kind:        d.kind,
 			CalledNames: d.calledNames,
 			Extractor:   d.extractor,
+			Dir:         path.Dir(d.path),
 		})
 	}
 	return out, nil
@@ -506,12 +576,8 @@ func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx 
 	out := make([]indexedDecl, 0, len(symbols))
 	for _, symbol := range symbols {
 		stableKey := "treesitter:" + f.Language + ":" + symbol.FullyQualifiedName + ":" + symbol.ContentHash
-		var symbolID string
-		if err := tx.QueryRowContext(ctx, `
-			INSERT INTO code_symbols (repository_id, stable_key, kind, language, first_snapshot_id)
-			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
-			RETURNING id`, repositoryID, stableKey, symbol.Kind, f.Language, snapshotID).Scan(&symbolID); err != nil {
+		symbolID, err := claimSymbolLocked(ctx, tx, repositoryID, snapshotID, stableKey, f.Path+"#"+symbol.Range, symbol.Kind, f.Language)
+		if err != nil {
 			return nil, fmt.Errorf("upsert %s: %w", symbol.FullyQualifiedName, err)
 		}
 		module, _, _ := strings.Cut(symbol.FullyQualifiedName, ".")
@@ -539,6 +605,7 @@ func (s *pgCodeStore) indexTreeSitterDeclarationsLocked(ctx context.Context, tx 
 			Kind:        symbol.Kind,
 			CalledNames: symbol.CalledNames,
 			Extractor:   extractor,
+			Dir:         path.Dir(f.Path),
 		})
 	}
 	return out, nil
@@ -560,13 +627,8 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 	out := make([]indexedDecl, 0, len(decls))
 	for _, d := range decls {
 		stableKey := "go:" + d.Kind + ":" + d.ContentHash
-		var symbolID string
-		if err := tx.QueryRowContext(ctx, `
-			INSERT INTO code_symbols (repository_id, stable_key, kind, language, first_snapshot_id)
-			VALUES ($1, $2, $3, 'go', $4)
-			ON CONFLICT (repository_id, stable_key) DO UPDATE SET stable_key = EXCLUDED.stable_key
-			RETURNING id`,
-			repositoryID, stableKey, d.Kind, snapshotID).Scan(&symbolID); err != nil {
+		symbolID, err := claimSymbolLocked(ctx, tx, repositoryID, snapshotID, stableKey, fmt.Sprintf("%s#%d-%d", f.Path, d.StartLine, d.EndLine), d.Kind, "go")
+		if err != nil {
 			return nil, fmt.Errorf("upsert go declaration identity for %s: %w", d.Name, err)
 		}
 		rangeText := fmt.Sprintf("%d-%d", d.StartLine, d.EndLine)
@@ -594,6 +656,7 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 			Kind:        d.Kind,
 			CalledNames: d.CalledNames,
 			Extractor:   "go/parser",
+			Dir:         path.Dir(f.Path),
 		})
 	}
 	return out, nil
@@ -629,7 +692,9 @@ func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch
 			LIMIT 1
 		) prior ON true
 		WHERE snap.repository_id = $1 AND snap.branch = $2 AND snap.status = 'active'
-		  AND (sv.fully_qualified_name = $3 OR sv.path = $3)
+		  AND (sv.fully_qualified_name = $3 OR sv.path = $3
+		       OR (left($3, 2) = '%.' AND sv.kind IN ('function', 'method', 'type')
+		           AND sv.fully_qualified_name LIKE '%.' || replace(replace(substr($3, 3), '%', '\%'), '_', '\_')))
 		ORDER BY sv.fully_qualified_name`,
 		repositoryID, branch, query)
 	if err != nil {
@@ -666,17 +731,21 @@ func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, te
 	if limit <= 0 {
 		limit = 20
 	}
+	simpleTerms, englishTerms := codeSearchTerms(term)
+	if simpleTerms == "" {
+		return nil, nil
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
 		       ts_rank(sv.search_vector, query) AS rank
 		FROM code_symbol_versions sv
 		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id,
-		     plainto_tsquery('simple', regexp_replace($3, '[/._-]', ' ', 'g')) query
+		     (SELECT to_tsquery('simple', $3) || to_tsquery('english', $5) AS query) q
 		WHERE snap.repository_id = $1 AND snap.branch = $2 AND snap.status = 'active'
 		  AND sv.search_vector @@ query
 		ORDER BY rank DESC
 		LIMIT $4`,
-		repositoryID, branch, term, limit)
+		repositoryID, branch, simpleTerms, limit, englishTerms)
 	if err != nil {
 		return nil, fmt.Errorf("query lexical: %w", err)
 	}
@@ -895,6 +964,14 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 	if err != nil {
 		return nil, fmt.Errorf("resolve query: %w", err)
 	}
+	if len(matched) == 0 && query != "" && !strings.ContainsAny(query, "./") {
+		// A bare name ("Sign") means every declaration of that name; each
+		// is listed in MatchedSymbols, so an ambiguous name is visible.
+		matched, err = s.QueryByPathOrFQN(ctx, repositoryID, branch, "%."+query)
+		if err != nil {
+			return nil, fmt.Errorf("resolve name: %w", err)
+		}
+	}
 	if len(matched) == 0 {
 		return nil, ErrSymbolNotFound
 	}
@@ -1036,3 +1113,110 @@ func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []st
 	}
 	return results, rows.Err()
 }
+
+// LatestIndexedBranch is the branch of the repository's most recently
+// activated snapshot: what a caller means when it names no branch. Empty
+// when nothing has been indexed.
+func (s *pgCodeStore) LatestIndexedBranch(ctx context.Context, repositoryID, tenantID string) (string, error) {
+	var branch string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT branch FROM code_repository_snapshots
+		 WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('ready', 'active') AND activated_at IS NOT NULL
+		 ORDER BY activated_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&branch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return branch, err
+}
+
+// SnapshotByKey finds the snapshot already recorded for this exact tree,
+// returning its id and status, or "" when there is none.
+func (s *pgCodeStore) SnapshotByKey(ctx context.Context, repositoryID, branch, commitID, extractorVersion, configurationHash string) (string, string, error) {
+	var id, status string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id::text, status::text FROM code_repository_snapshots
+		 WHERE repository_id = $1 AND branch = $2 AND commit_id = $3
+		   AND extractor_version = $4 AND configuration_hash = $5`,
+		repositoryID, branch, commitID, extractorVersion, configurationHash).Scan(&id, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	return id, status, err
+}
+
+// SetSnapshotStatus records a snapshot's state, and the error when failed.
+func (s *pgCodeStore) SetSnapshotStatus(ctx context.Context, snapshotID, status, failure string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE code_repository_snapshots SET status = $2::code_snapshot_status, error = NULLIF($3, '')
+		 WHERE id = $1 AND status <> 'ready' AND status <> 'active'`, snapshotID, status, failure)
+	return err
+}
+
+// DeleteFailedSnapshot removes a failed snapshot so the same tree can be
+// indexed again under its key.
+func (s *pgCodeStore) DeleteFailedSnapshot(ctx context.Context, snapshotID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM code_repository_snapshots WHERE id = $1 AND status = 'failed'`, snapshotID)
+	return err
+}
+
+// FailInterruptedSnapshots marks snapshots left mid-index by a previous
+// process as failed, so they neither block re-indexing nor look current.
+func (s *pgCodeStore) FailInterruptedSnapshots(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE code_repository_snapshots
+		   SET status = 'failed', error = 'interrupted: code-intelligence stopped while this snapshot was being indexed'
+		 WHERE status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')
+		   AND created_at < now() - interval '1 minute'`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// IndexingSnapshot is the snapshot currently being built for a repository,
+// or "" when none is.
+func (s *pgCodeStore) IndexingSnapshot(ctx context.Context, repositoryID, tenantID string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id::text FROM code_repository_snapshots
+		 WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')
+		 ORDER BY created_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
+// codeSearchStopWords are question words that would otherwise match path
+// and identifier tokens indexed without a stop-word list.
+var codeSearchStopWords = map[string]bool{
+	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true, "be": true, "by": true,
+	"can": true, "do": true, "does": true, "for": true, "from": true, "how": true, "i": true, "in": true,
+	"is": true, "it": true, "of": true, "on": true, "or": true, "that": true, "the": true, "this": true,
+	"to": true, "what": true, "when": true, "where": true, "which": true, "who": true, "why": true, "with": true,
+}
+
+// codeSearchTerms turns a search into two any-term tsquery strings: prefix
+// terms against name/path tokens (simple configuration) and terms against
+// the stemmed signature/doc text (english). camelCase in the query is
+// split the way the index splits identifiers, and only letters and digits
+// survive, so query text can never be tsquery syntax.
+func codeSearchTerms(term string) (simple, english string) {
+	split := camelBoundary.ReplaceAllString(term, "$1 $2")
+	words := strings.FieldsFunc(strings.ToLower(split), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	})
+	seen := make(map[string]bool, len(words))
+	var s, e []string
+	for _, w := range words {
+		if seen[w] || codeSearchStopWords[w] || len(w) > 60 {
+			continue
+		}
+		seen[w] = true
+		s = append(s, w+":*")
+		e = append(e, w)
+	}
+	return strings.Join(s, " | "), strings.Join(e, " | ")
+}
+
+var camelBoundary = regexp.MustCompile(`([a-z0-9])([A-Z])`)

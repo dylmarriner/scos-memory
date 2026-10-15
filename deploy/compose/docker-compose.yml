@@ -552,6 +552,12 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_CODE_INTELLIGENCE_HTTP_ADDR: ${SCOS_CODE_INTELLIGENCE_HTTP_ADDR:-:8084}
       SCOS_CODE_INTELLIGENCE_STORE_PATH: ${SCOS_CODE_INTELLIGENCE_STORE_PATH:-/var/lib/scos/code-intelligence/state.json}
+      # Repositories agents ask to index live under this host directory,
+      # mounted read-only at SCOS_WORKSPACE_ROOT; code-intelligence reads,
+      # hashes and parses them itself (POST /v2/code/scan). Host paths under
+      # it are translated to the mount; nothing outside it is ever read.
+      SCOS_WORKSPACE_HOST_PATH: ${SCOS_WORKSPACE_HOST_PATH:-}
+      SCOS_WORKSPACE_ROOT: /workspace
       # Durable, snapshot-based /v2/code/* store (pgstore.go) -- required at
       # startup like every other Postgres-backed service, not opt-in. The
       # /v1/* routes above are unaffected either way; an individual user can
@@ -561,6 +567,7 @@ services:
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - code-intelligence-data:/var/lib/scos/code-intelligence
+      - ${SCOS_WORKSPACE_HOST_PATH:-../..}:/workspace:ro
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8084:8084"
     depends_on:
@@ -699,6 +706,10 @@ services:
       SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR: ${SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR:-:8099}
       SCOS_MEMORY_INTELLIGENCE_URL: ${SCOS_MEMORY_INTELLIGENCE_URL:-https://memory-intelligence:8089}
       GRAPHIFY_REPO_PATH: ${GRAPHIFY_REPO_PATH:-/repo}
+      # repo_path arguments must resolve inside the shared workspace mount;
+      # host paths under SCOS_WORKSPACE_HOST_PATH are translated to it.
+      GRAPHIFY_ALLOWED_ROOT: /workspace
+      SCOS_WORKSPACE_HOST_PATH: ${SCOS_WORKSPACE_HOST_PATH:-}
       # Left optional rather than compose-required: these must be a real
       # tenant/principal/namespace already provisioned with a
       # namespace_memberships row (can_write_candidates=true) for ingestion
@@ -725,6 +736,9 @@ services:
       # writable mount here the process can't create it under /var/lib
       # (owned by root, not the container's non-root scos user) at all.
       - graphify-cache:/var/lib/graphify-cache
+      # Read-write for the same reason as /repo: graphify writes
+      # graphify-out/ into the repository it graphs.
+      - ${SCOS_WORKSPACE_HOST_PATH:-../..}:/workspace:rw
     depends_on:
       tls-certs:
         condition: service_completed_successfully

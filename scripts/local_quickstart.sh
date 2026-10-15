@@ -66,7 +66,9 @@ set_var SCOS_AGENT_ENDPOINT "disabled"
 set_var SCOS_BACKUP_PROVIDER local
 set_var SCOS_BACKUP_DATABASE_URL "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require"
 set_var SCOS_BACKUP_RESTORE_DATABASE_URL "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/postgres?sslmode=require"
-set_var GRAPHIFY_WORKSPACE_HOST_PATH "$WORKSPACE_DIR"
+# Repositories to index and graph live here; code-intelligence and graphify
+# mount it at /workspace and accept host paths under it.
+set_var SCOS_WORKSPACE_HOST_PATH "$WORKSPACE_DIR"
 # cloud-control-plane is not started locally, but compose interpolates every
 # service's environment, so its required public URL must still resolve: the
 # local mcp-gateway is the public entry point of a local stack.
