@@ -280,6 +280,25 @@ func (r *Registry) RecordOutcome(id string, success bool, quality float64) error
 	return nil
 }
 
+// RestoreObserved reinstates persisted observed performance for a record
+// (for example after a restart), so learning from RecordOutcome is not lost.
+// Values outside [0,1] are rejected.
+func (r *Registry) RestoreObserved(id string, successRate, quality float64) error {
+	if successRate < 0 || successRate > 1 || quality < 0 || quality > 1 {
+		return fmt.Errorf("observed values for %s must be within [0,1]", id)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cap, exists := r.capabilities[id]
+	if !exists {
+		return fmt.Errorf("capability %s not found", id)
+	}
+	cap.HistoricalSuccessRate = successRate
+	cap.QualityScore = quality
+	r.generation++
+	return nil
+}
+
 // Eligible applies selection steps 1-2: hard permission, sensitivity,
 // side-effect and policy constraints, then declared-contract intent matching.
 // It returns the surviving capabilities and the reason each other was rejected.

@@ -530,6 +530,7 @@ func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decis
 			err = c.dispatchHook(ctx, "on_checkpoint", map[string]any{"interaction_id": req.InteractionID, "checkpoint_id": lifecycle.Checkpoint.ID}, req)
 		}
 		stage.Status, stage.EndedAt = "completed", time.Now().UTC()
+		c.recordStageOutcome(ctx, req, step.System, err == nil)
 		if err != nil {
 			stage.Status, stage.Detail = "degraded", err.Error()
 			if status == "completed" {
@@ -1304,6 +1305,13 @@ func main() {
 		os.Exit(1)
 	}
 	plane := &controlPlane{db: db, store: store, client: commitClient, committer: memoryGatewayCommitter{endpoint: commitEndpoint, client: commitClient}}
+	restoreCtx, cancelRestore := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := plane.restoreCapabilityObservations(restoreCtx, "autonomous-control-plane"); err != nil {
+		cancelRestore()
+		logger.Error("startup failed", "error", "restore capability observations: "+err.Error())
+		os.Exit(1)
+	}
+	cancelRestore()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
