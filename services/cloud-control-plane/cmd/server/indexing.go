@@ -10,8 +10,10 @@ import (
 
 // codeRepos and codeIndexStatus proxy to code-intelligence, scoped to the
 // caller's own tenant (code-intelligence itself enforces the scoping — see
-// requireTenant and the tenant filter added to handleIndexStatus — this
-// proxy just forwards a genuine per-user identity instead of a shared one).
+// requireTenant and the tenant filter on its snapshot listing — this proxy
+// just forwards a genuine per-user identity instead of a shared one).
+// Index status is the durable store's snapshot list (GET /v2/code/snapshots):
+// each snapshot's repository, branch, commit, status and file counts.
 //
 // code-intelligence is wrapped in auth.ControlPlaneHandler (not just
 // AuthenticatedHandler like the other proxied services), so a valid claims
@@ -22,7 +24,7 @@ func (s *server) codeRepos(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) codeIndexStatus(w http.ResponseWriter, r *http.Request) {
-	s.proxyTenantScopedGet(w, r, s.codeIntelligenceURL, "/v1/index/status", "dashboard-code-status", true)
+	s.proxyTenantScopedGet(w, r, s.codeIntelligenceURL, "/v2/code/snapshots", "dashboard-code-status", true)
 }
 
 // codeSettings proxies the dashboard settings tab's durable-code-store

@@ -97,8 +97,7 @@ func TestPGExactSymbolResolution(t *testing.T) {
 	}
 }
 
-// TestPGRenamePreservesSymbolIdentity is the fix for
-// TestBaselineRenameLosesSymbolLineage: a file's stable identity is keyed
+// TestPGRenamePreservesSymbolIdentity: a file's stable identity is keyed
 // on its content hash, so renaming it without changing its content
 // resolves to the *same* code_symbols.id under the new path, and the
 // query result reports where it was renamed from.
@@ -158,8 +157,7 @@ func TestPGRenamePreservesSymbolIdentity(t *testing.T) {
 	}
 }
 
-// TestPGBranchesCoexistIndependently is the fix for
-// TestBaselineReindexDestroysPriorCommitState: indexing a second commit on
+// TestPGBranchesCoexistIndependently: indexing a second commit on
 // a different branch does not disturb the first branch's active snapshot.
 func TestPGBranchesCoexistIndependently(t *testing.T) {
 	store, db := testPGStore(t)
@@ -255,6 +253,58 @@ func TestPGSameBranchReindexSupersedesPriorCommit(t *testing.T) {
 	}
 	if len(stale) != 0 {
 		t.Fatalf("expected commit-a's file to no longer resolve once commit-b is active, got %v", stale)
+	}
+}
+
+// A file dropped from the next commit's file list must stop resolving on
+// that branch, while a file present in both commits keeps resolving: the
+// new active snapshot is the complete file set, never an accumulation.
+func TestPGDeletedFileRemovesItsSymbols(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenantID := testTenant(t, db)
+
+	repoID, err := store.EnsureRepository(ctx, tenantID, "/repo/"+t.Name())
+	if err != nil {
+		t.Fatalf("ensure repository: %v", err)
+	}
+	snap1, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-1", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 1: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap1, repoID, []PGFileInput{
+		{Path: "pkg/a.go", Language: "go", ContentHash: hashContent("a")},
+		{Path: "pkg/b.go", Language: "go", ContentHash: hashContent("b")},
+	}); err != nil {
+		t.Fatalf("index snapshot 1: %v", err)
+	}
+	if got, err := store.QueryByPathOrFQN(ctx, repoID, "main", "pkg/b.go"); err != nil || len(got) != 1 {
+		t.Fatalf("expected pkg/b.go to resolve before it is deleted, got %v (err %v)", got, err)
+	}
+
+	snap2, err := store.CreateSnapshot(ctx, repoID, tenantID, "main", "commit-2", "heuristic-v1", "")
+	if err != nil {
+		t.Fatalf("create snapshot 2: %v", err)
+	}
+	if err := store.IndexSnapshot(ctx, snap2, repoID, []PGFileInput{
+		{Path: "pkg/a.go", Language: "go", ContentHash: hashContent("a")},
+	}); err != nil {
+		t.Fatalf("index snapshot 2: %v", err)
+	}
+
+	deleted, err := store.QueryByPathOrFQN(ctx, repoID, "main", "pkg/b.go")
+	if err != nil {
+		t.Fatalf("query deleted file: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("expected pkg/b.go to stop resolving once it left the file list, got %v", deleted)
+	}
+	kept, err := store.QueryByPathOrFQN(ctx, repoID, "main", "pkg/a.go")
+	if err != nil || len(kept) != 1 {
+		t.Fatalf("expected pkg/a.go to keep resolving, got %v (err %v)", kept, err)
+	}
+	if kept[0].CommitID != "commit-2" {
+		t.Fatalf("expected pkg/a.go to resolve from commit-2, got %q", kept[0].CommitID)
 	}
 }
 

@@ -559,10 +559,11 @@ services:
       SCOS_WORKSPACE_HOST_PATH: ${SCOS_WORKSPACE_HOST_PATH:-}
       SCOS_WORKSPACE_ROOT: /workspace
       # Durable, snapshot-based /v2/code/* store (pgstore.go) -- required at
-      # startup like every other Postgres-backed service, not opt-in. The
-      # /v1/* routes above are unaffected either way; an individual user can
-      # still disable /v2 for themselves from the dashboard settings tab
-      # (POST /v2/code/settings) without this being unset.
+      # startup like every other Postgres-backed service, not opt-in. An
+      # individual user can still disable /v2 for themselves from the
+      # dashboard settings tab (/v2/code/settings) without this being
+      # unset. SCOS_CODE_INTELLIGENCE_STORE_PATH above holds only the
+      # /v1/repos registration records.
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro

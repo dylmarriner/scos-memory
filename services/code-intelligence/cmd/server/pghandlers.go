@@ -43,12 +43,7 @@ func declarationQuery(query string) string {
 	return name
 }
 
-// v2 handlers expose pgCodeStore over HTTP, additive alongside every
-// existing /v1/* route, which keeps working unchanged against the
-// in-memory codeStore -- see pgstore.go's doc comment for why the /v1 wire
-// protocol (bare path strings, no content hash) can't drive rename
-// detection, and why migrating existing /v1 callers onto the durable store
-// is a separate, coordinated change rather than something to do here.
+// v2 handlers expose pgCodeStore over HTTP as /v2/code/*.
 //
 // The durable store itself always runs (DATABASE_URL is required at
 // startup, main.go), but an individual user can opt out of these routes
@@ -247,8 +242,8 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		req.ExtractorVersion = "heuristic-v1"
 	}
 
-	// Ownership check mirrors handleIndex's: the repository must belong to
-	// the authenticated tenant. EnsureRepository is keyed on (tenant_id,
+	// Ownership check: the repository must belong to the authenticated
+	// tenant. EnsureRepository is keyed on (tenant_id,
 	// canonical_path), not on repository_id, so a repository_id supplied by
 	// one tenant that happens to belong to another is rejected here rather
 	// than silently indexing into it.
@@ -407,7 +402,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The tenant scope always comes from the authenticated caller, never a
-	// client-supplied field -- same rule as handleQuery (§19.10) -- so a
+	// client-supplied field -- same rule as requireTenant (§19.10) -- so a
 	// query can never be widened to another tenant's repositories even if
 	// repository_id happens to collide.
 	var owningTenant string

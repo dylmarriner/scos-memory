@@ -360,7 +360,7 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Context invariant evaluation metrics}
-  /v1/code/index:
+  /v2/code/index:
     post:
       operationId: indexCode
       requestBody:
@@ -368,8 +368,8 @@ paths:
         content:
           application/json: {schema: {type: object}}
       responses:
-        '200': {description: Code index generation result}
-  /v1/code/query:
+        '200': {description: Durable code snapshot indexing result}
+  /v2/code/query:
     post:
       operationId: queryCode
       requestBody:
@@ -378,7 +378,7 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Permission-scoped code query results}
-  /v1/code/impact:
+  /v2/code/impact:
     post:
       operationId: analyseCodeImpact
       requestBody:

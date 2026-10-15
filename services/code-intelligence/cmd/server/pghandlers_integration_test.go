@@ -117,8 +117,7 @@ func TestHandlePGEndToEndIndexAndQuery(t *testing.T) {
 }
 
 // A repository_id that exists but belongs to a different tenant must
-// behave exactly as if it didn't exist -- the same rule
-// TestHandleQueryPreventsCrossTenantLeakage enforces for the v1 store.
+// behave exactly as if it didn't exist.
 func TestHandlePGIndexRejectsCrossTenantRepository(t *testing.T) {
 	_, db := testPGStore(t)
 	srv := &server{pgStore: newPGCodeStore(db)}

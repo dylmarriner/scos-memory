@@ -38,7 +38,7 @@ fixed), **VERIFY** (auditor claim not yet independently reproduced).
 ## Findings by area
 
 ### Code intelligence
-- v1 graph never populated (`Imports`, `OutboundRelations`, `InboundRelationSummary`, `Tests` are never assigned); `/v1/impact`, `/v1/context`, `reference_search` return empty; `/v1/adapters` advertises capabilities with no code. — OPEN (no MCP tool or dashboard panel reaches v1 query/impact any more; the v1 routes themselves are still served)
+- v1 graph never populated (`Imports`, `OutboundRelations`, `InboundRelationSummary`, `Tests` are never assigned); `/v1/impact`, `/v1/context`, `reference_search` return empty; `/v1/adapters` advertises capabilities with no code. — FIXED (removed: the routes `/v1/index`, `/v1/code/index`, `/v1/index/status`, `/v1/query`, `/v1/code/query`, `/v1/context`, `/v1/impact`, `/v1/code/impact`, `/v1/impact/reconcile` and `/v1/adapters` on code-intelligence, with their handlers, the in-memory symbol/chunk/generation/relation index, the lexical query engine, the context and impact builders, impact reconciliation records and the language-adapter table. `/v1/repos`, `/v1/repos/{id}`, `/v1/version` and the health routes remain, backed by a registry that persists repository records only. The dashboard's index-status proxy now reads `/v2/code/snapshots`; the failure-injection probe, governed route list, OpenAPI and §38 name `/v2/code/*`)
 - v1 `SymbolCount` counts the global store across tenants (`main.go:805`); v2 stores file count as symbol count (`pgstore.go:261`). — FIXED (both count the snapshot's own symbols)
 - v2 trusts the client-supplied `content_hash` without checking it against `content`. — FIXED (refused with 400 when it does not match)
 

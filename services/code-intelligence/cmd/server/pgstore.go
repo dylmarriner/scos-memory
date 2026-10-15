@@ -90,20 +90,16 @@ func insertCodeChunkLocked(ctx context.Context, tx *sql.Tx, symbolVersionID, con
 // pgCodeStore is the durable, snapshot-based code-intelligence persistence
 // layer described in SCOS_MEMORY_TECHNICAL_BLUEPRINT_AND_ENGINEERING_ROADMAP.md
 // §10/§33 and implemented by migration
-// 000025_code_intelligence_persistence.sql. It closes the two gaps recorded
-// in baseline_fixtures_test.go against the in-memory codeStore:
+// 000025_code_intelligence_persistence.sql. It replaced an in-memory,
+// path-keyed index with two properties that index lacked:
 //
-//   - TestBaselineRenameLosesSymbolLineage: that store's symbol IDs are
-//     hashed from the file *path*, so a rename produces an unrelated ID
-//     with no connection to the old one. Here, a tier-0 symbol's stable
-//     identity (code_symbols.stable_key) is keyed on the file's *content*
-//     hash instead of its path, so a renamed-but-unmodified file resolves
-//     to the same code_symbols row under its new path automatically --
-//     see TestPGRenamePreservesSymbolIdentity.
+//   - Rename lineage: a tier-0 symbol's stable identity
+//     (code_symbols.stable_key) is keyed on the file's *content* hash
+//     instead of its path, so a renamed-but-unmodified file resolves to the
+//     same code_symbols row under its new path automatically -- see
+//     TestPGRenamePreservesSymbolIdentity.
 //
-//   - TestBaselineReindexDestroysPriorCommitState: that store has one
-//     mutable Repository.CommitID, so indexing a second commit overwrites
-//     the first. Here, every (repository, branch, commit, extractor,
+//   - Snapshot isolation: every (repository, branch, commit, extractor,
 //     config) is its own immutable code_repository_snapshots row, and
 //     activate_code_snapshot only ever supersedes the *same branch's*
 //     previous active snapshot -- two branches (or two points in one
@@ -112,9 +108,9 @@ func insertCodeChunkLocked(ctx context.Context, tx *sql.Tx, symbolVersionID, con
 //
 // This type is complete and integration-tested against a real PostgreSQL
 // database (pgstore_integration_test.go, gated on SCOS_CODE_STORE_TEST_DSN).
-// Its v2 wire protocol accepts content and content hashes, allowing parser
+// Its wire protocol accepts content and content hashes, allowing parser
 // adapters such as Go's AST extractor and Tree-sitter to populate immutable
-// snapshot projections without changing the legacy v1 request shape.
+// snapshot projections.
 type pgCodeStore struct {
 	db *sql.DB
 }
@@ -923,11 +919,9 @@ func (s *pgCodeStore) SetUserEnabled(ctx context.Context, tenantID, principalID 
 
 // PGImpact is the result of ChangeImpact: what actually depends on a
 // symbol, derived from real code_edges (CALLS, currently the only
-// relation goextract.go populates) rather than the in-memory codeStore's
-// OutboundRelations field, which the heuristic filename-convention
-// extractor never populates at all -- the original audit's "Change
-// impact: Partial... source graph precision limits correctness" applied
-// literally: there was no real graph to traverse. DirectDependents are
+// relation goextract.go populates). The removed in-memory index answered
+// change impact from a relation field its extractor never populated, so it
+// had no real graph to traverse. DirectDependents are
 // one CALLS hop away; TransitiveDependents are everything else reachable
 // within MaxDepth hops, excluding the matched symbols and their direct
 // dependents.
