@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +16,9 @@ from scos_consolidation.extractor import (
     _has_factual_claim,
     _infer_authority,
     _infer_confidence,
+    _infer_expiry,
     _infer_sensitivity,
+    UnresolvedNamespaceError,
 )
 
 
@@ -24,6 +27,7 @@ class ExtractorTests(unittest.TestCase):
         self.tenant_id = uuid4()
         self.event_id = uuid4()
         self.actor_id = uuid4()
+        self.namespace_id = uuid4()
 
     def _event(self, event_type="turn.completed", **overrides):
         event = {
@@ -35,6 +39,7 @@ class ExtractorTests(unittest.TestCase):
             "actor_id": self.actor_id,
             "occurred_at": "2026-07-26T12:00:00Z",
             "data": {},
+            "namespace_id": str(self.namespace_id),
         }
         event.update(overrides)
         return event
@@ -49,6 +54,23 @@ class ExtractorTests(unittest.TestCase):
             "turn_id": str(uuid4()),
             "committed_at": "2026-07-26T12:00:00Z",
         }
+
+    def test_namespace_is_resolved_never_a_placeholder(self):
+        messages = [self._message(role="user", content="What database does this project use?"),
+                    self._message(role="assistant", content="The project uses PostgreSQL with pgvector.")]
+        candidates = extract_candidates(self._event(), messages)
+        self.assertEqual(candidates[0].namespace_id, self.namespace_id)
+        explicit = uuid4()
+        candidates = extract_candidates(self._event(data={"namespace_id": str(explicit)}), messages)
+        self.assertEqual(candidates[0].namespace_id, explicit)
+        with self.assertRaises(UnresolvedNamespaceError):
+            extract_candidates(self._event(namespace_id=None), messages)
+
+    def test_expiry_is_relative_to_the_event(self):
+        event = self._event()
+        self.assertEqual(_infer_expiry(event, MemoryClass.WORKING), datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(_infer_expiry(event, MemoryClass.EPISODIC), datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc))
+        self.assertIsNone(_infer_expiry(event, MemoryClass.SEMANTIC))
 
     def test_extract_semantic_from_turn_completed(self):
         event = self._event(event_type="turn.completed")

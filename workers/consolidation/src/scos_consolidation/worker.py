@@ -159,6 +159,16 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
         _mark_failed(conn, job)
         return
 
+    # The completion event is keyed by turn; its session and namespace come
+    # from the turn row, without which neither messages nor the memory's
+    # namespace can be resolved.
+    scope = _load_turn_scope(conn, tenant_id, turn_id)
+    if not scope:
+        logger.error("job %s: turn %s has no session", job_id, turn_id)
+        _mark_failed(conn, job)
+        return
+    event["session_id"], event["namespace_id"] = scope
+
     messages = _load_session_messages(conn, tenant_id, event.get("session_id"), event.get("aggregate_id"))
 
     # ── 2. Extract candidates ────────────────────────────────────────
@@ -260,6 +270,26 @@ def _load_event_for_turn(
             (tenant_id, turn_id),
         )
         return cur.fetchone()
+
+
+def _load_turn_scope(
+    conn: psycopg.Connection, tenant_id: UUID, turn_id: str
+) -> tuple[str, str] | None:
+    """(session_id, namespace_id) of a turn, or None when unknown."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT t.session_id::text AS session_id, s.namespace_id::text AS namespace_id
+            FROM turns t
+            JOIN sessions s ON s.id = t.session_id
+            WHERE t.id::text = %s AND s.tenant_id = %s
+            """,
+            (str(turn_id), tenant_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return row["session_id"], row["namespace_id"]
 
 
 def _load_session_messages(

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -305,38 +305,60 @@ def _infer_sensitivity(
     return SensitivityClass.INTERNAL
 
 
+class UnresolvedNamespaceError(ValueError):
+    """A candidate's namespace could not be determined, so it cannot be stored."""
+
+
 def _resolve_namespace(
     event: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> UUID:
-    """Pull namespace from event data or fallback to a sentinel."""
+    """The namespace the memory belongs to.
+
+    The worker attaches the turn's session namespace as ``namespace_id`` on
+    the event; an explicit namespace in the event data takes precedence. A
+    memory with no resolvable namespace is an error, never a placeholder ID.
+    """
+    del messages
     data = event.get("data", {})
     if isinstance(data, str):
         try:
             data = json.loads(data)
         except (json.JSONDecodeError, TypeError):
             data = {}
-    ns = data.get("namespace_id") or data.get("namespace")
-    if ns:
+    for ns in (data.get("namespace_id"), data.get("namespace"), event.get("namespace_id")):
+        if not ns:
+            continue
         if isinstance(ns, UUID):
             return ns
         try:
             return UUID(str(ns))
         except (ValueError, AttributeError):
-            pass
-    # Return a nil UUID; the caller should resolve before insert
-    return UUID("00000000-0000-0000-0000-000000000000")
+            continue
+    raise UnresolvedNamespaceError(f"event {event.get('id')} has no resolvable namespace")
 
 
 def _infer_expiry(
     event: dict[str, Any],
     memory_class: MemoryClass,
 ) -> datetime | None:
-    """Expiry: working notes expire in 7 days, episodic in 30, rest are indefinite."""
+    """Expiry: working notes expire 7 days after the event, episodic memories
+    30 days after it; durable classes are indefinite."""
+    occurred = event.get("occurred_at")
+    if isinstance(occurred, str):
+        try:
+            occurred = datetime.fromisoformat(occurred.replace("Z", "+00:00"))
+        except ValueError:
+            occurred = None
+    if not isinstance(occurred, datetime):
+        occurred = datetime.now(timezone.utc)
+    if occurred.tzinfo is None:
+        occurred = occurred.replace(tzinfo=timezone.utc)
+    occurred = occurred.replace(microsecond=0)
     if memory_class == MemoryClass.WORKING:
-        return datetime.now(timezone.utc).replace(microsecond=0)
+        return occurred + timedelta(days=7)
     if memory_class == MemoryClass.EPISODIC:
-        return datetime.now(timezone.utc).replace(microsecond=0)
+        return occurred + timedelta(days=30)
     return None  # indefinite for durable classes
 
 
