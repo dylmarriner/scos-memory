@@ -221,14 +221,69 @@ class RunCycleTests(unittest.TestCase):
     def test_cycle_resolves_space_once_and_does_not_globally_purge_history(self):
         conn = self.FakeConn()
         with patch.object(worker, "_ensure_embedding_space", return_value="space-1") as ensure:
-            with patch.object(worker, "_unembedded_batch", return_value=[]) as batch:
-                with patch.object(worker, "_purge_stale_spaces", return_value=99) as purge:
-                    written = worker.run_cycle(conn)
+            with patch.object(worker, "_activate_embedding_space", return_value=False) as activate:
+                with patch.object(worker, "_unembedded_batch", return_value=[]) as batch:
+                    with patch.object(worker, "_purge_stale_spaces", return_value=99) as purge:
+                        written = worker.run_cycle(conn)
         self.assertEqual(written, 0)
         ensure.assert_called_once()
+        activate.assert_called_once_with(conn, "space-1")
         batch.assert_called_once_with(conn, worker.BATCH_SIZE, "space-1")
         purge.assert_not_called()
-        self.assertEqual(conn.commits, 1)
+        # The activation is committed on its own, then the empty batch.
+        self.assertEqual(conn.commits, 2)
+
+    def test_activation_survives_an_embedding_failure(self):
+        conn = self.FakeConn()
+        order = []
+        conn.commit = lambda: order.append("commit")
+        conn.rollback = lambda: order.append("rollback")
+        with patch.object(worker, "_ensure_embedding_space", return_value="space-1"):
+            with patch.object(worker, "_activate_embedding_space", side_effect=lambda *_: order.append("activate")):
+                with patch.object(worker, "_unembedded_batch", return_value=[{"id": "v1", "content": "x"}]):
+                    with patch.object(worker, "embed_texts", return_value=None):
+                        self.assertEqual(worker.run_cycle(conn), 0)
+        self.assertEqual(order, ["activate", "commit", "rollback"])
+
+
+class ActivationTests(unittest.TestCase):
+    class FakeCursor:
+        def __init__(self, rowcount):
+            self.calls = []
+            self.rowcount = rowcount
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+    class FakeConn:
+        def __init__(self, rowcount):
+            self.cur = ActivationTests.FakeCursor(rowcount)
+
+        def cursor(self, row_factory=None):
+            return self.cur
+
+    def test_activation_marks_the_space_unless_it_is_already_active(self):
+        conn = self.FakeConn(rowcount=1)
+        self.assertTrue(worker._activate_embedding_space(conn, "space-2"))
+        sql, params = conn.cur.calls[0]
+        self.assertIn("UPDATE embedding_spaces", sql)
+        self.assertIn("SET activated_at", sql)
+        self.assertIn("IS DISTINCT FROM", sql)
+        self.assertEqual(params, ("space-2",))
+        self.assertFalse(worker._activate_embedding_space(self.FakeConn(rowcount=0), "space-2"))
+
+    def test_backlog_counts_against_the_active_space(self):
+        migration = (Path(__file__).resolve().parents[3] / "database/migrations/000053_hierarchy_membership_and_active_embedding_space.sql").read_text()
+        backlog = migration[migration.index("FUNCTION scos_worker_embedding_backlog()"):]
+        self.assertIn("activated_at IS NOT NULL", backlog)
+        self.assertIn("me.embedding_space_id = (SELECT id FROM active_space)", backlog)
+        self.assertIn("me.chunk_number = 0", backlog)
 
 
 class RerankCandidatesTests(unittest.TestCase):

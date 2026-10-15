@@ -220,7 +220,7 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
                         result.merged_into.get("kind", "memory"), result.merged_into.get("id"))
             continue
         candidate_conflicts = [c for c in conflicts
-                               if str(candidate.source_event_id) in c.subjects]
+                               if str(candidate.candidate_id) in c.subjects]
 
         promotion = evaluate_promotion(candidate, candidate_conflicts)
 
@@ -563,22 +563,41 @@ def _record_merge(
         )
 
 
+# Where a conflict is recorded for each kind of subject: a candidate's
+# conflict_assessment (shown by the review queue) or an active memory's
+# metadata. Both keep a list under "conflicts", so a record involved in
+# several conflicts keeps them all.
+_CONFLICT_TARGETS = {
+    "candidate": pysql.SQL(
+        "UPDATE memory_candidates SET conflict_assessment = jsonb_set("
+        "conflict_assessment, '{conflicts}', "
+        "COALESCE(conflict_assessment->'conflicts', '[]'::jsonb) || jsonb_build_array(%s::jsonb)) "
+        "WHERE id = %s"
+    ),
+    "memory": pysql.SQL(
+        "UPDATE memory_items SET metadata = jsonb_set("
+        "metadata, '{conflicts}', "
+        "COALESCE(metadata->'conflicts', '[]'::jsonb) || jsonb_build_array(%s::jsonb)) "
+        "WHERE id = %s"
+    ),
+}
+
+
 def _write_conflict(conn: psycopg.Connection, conflict: ConflictSet) -> None:
-    """Record a conflict set as structured metadata on affected candidates."""
-    conflict_data = conflict.to_dict()
-    for subject in conflict.subjects:
+    """Record a conflict set on every record it involves.
+
+    Each subject is the primary key of a memory_candidates or memory_items
+    row. A subject that matches no row would leave the conflict recorded
+    nowhere, so it fails the job instead of being silently dropped.
+    """
+    conflict_data = json.dumps(conflict.to_dict())
+    for ref in conflict.subject_refs:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE memory_candidates
-                SET conflict_assessment = conflict_assessment || %s
-                WHERE id = %s
-                """,
-                (
-                    json.dumps({"conflict": conflict_data}),
-                    subject,
-                ),
-            )
+            cur.execute(_CONFLICT_TARGETS[ref["kind"]], (conflict_data, ref["id"]))
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"conflict {conflict.conflict_id}: {ref['kind']} {ref['id']} is not a visible record"
+                )
 
 
 def _mark_completed(conn: psycopg.Connection, job_id: UUID) -> None:

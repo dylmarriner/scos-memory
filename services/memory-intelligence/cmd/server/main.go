@@ -119,17 +119,24 @@ type Belief struct {
 	Evidence   []string `json:"evidence_ids"`
 	RevisedBy  string   `json:"revised_by,omitempty"`
 	CreatedAt  string   `json:"created_at"`
+	// Status and UpdatedAt are read back from the store (loadBeliefs);
+	// UpdatedAt is the belief's last revision, the point its evidence is
+	// judged against for staleness (see beliefStaleness).
+	Status    string `json:"status,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	revisedAt time.Time
 
 	TenantID    string `json:"tenant_id,omitempty"`
 	PrincipalID string `json:"principal_id,omitempty"`
 }
 
 type TemporalRelation struct {
-	SourceID  string `json:"source_id"`
-	TargetID  string `json:"target_id"`
-	Type      string `json:"type"` // derived_from, contradicts, supersedes, evidence_for, used_in
-	Scope     string `json:"scope"`
-	CreatedAt string `json:"created_at"`
+	SourceID   string  `json:"source_id"`
+	TargetID   string  `json:"target_id"`
+	Type       string  `json:"type"` // derived_from, contradicts, supersedes, evidence_for, used_in
+	Confidence float64 `json:"confidence"`
+	Scope      string  `json:"scope"`
+	CreatedAt  string  `json:"created_at"`
 }
 
 // ── Organisational hierarchy (§25.6) ────────────────────────────────────
@@ -146,14 +153,19 @@ const (
 )
 
 type HierarchyNode struct {
-	ID        string          `json:"id"`
-	Level     MemoryHierarchy `json:"level"`
-	Name      string          `json:"name"`
-	ParentID  string          `json:"parent_id,omitempty"`
-	Scope     string          `json:"scope"`
-	Summary   string          `json:"summary,omitempty"`
-	FactCount int             `json:"fact_count"`
-	UpdatedAt string          `json:"updated_at"`
+	ID       string          `json:"id"`
+	Level    MemoryHierarchy `json:"level"`
+	Name     string          `json:"name"`
+	ParentID string          `json:"parent_id,omitempty"`
+	Scope    string          `json:"scope"`
+	Summary  string          `json:"summary,omitempty"`
+	// FactIDs are the active facts filed directly under this node and
+	// FactCount the distinct active facts in its whole subtree. Both are
+	// computed from stored facts on read (loadHierarchy); neither is
+	// accepted from a caller.
+	FactIDs   []string `json:"fact_ids,omitempty"`
+	FactCount int      `json:"fact_count"`
+	UpdatedAt string   `json:"updated_at"`
 
 	TenantID    string `json:"tenant_id,omitempty"`
 	PrincipalID string `json:"principal_id,omitempty"`
@@ -173,6 +185,9 @@ type SystemMapEntry struct {
 	Status  string `json:"status"`
 	Version string `json:"version"`
 	Uptime  string `json:"uptime"`
+	// Detail says why a field could not be measured, e.g. a peer that
+	// refused this service's credentials on /v1/version.
+	Detail string `json:"detail,omitempty"`
 }
 
 // ── server state ─────────────────────────────────────────────────────────
@@ -198,6 +213,10 @@ type engineServer struct {
 	okfAuthorityThresh   int
 	okfConfidenceThresh  float64
 	internalServiceToken string
+	// controlPlaneToken is presented, with internalServiceToken, when this
+	// service probes its peers for the system map: several peers sit behind
+	// auth.ControlPlaneHandler and refuse a bearer token alone.
+	controlPlaneToken string
 }
 
 // peerDefault names an environment variable and its fallback base URL for a
@@ -356,6 +375,7 @@ func main() {
 	srv.okfAuthorityThresh = envInt("SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD", 90)
 	srv.okfConfidenceThresh = envFloat("SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD", 0.85)
 	srv.internalServiceToken = strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN"))
+	srv.controlPlaneToken = strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -378,6 +398,7 @@ func main() {
 	mux.HandleFunc("/v1/beliefs", srv.handleBeliefs)
 	mux.HandleFunc("/v1/relations", srv.handleRelations)
 	mux.HandleFunc("/v1/hierarchy", srv.handleHierarchy)
+	mux.HandleFunc("/v1/hierarchy/", srv.handleHierarchyFacts)
 
 	// Reflection
 	mux.HandleFunc("/v1/reflect", srv.handleReflect)
@@ -598,9 +619,11 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var contradictions []string
+		contradicted := make(map[string]*Fact)
 		for _, other := range existing {
 			if isContradictory(&fact, other) {
 				contradictions = append(contradictions, other.ID)
+				contradicted[other.ID] = other
 			}
 		}
 		merge := findMergeCandidate(ctx, &fact, existing)
@@ -625,9 +648,14 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			serviceMetrics.Count(telemetry.MetricUserModelChanges,
 				map[string]string{"change": "fact_merge_skipped"},
 				telemetry.Correlation{Tenant: identity.TenantID})
-			writeJSON(w, map[string]any{
+			response := map[string]any{
 				"fact": merge.ExistingFact, "merged": true, "canonical_fact_id": merge.ExistingFact.ID,
-			})
+			}
+			if len(fact.CodeSymbolVersionIDs) > 0 {
+				response["code_symbol_links"] = dropAllCodeLinks(fact.CodeSymbolVersionIDs,
+					"no new fact was stored (merged into "+merge.ExistingFact.ID+"); link the canonical fact with /v1/evidence-links")
+			}
+			writeJSON(w, response)
 			return
 		}
 
@@ -638,16 +666,30 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 		}
 		fact.ID = factID
 		for _, c := range contradictions {
-			if err := insertRelation(ctx, tx, factID, c, "contradicts"); err != nil {
+			// A detected contradiction is as certain as the weaker of the
+			// two claims it sets against each other.
+			if err := insertRelation(ctx, tx, factID, c, "contradicts", relationConfidenceFromFacts(&fact, contradicted[c])); err != nil {
 				http.Error(w, "failed to persist contradiction: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
+		diary := map[string]any{
+			"fact_id": factID, "network": fact.Network, "namespace_id": fact.NamespaceID,
+			"summary": truncate(fact.Content, 120),
+		}
+		if len(contradictions) > 0 {
+			diary["contradicts"] = contradictions
+		}
 		if merge != nil && merge.NewIsRicher {
-			if err := markFactMerged(ctx, tx, identity.TenantID, merge.ExistingFact.ID, factID); err != nil {
+			if err := markFactMerged(ctx, tx, identity.TenantID, merge.ExistingFact.ID, factID, merge.Score); err != nil {
 				http.Error(w, "failed to mark duplicate merged: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
+			diary["merged_fact_id"] = merge.ExistingFact.ID
+		}
+		if err := recordDiaryEntry(ctx, tx, identity, "fact_recorded", diary); err != nil {
+			http.Error(w, "failed to record diary entry: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 		if err := tx.Commit(); err != nil {
 			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
@@ -664,14 +706,21 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 				map[string]string{"namespace": fact.NamespaceID},
 				telemetry.Correlation{Tenant: identity.TenantID})
 		}
+		requestedCodeLinks := len(fact.CodeSymbolVersionIDs) > 0
+		codeLinks := s.maybePromoteToOKF(&fact, identity)
+		// Echo only the code links that were actually recorded; every
+		// requested link that was not is reported as dropped with the reason.
+		fact.CodeSymbolVersionIDs = codeLinks.Linked
 		response := map[string]any{"fact": fact, "contradictions": contradictions}
+		if requestedCodeLinks {
+			response["code_symbol_links"] = codeLinks
+		}
 		if merge != nil && merge.NewIsRicher {
 			serviceMetrics.Count(telemetry.MetricUserModelChanges,
 				map[string]string{"change": "fact_merged"},
 				telemetry.Correlation{Tenant: identity.TenantID})
 			response["merged_fact_id"] = merge.ExistingFact.ID
 		}
-		s.maybePromoteToOKF(&fact, identity.TenantID)
 		writeJSON(w, response)
 
 	default:
@@ -822,7 +871,7 @@ func (s *engineServer) handleFactCorrect(w http.ResponseWriter, r *http.Request,
 	serviceMetrics.Count(telemetry.MetricUserModelChanges,
 		map[string]string{"change": "fact_corrected"},
 		telemetry.Correlation{Tenant: identity.TenantID})
-	s.maybePromoteToOKF(corrected, identity.TenantID)
+	s.maybePromoteToOKF(corrected, identity)
 	writeJSON(w, map[string]any{
 		"corrected":        true,
 		"previous_fact_id": id,
@@ -843,6 +892,63 @@ var okfCategories = map[string]bool{
 
 var okfSlugSanitizer = regexp.MustCompile(`[^a-z0-9-]+`)
 
+// codeLinkReport says what became of the code_symbol_version_ids a fact
+// write cited: which were recorded as memory_code_links rows and which were
+// not, each with the reason. A caller is never told a link exists that was
+// not written.
+type codeLinkReport struct {
+	Linked  []string          `json:"linked"`
+	Dropped []droppedCodeLink `json:"dropped"`
+}
+
+type droppedCodeLink struct {
+	CodeSymbolVersionID string `json:"code_symbol_version_id"`
+	Reason              string `json:"reason"`
+}
+
+func dropAllCodeLinks(ids []string, reason string) codeLinkReport {
+	report := codeLinkReport{Linked: []string{}, Dropped: make([]droppedCodeLink, 0, len(ids))}
+	for _, id := range ids {
+		report.Dropped = append(report.Dropped, droppedCodeLink{CodeSymbolVersionID: id, Reason: reason})
+	}
+	return report
+}
+
+// linkPromotedFactToCode is P1-C write point 2: a fact that already cites
+// code_symbol_version_ids and clears the OKF durability bar gets those
+// citations persisted as memory_code_links rows with source='okf_promotion'.
+// The links are written in one transaction, so either all are recorded or
+// none is, and the report says which. A failure never blocks the promotion
+// this fact is already mid-way through.
+func (s *engineServer) linkPromotedFactToCode(fact *Fact, identity requestIdentity) codeLinkReport {
+	if s.db == nil {
+		return dropAllCodeLinks(fact.CodeSymbolVersionIDs, "no database is configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fail := func(stage string, err error) codeLinkReport {
+		log.Printf("link promoted fact %s to code: %s: %v", fact.ID, stage, err)
+		return dropAllCodeLinks(fact.CodeSymbolVersionIDs, "link not recorded: "+stage+": "+err.Error())
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fail("begin transaction", err)
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, identity); err != nil {
+		return fail("set principal context", err)
+	}
+	for _, symbolVersionID := range fact.CodeSymbolVersionIDs {
+		if _, err := insertEvidenceLink(ctx, tx, identity.TenantID, fact.ID, symbolVersionID, "evidences", "okf_promotion", 1.0); err != nil {
+			return fail("code symbol version "+symbolVersionID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fail("commit", err)
+	}
+	return codeLinkReport{Linked: append([]string{}, fact.CodeSymbolVersionIDs...), Dropped: []droppedCodeLink{}}
+}
+
 // maybePromoteToOKF implements the automatic half of §16/§26. The
 // authority/confidence threshold (SCOS_OKF_PROMOTION_*) is only a cheap
 // pre-filter to avoid spending an LLM call on every low-grade fact; the
@@ -851,8 +957,8 @@ var okfSlugSanitizer = regexp.MustCompile(`[^a-z0-9-]+`)
 // concept, a durable confirmed fact about a real entity, a procedure, tool
 // documentation, a decision, or a glossary term -- exactly the "belongs in
 // OKF" list, not raw conversational content. When the model says a fact
-// doesn't qualify, or DEEPSEEK_API_KEY isn't configured, nothing happens:
-// this is additive and silent, never a requirement for the fact write it
+// doesn't qualify, or DEEPSEEK_API_KEY isn't configured, no proposal is
+// opened: this is additive, never a requirement for the fact write it
 // followed to succeed.
 //
 // What it produces either way is a *proposal*, never a merge -- the
@@ -861,57 +967,39 @@ var okfSlugSanitizer = regexp.MustCompile(`[^a-z0-9-]+`)
 // knowledge_curator (or role-appropriate reviewer) to approve it. Nothing
 // here bypasses that; it only decides whether a proposal is worth opening
 // and how to shape it.
-// linkPromotedFactToCode is P1-C write point 2: a fact that already cites
-// code_symbol_version_ids and clears the OKF durability bar gets those
-// citations persisted as memory_code_links rows with source='okf_promotion'
-// -- best-effort, logged not fatal, since this never blocks the promotion
-// this fact is already mid-way through.
-func (s *engineServer) linkPromotedFactToCode(fact *Fact, tenantID string) {
-	if s.db == nil {
-		return
+//
+// On promotion it also records the code links the fact cites, and it
+// reports what became of those links: code links are written only on
+// promotion (or explicitly through /v1/evidence-links), so a fact that is
+// not promoted has every cited link reported as dropped, with the reason.
+func (s *engineServer) maybePromoteToOKF(fact *Fact, identity requestIdentity) codeLinkReport {
+	report := codeLinkReport{Linked: []string{}, Dropped: []droppedCodeLink{}}
+	if fact == nil {
+		return report
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		log.Printf("link promoted fact %s to code: begin transaction: %v", fact.ID, err)
-		return
-	}
-	defer tx.Rollback()
-	if err := setPrincipalContext(ctx, tx, requestIdentity{TenantID: tenantID, PrincipalID: fact.PrincipalID}); err != nil {
-		log.Printf("link promoted fact %s to code: set principal context: %v", fact.ID, err)
-		return
-	}
-	for _, symbolVersionID := range fact.CodeSymbolVersionIDs {
-		if _, err := insertEvidenceLink(ctx, tx, tenantID, fact.ID, symbolVersionID, "evidences", "okf_promotion", 1.0); err != nil {
-			log.Printf("link promoted fact %s to code symbol version %s: %v", fact.ID, symbolVersionID, err)
-			return
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		log.Printf("link promoted fact %s to code: commit: %v", fact.ID, err)
-	}
-}
-
-func (s *engineServer) maybePromoteToOKF(fact *Fact, tenantID string) {
-	if fact == nil || fact.Authority < s.okfAuthorityThresh || fact.Confidence < s.okfConfidenceThresh {
-		return
+	const explicitLink = "; link it explicitly with /v1/evidence-links"
+	if fact.Authority < s.okfAuthorityThresh || fact.Confidence < s.okfConfidenceThresh {
+		return dropAllCodeLinks(fact.CodeSymbolVersionIDs, fmt.Sprintf(
+			"fact is below the OKF promotion threshold (authority %d, needs %d; confidence %.2f, needs %.2f) and code links are recorded only on promotion%s",
+			fact.Authority, s.okfAuthorityThresh, fact.Confidence, s.okfConfidenceThresh, explicitLink))
 	}
 	if !llmClient.Enabled() || s.okfSynchroniserURL == "" || s.internalServiceToken == "" || s.httpClient == nil {
-		return
+		return dropAllCodeLinks(fact.CodeSymbolVersionIDs,
+			"OKF promotion is not configured (needs the classification model, the OKF synchroniser URL and the internal service token)"+explicitLink)
 	}
 
 	candidate, err := classifyForOKF(context.Background(), fact)
 	if err != nil {
 		log.Printf("okf classification for fact %s: %v", fact.ID, err)
-		return
+		return dropAllCodeLinks(fact.CodeSymbolVersionIDs, "OKF classification failed: "+err.Error()+explicitLink)
 	}
 	if candidate == nil {
-		return // model judged this fact not durable/structural enough for OKF
+		// The model judged this fact not durable/structural enough for OKF.
+		return dropAllCodeLinks(fact.CodeSymbolVersionIDs, "the fact was not judged durable enough for OKF promotion"+explicitLink)
 	}
 
 	if len(fact.CodeSymbolVersionIDs) > 0 {
-		s.linkPromotedFactToCode(fact, tenantID)
+		report = s.linkPromotedFactToCode(fact, identity)
 	}
 
 	path := candidate.Category + "/" + candidate.Slug + ".md"
@@ -921,30 +1009,31 @@ func (s *engineServer) maybePromoteToOKF(fact *Fact, tenantID string) {
 		"proposer": "system:memory-intelligence-auto-promotion",
 	})
 	if err != nil {
-		return
+		return report
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.okfSynchroniserURL+"/v1/proposals", bytes.NewReader(body))
 	if err != nil {
-		return
+		return report
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.internalServiceToken)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		log.Printf("okf promotion proposal for fact %s: %v", fact.ID, err)
-		return
+		return report
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		log.Printf("okf promotion proposal for fact %s (%s): %s: %s", fact.ID, path, resp.Status, strings.TrimSpace(string(respBody)))
-		return
+		return report
 	}
 	serviceMetrics.Count(telemetry.MetricUserModelChanges,
 		map[string]string{"change": "fact_okf_proposal_opened", "category": candidate.Category},
-		telemetry.Correlation{Tenant: tenantID})
+		telemetry.Correlation{Tenant: identity.TenantID})
+	return report
 }
 
 // okfCandidate is what the model decides when asked whether, and how, a
@@ -1493,6 +1582,13 @@ func (s *engineServer) handleBeliefs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to persist belief: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := recordDiaryEntry(ctx, tx, identity, "belief_recorded", map[string]any{
+			"belief_id": beliefID, "evidence_ids": belief.Evidence,
+			"confidence": clampFloat(belief.Confidence, 0, 1), "summary": truncate(belief.Conclusion, 120),
+		}); err != nil {
+			http.Error(w, "failed to record diary entry: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if err := tx.Commit(); err != nil {
 			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1539,6 +1635,9 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 			SourceMemoryID string `json:"source_memory_id"`
 			TargetMemoryID string `json:"target_memory_id"`
 			RelationType   string `json:"relation_type"`
+			// Confidence is optional; when absent it is derived from the
+			// two facts the relation connects (relationConfidenceFromFacts).
+			Confidence *float64 `json:"confidence,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
@@ -1546,6 +1645,10 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.SourceMemoryID == "" || req.TargetMemoryID == "" || req.RelationType == "" {
 			http.Error(w, "source_memory_id, target_memory_id and relation_type are required", http.StatusBadRequest)
+			return
+		}
+		if req.Confidence != nil && !validRelationConfidence(*req.Confidence) {
+			http.Error(w, "confidence must be between 0 and 1", http.StatusBadRequest)
 			return
 		}
 		identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
@@ -1565,17 +1668,23 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 		// as belonging to the caller, so ownership has to be enforced here,
 		// at write time, exactly as handleBeliefs already does for
 		// evidence_ids.
-		if _, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+		source, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
 			return getFact(ctx, q, identity.TenantID, req.SourceMemoryID)
-		}); err != nil {
+		})
+		if err != nil {
 			http.Error(w, fmt.Sprintf("source_memory_id references unknown fact %q", req.SourceMemoryID), http.StatusUnprocessableEntity)
 			return
 		}
-		if _, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
+		target, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
 			return getFact(ctx, q, identity.TenantID, req.TargetMemoryID)
-		}); err != nil {
+		})
+		if err != nil {
 			http.Error(w, fmt.Sprintf("target_memory_id references unknown fact %q", req.TargetMemoryID), http.StatusUnprocessableEntity)
 			return
+		}
+		confidence, confidenceSource := relationConfidenceFromFacts(source, target), "evidence"
+		if req.Confidence != nil {
+			confidence, confidenceSource = *req.Confidence, "request"
 		}
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -1587,7 +1696,7 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := insertRelation(ctx, tx, req.SourceMemoryID, req.TargetMemoryID, req.RelationType); err != nil {
+		if err := insertRelation(ctx, tx, req.SourceMemoryID, req.TargetMemoryID, req.RelationType, confidence); err != nil {
 			http.Error(w, "insert relation: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1596,176 +1705,17 @@ func (s *engineServer) handleRelations(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{
-			"created":          true,
-			"source_memory_id": req.SourceMemoryID,
-			"target_memory_id": req.TargetMemoryID,
-			"relation_type":    req.RelationType,
+			"created":           true,
+			"source_memory_id":  req.SourceMemoryID,
+			"target_memory_id":  req.TargetMemoryID,
+			"relation_type":     req.RelationType,
+			"confidence":        confidence,
+			"confidence_source": confidenceSource,
 		})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-// ── hierarchy ────────────────────────────────────────────────────────────
-
-func (s *engineServer) handleHierarchy(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		identity, status, msg := resolveIdentityFromRequest(r)
-		if status != 0 {
-			http.Error(w, msg, status)
-			return
-		}
-		nodes, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) ([]*HierarchyNode, error) {
-			return loadHierarchy(r.Context(), q, identity.TenantID)
-		})
-		if err != nil {
-			http.Error(w, "load hierarchy: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, nodes)
-
-	case http.MethodPost:
-		var node HierarchyNode
-		if err := json.NewDecoder(r.Body).Decode(&node); err != nil {
-			http.Error(w, "invalid node: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if node.Name == "" {
-			http.Error(w, "name required", http.StatusBadRequest)
-			return
-		}
-		identity, status, msg := resolveIdentity(r, node.TenantID, node.PrincipalID)
-		if status != 0 {
-			http.Error(w, msg, status)
-			return
-		}
-		if node.Level == "" {
-			node.Level = LevelDrawer
-		}
-
-		ctx := r.Context()
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer tx.Rollback()
-		if err := setPrincipalContext(ctx, tx, identity); err != nil {
-			http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		nodeID, err := insertHierarchyNode(ctx, tx, identity.TenantID, &node)
-		if err != nil {
-			http.Error(w, "failed to persist hierarchy: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := tx.Commit(); err != nil {
-			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		node.ID = nodeID
-		node.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		writeJSON(w, node)
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// ── reflection (§25.7) ───────────────────────────────────────────────────
-
-func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Evidence    []string `json:"evidence_ids"`
-		Scope       string   `json:"scope,omitempty"`
-		MaxBeliefs  int      `json:"max_beliefs,omitempty"`
-		TenantID    string   `json:"tenant_id,omitempty"`
-		PrincipalID string   `json:"principal_id,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.MaxBeliefs <= 0 {
-		req.MaxBeliefs = 5
-	}
-	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
-	if status != 0 {
-		http.Error(w, msg, status)
-		return
-	}
-
-	ctx := r.Context()
-	var evidenceFacts []*Fact
-	for _, id := range req.Evidence {
-		if f, err := withPrincipalContext(ctx, s.db, identity, func(q querier) (*Fact, error) {
-			return getFact(ctx, q, identity.TenantID, id)
-		}); err == nil {
-			evidenceFacts = append(evidenceFacts, f)
-		}
-	}
-
-	var contradictions []map[string]any
-	for i, f1 := range evidenceFacts {
-		for j, f2 := range evidenceFacts {
-			if i >= j {
-				continue
-			}
-			if isContradictory(f1, f2) {
-				contradictions = append(contradictions, map[string]any{
-					"fact_a": f1.ID,
-					"fact_b": f2.ID,
-					"reason": "conflicting claims",
-				})
-			}
-		}
-	}
-
-	var candidates []Belief
-	for _, f := range evidenceFacts {
-		if f.Inferred {
-			continue
-		}
-		candidates = append(candidates, Belief{
-			Conclusion: f.Content,
-			Confidence: f.Confidence * 0.9,
-			Evidence:   []string{f.ID},
-		})
-		if len(candidates) >= req.MaxBeliefs {
-			break
-		}
-	}
-
-	existingBeliefs, err := withPrincipalContext(ctx, s.db, identity, func(q querier) ([]*Belief, error) {
-		return loadBeliefs(ctx, q, identity.TenantID)
-	})
-	if err != nil {
-		http.Error(w, "load beliefs: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	var staleBeliefs []string
-	for _, b := range existingBeliefs {
-		for _, f := range evidenceFacts {
-			if strings.Contains(strings.ToLower(b.Conclusion), strings.ToLower(f.Content[:minInt(30, len(f.Content))])) {
-				staleBeliefs = append(staleBeliefs, b.ID)
-			}
-		}
-	}
-
-	writeJSON(w, map[string]any{
-		"evidence_analysed": len(evidenceFacts),
-		"contradictions":    contradictions,
-		"candidate_beliefs": candidates,
-		"stale_beliefs":     staleBeliefs,
-		"requires_revision": len(contradictions) > 0 || len(staleBeliefs) > 0,
-	})
 }
 
 // ── dashboard views ──────────────────────────────────────────────────────
@@ -1782,12 +1732,37 @@ type versionInfo struct {
 // uptime. A peer that cannot be reached is truthfully reported as
 // unreachable rather than defaulting to a fabricated healthy/unknown value
 // (ss42 prohibits fabricated operational state).
+//
+// /v1/version sits behind each peer's authentication, and several peers
+// (auth.ControlPlaneHandler) also require the control-plane token, so the
+// probe presents this service's own credentials -- its internal service
+// token and control-plane token, as transparency-projection does for the
+// dashboard's upstream calls. Without a configured service token the
+// caller's verified bearer token is forwarded instead. A peer that still
+// refuses is reported as such in Detail, never as an unknown version
+// without a reason.
+func (s *engineServer) peerProbeHeaders(ctx context.Context) http.Header {
+	h := http.Header{}
+	bearer := s.internalServiceToken
+	if bearer == "" {
+		bearer = auth.BearerToken(ctx)
+	}
+	if bearer != "" {
+		h.Set("Authorization", "Bearer "+bearer)
+	}
+	if s.controlPlaneToken != "" {
+		h.Set("X-SCOS-Control-Plane-Token", s.controlPlaneToken)
+	}
+	return h
+}
+
 func (s *engineServer) probePeer(ctx context.Context, name, base string) SystemMapEntry {
 	entry := SystemMapEntry{Service: name, Status: "unreachable", Version: "unknown", Uptime: "unknown"}
 	client := s.httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Second, Transport: telemetry.ProcessTransport(nil)}
 	}
+	headers := s.peerProbeHeaders(ctx)
 
 	readyReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health/ready", nil)
 	if err != nil {
@@ -1808,19 +1783,28 @@ func (s *engineServer) probePeer(ctx context.Context, name, base string) SystemM
 	if err != nil {
 		return entry
 	}
+	versionReq.Header = headers.Clone()
 	versionResp, err := client.Do(versionReq)
 	if err != nil {
+		entry.Detail = "version probe failed: " + err.Error()
 		return entry
 	}
 	defer versionResp.Body.Close()
-	if versionResp.StatusCode == http.StatusOK {
+	switch versionResp.StatusCode {
+	case http.StatusOK:
 		var info versionInfo
-		if json.NewDecoder(versionResp.Body).Decode(&info) == nil {
-			if info.Version != "" {
-				entry.Version = info.Version
-			}
-			entry.Uptime = (time.Duration(info.UptimeSeconds) * time.Second).String()
+		if err := json.NewDecoder(versionResp.Body).Decode(&info); err != nil {
+			entry.Detail = "version response unreadable: " + err.Error()
+			break
 		}
+		if info.Version != "" {
+			entry.Version = info.Version
+		}
+		entry.Uptime = (time.Duration(info.UptimeSeconds) * time.Second).String()
+	case http.StatusUnauthorized, http.StatusForbidden:
+		entry.Detail = fmt.Sprintf("version probe refused this service's credentials (%d)", versionResp.StatusCode)
+	default:
+		entry.Detail = fmt.Sprintf("version probe answered %d", versionResp.StatusCode)
 	}
 	return entry
 }
@@ -1922,7 +1906,7 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 	for _, rel := range relations {
 		edges = append(edges, map[string]any{
 			"source": rel.SourceID, "target": rel.TargetID,
-			"type": rel.Type,
+			"type": rel.Type, "confidence": rel.Confidence,
 		})
 	}
 	// Entity-mention edges: linkEntityMentions (store.go) records, on every
@@ -2510,6 +2494,9 @@ const maxMergeCandidates = 3
 type mergeDecision struct {
 	ExistingFact *Fact
 	NewIsRicher  bool
+	// Score is the significant-word overlap between the two statements
+	// (overlapScore), the measured basis for treating them as one.
+	Score float64
 }
 
 // findMergeCandidate implements Dream's Merge duplicate-detection: a new
@@ -2548,7 +2535,7 @@ func findMergeCandidate(ctx context.Context, fact *Fact, existing []*Fact) *merg
 		if top.score < 0.85 {
 			return nil
 		}
-		return &mergeDecision{ExistingFact: top.fact, NewIsRicher: len(fact.Content) > len(top.fact.Content)}
+		return &mergeDecision{ExistingFact: top.fact, NewIsRicher: len(fact.Content) > len(top.fact.Content), Score: top.score}
 	}
 
 	var options strings.Builder
@@ -2569,7 +2556,8 @@ func findMergeCandidate(ctx context.Context, fact *Fact, existing []*Fact) *merg
 	if err != nil || !result.IsDuplicate || result.CandidateIndex < 0 || result.CandidateIndex >= len(candidates) {
 		return nil
 	}
-	return &mergeDecision{ExistingFact: candidates[result.CandidateIndex].fact, NewIsRicher: result.Richer != "existing"}
+	chosen := candidates[result.CandidateIndex]
+	return &mergeDecision{ExistingFact: chosen.fact, NewIsRicher: result.Richer != "existing", Score: chosen.score}
 }
 
 // ── utility ──────────────────────────────────────────────────────────────

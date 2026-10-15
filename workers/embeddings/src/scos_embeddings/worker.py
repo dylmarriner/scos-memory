@@ -264,6 +264,36 @@ def _ensure_embedding_space(
     return str(row[0])
 
 
+def _activate_embedding_space(conn: psycopg.Connection, space_id: str) -> bool:
+    """Record space_id as the active space for its role.
+
+    The active space is the one with the latest activated_at for the role
+    (migrations/000053). The embedding backlog is counted against it, so a
+    model change makes every memory embedded only in the previous space
+    backlog again instead of reading as done. Re-activating the space that
+    is already active is a no-op, so a steady worker does not rewrite the
+    row every cycle. Returns True when the active space changed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE embedding_spaces s
+               SET activated_at = clock_timestamp()
+             WHERE s.id = %s::uuid
+               AND s.id IS DISTINCT FROM (
+                    SELECT a.id FROM embedding_spaces a
+                     WHERE a.role = s.role AND a.activated_at IS NOT NULL
+                     ORDER BY a.activated_at DESC
+                     LIMIT 1)
+            """,
+            (space_id,),
+        )
+        changed = cur.rowcount == 1
+    if changed:
+        logger.info("embedding space %s is now the active text space", space_id)
+    return changed
+
+
 def _unembedded_batch(
     conn: psycopg.Connection,
     limit: int,
@@ -335,6 +365,10 @@ def run_cycle(conn: psycopg.Connection) -> int:
         dimensions=MODEL_DIMENSIONS,
         generation=MODEL_GENERATION,
     )
+    _activate_embedding_space(conn, space_id)
+    # The space and its activation describe this worker's configuration, not
+    # the outcome of the batch: they are committed even if embedding fails.
+    conn.commit()
     batch = _unembedded_batch(conn, BATCH_SIZE, space_id)
     if not batch:
         conn.commit()

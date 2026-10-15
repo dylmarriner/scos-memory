@@ -44,9 +44,38 @@ def expire_memories(conn: psycopg.Connection, now: datetime) -> tuple[int, int]:
 
 
 def embedding_backlog_count(conn: psycopg.Connection) -> int:
-    """Active memories whose current version has no embedding yet."""
+    """Active memories whose current version has no vector in the active
+    text embedding space (the space the embeddings worker last activated,
+    migrations/000053). A vector in any other space does not count: retrieval
+    only compares vectors within the active space."""
     row = conn.execute("SELECT scos_worker_embedding_backlog()").fetchone()
     return int(row[0])
+
+
+def active_embedding_space(conn: psycopg.Connection) -> dict[str, Any] | None:
+    """The text embedding space the backlog is measured against, or None
+    when the embeddings worker has not activated one yet (then every active
+    memory is backlog)."""
+    row = conn.execute(
+        """
+        SELECT id::text, provider, model, model_revision, dimensions, generation, activated_at
+          FROM embedding_spaces
+         WHERE role = 'text' AND activated_at IS NOT NULL
+         ORDER BY activated_at DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "provider": row[1],
+        "model": row[2],
+        "model_revision": row[3],
+        "dimensions": int(row[4]),
+        "generation": int(row[5]),
+        "activated_at": row[6].isoformat() if row[6] else None,
+    }
 
 
 def table_maintenance_status(conn: psycopg.Connection, tables: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -87,6 +116,7 @@ def run_maintenance_cycle(conn: psycopg.Connection) -> dict:
 
     expired_explicit, expired_retention = expire_memories(conn, now)
     backlog = embedding_backlog_count(conn)
+    space = active_embedding_space(conn)
     tables = table_maintenance_status(conn, MAINTAINED_TABLES)
 
     return {
@@ -95,6 +125,7 @@ def run_maintenance_cycle(conn: psycopg.Connection) -> dict:
         "expired_explicit": expired_explicit,
         "expired_retention": expired_retention,
         "embedding_backlog": backlog,
+        "embedding_space": space,
         "table_maintenance": tables,
         "timestamp": now.isoformat(),
     }

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 sys.modules.setdefault("psycopg", MagicMock())
 
 from main import (  # noqa: E402
+    active_embedding_space,
     embedding_backlog_count,
     expire_memories,
     run_maintenance_cycle,
@@ -40,6 +41,17 @@ class EmbeddingBacklogTests(unittest.TestCase):
         self.assertEqual(embedding_backlog_count(conn), 7)
         self.assertIn("scos_worker_embedding_backlog", conn.execute.call_args[0][0])
 
+    def test_reports_the_active_space_or_none(self):
+        conn = MagicMock()
+        ts = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        conn.execute.return_value = fake_cursor(one=("s1", "fastembed", "m", "local", 384, 2, ts))
+        self.assertEqual(active_embedding_space(conn), {
+            "id": "s1", "provider": "fastembed", "model": "m", "model_revision": "local",
+            "dimensions": 384, "generation": 2, "activated_at": ts.isoformat()})
+        self.assertIn("activated_at IS NOT NULL", conn.execute.call_args[0][0])
+        conn.execute.return_value = fake_cursor(one=None)
+        self.assertIsNone(active_embedding_space(conn))
+
 
 class TableMaintenanceTests(unittest.TestCase):
     def test_reports_autovacuum_state(self):
@@ -57,6 +69,7 @@ class RunMaintenanceCycleTests(unittest.TestCase):
         conn.execute.side_effect = [
             fake_cursor(one=(1, 2)),  # expiry
             fake_cursor(one=(3,)),  # embedding backlog
+            fake_cursor(one=None),  # no active space yet
             fake_cursor(rows=[]),  # table stats
         ]
         result = run_maintenance_cycle(conn)
@@ -64,6 +77,7 @@ class RunMaintenanceCycleTests(unittest.TestCase):
         self.assertEqual(result["stale_items_pruned"], 3)
         self.assertEqual((result["expired_explicit"], result["expired_retention"]), (1, 2))
         self.assertEqual(result["embedding_backlog"], 3)
+        self.assertIsNone(result["embedding_space"])
         self.assertEqual(result["table_maintenance"], [])
         self.assertIn("timestamp", result)
 

@@ -143,6 +143,106 @@ class WorkerRLSTests(unittest.TestCase):
         self.assertGreater(evidence, 1, "the second turn's evidence must be attached to the existing memory")
         self.assertNotEqual(first, second)
 
+    def test_conflict_is_recorded_on_the_candidate_and_the_memory_it_contradicts(self):
+        from scos_consolidation import worker
+
+        fx = Fixture(self.admin)
+        memory = str(uuid.uuid4())
+        version = str(uuid.uuid4())
+        title = "The release train leaves on Wednesdays."
+        self.admin.execute(
+            """INSERT INTO memory_items (id, tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary,
+                   authority_level, confidence_score, sensitivity)
+               VALUES (%s, %s, %s, %s, 'semantic', 'active', %s, 'Releases are cut by hand whenever QA signs off.', 10, 0.5, 'internal')""",
+            (memory, fx.tenant, fx.namespace, fx.principal, title))
+        self.admin.execute(
+            """INSERT INTO memory_versions (id, memory_id, version_number, content, structured_content, content_hash, change_reason, created_by)
+               VALUES (%s, %s, 1, 'Releases are cut by hand whenever QA signs off.', '{}', 'h', 'seed', %s)""",
+            (version, memory, fx.principal))
+        self.admin.execute("UPDATE memory_items SET current_version_id = %s WHERE id = %s", (version, memory))
+        self.admin.commit()
+
+        turn = fx.completed_turn("Remember that the release train leaves on Wednesdays.", "Noted.")
+        worker._process_cycle(self.app)
+
+        status = self.admin.execute("SELECT status::text FROM outbox_jobs WHERE operation_id = %s", (turn + ":completed",)).fetchone()[0]
+        candidate = self.admin.execute(
+            "SELECT id::text, status, conflict_assessment FROM memory_candidates WHERE tenant_id = %s", (fx.tenant,)).fetchone()
+        memory_meta = self.admin.execute("SELECT metadata FROM memory_items WHERE id = %s", (memory,)).fetchone()[0]
+        self.admin.commit()
+        self.assertEqual(status, "succeeded")
+        candidate_id, candidate_status, assessment = candidate
+        self.assertEqual(candidate_status, "pending_review", "a conflicting candidate is held for review")
+        recorded = assessment.get("conflicts", [])
+        self.assertEqual(len(recorded), 1, assessment)
+        self.assertEqual(recorded[0]["subjects"], [candidate_id, memory])
+        self.assertEqual(recorded[0]["subject_refs"], [{"kind": "candidate", "id": candidate_id}, {"kind": "memory", "id": memory}])
+        self.assertEqual([c["conflict_id"] for c in memory_meta.get("conflicts", [])], [recorded[0]["conflict_id"]],
+                         "the contradicted memory must carry the same conflict set")
+
+    def test_embedding_backlog_is_measured_in_the_active_space(self):
+        from scos_embeddings import worker as emb
+        index_main = _load("index_maintenance_backlog", ROOT / "workers/index-maintenance/main.py")
+
+        fx = Fixture(self.admin)
+        memory, version = str(uuid.uuid4()), str(uuid.uuid4())
+        self.admin.execute(
+            """INSERT INTO memory_items (id, tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary,
+                   authority_level, confidence_score, sensitivity)
+               VALUES (%s, %s, %s, %s, 'semantic', 'active', 'space test', 'space test', 50, 0.5, 'internal')""",
+            (memory, fx.tenant, fx.namespace, fx.principal))
+        self.admin.execute(
+            """INSERT INTO memory_versions (id, memory_id, version_number, content, structured_content, content_hash, change_reason, created_by)
+               VALUES (%s, %s, 1, 'space test', '{}', 'h', 'seed', %s)""",
+            (version, memory, fx.principal))
+        self.admin.execute("UPDATE memory_items SET current_version_id = %s WHERE id = %s", (version, memory))
+        self.admin.commit()
+
+        def backlog_has_memory(space_id: str) -> bool:
+            # The backlog is fabric-wide, so check this memory's own standing
+            # against the active space rather than the global count.
+            return self.admin.execute(
+                """SELECT NOT EXISTS (SELECT 1 FROM memory_embeddings me
+                                       WHERE me.memory_version_id = %s AND me.embedding_space_id = %s
+                                         AND me.chunk_number = 0 AND me.embedding IS NOT NULL)""",
+                (version, space_id)).fetchone()[0]
+
+        tag = uuid.uuid4().hex[:8]
+        app = psycopg.connect(APP_URL)
+        try:
+            old_space = emb._ensure_embedding_space(app, "it-provider", "it-model-" + tag, "a", 3, 1)
+            emb._activate_embedding_space(app, old_space)
+            app.execute("SELECT scos_worker_store_embedding(%s::uuid, %s::uuid, 'it-provider', %s, 'a', 3, 'h', '[0.1,0.2,0.3]')",
+                        (version, old_space, "it-model-" + tag))
+            app.commit()
+            before = index_main.embedding_backlog_count(app)
+            app.commit()
+
+            # A model change: a new active space where this memory has no vector yet.
+            new_space = emb._ensure_embedding_space(app, "it-provider", "it-model-" + tag, "b", 3, 1)
+            self.assertTrue(emb._activate_embedding_space(app, new_space))
+            self.assertFalse(emb._activate_embedding_space(app, new_space), "re-activating the active space is a no-op")
+            app.commit()
+            after_switch = index_main.embedding_backlog_count(app)
+            active = index_main.active_embedding_space(app)
+            app.commit()
+            self.assertEqual(active["id"], new_space)
+            self.assertTrue(backlog_has_memory(new_space))
+            self.assertEqual(after_switch, before + 1,
+                             "a memory embedded only in the previous space is backlog in the active one")
+
+            app.execute("SELECT scos_worker_store_embedding(%s::uuid, %s::uuid, 'it-provider', %s, 'b', 3, 'h', '[0.3,0.2,0.1]')",
+                        (version, new_space, "it-model-" + tag))
+            app.commit()
+            self.assertEqual(index_main.embedding_backlog_count(app), after_switch - 1)
+            app.commit()
+        finally:
+            # Leave the database's real active space as it was.
+            self.admin.execute("DELETE FROM memory_embeddings WHERE memory_version_id = %s", (version,))
+            self.admin.execute("DELETE FROM embedding_spaces WHERE model = %s", ("it-model-" + tag,))
+            self.admin.commit()
+            app.close()
+
     def test_index_maintenance_expires_across_tenants(self):
         index_main = _load("index_maintenance_main", ROOT / "workers/index-maintenance/main.py")
 

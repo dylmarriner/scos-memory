@@ -278,6 +278,12 @@ func (s *graphifyServer) ingestEdge(ctx context.Context, bearer, sourceMemoryID,
 		"target_memory_id": targetMemoryID,
 		"relation_type":    relationTypeFor(edge.Confidence),
 	}
+	// graphify scores each edge; that measured score is the relation's
+	// confidence. Without one, memory-intelligence derives it from the two
+	// facts the edge connects.
+	if edge.ConfidenceScore > 0 && edge.ConfidenceScore <= 1 {
+		relation["confidence"] = edge.ConfidenceScore
+	}
 	return s.postJSON(ctx, bearer, s.memoryIntelligenceURL+"/v1/relations", relation, nil)
 }
 

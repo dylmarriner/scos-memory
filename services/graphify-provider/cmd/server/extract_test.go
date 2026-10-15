@@ -55,7 +55,7 @@ func TestExtractIngestsTheGraphAsTheCallingPrincipal(t *testing.T) {
 				{"id": "a_main", "label": "main()", "source_file": "a/main.go", "source_location": "L3"},
 				{"id": "b_main", "label": "main()", "source_file": "b/main.go", "source_location": "L5"}
 			],
-			"edges": [{"source": "a_main", "target": "b_main", "relation": "calls", "confidence": "EXTRACTED"}]
+			"edges": [{"source": "a_main", "target": "b_main", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 0.7}]
 		}`), 0o644)
 	}
 	handler := auth.AuthenticatedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +113,9 @@ func TestExtractIngestsTheGraphAsTheCallingPrincipal(t *testing.T) {
 	}
 	if facts[0]["content"] == facts[1]["content"] || facts[0]["namespace_id"] != "ns-1" {
 		t.Fatalf("distinct declarations must stay distinct facts in the named namespace: %v", facts)
+	}
+	if len(relations) != 1 || relations[0]["confidence"] != 0.7 {
+		t.Fatalf("the edge's measured score is the relation's confidence: %v", relations)
 	}
 	if _, ok := facts[0]["tenant_id"]; ok {
 		t.Fatalf("identity comes from the credentials, not the body: %v", facts[0])

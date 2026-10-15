@@ -55,9 +55,9 @@ fixed), **VERIFY** (auditor claim not yet independently reproduced).
 - Readiness checks `os.TempDir()` instead of the source store. — FIXED: readiness writes to the configured source store
 
 ### Memory intelligence
-- `/v1/reflect` beliefs are facts scaled by 0.9; "stale" means "agrees with its evidence". — OPEN
-- Relation confidence constant 0.8; hierarchy `fact_count` taken from the request body. — OPEN
-- Diary writer never called; system dashboard probes peers without a token; code-symbol links dropped below thresholds but echoed back. — OPEN
+- `/v1/reflect` beliefs are facts scaled by 0.9; "stale" means "agrees with its evidence". — FIXED: candidate beliefs group agreeing evidence and take confidence from combined support less contradicting evidence (inferred facts never count); a held belief is stale only when cited evidence is missing, withdrawn, expired, revised after the belief's last revision, or contradicted by a fact recorded since, each with its reason. Also fixed: every belief write failed (`text = uuid` in the evidence lookup)
+- Relation confidence constant 0.8; hierarchy `fact_count` taken from the request body. — FIXED: confidence is the caller's (validated 0–1) or the weaker of the two facts' confidences; contradictions, merges and corrections carry their own measure; graphify sends its edge score. Hierarchy nodes name their facts (`fact_ids`, migration 000053) and `fact_count` counts the active facts in the subtree on read; a supplied count is refused
+- Diary writer never called; system dashboard probes peers without a token; code-symbol links dropped below thresholds but echoed back. — FIXED: the diary is written in the same transaction as each fact record, correction, forget, belief and review decision; peer version probes carry the service token and control-plane token and report a refusal; a fact write echoes only links actually recorded and lists the rest under `code_symbol_links.dropped` with the reason
 - Entity-link errors inside the fact transaction abort the commit despite "best-effort" comment. — VERIFY
 
 ### OKF synchroniser
@@ -90,8 +90,8 @@ fixed), **VERIFY** (auditor claim not yet independently reproduced).
 ### Consolidation worker / index maintenance
 - "Merged" duplicates are promoted as a second active memory; evidence merge reads a field never loaded. — FIXED
 - "Superseded" logic inverted; higher-authority duplicate silently dropped. — FIXED
-- Conflict sets written to ids that are never candidates. — OPEN
-- Embedding backlog ignores embedding spaces. — OPEN
+- Conflict sets written to ids that are never candidates. — FIXED: subjects are the candidate id and the existing memory or pending candidate id; the set is appended to the candidate's `conflict_assessment` and the memory's metadata, and a subject matching no row fails the job
+- Embedding backlog ignores embedding spaces. — FIXED: the embeddings worker records its space as the active one (migration 000053); the backlog counts active memories with no vector in that space, and index maintenance reports which space it measured
 
 ### Benchmarks
 - `--live` discards the live run's results and drops the "live evidence not included" note. — OPEN

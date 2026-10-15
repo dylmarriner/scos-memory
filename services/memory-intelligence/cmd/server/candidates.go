@@ -177,6 +177,12 @@ func (s *engineServer) handleCandidateDecision(w http.ResponseWriter, r *http.Re
 			http.Error(w, "record review: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := recordDiaryEntry(ctx, tx, identity, "candidate_rejected", map[string]any{
+			"candidate_id": id, "namespace_id": candidate.NamespaceID, "rationale": req.Rationale,
+		}); err != nil {
+			http.Error(w, "record diary entry: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if err := tx.Commit(); err != nil {
 			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -197,6 +203,12 @@ func (s *engineServer) handleCandidateDecision(w http.ResponseWriter, r *http.Re
 			http.Error(w, "record review: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := recordDiaryEntry(ctx, tx, identity, "candidate_approved", map[string]any{
+			"candidate_id": id, "namespace_id": candidate.NamespaceID, "merged_into_fact_id": merge.ExistingFact.ID,
+		}); err != nil {
+			http.Error(w, "record diary entry: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if err := tx.Commit(); err != nil {
 			http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -214,13 +226,24 @@ func (s *engineServer) handleCandidateDecision(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if merge != nil {
-		if err := markFactMerged(ctx, tx, identity.TenantID, merge.ExistingFact.ID, factID); err != nil {
+		if err := markFactMerged(ctx, tx, identity.TenantID, merge.ExistingFact.ID, factID, merge.Score); err != nil {
 			http.Error(w, "mark duplicate merged: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 	if err := recordReview(ctx, tx, id, identity.PrincipalID, "approved", rationale, "promoted"); err != nil {
 		http.Error(w, "record review: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	approved := map[string]any{
+		"candidate_id": id, "namespace_id": candidate.NamespaceID, "fact_id": factID,
+		"summary": truncate(fact.Content, 120),
+	}
+	if merge != nil {
+		approved["merged_fact_id"] = merge.ExistingFact.ID
+	}
+	if err := recordDiaryEntry(ctx, tx, identity, "candidate_approved", approved); err != nil {
+		http.Error(w, "record diary entry: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := tx.Commit(); err != nil {
