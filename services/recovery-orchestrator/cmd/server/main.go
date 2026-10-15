@@ -109,6 +109,11 @@ func main() {
 			return discoverRecoveryFindings(ctx, db, serviceID)
 		}
 		defer db.Close()
+		loadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := s.loadPersistedStatuses(loadCtx); err != nil {
+			log.Fatalf("load persisted recovery runs: %v", err)
+		}
+		cancel()
 	}
 	mux := newRecoveryMux(s)
 
@@ -669,6 +674,67 @@ func (s *recoveryServer) persistRecoveryStatus(ctx context.Context, status *Reco
 			WHERE lease_key=$1 AND recovery_run_id=$2`, "recovery:"+status.ServiceID, status.RecoveryRunID)
 	}
 	return tx.Commit(ctx)
+}
+
+// loadPersistedStatuses restores the latest recovery run of every service
+// from the database, so the status, checklist and interrupted work a
+// recovery reported are still served after the orchestrator restarts.
+func (s *recoveryServer) loadPersistedStatuses(ctx context.Context) error {
+	var raw []byte
+	if err := s.db.QueryRow(ctx, `SELECT scos_recovery_latest_runs()`).Scan(&raw); err != nil {
+		return err
+	}
+	statuses, err := decodePersistedRuns(raw)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, st := range statuses {
+		s.statuses[st.ServiceID] = st
+	}
+	return nil
+}
+
+// decodePersistedRuns turns scos_recovery_latest_runs() output back into
+// statuses. The run row holds the phase and checklist; the identifiers of
+// interrupted turns and open operations live in the run's latest event.
+func decodePersistedRuns(raw []byte) ([]*RecoveryStatus, error) {
+	var runs []struct {
+		RecoveryRunID   string            `json:"recovery_run_id"`
+		ServiceID       string            `json:"service_id"`
+		Phase           string            `json:"phase"`
+		Checklist       RecoveryChecklist `json:"checklist"`
+		PendingOutbox   int               `json:"pending_outbox_count"`
+		RecoveryStarted string            `json:"recovery_started"`
+		RecoveryEnded   string            `json:"recovery_ended"`
+		LatestEvent     *struct {
+			InterruptedTurns []string `json:"interrupted_turns"`
+			OpenOperations   []string `json:"open_operations"`
+		} `json:"latest_event"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil {
+		return nil, fmt.Errorf("decode recovery runs: %w", err)
+	}
+	out := make([]*RecoveryStatus, 0, len(runs))
+	for _, run := range runs {
+		st := &RecoveryStatus{
+			RecoveryRunID: run.RecoveryRunID, ServiceID: run.ServiceID, Phase: run.Phase,
+			Checklist: run.Checklist, PendingOutbox: run.PendingOutbox,
+			RecoveryStarted: run.RecoveryStarted, RecoveryEnded: run.RecoveryEnded,
+			InterruptedTurns: []string{}, OpenOperations: []string{},
+		}
+		if run.LatestEvent != nil {
+			if run.LatestEvent.InterruptedTurns != nil {
+				st.InterruptedTurns = run.LatestEvent.InterruptedTurns
+			}
+			if run.LatestEvent.OpenOperations != nil {
+				st.OpenOperations = run.LatestEvent.OpenOperations
+			}
+		}
+		out = append(out, st)
+	}
+	return out, nil
 }
 
 func checklistError(status *RecoveryStatus) string {
