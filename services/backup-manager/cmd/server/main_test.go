@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,7 +141,80 @@ func TestGitMirrorPlanRequiresRemoteAndVerification(t *testing.T) {
 	}
 }
 
+// fakePostgresTools replaces the PostgreSQL client binaries with this test
+// binary (TestHelperProcess) and records every invocation in the returned log.
+func fakePostgresTools(t *testing.T) *[]string {
+	t.Helper()
+	var calls []string
+	prevCmd, prevLook := commandContext, lookPath
+	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		cmd := exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=TestHelperProcess", "--", name}, args...)...)
+		cmd.Env = append(os.Environ(), "SCOS_BACKUP_HELPER_PROCESS=1")
+		return cmd
+	}
+	lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	t.Cleanup(func() { commandContext, lookPath = prevCmd, prevLook })
+	return &calls
+}
+
+// TestHelperProcess stands in for pg_dump, createdb, dropdb and pg_restore.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("SCOS_BACKUP_HELPER_PROCESS") != "1" {
+		return
+	}
+	args := os.Args
+	for len(args) > 0 && args[0] != "--" {
+		args = args[1:]
+	}
+	args = args[1:]
+	switch args[0] {
+	case "pg_dump":
+		for i, a := range args {
+			if a == "--file" {
+				if err := os.WriteFile(args[i+1], []byte("PGDMP custom archive of "+args[len(args)-1]), 0600); err != nil {
+					os.Exit(2)
+				}
+			}
+		}
+	case "pg_restore":
+		data, err := os.ReadFile(args[len(args)-1])
+		if err != nil || !bytes.HasPrefix(data, []byte("PGDMP")) {
+			fmt.Fprintln(os.Stderr, "pg_restore: input file does not appear to be a valid archive")
+			os.Exit(1)
+		}
+	}
+	os.Exit(0)
+}
+
+func writeLocalBackup(t *testing.T, dir, id string, dump []byte, manifestContent []byte) {
+	t.Helper()
+	m := backupManifest{ID: id, Type: "base_backup", Format: "postgresql-custom-v1", ContentHash: hashBytes(manifestContent), SizeBytes: int64(len(manifestContent))}
+	data, _ := json.Marshal(backupArtifact{Manifest: m})
+	if err := os.WriteFile(filepath.Join(dir, id+".backup.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".dump"), dump, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLocalBackupRequiresDatabase(t *testing.T) {
+	fakePostgresTools(t)
+	t.Setenv("SCOS_BACKUP_DATABASE_URL", "")
+	t.Setenv("SCOS_DATABASE_URL", "")
+	s := newBackupServerWithDir(t.TempDir())
+	rec := httptest.NewRecorder()
+	s.handleBackupStart(rec, httptest.NewRequest(http.MethodPost, "/v1/backups/start", stringsReader(`{}`)))
+	if rec.Code != http.StatusServiceUnavailable || !contains(rec.Body.String(), "SCOS_DATABASE_URL") {
+		t.Fatalf("expected an unavailable backup without a database, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestLocalBackupArtifactLifecycle(t *testing.T) {
+	calls := fakePostgresTools(t)
+	t.Setenv("SCOS_BACKUP_DATABASE_URL", "postgres://scos@db/scos_memory?sslmode=require")
+	t.Setenv("SCOS_BACKUP_RESTORE_DATABASE_URL", "postgres://scos@db/postgres?sslmode=require")
 	dir := t.TempDir()
 	s := newBackupServerWithDir(dir)
 
@@ -152,11 +228,15 @@ func TestLocalBackupArtifactLifecycle(t *testing.T) {
 	if err := json.NewDecoder(start.Body).Decode(&started); err != nil {
 		t.Fatal(err)
 	}
-	if started.Status != "running" || started.Location == "" {
+	if started.Status != "running" || started.Location == "" || started.Production {
 		t.Fatalf("unexpected start record: %+v", started)
 	}
-	if _, err := os.Stat(started.Location); err != nil {
-		t.Fatalf("artifact was not created: %v", err)
+	dump, err := os.ReadFile(started.Location)
+	if err != nil || !bytes.HasPrefix(dump, []byte("PGDMP")) || started.ContentHash != hashBytes(dump) {
+		t.Fatalf("archive was not the pg_dump output: %q %v", dump, err)
+	}
+	if !strings.HasPrefix((*calls)[0], "pg_dump --format=custom") {
+		t.Fatalf("expected pg_dump, got %v", *calls)
 	}
 
 	complete := httptest.NewRecorder()
@@ -171,15 +251,23 @@ func TestLocalBackupArtifactLifecycle(t *testing.T) {
 	if completed.Status != "completed" || completed.SizeBytes == 999 || completed.VerifiedAt == "" {
 		t.Fatalf("completion trusted caller metadata: %+v", completed)
 	}
+
+	restore := httptest.NewRecorder()
+	s.handleRestore(restore, httptest.NewRequest(http.MethodPost, "/v1/backups/"+started.ID+"/restore", nil), started.ID)
+	if restore.Code != http.StatusOK || !contains(restore.Body.String(), `"passed"`) {
+		t.Fatalf("restore drill = %d %s", restore.Code, restore.Body.String())
+	}
+	joined := strings.Join(*calls, "\n")
+	if !contains(joined, "createdb --maintenance-db postgres://scos@db/postgres") || !contains(joined, "pg_restore --exit-on-error") || !contains(joined, "dropdb --if-exists") {
+		t.Fatalf("restore drill did not create, restore and drop a temporary database: %v", *calls)
+	}
 }
 
 func TestTamperedArtifactFailsRestore(t *testing.T) {
+	fakePostgresTools(t)
+	t.Setenv("SCOS_BACKUP_RESTORE_DATABASE_URL", "postgres://scos@db/postgres?sslmode=require")
 	s := newBackupServerWithDir(t.TempDir())
-	artifact := backupArtifact{Manifest: backupManifest{ID: "backup-tampered", Type: "base_backup", Format: "scos-local-v1", ContentHash: hashString("original"), SizeBytes: 8}, Payload: "tampered"}
-	data, _ := json.Marshal(artifact)
-	if err := os.WriteFile(filepath.Join(s.backupDir, "backup-tampered.backup.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeLocalBackup(t, s.backupDir, "backup-tampered", []byte("PGDMP tampered"), []byte("PGDMP original"))
 	rec := httptest.NewRecorder()
 	s.handleRestore(rec, httptest.NewRequest(http.MethodPost, "/v1/backups/backup-tampered/restore", nil), "backup-tampered")
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -200,12 +288,8 @@ func TestRetentionCleanupRemovesExpiredArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	s := newBackupServerWithDir(dir)
 	s.retention.WALAndDaily = 1
-	artifact := backupArtifact{Manifest: backupManifest{ID: "backup-old", Type: "base_backup", Format: "scos-local-v1", ContentHash: hashString("old"), SizeBytes: 3}, Payload: "old"}
-	data, _ := json.Marshal(artifact)
+	writeLocalBackup(t, dir, "backup-old", []byte("PGDMP old"), []byte("PGDMP old"))
 	path := filepath.Join(dir, "backup-old.backup.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
 	old := time.Now().Add(-48 * time.Hour)
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
@@ -213,6 +297,9 @@ func TestRetentionCleanupRemovesExpiredArtifacts(t *testing.T) {
 	removed, err := s.cleanupRetention(time.Now())
 	if err != nil || removed != 1 {
 		t.Fatalf("cleanup removed=%d err=%v", removed, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "backup-old.dump")); !os.IsNotExist(err) {
+		t.Fatalf("expired archive was kept: %v", err)
 	}
 }
 
@@ -388,18 +475,16 @@ func TestRestoreCadenceStatusHonoursRecentPass(t *testing.T) {
 }
 
 func TestRestoreTestPersistsAcrossRestart(t *testing.T) {
+	fakePostgresTools(t)
+	t.Setenv("SCOS_BACKUP_RESTORE_DATABASE_URL", "")
 	dir := t.TempDir()
 	s := newBackupServerWithDir(dir)
-	artifact := backupArtifact{Manifest: backupManifest{ID: "backup-1", Type: "base_backup", Format: "scos-local-v1", ContentHash: hashString("data"), SizeBytes: 4}, Payload: "data"}
-	data, _ := json.Marshal(artifact)
-	if err := os.WriteFile(filepath.Join(dir, "backup-1.backup.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeLocalBackup(t, dir, "backup-1", []byte("PGDMP data"), []byte("PGDMP data"))
 	result := s.executeRestoreTest(restoreTestTypeMonthly, "backup-1")
-	if result.Status != "failed" {
-		// Local synthetic artifacts never satisfy a restore drill by design;
-		// the point here is that the *result* is durable, not its verdict.
-		t.Fatalf("unexpected status: %s", result.Status)
+	if result.Status != "failed" || !contains(result.Detail, "SCOS_BACKUP_RESTORE_DATABASE_URL") {
+		// Without a restore server the drill cannot run and must say so; the
+		// point here is that the *result* is durable, not its verdict.
+		t.Fatalf("unexpected result: %+v", result)
 	}
 
 	reopened := newBackupServerWithDir(dir)

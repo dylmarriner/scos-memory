@@ -81,7 +81,9 @@ FROM alpine:3.24
 # binaries land below) makes the installed `graphify` script reachable by
 # every user in the image, not just whichever account ran the build.
 ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
-RUN apk add --no-cache ca-certificates python3 py3-pip pipx \
+# backup-manager execs pg_dump, pg_restore, createdb and dropdb; the client
+# major version matches the pgvector/pgvector:pg17 server so dumps load.
+RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client \
     && pipx install graphifyy \
     && addgroup -S scos && adduser -S -G scos scos \
     # State directories for the services that keep local state. compose mounts

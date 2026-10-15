@@ -119,9 +119,10 @@ type backupManifest struct {
 	ManifestMAC  string `json:"manifest_mac"`
 }
 
+// backupArtifact is the manifest file of a local development backup; the
+// pg_dump archive it describes sits beside it as <id>.dump.
 type backupArtifact struct {
 	Manifest backupManifest `json:"manifest"`
-	Payload  string         `json:"payload"`
 }
 
 type backupServer struct {
@@ -135,7 +136,10 @@ type backupServer struct {
 	config       backupConfig
 }
 
-var commandContext = exec.CommandContext
+var (
+	commandContext = exec.CommandContext
+	lookPath       = exec.LookPath
+)
 
 func newBackupServer() *backupServer {
 	dir := os.Getenv("SCOS_BACKUP_DIR")
@@ -279,6 +283,10 @@ func (s *backupServer) handleReady(w http.ResponseWriter, _ *http.Request) {
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"status": "unready", "dependency": "backup_storage", "error": err.Error()})
 		return
 	}
+	if err := localDumpConfigError(); err != nil {
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"status": "unready", "dependency": "pg_dump", "error": err.Error()})
+		return
+	}
 	writeJSON(w, map[string]string{"status": "ready"})
 }
 
@@ -389,22 +397,37 @@ func (s *backupServer) handleBackupStart(w http.ResponseWriter, r *http.Request)
 	if req.Type == "" {
 		req.Type = "base_backup"
 	}
+	if err := localDumpConfigError(); err != nil {
+		http.Error(w, "backup unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	if err := os.MkdirAll(s.backupDir, 0750); err != nil {
 		http.Error(w, "backup storage unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	id := s.nextID()
-	payload := fmt.Sprintf("SCOS local backup artifact\ntype=%s\nid=%s\n", req.Type, id)
-	contentHash := hashString(payload)
-	manifest := backupManifest{ID: id, Type: req.Type, Format: "scos-local-test-v1", ContentHash: contentHash, SizeBytes: int64(len(payload)), Production: false, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	artifact := backupArtifact{Manifest: manifest, Payload: payload}
-	data, _ := json.Marshal(artifact)
-	if err := os.WriteFile(s.artifactPath(id), data, 0600); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	dump, err := pgDump(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	// A local development backup is a real pg_dump archive kept on this
+	// host, unencrypted; it is never reported as a production backup.
+	manifest := backupManifest{ID: id, Type: req.Type, Format: "postgresql-custom-v1", ContentHash: hashBytes(dump), SizeBytes: int64(len(dump)), Production: false, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	if err := writeAtomic(s.dumpPath(id), dump, 0600); err != nil {
+		http.Error(w, "backup creation failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data, _ := json.Marshal(backupArtifact{Manifest: manifest})
+	if err := writeAtomic(s.artifactPath(id), data, 0600); err != nil {
+		_ = os.Remove(s.dumpPath(id))
 		http.Error(w, "backup creation failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	b := &BackupRecord{ID: id, Type: req.Type, Status: "running", Encrypted: false, Production: false, StartedAt: now, Location: s.artifactPath(id), SizeBytes: manifest.SizeBytes, ContentHash: contentHash, ManifestHash: hashManifest(manifest)}
+	b := &BackupRecord{ID: id, Type: req.Type, Status: "running", Encrypted: false, Production: false, StartedAt: now, Location: s.dumpPath(id), SizeBytes: manifest.SizeBytes, ContentHash: manifest.ContentHash, ManifestHash: hashManifest(manifest)}
 	s.mu.Lock()
 	s.backups[id] = b
 	s.mu.Unlock()
@@ -460,12 +483,55 @@ func (s *backupServer) handleRestore(w http.ResponseWriter, r *http.Request, id 
 		s.unavailable(w)
 		return
 	}
-	b, err := s.verifyBackup(id)
-	if err != nil {
+	if err := s.restoreLocal(id); err != nil {
 		writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]string{"status": "failed", "backup_id": id, "error": err.Error()})
 		return
 	}
-	writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{"status": "failed", "backup": b, "detail": "synthetic local artifact is not a production backup and was not restored"})
+	writeJSON(w, map[string]any{"status": "passed", "backup_id": id, "detail": localRestoreDetail})
+}
+
+const localRestoreDetail = "local development backup restored into a temporary PostgreSQL database"
+
+// localDumpConfigError reports what stops the local provider from taking a
+// real pg_dump: a database to dump and the pg_dump client.
+func localDumpConfigError() error {
+	if databaseURL() == "" {
+		return fmt.Errorf("SCOS_BACKUP_DATABASE_URL or SCOS_DATABASE_URL is required")
+	}
+	if _, err := lookPath("pg_dump"); err != nil {
+		return fmt.Errorf("pg_dump is unavailable: %w", err)
+	}
+	return nil
+}
+
+// pgDump returns a custom-format pg_dump archive of the configured database.
+func pgDump(ctx context.Context) ([]byte, error) {
+	f, err := os.CreateTemp("", "scos-pg-dump-*")
+	if err != nil {
+		return nil, fmt.Errorf("backup creation failed: %w", err)
+	}
+	path := f.Name()
+	_ = f.Close()
+	defer os.Remove(path)
+	if out, err := commandContext(ctx, "pg_dump", "--format=custom", "--no-owner", "--file", path, databaseURL()).CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("pg_dump failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	dump, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("backup creation failed: %w", err)
+	}
+	if len(dump) == 0 {
+		return nil, fmt.Errorf("pg_dump produced an empty archive")
+	}
+	return dump, nil
+}
+
+func (s *backupServer) restoreLocal(id string) error {
+	_, dump, err := s.localArtifact(id)
+	if err != nil {
+		return err
+	}
+	return restoreDump(id, dump)
 }
 
 func (s *backupServer) handleRestoreTests(w http.ResponseWriter, _ *http.Request) {
@@ -491,12 +557,10 @@ func (s *backupServer) executeRestoreTest(testType, backupID string) *RestoreTes
 		} else {
 			t.Status, t.Detail = "passed", "backup restored into a temporary PostgreSQL database"
 		}
-	} else if _, err := s.verifyBackup(backupID); err != nil {
-		t.Status = "failed"
-		t.Detail = err.Error()
+	} else if err := s.restoreLocal(backupID); err != nil {
+		t.Status, t.Detail = "failed", err.Error()
 	} else {
-		t.Status = "failed"
-		t.Detail = "synthetic local artifact is not a production backup and cannot satisfy a restore drill"
+		t.Status, t.Detail = "passed", localRestoreDetail
 	}
 	t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 	s.mu.Lock()
@@ -558,10 +622,10 @@ func (s *backupServer) handleRestoreTestComplete(w http.ResponseWriter, r *http.
 		} else {
 			t.Status, t.Detail = "passed", "backup restored into a temporary PostgreSQL database"
 		}
-	} else if _, err := s.verifyBackup(t.BackupID); err != nil {
+	} else if err := s.restoreLocal(t.BackupID); err != nil {
 		t.Status, t.Detail = "failed", err.Error()
 	} else {
-		t.Status, t.Detail = "failed", "synthetic local artifact is not a production backup and cannot satisfy a restore drill"
+		t.Status, t.Detail = "passed", localRestoreDetail
 	}
 	t.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 	s.recordRestoreTest(t)
@@ -758,6 +822,9 @@ func (s *backupServer) nextID() string { return fmt.Sprintf("backup-%d", time.No
 func (s *backupServer) artifactPath(id string) string {
 	return filepath.Join(s.backupDir, id+".backup.json")
 }
+func (s *backupServer) dumpPath(id string) string {
+	return filepath.Join(s.backupDir, id+".dump")
+}
 func hashString(v string) string { h := sha256.Sum256([]byte(v)); return hex.EncodeToString(h[:]) }
 func hashManifest(v backupManifest) string {
 	data, _ := json.Marshal(v)
@@ -798,10 +865,10 @@ func (s *backupServer) productionConfigError() error {
 	if s.config.databaseURL == "" {
 		return fmt.Errorf("SCOS_BACKUP_DATABASE_URL or SCOS_DATABASE_URL is required")
 	}
-	if _, err := exec.LookPath("pg_dump"); err != nil {
+	if _, err := lookPath("pg_dump"); err != nil {
 		return fmt.Errorf("pg_dump is unavailable: %w", err)
 	}
-	if _, err := exec.LookPath("pg_restore"); err != nil {
+	if _, err := lookPath("pg_restore"); err != nil {
 		return fmt.Errorf("pg_restore is unavailable: %w", err)
 	}
 	return nil
@@ -1073,20 +1140,29 @@ func (s *backupServer) restoreProduction(id string) error {
 	if err != nil {
 		return err
 	}
+	return restoreDump(id, plain)
+}
+
+// restoreDump restores a pg_dump archive into a fresh temporary database on
+// the restore server and drops it afterwards: the drill proves the archive
+// is restorable without touching the live database.
+func restoreDump(id string, plain []byte) error {
 	restoreURL := strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_DATABASE_URL"))
 	if restoreURL == "" {
 		return fmt.Errorf("SCOS_BACKUP_RESTORE_DATABASE_URL is required for a restore drill")
 	}
-	if _, err := exec.LookPath("createdb"); err != nil {
-		return fmt.Errorf("createdb is unavailable: %w", err)
+	for _, tool := range []string{"createdb", "dropdb", "pg_restore"} {
+		if _, err := lookPath(tool); err != nil {
+			return fmt.Errorf("%s is unavailable: %w", tool, err)
+		}
 	}
 	name := "scos_restore_" + strings.ReplaceAll(id, "-", "_") + fmt.Sprintf("_%d", time.Now().UnixNano())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	if out, err := commandContext(ctx, "createdb", "--dbname", restoreURL, name).CombinedOutput(); err != nil {
+	if out, err := commandContext(ctx, "createdb", "--maintenance-db", restoreURL, name).CombinedOutput(); err != nil {
 		return fmt.Errorf("temporary database creation failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	defer commandContext(context.Background(), "dropdb", "--if-exists", "--dbname", restoreURL, name).Run()
+	defer commandContext(context.Background(), "dropdb", "--if-exists", "--maintenance-db", restoreURL, name).Run()
 	target, err := databaseWithName(restoreURL, name)
 	if err != nil {
 		return err
@@ -1121,20 +1197,34 @@ func databaseWithName(raw, name string) (string, error) {
 	return u.String(), nil
 }
 
-func (s *backupServer) verifyBackup(id string) (*BackupRecord, error) {
+// localArtifact reads a local backup's manifest and archive and verifies
+// the archive against the manifest's identity, size and content hash.
+func (s *backupServer) localArtifact(id string) (backupManifest, []byte, error) {
 	data, err := os.ReadFile(s.artifactPath(id))
 	if err != nil {
-		return nil, err
+		return backupManifest{}, nil, err
 	}
 	var artifact backupArtifact
 	if err := json.Unmarshal(data, &artifact); err != nil {
+		return backupManifest{}, nil, err
+	}
+	dump, err := os.ReadFile(s.dumpPath(id))
+	if err != nil {
+		return artifact.Manifest, nil, err
+	}
+	if artifact.Manifest.ID != id || artifact.Manifest.ContentHash != hashBytes(dump) || artifact.Manifest.SizeBytes != int64(len(dump)) {
+		return artifact.Manifest, nil, fmt.Errorf("manifest/content hash mismatch")
+	}
+	return artifact.Manifest, dump, nil
+}
+
+func (s *backupServer) verifyBackup(id string) (*BackupRecord, error) {
+	m, _, err := s.localArtifact(id)
+	if err != nil {
 		return nil, err
 	}
-	if artifact.Manifest.ID != id || artifact.Manifest.ContentHash != hashString(artifact.Payload) || artifact.Manifest.SizeBytes != int64(len(artifact.Payload)) {
-		return nil, fmt.Errorf("manifest/content hash mismatch")
-	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	return &BackupRecord{ID: id, Type: artifact.Manifest.Type, Status: "completed", Production: artifact.Manifest.Production, SizeBytes: artifact.Manifest.SizeBytes, Location: s.artifactPath(id), StartedAt: now, CompletedAt: now, VerifiedAt: now, ManifestHash: hashManifest(artifact.Manifest), ContentHash: artifact.Manifest.ContentHash}, nil
+	return &BackupRecord{ID: id, Type: m.Type, Status: "completed", Production: m.Production, SizeBytes: m.SizeBytes, Location: s.dumpPath(id), StartedAt: m.CreatedAt, CompletedAt: now, VerifiedAt: now, ManifestHash: hashManifest(m), ContentHash: m.ContentHash}, nil
 }
 
 func (s *backupServer) readBackup(id string) (*BackupRecord, error) { return s.verifyBackup(id) }
@@ -1187,6 +1277,9 @@ func (s *backupServer) cleanupRetention(now time.Time) (int, error) {
 			days = s.retention.Monthly * 30
 		}
 		if days > 0 && now.Sub(info.ModTime()) > time.Duration(days)*24*time.Hour {
+			if err := os.Remove(s.dumpPath(id)); err != nil && !os.IsNotExist(err) {
+				return removed, err
+			}
 			if err := os.Remove(filepath.Join(s.backupDir, entry.Name())); err != nil {
 				return removed, err
 			}
