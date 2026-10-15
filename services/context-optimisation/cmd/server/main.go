@@ -178,7 +178,7 @@ func main() {
 		addr = ":8083"
 	}
 	log.Printf("context optimisation layer listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("context-optimisation", auth.ControlPlaneHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }

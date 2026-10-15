@@ -1,5 +1,7 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
+
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/release"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
@@ -192,7 +194,7 @@ func (c memoryGatewayCommitter) Commit(ctx context.Context, req RouteRequest, re
 	}
 	client := c.client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = &http.Client{Timeout: 10 * time.Second, Transport: telemetry.ProcessTransport(nil)}
 	}
 	response, err := client.Do(httpReq)
 	if err != nil {
@@ -377,7 +379,7 @@ func (c *controlPlane) callService(ctx context.Context, system, path string, pay
 	request.Header.Set("Idempotency-Key", "scos-"+req.InteractionID+"-"+strings.ReplaceAll(path, "/", "-"))
 	client := c.client
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		client = &http.Client{Timeout: 5 * time.Second, Transport: telemetry.ProcessTransport(nil)}
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -1286,7 +1288,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           handler,
+		Handler:           telemetry.Instrument("autonomous-control-plane", handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

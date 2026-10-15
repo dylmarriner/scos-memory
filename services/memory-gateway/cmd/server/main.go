@@ -80,7 +80,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:              addr,
-		Handler:           auth.ControlPlaneHandler(s.routes(), authConfig),
+		Handler:           telemetry.Instrument("memory-gateway", auth.ControlPlaneHandler(s.routes(), authConfig)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

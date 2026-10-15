@@ -231,7 +231,7 @@ func main() {
 		log.Printf("restore-test cadence scheduler enabled, checking every %s", interval)
 	}
 	log.Printf("backup manager listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("backup-manager", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }

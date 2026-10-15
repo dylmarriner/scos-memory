@@ -12,6 +12,8 @@
 // its own database tables, rather than folded into security-gate's wider
 // audit/policy responsibilities.
 package main
+
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -608,7 +610,7 @@ func main() {
 		addr = ":8100"
 	}
 	logger.Info("credential vault listening", "addr", addr, "version", version)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("credential-vault", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)
 	}

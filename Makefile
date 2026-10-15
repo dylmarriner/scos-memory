@@ -22,6 +22,7 @@ test:
 	python3 -m unittest discover -s integrations/hermes/plugins/scos -p "test_*.py" -v
 	python3 tests/failure-injection/test_runner.py -v
 	python3 -m unittest discover -s tests -p 'test_compose_security.py' -v
+	python3 -m unittest discover -s tests -p 'test_benchmark_publish.py' -v
 
 integration-test:
 	COMPOSE_PROJECT_NAME=scos-memory-integration docker compose -f deploy/compose/docker-compose.yml up -d postgres

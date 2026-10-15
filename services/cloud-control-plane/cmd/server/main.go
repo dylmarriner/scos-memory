@@ -1,5 +1,7 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import (
@@ -153,7 +155,7 @@ func main() {
 		addr = ":8079"
 	}
 	log.Printf("cloud-control-plane listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, mux); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("cloud-control-plane", mux)); err != nil {
 		log.Fatal(err)
 	}
 }

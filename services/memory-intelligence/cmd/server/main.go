@@ -392,7 +392,7 @@ func main() {
 		addr = ":8089"
 	}
 	log.Printf("memory intelligence engine listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("memory-intelligence", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -1750,7 +1750,7 @@ func (s *engineServer) probePeer(ctx context.Context, name, base string) SystemM
 	entry := SystemMapEntry{Service: name, Status: "unreachable", Version: "unknown", Uptime: "unknown"}
 	client := s.httpClient
 	if client == nil {
-		client = &http.Client{Timeout: 3 * time.Second}
+		client = &http.Client{Timeout: 3 * time.Second, Transport: telemetry.ProcessTransport(nil)}
 	}
 
 	readyReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health/ready", nil)

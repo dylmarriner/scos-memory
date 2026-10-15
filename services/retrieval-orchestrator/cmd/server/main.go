@@ -225,7 +225,7 @@ func main() {
 		addr = ":8082"
 	}
 	log.Printf("retrieval orchestrator listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("retrieval-orchestrator", auth.ControlPlaneHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }

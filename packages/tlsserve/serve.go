@@ -17,6 +17,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/telemetry"
 )
 
 // ListenAndServe starts an HTTPS listener when SCOS_TLS_CERT_FILE and
@@ -101,7 +103,7 @@ func ServeGracefully(server *http.Server, shutdownTimeout time.Duration, logger 
 func TrustedClient(timeout time.Duration) (*http.Client, error) {
 	caFile := os.Getenv("SCOS_TLS_CA_FILE")
 	if caFile == "" {
-		return &http.Client{Timeout: timeout}, nil
+		return &http.Client{Timeout: timeout, Transport: telemetry.ProcessTransport(nil)}, nil
 	}
 	pem, err := os.ReadFile(caFile)
 	if err != nil {
@@ -113,8 +115,9 @@ func TrustedClient(timeout time.Duration) (*http.Client, error) {
 	}
 	return &http.Client{
 		Timeout: timeout,
-		Transport: &http.Transport{
+		Transport: telemetry.ProcessTransport(&http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
 			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-		},
+		}),
 	}, nil
 }

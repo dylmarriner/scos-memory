@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from benchmarks.deployed import DeployedCodeClient, config_from_environment
+from benchmarks.publish import publish, run_from_cases
 
 
 def _file(path: str, content: str) -> dict[str, Any]:
@@ -96,6 +97,11 @@ def main() -> int:
     args = parser.parse_args()
     artifact = run()
     args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    published = publish(run_from_cases(
+        "deployed-code-baseline", artifact["cases"], schema_version=artifact["schema_version"],
+        mode=artifact["mode"], wall_time_ms=artifact["summary"]["wall_time_ms"]))
+    if published is not None:
+        print(json.dumps({"published_run_id": published.get("run_id")}))
     print(json.dumps({"output": str(args.output), "passed_cases": artifact["summary"]["passed_cases"], "total_cases": artifact["summary"]["total_cases"]}))
     return 0 if artifact["summary"]["passed_cases"] == artifact["summary"]["total_cases"] else 1
 

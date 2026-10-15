@@ -475,15 +475,79 @@ paths:
         '200': {description: Retrieval result with source and timing metadata}
   /v1/benchmarks:
     get:
-      operationId: runBenchmarks
+      operationId: listBenchmarkHistory
+      description: Recorded benchmark runs published by the benchmark harnesses. Empty when nothing has been measured; the service never synthesises results.
+      parameters:
+        - {name: suite, in: query, required: false, schema: {type: string}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 500}}
       responses:
         '200':
-          description: Measured results from the frozen governance quality benchmark suite.
+          description: Per-suite latest run and newest-first run history.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BenchmarkSummary'
+                $ref: '#/components/schemas/BenchmarkHistory'
+        '400': {description: Invalid limit}
         '405': {description: Method not allowed}
+  /v1/benchmarks/runs:
+    post:
+      operationId: recordBenchmarkRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BenchmarkRun'
+      responses:
+        '201': {description: Run recorded; totals are derived from the submitted cases}
+        '200': {description: Run already recorded (idempotent on run_id)}
+        '400': {description: Invalid run}
+        '503': {description: Benchmark persistence unavailable}
+  /v1/benchmarks/runs/{run_id}:
+    get:
+      operationId: getBenchmarkRun
+      parameters: [{name: run_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200':
+          description: One recorded run with its cases.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BenchmarkRun'
+        '404': {description: Unknown run}
+  /v1/metrics/series:
+    get:
+      operationId: getMetricSeries
+      description: Bucketed history for one metric from durable 1m (48h) and 1h (90d) rollups.
+      parameters:
+        - {name: name, in: query, required: true, schema: {type: string}}
+        - {name: range, in: query, required: false, schema: {type: string, example: 24h}}
+        - {name: to, in: query, required: false, schema: {type: string, format: date-time}}
+        - {name: step, in: query, required: false, schema: {type: string, example: 5m}}
+        - {name: group_by, in: query, required: false, schema: {type: string, example: 'service,caller'}}
+        - {name: service, in: query, required: false, schema: {type: string}}
+        - {name: caller, in: query, required: false, schema: {type: string}}
+        - {name: route, in: query, required: false, schema: {type: string}}
+      responses:
+        '200': {description: 'Series of {t, count, sum, avg, min, max, last, errors, p50, p95, p99} points per group'}
+        '400': {description: Invalid query}
+  /v1/metrics/catalog:
+    get:
+      operationId: getMetricCatalog
+      parameters:
+        - {name: range, in: query, required: false, schema: {type: string, example: 24h}}
+      responses:
+        '200': {description: Metrics with recorded history in the window}
+  /v1/flows:
+    get:
+      operationId: getServiceFlows
+      description: Caller-to-service request graph built from the inbound request measure (scos.http.server.request) every service records.
+      parameters:
+        - {name: range, in: query, required: false, schema: {type: string, example: 15m}}
+        - {name: to, in: query, required: false, schema: {type: string, format: date-time}}
+      responses:
+        '200': {description: 'Nodes and edges with request counts, error ratio, average and p95 latency, top routes and a sparkline'}
+        '400': {description: Invalid window}
   /v1/proxy/restore/{restorationHandle}:
     get:
       operationId: proxyRestore
@@ -713,30 +777,51 @@ components:
       properties:
         operation_id: {type: string, format: uuid}
         status: {type: string, enum: [prepared]}
-    BenchmarkSummary:
+    BenchmarkCase:
       type: object
-      required: [suite, version, total_cases, average_scores, total_latency_ms, avg_latency_ms, results]
+      required: [case_id, latency_ms]
       properties:
+        case_id: {type: string}
+        passed: {type: boolean}
+        latency_ms: {type: number, minimum: 0}
+        scores:
+          type: object
+          additionalProperties: {type: number}
+    BenchmarkRun:
+      type: object
+      required: [suite, cases]
+      properties:
+        run_id: {type: string}
         suite: {type: string}
-        version: {type: string}
-        total_cases: {type: integer, minimum: 1}
+        schema_version: {type: string}
+        mode: {type: string}
+        source_sha: {type: string}
+        recorded_at: {type: string, format: date-time}
+        total_cases: {type: integer, readOnly: true}
+        passed_cases: {type: integer, readOnly: true}
+        pass_rate: {type: number, readOnly: true}
+        wall_time_ms: {type: number, minimum: 0}
+        avg_latency_ms: {type: number, readOnly: true}
         average_scores:
           type: object
-          additionalProperties: {type: number, minimum: 0, maximum: 1}
-        total_latency_ms: {type: number, minimum: 0}
-        avg_latency_ms: {type: number, minimum: 0}
-        results:
+          readOnly: true
+          additionalProperties: {type: number}
+        cases:
           type: array
           minItems: 1
+          items: {$ref: '#/components/schemas/BenchmarkCase'}
+    BenchmarkHistory:
+      type: object
+      required: [suites, history]
+      properties:
+        suites:
+          type: array
           items:
             type: object
-            required: [case_id, retrieved_ids, latency_ms, scores]
             properties:
-              case_id: {type: string}
-              retrieved_ids:
-                type: array
-                items: {type: string}
-              latency_ms: {type: number, minimum: 0}
-              scores:
-                type: object
-                additionalProperties: {type: number, minimum: 0, maximum: 1}
+              suite: {type: string}
+              runs: {type: integer}
+              latest: {$ref: '#/components/schemas/BenchmarkRun'}
+        history:
+          type: array
+          items: {type: object}

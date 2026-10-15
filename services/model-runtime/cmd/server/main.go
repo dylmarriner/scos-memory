@@ -1,5 +1,7 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
+
 import (
 	"bytes"
 	"context"
@@ -93,7 +95,7 @@ func main() {
 		addr = defaultAddr
 	}
 	log.Printf("model runtime listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, handler); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("model-runtime", handler)); err != nil {
 		log.Fatal(err)
 	}
 }

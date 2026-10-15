@@ -1,4 +1,6 @@
 package main
+
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -12,13 +14,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
-	benchmarkharness "github.com/dylmarriner/scos-memory/packages/benchmark-harness"
 	servicestate "github.com/dylmarriner/scos-memory/packages/service-state"
 )
 
@@ -90,41 +94,6 @@ type ObservabilityTargets struct {
 	LostCommittedTurns        int     `json:"lost_committed_turns"`
 }
 
-type benchmarkCaseResult struct {
-	CaseID       string             `json:"case_id"`
-	RetrievedIDs []string           `json:"retrieved_ids"`
-	LatencyMs    float64            `json:"latency_ms"`
-	Scores       map[string]float64 `json:"scores"`
-}
-
-type benchmarkSummary struct {
-	Suite          string                `json:"suite"`
-	Version        string                `json:"version"`
-	TotalCases     int                   `json:"total_cases"`
-	AverageScores  map[string]float64    `json:"average_scores"`
-	TotalLatencyMs float64               `json:"total_latency_ms"`
-	AvgLatencyMs   float64               `json:"avg_latency_ms"`
-	Results        []benchmarkCaseResult `json:"results"`
-}
-
-type benchmarkCase struct {
-	id       string
-	query    string
-	expected []string
-}
-
-var frozenBenchmarkCases = []benchmarkCase{
-	{id: "case_001", query: "What is the authoritative transaction model for memory turns?", expected: []string{"doc_journal_commit", "doc_turn_durability"}},
-	{id: "case_002", query: "sys_memory_item_9921a", expected: []string{"sys_memory_item_9921a"}},
-	{id: "case_003", query: "What was the user's preferred database schema prior to revision 3?", expected: []string{"mem_schema_v2", "hist_rev_3"}},
-	{id: "case_004", query: "Confirm user identity bypass authorization", expected: []string{"sec_denied_injection"}},
-	{id: "case_005", query: "Retrieve project alpha deployment parameters for organization scos", expected: []string{"prj_alpha_deploy_cfg"}},
-	{id: "case_006", query: "What active conflicts exist for turn sequence 412?", expected: []string{"conflict_seq_412"}},
-	{id: "case_007", query: "Restore prior context state following worker process failure", expected: []string{"recovery_checkpoint_412"}},
-	{id: "case_008", query: "Identify deprecated extension hook signatures", expected: []string{"stale_hook_sig_v1"}},
-	{id: "case_009", query: "Trace multi-turn step 3 tool execution results", expected: []string{"turn_step_3_proxy_log"}},
-}
-
 // ── server ───────────────────────────────────────────────────────────────
 
 type observabilityServer struct {
@@ -141,6 +110,22 @@ type observabilityServer struct {
 	db         *servicestate.Repository
 	otlp       *otlpExporter
 	otlpErr    error
+
+	// Historic aggregates and recorded benchmark runs (rollup.go,
+	// benchmarks.go), persisted through history when a database is wired.
+	rollups    *rollupStore
+	benchmarks *benchmarkStore
+	history    historyPersister
+
+	persistMu      sync.Mutex
+	stateDirty     bool
+	lastPersistErr error
+}
+
+// historyPersister is the durable store for rollups and benchmark runs.
+type historyPersister interface {
+	rollupPersister
+	benchmarkPersister
 }
 
 func newObservabilityServer() *observabilityServer {
@@ -168,6 +153,8 @@ func newObservabilityServerAt(path string) (*observabilityServer, error) {
 		maxMetrics: 10000,
 		maxTraces:  10000,
 		store:      store,
+		rollups:    newRollupStore(),
+		benchmarks: &benchmarkStore{},
 		targets: ObservabilityTargets{
 			DurabilityAfterAck:        100.0,
 			DurabilityAfterCompletion: 100.0,
@@ -188,7 +175,7 @@ func newObservabilityServerAt(path string) (*observabilityServer, error) {
 }
 
 func newUnavailableObservabilityServer(err error) *observabilityServer {
-	return &observabilityServer{metrics: make([]*MetricPoint, 0), traces: make([]*TraceSpan, 0), logs: make([]*LogEntry, 0), maxLogs: 10000, maxMetrics: 10000, maxTraces: 10000, storageErr: err}
+	return &observabilityServer{metrics: make([]*MetricPoint, 0), traces: make([]*TraceSpan, 0), logs: make([]*LogEntry, 0), maxLogs: 10000, maxMetrics: 10000, maxTraces: 10000, storageErr: err, rollups: newRollupStore(), benchmarks: &benchmarkStore{}}
 }
 
 type journalRecord struct {
@@ -294,14 +281,95 @@ func (s *observabilityServer) trimRetention() {
 	}
 }
 
+// persistDB marks the raw signal state for the next background save. Each
+// ingested record is already fsynced to the JSONL journal before the ingest
+// is acknowledged; the PostgreSQL document is the restart snapshot, and
+// rewriting the whole ring (up to 30k records) on every ingest call would
+// dominate the collector's cost under fabric request traffic. A failed save
+// is surfaced on /health/ready and retried on the next tick.
 func (s *observabilityServer) persistDB() error {
 	if s.db == nil {
+		return nil
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	s.stateDirty = true
+	return s.lastPersistErr
+}
+
+// saveState writes the raw signal snapshot when it has changed.
+func (s *observabilityServer) saveState(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	s.persistMu.Lock()
+	dirty := s.stateDirty
+	s.stateDirty = false
+	s.persistMu.Unlock()
+	if !dirty {
 		return nil
 	}
 	s.mu.RLock()
 	state := persistedObservabilityState{Metrics: s.metrics, Traces: s.traces, Logs: s.logs, Targets: s.targets}
 	s.mu.RUnlock()
-	return s.db.Save(context.Background(), "observability", state)
+	err := s.db.Save(ctx, "observability", state)
+	s.persistMu.Lock()
+	s.lastPersistErr = err
+	if err != nil {
+		s.stateDirty = true
+	}
+	s.persistMu.Unlock()
+	return err
+}
+
+// flushHistory persists changed rollup buckets; failures are requeued.
+func (s *observabilityServer) flushHistory(ctx context.Context) error {
+	if s.history == nil {
+		return nil
+	}
+	rows := s.rollups.takeDirty()
+	if err := s.history.UpsertRollups(ctx, rows); err != nil {
+		s.rollups.requeue(rows)
+		return err
+	}
+	return nil
+}
+
+// runBackground persists state and rollups every interval and prunes
+// expired history hourly, until ctx ends (then flushes once more).
+func (s *observabilityServer) runBackground(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	lastPrune := time.Time{}
+	for {
+		select {
+		case <-ctx.Done():
+			final, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = s.saveState(final)
+			_ = s.flushHistory(final)
+			cancel()
+			return
+		case <-ticker.C:
+			opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := s.saveState(opCtx); err != nil {
+				log.Printf("observability: persist signal state: %v", err)
+			}
+			if err := s.flushHistory(opCtx); err != nil {
+				log.Printf("observability: persist rollups: %v", err)
+			}
+			if time.Since(lastPrune) > time.Hour {
+				s.rollups.prune()
+				if s.history != nil {
+					now := time.Now()
+					if err := s.history.PruneRollups(opCtx, now.Add(-minuteRetention), now.Add(-hourRetention)); err != nil {
+						log.Printf("observability: prune rollups: %v", err)
+					}
+				}
+				lastPrune = time.Now()
+			}
+			cancel()
+		}
+	}
 }
 
 func main() {
@@ -324,6 +392,32 @@ func main() {
 		s.targets = state.Targets
 	}
 	s.mu.Unlock()
+
+	history := &pgHistoryStore{db: repo.DB}
+	s.history = history
+	now := time.Now()
+	rows, err := history.LoadRollups(context.Background(), now.Add(-minuteRetention), now.Add(-hourRetention))
+	if err != nil {
+		log.Fatalf("load observability rollups: %v", err)
+	}
+	s.rollups.load(rows)
+	if s.rollups.empty() {
+		// First start on a database without rollups: fold the retained raw
+		// ring into history so existing measurements are not discarded.
+		s.mu.RLock()
+		for _, m := range s.metrics {
+			s.rollups.add(m)
+		}
+		s.mu.RUnlock()
+	}
+	runs, err := history.LoadBenchmarkRuns(context.Background(), maxBenchmarkRuns)
+	if err != nil {
+		log.Fatalf("load benchmark runs: %v", err)
+	}
+	s.benchmarks.load(runs)
+	bgCtx, stopBackground := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopBackground()
+	go s.runBackground(bgCtx, 15*time.Second)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/version", release.Handler("observability"))
@@ -333,6 +427,9 @@ func main() {
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/metrics/ingest", s.handleMetricsIngest)
 	mux.HandleFunc("/v1/metrics/query", s.handleMetricsQuery)
+	mux.HandleFunc("/v1/metrics/series", s.handleMetricsSeries)
+	mux.HandleFunc("/v1/metrics/catalog", s.handleMetricsCatalog)
+	mux.HandleFunc("/v1/flows", s.handleFlows)
 
 	// Traces
 	mux.HandleFunc("/v1/traces", s.handleTraces)
@@ -346,14 +443,16 @@ func main() {
 	// Targets
 	mux.HandleFunc("/v1/targets", s.handleTargets)
 	mux.HandleFunc("/v1/export/status", s.handleExportStatus)
-	mux.HandleFunc("/v1/benchmarks", handleBenchmarks)
+	mux.HandleFunc("/v1/benchmarks", s.handleBenchmarks)
+	mux.HandleFunc("/v1/benchmarks/runs", s.handleBenchmarkRuns)
+	mux.HandleFunc("/v1/benchmarks/runs/", s.handleBenchmarkRuns)
 
 	addr := os.Getenv("SCOS_OBSERVABILITY_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8096"
 	}
 	log.Printf("observability listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("observability", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -367,6 +466,14 @@ func (s *observabilityServer) handleReady(w http.ResponseWriter, _ *http.Request
 	if s.storageErr != nil || s.otlpErr != nil || s.db == nil && (s.store == nil || s.store.ready() != nil) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		writeJSON(w, map[string]string{"status": "unavailable"})
+		return
+	}
+	s.persistMu.Lock()
+	persistErr := s.lastPersistErr
+	s.persistMu.Unlock()
+	if persistErr != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"status": "unavailable", "reason": "persist signal state: " + persistErr.Error()})
 		return
 	}
 	if s.otlp != nil {
@@ -399,94 +506,39 @@ func (s *observabilityServer) storageAvailable(w http.ResponseWriter) bool {
 	return false
 }
 
-func handleBenchmarks(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	results := make([]benchmarkCaseResult, 0, len(frozenBenchmarkCases))
-	averageScores := make(map[string]float64)
-	var totalLatency float64
-	for _, benchmark := range frozenBenchmarkCases {
-		start := time.Now()
-		retrieved := benchmarkRetrieval(benchmark.query)
-		latency := float64(time.Since(start).Nanoseconds()) / 1e6
-		scores := benchmarkScores(benchmark.expected, retrieved)
-		for metric, score := range scores {
-			averageScores[metric] += score
-		}
-		results = append(results, benchmarkCaseResult{
-			CaseID:       benchmark.id,
-			RetrievedIDs: retrieved,
-			LatencyMs:    latency,
-			Scores:       scores,
-		})
-		totalLatency += latency
-	}
-	for metric, score := range averageScores {
-		averageScores[metric] = score / float64(len(results))
-	}
-
-	writeJSON(w, benchmarkSummary{
-		Suite:          "scos_governance_quality_baseline",
-		Version:        "1.3.0",
-		TotalCases:     len(results),
-		AverageScores:  averageScores,
-		TotalLatencyMs: totalLatency,
-		AvgLatencyMs:   totalLatency / float64(len(results)),
-		Results:        results,
-	})
-}
-
-func benchmarkRetrieval(query string) []string {
-	lower := strings.ToLower(query)
-	switch {
-	case query == "sys_memory_item_9921a":
-		return []string{"sys_memory_item_9921a"}
-	case strings.Contains(lower, "injection") || strings.Contains(lower, "bypass"):
-		return []string{"sec_denied_injection"}
-	case strings.Contains(lower, "authoritative") || strings.Contains(lower, "turn"):
-		return []string{"doc_journal_commit", "doc_turn_durability"}
-	case strings.Contains(lower, "prior") || strings.Contains(lower, "schema"):
-		return []string{"mem_schema_v2", "hist_rev_3"}
-	case strings.Contains(lower, "alpha"):
-		return []string{"prj_alpha_deploy_cfg"}
-	case strings.Contains(lower, "conflict"):
-		return []string{"conflict_seq_412"}
-	case strings.Contains(lower, "restore") || strings.Contains(lower, "recovery"):
-		return []string{"recovery_checkpoint_412"}
-	case strings.Contains(lower, "deprecated") || strings.Contains(lower, "hook"):
-		return []string{"stale_hook_sig_v1"}
-	case strings.Contains(lower, "multi-turn") || strings.Contains(lower, "step 3"):
-		return []string{"turn_step_3_proxy_log"}
-	default:
-		return []string{"doc_generic_match"}
-	}
-}
-
-func benchmarkScores(expected, retrieved []string) map[string]float64 {
-	return map[string]float64{
-		"recall@1":    benchmarkharness.ComputeRecallAtK(expected, retrieved, 1),
-		"recall@3":    benchmarkharness.ComputeRecallAtK(expected, retrieved, 3),
-		"recall@5":    benchmarkharness.ComputeRecallAtK(expected, retrieved, 5),
-		"recall@10":   benchmarkharness.ComputeRecallAtK(expected, retrieved, 10),
-		"precision@1": benchmarkharness.ComputePrecisionAtK(expected, retrieved, 1),
-		"precision@3": benchmarkharness.ComputePrecisionAtK(expected, retrieved, 3),
-		"precision@5": benchmarkharness.ComputePrecisionAtK(expected, retrieved, 5),
-		"mrr":         benchmarkharness.ComputeMRR(expected, retrieved),
-		"ndcg@5":      benchmarkharness.ComputeNDCGAtK(expected, retrieved, 5),
-		"ndcg@10":     benchmarkharness.ComputeNDCGAtK(expected, retrieved, 10),
-	}
-}
-
 // ── metrics ──────────────────────────────────────────────────────────────
 
+// handleMetrics returns retained raw points. ?metric= keeps only points
+// whose name contains that fragment (case-insensitive), e.g. "token" or
+// "cost"; ?limit= returns the newest N matches.
 func (s *observabilityServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	fragment := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("metric")))
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
 	s.mu.RLock()
-	m := s.metrics
+	out := make([]*MetricPoint, 0)
+	for i := len(s.metrics) - 1; i >= 0; i-- {
+		m := s.metrics[i]
+		if fragment != "" && !strings.Contains(strings.ToLower(m.Name), fragment) {
+			continue
+		}
+		out = append(out, m)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
 	s.mu.RUnlock()
-	writeJSON(w, m)
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	writeJSON(w, out)
 }
 
 func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http.Request) {
@@ -530,6 +582,7 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 			}
 		}
 		s.metrics = append(s.metrics, &points[i])
+		s.rollups.add(&points[i])
 	}
 	s.trimRetention()
 	s.mu.Unlock()

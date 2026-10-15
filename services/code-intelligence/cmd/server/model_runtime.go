@@ -1,5 +1,7 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
+
 import (
 	"bytes"
 	"context"
@@ -142,7 +144,7 @@ func newCodeModelRuntimeClientFromEnvironment() (*codeModelRuntimeClient, error)
 	}
 	return &codeModelRuntimeClient{
 		baseURL:           baseURL,
-		httpClient:        &http.Client{Timeout: time.Duration(timeoutSeconds) * time.Second, Transport: transport},
+		httpClient:        &http.Client{Timeout: time.Duration(timeoutSeconds) * time.Second, Transport: telemetry.ProcessTransport(transport)},
 		serviceToken:      cfg.Token,
 		controlPlaneToken: cfg.ControlPlaneToken,
 	}, nil

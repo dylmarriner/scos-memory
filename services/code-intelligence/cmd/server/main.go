@@ -464,7 +464,7 @@ func main() {
 		addr = ":8084"
 	}
 	log.Printf("code intelligence layer listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("code-intelligence", auth.ControlPlaneHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }

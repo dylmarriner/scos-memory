@@ -297,7 +297,7 @@ func configuredGovernance() ToolGovernance {
 		client, err := tlsserve.TrustedClient(10 * time.Second)
 		if err != nil {
 			log.Printf("configure internal TLS client for tool-governance: %v; using default client", err)
-			client = http.DefaultClient
+			client = &http.Client{Timeout: 10 * time.Second, Transport: telemetry.ProcessTransport(nil)}
 		}
 		return toolGovernanceClient{baseURL: baseURL, client: client}
 	}
@@ -521,7 +521,7 @@ func main() {
 		addr = ":8085"
 	}
 	log.Printf("adaptive execution proxy listening on %s", addr)
-	if err := tlsserve.ListenAndServe(addr, auth.ControlPlaneHandler(mux, auth.MustFromEnvironment())); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("execution-proxy", auth.ControlPlaneHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		log.Fatal(err)
 	}
 }

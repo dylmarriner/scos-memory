@@ -1,5 +1,7 @@
 package main
 
+import "github.com/dylmarriner/scos-memory/packages/telemetry"
+
 import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
@@ -126,7 +128,7 @@ func main() {
 
 	log.Printf("mcp-gateway (%s) listening on %s, hermes=%s memory-intelligence=%s",
 		version, addr, s.hermesURL, s.memoryIntelligenceURL)
-	if err := tlsserve.ListenAndServe(addr, handler); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("mcp-gateway", handler)); err != nil {
 		log.Fatal(err)
 	}
 }

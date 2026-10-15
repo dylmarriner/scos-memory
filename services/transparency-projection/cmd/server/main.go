@@ -166,7 +166,7 @@ func main() {
 		addr = ":8097"
 	}
 	log.Printf("transparency projection listening on %s, upstream=%s", addr, s.upstream)
-	if err := tlsserve.ListenAndServe(addr, handler); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("transparency-projection", handler)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -481,7 +481,7 @@ func (s *projectionServer) cloudAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	client := s.client
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Transport: telemetry.ProcessTransport(nil)}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
