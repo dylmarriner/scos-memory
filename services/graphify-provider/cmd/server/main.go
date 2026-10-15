@@ -9,6 +9,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -43,6 +44,15 @@ type graphifyServer struct {
 
 	extractorVersionOnce   sync.Once
 	extractorVersionCached string
+
+	// buildWait is how long a query waits for a graph build before
+	// answering that the graph is still being built.
+	buildWait time.Duration
+	// extract builds a graph for workDir into outDir; nil runs graphify.
+	extract   func(ctx context.Context, workDir, outDir string) error
+	buildsMu  sync.Mutex
+	builds    map[string]*graphBuild
+	buildSlot sync.Mutex
 }
 
 // extractorVersion identifies which graphify build this process will run,
@@ -163,6 +173,7 @@ func main() {
 	srv.tenantID = strings.TrimSpace(os.Getenv("GRAPHIFY_TENANT_ID"))
 	srv.principalID = strings.TrimSpace(os.Getenv("GRAPHIFY_PRINCIPAL_ID"))
 	srv.backend = strings.TrimSpace(os.Getenv("GRAPHIFY_BACKEND"))
+	srv.buildWait = 10 * time.Second
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -323,6 +334,31 @@ func (s *graphifyServer) ingestEdge(ctx context.Context, sourceMemoryID, targetM
 
 // ── read-side: query / path / explain ───────────────────────────────────
 
+// cachedGraphOrRespond returns workDir's graph, or answers the request
+// itself: 202 with a retry hint while the graph is still being built (the
+// first question about a repository, or the first after it changed), or the
+// build's error.
+func (s *graphifyServer) cachedGraphOrRespond(w http.ResponseWriter, r *http.Request, workDir string) (string, bool) {
+	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
+	if errors.Is(err, errGraphBuilding) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "15")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":              "building",
+			"repo_path":           workDir,
+			"retry_after_seconds": 15,
+			"message":             "The code graph for this repository is being built (first use, or the repository changed since the last build). Ask again in about 15 seconds.",
+		})
+		return "", false
+	}
+	if err != nil {
+		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+		return "", false
+	}
+	return graphPath, true
+}
+
 func (s *graphifyServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -345,9 +381,8 @@ func (s *graphifyServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
-	if err != nil {
-		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+	graphPath, ok := s.cachedGraphOrRespond(w, r, workDir)
+	if !ok {
 		return
 	}
 	out, err := runGraphify(r.Context(), workDir, "query", req.Q, "--graph", graphPath)
@@ -385,9 +420,8 @@ func (s *graphifyServer) handlePath(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
-	if err != nil {
-		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+	graphPath, ok := s.cachedGraphOrRespond(w, r, workDir)
+	if !ok {
 		return
 	}
 	out, err := runGraphify(r.Context(), workDir, "path", req.From, req.To, "--graph", graphPath)
@@ -420,9 +454,8 @@ func (s *graphifyServer) handleExplain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	graphPath, err := s.ensureCachedGraph(r.Context(), workDir)
-	if err != nil {
-		http.Error(w, "graphify extract: "+err.Error(), http.StatusInternalServerError)
+	graphPath, ok := s.cachedGraphOrRespond(w, r, workDir)
+	if !ok {
 		return
 	}
 	out, err := runGraphify(r.Context(), workDir, "explain", req.Node, "--graph", graphPath)

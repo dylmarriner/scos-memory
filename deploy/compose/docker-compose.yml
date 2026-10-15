@@ -701,6 +701,11 @@ services:
     <<: [*service-limits, *fabric-image]
     command: ["graphify-provider"]
     restart: unless-stopped
+    # Override the shared 160m cap: graphify's Python extractor holds a parse
+    # of the whole repository while it builds a graph, which measured ~156MiB
+    # on this ~900-file repository alone and was OOM-killed under 160m.
+    mem_limit: ${GRAPHIFY_SERVICE_MEM_LIMIT:-1536m}
+    memswap_limit: ${GRAPHIFY_SERVICE_MEM_LIMIT:-1536m}
     environment:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR: ${SCOS_GRAPHIFY_PROVIDER_HTTP_ADDR:-:8099}
@@ -736,9 +741,9 @@ services:
       # writable mount here the process can't create it under /var/lib
       # (owned by root, not the container's non-root scos user) at all.
       - graphify-cache:/var/lib/graphify-cache
-      # Read-write for the same reason as /repo: graphify writes
-      # graphify-out/ into the repository it graphs.
-      - ${SCOS_WORKSPACE_HOST_PATH:-../..}:/workspace:rw
+      # Read-only: graphs of workspace repositories are built into
+      # /var/lib/graphify-cache, never into the repository itself.
+      - ${SCOS_WORKSPACE_HOST_PATH:-../..}:/workspace:ro
     depends_on:
       tls-certs:
         condition: service_completed_successfully

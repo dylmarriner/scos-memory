@@ -1311,7 +1311,7 @@ func governedTools() []map[string]any {
 				"type": "object",
 				"properties": map[string]any{
 					"q":         map[string]any{"type": "string", "description": "The question to ask the graph"},
-					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo. The first question about a repository (or the first after it changes) builds its graph in the background; until it is ready the call returns status \"building\" with retry_after_seconds, and the same call should be repeated after that delay."},
 				},
 				"required": []string{"q"},
 			},
@@ -1324,7 +1324,7 @@ func governedTools() []map[string]any {
 				"properties": map[string]any{
 					"from":      map[string]any{"type": "string", "description": "Starting node name"},
 					"to":        map[string]any{"type": "string", "description": "Target node name"},
-					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo. The first question about a repository (or the first after it changes) builds its graph in the background; until it is ready the call returns status \"building\" with retry_after_seconds, and the same call should be repeated after that delay."},
 				},
 				"required": []string{"from", "to"},
 			},
@@ -1336,7 +1336,7 @@ func governedTools() []map[string]any {
 				"type": "object",
 				"properties": map[string]any{
 					"node":      map[string]any{"type": "string", "description": "Node name to explain"},
-					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo; first use against a given path builds its graph automatically."},
+					"repo_path": map[string]any{"type": "string", "description": "Absolute path of the repo to graph. Omit to use the provider's default repo. The first question about a repository (or the first after it changes) builds its graph in the background; until it is ready the call returns status \"building\" with retry_after_seconds, and the same call should be repeated after that delay."},
 				},
 				"required": []string{"node"},
 			},
