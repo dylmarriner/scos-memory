@@ -4,13 +4,13 @@
       "cases": [
         {
           "case_id": "ctx_001",
-          "latency_ms": 3.2736470002419082,
+          "latency_ms": 2.6847810004255734,
           "measured": {
-            "capsule_id": "42c361cfbd71420a-949a-ee1a74d8b501",
+            "capsule_id": "16fc049fc33e4229-a289-41c666efa86a",
             "input_tokens": 50,
             "output": "--- optional_background ---\nretain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit",
             "output_tokens": 57,
-            "restore_latency_ms": 1.5740240014565643,
+            "restore_latency_ms": 2.525451000110479,
             "restored": "retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit ",
             "service_reported_tokens": {
               "compiled": 86,
@@ -29,13 +29,13 @@
         },
         {
           "case_id": "ctx_002",
-          "latency_ms": 1.2642460005736211,
+          "latency_ms": 1.9879659994330723,
           "measured": {
-            "capsule_id": "68c474a0079d4328-9f31-20cd4f2c82e3",
+            "capsule_id": "375a49658fcd4d83-9fd7-e4049634de7d",
             "input_tokens": 55,
             "output": "--- optional_background ---\nrestore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation",
             "output_tokens": 62,
-            "restore_latency_ms": 0.7440959998348262,
+            "restore_latency_ms": 1.1404699998820433,
             "restored": "restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation ",
             "service_reported_tokens": {
               "compiled": 102,
@@ -54,13 +54,13 @@
         },
         {
           "case_id": "ctx_003",
-          "latency_ms": 0.9513160002825316,
+          "latency_ms": 1.035645000229124,
           "measured": {
-            "capsule_id": "c2bda1660e4a46c7-b0cf-b81577e89841",
+            "capsule_id": "67539abf04ca4b8f-914e-9d6827df4b98",
             "input_tokens": 50,
             "output": "--- optional_background ---\nanswer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha",
             "output_tokens": 57,
-            "restore_latency_ms": 0.7900580003479263,
+            "restore_latency_ms": 1.5215430012176512,
             "restored": "answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha ",
             "service_reported_tokens": {
               "compiled": 98,
@@ -79,13 +79,13 @@
         },
         {
           "case_id": "ctx_004",
-          "latency_ms": 0.9234970002580667,
+          "latency_ms": 0.7316929986700416,
           "measured": {
-            "capsule_id": "c1fdd5b3dbd747e3-99a4-0aeeb840d0e2",
+            "capsule_id": "80bea011f5dc4bec-a37d-91b2d54a04b8",
             "input_tokens": 65,
             "output": "--- optional_background ---\npreserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger",
             "output_tokens": 72,
-            "restore_latency_ms": 0.922077999348403,
+            "restore_latency_ms": 1.5375270013464615,
             "restored": "preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger ",
             "service_reported_tokens": {
               "compiled": 93,
@@ -104,13 +104,13 @@
         },
         {
           "case_id": "ctx_005",
-          "latency_ms": 1.041591000102926,
+          "latency_ms": 0.8117990000755526,
           "measured": {
-            "capsule_id": "6ab6d0f6ab714eee-b966-c32f5102ce8f",
+            "capsule_id": "0f3ad139128a41f6-88f5-d73c9dfd4f12",
             "input_tokens": 50,
             "output": "--- optional_background ---\ncite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result",
             "output_tokens": 57,
-            "restore_latency_ms": 1.1323319995426573,
+            "restore_latency_ms": 0.8734439998079324,
             "restored": "cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result ",
             "service_reported_tokens": {
               "compiled": 98,
@@ -129,13 +129,13 @@
         },
         {
           "case_id": "ctx_006",
-          "latency_ms": 5.865826999070123,
+          "latency_ms": 0.6190269996295683,
           "measured": {
-            "capsule_id": "0b43597f80c64307-8ace-c24176f48fa2",
+            "capsule_id": "68f6fe3a251e4949-9a47-04e4e8100ea3",
             "input_tokens": 45,
             "output": "--- governing_policy ---\nquote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages",
             "output_tokens": 52,
-            "restore_latency_ms": 1.220972999362857,
+            "restore_latency_ms": 0.7490299994969973,
             "restored": "quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages ",
             "service_reported_tokens": {
               "compiled": 91,
@@ -154,13 +154,13 @@
         },
         {
           "case_id": "ctx_007",
-          "latency_ms": 2.8331230005278485,
+          "latency_ms": 0.7197319991973927,
           "measured": {
-            "capsule_id": "89a24c6f52ef4a1b-a8d8-ab5f16f99307",
+            "capsule_id": "01cb4896c64d48d9-b952-e8e3829565e5",
             "input_tokens": 45,
             "output": "--- optional_background ---\nreference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision",
             "output_tokens": 52,
-            "restore_latency_ms": 1.3880830010748468,
+            "restore_latency_ms": 0.7371210012934171,
             "restored": "reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision ",
             "service_reported_tokens": {
               "compiled": 101,
@@ -179,13 +179,13 @@
         },
         {
           "case_id": "ctx_008",
-          "latency_ms": 1.4081259996601148,
+          "latency_ms": 0.6490650011983234,
           "measured": {
-            "capsule_id": "c13d31773e5447e8-be17-2d460d9f3970",
+            "capsule_id": "c29b8e1518de43b2-a5e5-f2db3eab2d06",
             "input_tokens": 45,
             "output": "--- optional_background ---\nkeep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact",
             "output_tokens": 52,
-            "restore_latency_ms": 0.9406550016137771,
+            "restore_latency_ms": 0.764541000535246,
             "restored": "keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact ",
             "service_reported_tokens": {
               "compiled": 86,
@@ -204,13 +204,13 @@
         },
         {
           "case_id": "ctx_009",
-          "latency_ms": 1.465441000618739,
+          "latency_ms": 1.1751479996746639,
           "measured": {
-            "capsule_id": "e5a875cba298475e-8196-15e99b2ba0bc",
+            "capsule_id": "d73d0cd297c04288-83ae-8b1f991ba304",
             "input_tokens": 55,
             "output": "--- optional_background ---\npreserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay",
             "output_tokens": 62,
-            "restore_latency_ms": 1.3255750000098487,
+            "restore_latency_ms": 0.6870609995530685,
             "restored": "preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay ",
             "service_reported_tokens": {
               "compiled": 89,
@@ -229,13 +229,13 @@
         },
         {
           "case_id": "ctx_010",
-          "latency_ms": 1.6072620001068572,
+          "latency_ms": 2.025364001383423,
           "measured": {
-            "capsule_id": "9b3df34f43224229-a723-1a7e0c8f6035",
+            "capsule_id": "7d024e4a66d14430-a0a2-e9c9191b6079",
             "input_tokens": 60,
             "output": "--- optional_background ---\nretain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter",
             "output_tokens": 67,
-            "restore_latency_ms": 0.8195799982786411,
+            "restore_latency_ms": 1.0460209996381309,
             "restored": "retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter ",
             "service_reported_tokens": {
               "compiled": 104,
@@ -254,13 +254,13 @@
         },
         {
           "case_id": "ctx_011",
-          "latency_ms": 1.3063269998383475,
+          "latency_ms": 0.9039510005095508,
           "measured": {
-            "capsule_id": "2dd6258656e14d3f-b4ee-83dd90130964",
+            "capsule_id": "6c83c3d153b9401b-a203-da4437fd9082",
             "input_tokens": 65,
             "output": "--- optional_background ---\ncite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery",
             "output_tokens": 72,
-            "restore_latency_ms": 1.1377759983588476,
+            "restore_latency_ms": 0.8184649996110238,
             "restored": "cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery ",
             "service_reported_tokens": {
               "compiled": 103,
@@ -279,13 +279,13 @@
         },
         {
           "case_id": "ctx_012",
-          "latency_ms": 1.5020720002212329,
+          "latency_ms": 0.8872640009940369,
           "measured": {
-            "capsule_id": "820a4f1cdc604167-91d8-86b5bc5d34ca",
+            "capsule_id": "e930995955114bd4-8d32-4e7b42a49173",
             "input_tokens": 45,
             "output": "--- optional_background ---\nhonor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation",
             "output_tokens": 52,
-            "restore_latency_ms": 0.8347179991687881,
+            "restore_latency_ms": 0.8648799994261935,
             "restored": "honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation ",
             "service_reported_tokens": {
               "compiled": 97,
@@ -304,13 +304,13 @@
         },
         {
           "case_id": "ctx_013",
-          "latency_ms": 1.265244000023813,
+          "latency_ms": 0.9249840004486032,
           "measured": {
-            "capsule_id": "aa6fcf24a46a45e4-924d-8275ec8896a5",
+            "capsule_id": "26a1d7f032784d97-b015-f03abdb16bce",
             "input_tokens": 60,
             "output": "--- optional_background ---\nkeep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source",
             "output_tokens": 67,
-            "restore_latency_ms": 1.0255540000798646,
+            "restore_latency_ms": 0.7494550009141676,
             "restored": "keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source ",
             "service_reported_tokens": {
               "compiled": 92,
@@ -329,13 +329,13 @@
         },
         {
           "case_id": "ctx_014",
-          "latency_ms": 1.1203049998584902,
+          "latency_ms": 1.1996070006716764,
           "measured": {
-            "capsule_id": "5b4e538d13a54cbe-8c45-52fe3034beba",
+            "capsule_id": "fe0ab38500064391-a88f-b650a1d3f807",
             "input_tokens": 75,
             "output": "--- optional_background ---\ncite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check",
             "output_tokens": 82,
-            "restore_latency_ms": 1.065915999788558,
+            "restore_latency_ms": 0.9482929999649059,
             "restored": "cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check ",
             "service_reported_tokens": {
               "compiled": 97,
@@ -354,13 +354,13 @@
         },
         {
           "case_id": "ctx_015",
-          "latency_ms": 1.1300790010864148,
+          "latency_ms": 0.8969249993242556,
           "measured": {
-            "capsule_id": "9e4dd50ed0c14d3f-bfa6-91ba4366aa7d",
+            "capsule_id": "7ba1af955c274859-bc8b-0f7454d844b6",
             "input_tokens": 50,
             "output": "--- optional_background ---\npreserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report",
             "output_tokens": 57,
-            "restore_latency_ms": 0.9458980002818862,
+            "restore_latency_ms": 0.7662700008950196,
             "restored": "preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report ",
             "service_reported_tokens": {
               "compiled": 93,
@@ -379,13 +379,13 @@
         },
         {
           "case_id": "ctx_016",
-          "latency_ms": 1.0890539997490123,
+          "latency_ms": 0.8154549996106653,
           "measured": {
-            "capsule_id": "0ab6abb74c444bb8-9f1c-3d55ea2e6449",
+            "capsule_id": "953d4a8748e34b1f-b340-78f50a34f231",
             "input_tokens": 55,
             "output": "--- optional_background ---\nkeep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact",
             "output_tokens": 62,
-            "restore_latency_ms": 1.0266580011375481,
+            "restore_latency_ms": 0.7231020008475753,
             "restored": "keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact ",
             "service_reported_tokens": {
               "compiled": 91,
@@ -404,13 +404,13 @@
         },
         {
           "case_id": "ctx_017",
-          "latency_ms": 1.2281300005270168,
+          "latency_ms": 0.8548299992980901,
           "measured": {
-            "capsule_id": "d6c03901ae184c81-ad91-701d1a4689b1",
+            "capsule_id": "620c95b913124653-b8f7-f4ca294d525b",
             "input_tokens": 60,
             "output": "--- optional_background ---\ncite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it",
             "output_tokens": 67,
-            "restore_latency_ms": 0.7588939988636412,
+            "restore_latency_ms": 0.6117089997133007,
             "restored": "cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it ",
             "service_reported_tokens": {
               "compiled": 81,
@@ -429,13 +429,13 @@
         },
         {
           "case_id": "ctx_018",
-          "latency_ms": 1.2614089991984656,
+          "latency_ms": 1.3127099991834257,
           "measured": {
-            "capsule_id": "40ace348638b4336-8178-ab6a091deb1c",
+            "capsule_id": "a72c49912a764af7-82aa-2db897bd8e02",
             "input_tokens": 60,
             "output": "--- optional_background ---\nretain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11",
             "output_tokens": 67,
-            "restore_latency_ms": 0.83199000073364,
+            "restore_latency_ms": 0.5563060003623832,
             "restored": "retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 ",
             "service_reported_tokens": {
               "compiled": 88,
@@ -454,13 +454,13 @@
         },
         {
           "case_id": "ctx_019",
-          "latency_ms": 1.3165939999453258,
+          "latency_ms": 0.749783001083415,
           "measured": {
-            "capsule_id": "077ea644c4724edc-b3e8-2b56a6a79a8e",
+            "capsule_id": "92f8b2d2af314e50-b660-0c2cd46b94b2",
             "input_tokens": 65,
             "output": "--- optional_background ---\npreserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207",
             "output_tokens": 72,
-            "restore_latency_ms": 0.9956060002878075,
+            "restore_latency_ms": 0.6512630006909603,
             "restored": "preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 ",
             "service_reported_tokens": {
               "compiled": 91,
@@ -479,13 +479,13 @@
         },
         {
           "case_id": "ctx_020",
-          "latency_ms": 1.1366379985702224,
+          "latency_ms": 1.34090600113268,
           "measured": {
-            "capsule_id": "f2643353f82f4992-9c08-b89f821dc95f",
+            "capsule_id": "cfae2493f2634fb8-978f-ead4a2bfd33d",
             "input_tokens": 60,
             "output": "--- optional_background ---\ncite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337",
             "output_tokens": 67,
-            "restore_latency_ms": 0.908733998585376,
+            "restore_latency_ms": 0.594729999647825,
             "restored": "cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 ",
             "service_reported_tokens": {
               "compiled": 78,
@@ -504,13 +504,13 @@
         },
         {
           "case_id": "ctx_021",
-          "latency_ms": 1.4308120007626712,
+          "latency_ms": 1.0489950000192039,
           "measured": {
-            "capsule_id": "6a928d4fbf8c427a-a3b3-1b86910143cb",
+            "capsule_id": "60d8c5aa04a042e8-a591-c56384248373",
             "input_tokens": 60,
             "output": "--- optional_background ---\nkeep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556",
             "output_tokens": 67,
-            "restore_latency_ms": 1.1206839990336448,
+            "restore_latency_ms": 0.5421920013759518,
             "restored": "keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 ",
             "service_reported_tokens": {
               "compiled": 86,
@@ -529,13 +529,13 @@
         },
         {
           "case_id": "ctx_022",
-          "latency_ms": 1.3507130006473744,
+          "latency_ms": 1.790713000445976,
           "measured": {
-            "capsule_id": "d3ffb6fb0dfc43f9-8661-a2aacf6506f4",
+            "capsule_id": "bf5fca5ab72d4f61-883d-6c8a101d5d66",
             "input_tokens": 50,
             "output": "--- optional_background ---\npreserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931",
             "output_tokens": 57,
-            "restore_latency_ms": 0.9713799991004635,
+            "restore_latency_ms": 0.7030010001471965,
             "restored": "preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 ",
             "service_reported_tokens": {
               "compiled": 82,
@@ -554,13 +554,13 @@
         },
         {
           "case_id": "ctx_023",
-          "latency_ms": 1.2770950015692506,
+          "latency_ms": 0.8606080009485595,
           "measured": {
-            "capsule_id": "3a51aaafb7ad446a-9d95-acae2ec14ae7",
+            "capsule_id": "f3b0030bfc3a423a-b9b2-705d4977d563",
             "input_tokens": 55,
             "output": "--- optional_background ---\ncite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice",
             "output_tokens": 62,
-            "restore_latency_ms": 1.1350540007697418,
+            "restore_latency_ms": 0.6958939993637614,
             "restored": "cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice ",
             "service_reported_tokens": {
               "compiled": 86,
@@ -579,13 +579,13 @@
         },
         {
           "case_id": "ctx_024",
-          "latency_ms": 1.2722240007860819,
+          "latency_ms": 0.6700300000375137,
           "measured": {
-            "capsule_id": "e12f2151d85d4e2d-b6f7-49282004c470",
+            "capsule_id": "59cacb350e9f469c-a460-998039610b0c",
             "input_tokens": 65,
             "output": "--- optional_background ---\nkeep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii",
             "output_tokens": 72,
-            "restore_latency_ms": 1.2220730004628422,
+            "restore_latency_ms": 0.655796000501141,
             "restored": "keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii ",
             "service_reported_tokens": {
               "compiled": 89,
@@ -638,8 +638,8 @@
             "database": null,
             "services": {
               "context-optimisation": {
-                "binary_built_from": "4b1dc58fc269cd84d4dadfce7cf64cf17a6aa147+dirty",
-                "url": "http://127.0.0.1:44507"
+                "binary_built_from": "69df051a564aac380fb4c3456a1b29055499b34a",
+                "url": "http://127.0.0.1:53743"
               }
             }
           }
@@ -648,7 +648,7 @@
       },
       "name": "context_optimisation_service",
       "summary": {
-        "average_latency_ms": 1.5966988335094356,
+        "average_latency_ms": 1.1123742084843495,
         "average_metrics": {
           "evidence_retention": 1.0,
           "exact_value_retention": 1.0,
@@ -670,8 +670,8 @@
           "successful_cases": 24,
           "total_cases": 24
         },
-        "total_latency_ms": 38.320772004226455,
-        "wall_time_ms": 160.40726200117206
+        "total_latency_ms": 26.696981003624387,
+        "wall_time_ms": 107.55208899900026
       },
       "version": "3.0.0"
     },
@@ -679,7 +679,7 @@
       "cases": [
         {
           "case_id": "ctx_001",
-          "latency_ms": 0.003163000656059012,
+          "latency_ms": 0.0026279994926881045,
           "measured": {
             "input_tokens": 50,
             "output": "retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit ",
@@ -698,7 +698,7 @@
         },
         {
           "case_id": "ctx_002",
-          "latency_ms": 0.0011710017133736983,
+          "latency_ms": 0.0012709988368442282,
           "measured": {
             "input_tokens": 55,
             "output": "restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation ",
@@ -717,7 +717,7 @@
         },
         {
           "case_id": "ctx_003",
-          "latency_ms": 0.001115000486606732,
+          "latency_ms": 0.0007210001058410853,
           "measured": {
             "input_tokens": 50,
             "output": "answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha ",
@@ -736,7 +736,7 @@
         },
         {
           "case_id": "ctx_004",
-          "latency_ms": 0.0008089991752058268,
+          "latency_ms": 0.0006359987310133874,
           "measured": {
             "input_tokens": 65,
             "output": "preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger ",
@@ -755,7 +755,7 @@
         },
         {
           "case_id": "ctx_005",
-          "latency_ms": 0.0005099991540191695,
+          "latency_ms": 0.0003469995135674253,
           "measured": {
             "input_tokens": 50,
             "output": "cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result ",
@@ -774,7 +774,7 @@
         },
         {
           "case_id": "ctx_006",
-          "latency_ms": 0.00039600126910954714,
+          "latency_ms": 0.0003330005711177364,
           "measured": {
             "input_tokens": 45,
             "output": "quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages ",
@@ -793,7 +793,7 @@
         },
         {
           "case_id": "ctx_007",
-          "latency_ms": 0.0006689988367725164,
+          "latency_ms": 0.00034600088838487864,
           "measured": {
             "input_tokens": 45,
             "output": "reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision ",
@@ -812,7 +812,7 @@
         },
         {
           "case_id": "ctx_008",
-          "latency_ms": 0.0004320008883951232,
+          "latency_ms": 0.0003149998519802466,
           "measured": {
             "input_tokens": 45,
             "output": "keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact ",
@@ -831,7 +831,7 @@
         },
         {
           "case_id": "ctx_009",
-          "latency_ms": 0.0012229993444634601,
+          "latency_ms": 0.0003650002327049151,
           "measured": {
             "input_tokens": 55,
             "output": "preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay ",
@@ -850,7 +850,7 @@
         },
         {
           "case_id": "ctx_010",
-          "latency_ms": 0.000878999344422482,
+          "latency_ms": 0.0004749999789055437,
           "measured": {
             "input_tokens": 60,
             "output": "retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter ",
@@ -869,7 +869,7 @@
         },
         {
           "case_id": "ctx_011",
-          "latency_ms": 0.0008179995347745717,
+          "latency_ms": 0.0003020013537025079,
           "measured": {
             "input_tokens": 65,
             "output": "cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery ",
@@ -888,7 +888,7 @@
         },
         {
           "case_id": "ctx_012",
-          "latency_ms": 0.0007910002750577405,
+          "latency_ms": 0.00042200008465442806,
           "measured": {
             "input_tokens": 45,
             "output": "honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation ",
@@ -907,7 +907,7 @@
         },
         {
           "case_id": "ctx_013",
-          "latency_ms": 0.000471998646389693,
+          "latency_ms": 0.0001900007191579789,
           "measured": {
             "input_tokens": 60,
             "output": "keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source ",
@@ -926,7 +926,7 @@
         },
         {
           "case_id": "ctx_014",
-          "latency_ms": 0.0004470002750167623,
+          "latency_ms": 0.0003879995347233489,
           "measured": {
             "input_tokens": 75,
             "output": "cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check ",
@@ -945,7 +945,7 @@
         },
         {
           "case_id": "ctx_015",
-          "latency_ms": 0.0006850004865555093,
+          "latency_ms": 0.0005300007615005597,
           "measured": {
             "input_tokens": 50,
             "output": "preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report ",
@@ -964,7 +964,7 @@
         },
         {
           "case_id": "ctx_016",
-          "latency_ms": 0.0004069988790433854,
+          "latency_ms": 0.0004880002961726859,
           "measured": {
             "input_tokens": 55,
             "output": "keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact ",
@@ -983,7 +983,7 @@
         },
         {
           "case_id": "ctx_017",
-          "latency_ms": 0.0012700002116616815,
+          "latency_ms": 0.000672000169288367,
           "measured": {
             "input_tokens": 60,
             "output": "cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it ",
@@ -1002,7 +1002,7 @@
         },
         {
           "case_id": "ctx_018",
-          "latency_ms": 0.00094600000011269,
+          "latency_ms": 0.0005609999789157882,
           "measured": {
             "input_tokens": 60,
             "output": "retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 ",
@@ -1021,7 +1021,7 @@
         },
         {
           "case_id": "ctx_019",
-          "latency_ms": 0.0011039992386940867,
+          "latency_ms": 0.0005869987944606692,
           "measured": {
             "input_tokens": 65,
             "output": "preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 ",
@@ -1040,7 +1040,7 @@
         },
         {
           "case_id": "ctx_020",
-          "latency_ms": 0.0007839989848434925,
+          "latency_ms": 0.00039999940781854093,
           "measured": {
             "input_tokens": 60,
             "output": "cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 ",
@@ -1059,7 +1059,7 @@
         },
         {
           "case_id": "ctx_021",
-          "latency_ms": 0.0007689995982218534,
+          "latency_ms": 0.0003969998942920938,
           "measured": {
             "input_tokens": 60,
             "output": "keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 ",
@@ -1078,7 +1078,7 @@
         },
         {
           "case_id": "ctx_022",
-          "latency_ms": 0.0010950006981147453,
+          "latency_ms": 0.0007380003808066249,
           "measured": {
             "input_tokens": 50,
             "output": "preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 ",
@@ -1097,7 +1097,7 @@
         },
         {
           "case_id": "ctx_023",
-          "latency_ms": 0.0008400002116104588,
+          "latency_ms": 0.0005270012479741126,
           "measured": {
             "input_tokens": 55,
             "output": "cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice ",
@@ -1116,7 +1116,7 @@
         },
         {
           "case_id": "ctx_024",
-          "latency_ms": 0.0010339990694774315,
+          "latency_ms": 0.0008480001270072535,
           "measured": {
             "input_tokens": 65,
             "output": "keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii ",
@@ -1168,7 +1168,7 @@
       },
       "name": "unoptimised_context_baseline",
       "summary": {
-        "average_latency_ms": 0.0009095415407500695,
+        "average_latency_ms": 0.0006036250397301046,
         "average_metrics": {
           "evidence_retention": 1.0,
           "exact_value_retention": 1.0,
@@ -1190,8 +1190,8 @@
           "successful_cases": 24,
           "total_cases": 24
         },
-        "total_latency_ms": 0.02182899697800167,
-        "wall_time_ms": 62.26554500062775
+        "total_latency_ms": 0.01448700095352251,
+        "wall_time_ms": 64.93849099933868
       },
       "version": "3.0.0"
     },
@@ -1199,7 +1199,7 @@
       "cases": [
         {
           "case_id": "code_001",
-          "latency_ms": 15.148261998547241,
+          "latency_ms": 13.872482999431668,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -1240,7 +1240,7 @@
         },
         {
           "case_id": "code_002",
-          "latency_ms": 4.550028999801725,
+          "latency_ms": 8.287098000437254,
           "measured": {
             "matches": [
               "packages/execution-adapters/adapters.go"
@@ -1264,7 +1264,7 @@
         },
         {
           "case_id": "code_003",
-          "latency_ms": 5.541941998671973,
+          "latency_ms": 9.125167000092915,
           "measured": {
             "matches": [
               "packages/execution-adapters/python/scos_execution/reducer.py"
@@ -1288,7 +1288,7 @@
         },
         {
           "case_id": "code_004",
-          "latency_ms": 12.641106999581098,
+          "latency_ms": 10.318987000573543,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -1329,7 +1329,7 @@
         },
         {
           "case_id": "code_005",
-          "latency_ms": 12.241776999871945,
+          "latency_ms": 9.182854999380652,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -1370,7 +1370,7 @@
         },
         {
           "case_id": "code_006",
-          "latency_ms": 11.152651999509544,
+          "latency_ms": 7.328115001655533,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -1411,7 +1411,7 @@
         },
         {
           "case_id": "code_007",
-          "latency_ms": 4.974444000254152,
+          "latency_ms": 3.749622001123498,
           "measured": {
             "matches": [
               "packages/database/tls.go"
@@ -1435,7 +1435,7 @@
         },
         {
           "case_id": "code_008",
-          "latency_ms": 3.28089999857184,
+          "latency_ms": 4.926977000650368,
           "measured": {
             "matches": [
               "packages/execution-adapters/python/scos_execution/reducer.py"
@@ -1479,7 +1479,7 @@
         },
         {
           "case_id": "code_009",
-          "latency_ms": 12.481086001571384,
+          "latency_ms": 12.906895999549306,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -1519,7 +1519,7 @@
         },
         {
           "case_id": "code_010",
-          "latency_ms": 6.599931999517139,
+          "latency_ms": 4.610985999534023,
           "measured": {
             "matches": [
               "packages/context-contracts/context.go"
@@ -1543,7 +1543,7 @@
         },
         {
           "case_id": "code_011",
-          "latency_ms": 4.135699000471504,
+          "latency_ms": 3.0320980004034936,
           "measured": {
             "matches": [
               "packages/context-contracts/context.go"
@@ -1567,7 +1567,7 @@
         },
         {
           "case_id": "code_012",
-          "latency_ms": 3.5636810007417807,
+          "latency_ms": 3.5523830010788515,
           "measured": {
             "matches": [
               "packages/extension-contracts/extensions.go"
@@ -1591,7 +1591,7 @@
         },
         {
           "case_id": "code_013",
-          "latency_ms": 3.4429459992679767,
+          "latency_ms": 3.872150000461261,
           "measured": {
             "matches": [
               "packages/benchmark-harness/harness.go"
@@ -1615,7 +1615,7 @@
         },
         {
           "case_id": "code_014",
-          "latency_ms": 3.533512999638333,
+          "latency_ms": 3.976663998400909,
           "measured": {
             "matches": [
               "packages/benchmark-harness/harness.go"
@@ -1639,7 +1639,7 @@
         },
         {
           "case_id": "code_015",
-          "latency_ms": 3.7004259993409505,
+          "latency_ms": 3.155170001264196,
           "measured": {
             "matches": [
               "packages/benchmark-harness/harness.go"
@@ -1663,7 +1663,7 @@
         },
         {
           "case_id": "code_016",
-          "latency_ms": 3.51839599898085,
+          "latency_ms": 3.4245910010213265,
           "measured": {
             "matches": [
               "packages/auth/middleware.go"
@@ -1687,7 +1687,7 @@
         },
         {
           "case_id": "code_017",
-          "latency_ms": 3.3706719987094402,
+          "latency_ms": 3.750672000023769,
           "measured": {
             "matches": [
               "packages/auth/middleware.go"
@@ -1711,7 +1711,7 @@
         },
         {
           "case_id": "code_018",
-          "latency_ms": 3.034255001693964,
+          "latency_ms": 3.5458840011415305,
           "measured": {
             "matches": [
               "packages/auth/middleware.go"
@@ -1735,7 +1735,7 @@
         },
         {
           "case_id": "code_019",
-          "latency_ms": 3.2689389990991913,
+          "latency_ms": 3.1221549998008413,
           "measured": {
             "matches": [
               "packages/language-adapters/adapters.go"
@@ -1783,16 +1783,16 @@
         "setup": {
           "index": {
             "commit_id": "89515656ec3477d725ff5f43b1af6798a752ff93",
-            "index_latency_ms": 1598.86596600154,
+            "index_latency_ms": 1342.0217860002595,
             "indexed_files": 48,
-            "snapshot_id": "cd18d4c5-b6c1-446b-bad1-a5ac02fad510"
+            "snapshot_id": "55c29087-6d0e-4a66-a6c9-5829650e44b0"
           },
           "stack": {
             "database": "pgvector/pgvector:pg17",
             "services": {
               "code-intelligence": {
-                "binary_built_from": "4b1dc58fc269cd84d4dadfce7cf64cf17a6aa147+dirty",
-                "url": "http://127.0.0.1:56291"
+                "binary_built_from": "69df051a564aac380fb4c3456a1b29055499b34a",
+                "url": "http://127.0.0.1:53217"
               }
             }
           }
@@ -1801,7 +1801,7 @@
       },
       "name": "code_intelligence_service",
       "summary": {
-        "average_latency_ms": 6.32529778914958,
+        "average_latency_ms": 6.09162910558026,
         "average_metrics": {
           "exact_lookup": 0.7368421052631579,
           "reference_precision": 1.0,
@@ -1819,8 +1819,8 @@
           "successful_cases": 14,
           "total_cases": 19
         },
-        "total_latency_ms": 120.18065799384203,
-        "wall_time_ms": 152.5870820005366
+        "total_latency_ms": 115.74095300602494,
+        "wall_time_ms": 153.8039850001951
       },
       "version": "3.0.0"
     },
@@ -1828,7 +1828,7 @@
       "cases": [
         {
           "case_id": "code_001",
-          "latency_ms": 7.822654999472434,
+          "latency_ms": 11.19284800006426,
           "measured": {
             "matches": []
           },
@@ -1841,7 +1841,7 @@
         },
         {
           "case_id": "code_002",
-          "latency_ms": 0.18257000010635238,
+          "latency_ms": 0.1465759996790439,
           "measured": {
             "matches": []
           },
@@ -1854,7 +1854,7 @@
         },
         {
           "case_id": "code_003",
-          "latency_ms": 0.14334899969981052,
+          "latency_ms": 0.19803900067927316,
           "measured": {
             "matches": []
           },
@@ -1867,7 +1867,7 @@
         },
         {
           "case_id": "code_004",
-          "latency_ms": 0.18927800010715146,
+          "latency_ms": 0.18574199930299073,
           "measured": {
             "matches": []
           },
@@ -1880,7 +1880,7 @@
         },
         {
           "case_id": "code_005",
-          "latency_ms": 0.13815300007991027,
+          "latency_ms": 0.1381660003971774,
           "measured": {
             "matches": []
           },
@@ -1893,7 +1893,7 @@
         },
         {
           "case_id": "code_006",
-          "latency_ms": 0.13614900126412977,
+          "latency_ms": 0.17416500122635625,
           "measured": {
             "matches": []
           },
@@ -1906,7 +1906,7 @@
         },
         {
           "case_id": "code_007",
-          "latency_ms": 0.13194100029068068,
+          "latency_ms": 0.13958499948785175,
           "measured": {
             "matches": []
           },
@@ -1919,7 +1919,7 @@
         },
         {
           "case_id": "code_008",
-          "latency_ms": 0.12901099944429006,
+          "latency_ms": 0.1329930000792956,
           "measured": {
             "matches": [
               "packages/execution-adapters/python/scos_execution/reducer.py"
@@ -1935,7 +1935,7 @@
         },
         {
           "case_id": "code_009",
-          "latency_ms": 0.17377800031681545,
+          "latency_ms": 0.13434799984679557,
           "measured": {
             "matches": []
           },
@@ -1947,7 +1947,7 @@
         },
         {
           "case_id": "code_010",
-          "latency_ms": 0.13031799971940927,
+          "latency_ms": 0.13015500007895753,
           "measured": {
             "matches": []
           },
@@ -1960,7 +1960,7 @@
         },
         {
           "case_id": "code_011",
-          "latency_ms": 0.1304500001424458,
+          "latency_ms": 0.13586699969891924,
           "measured": {
             "matches": []
           },
@@ -1973,7 +1973,7 @@
         },
         {
           "case_id": "code_012",
-          "latency_ms": 0.12706199959211517,
+          "latency_ms": 0.13489800039678812,
           "measured": {
             "matches": []
           },
@@ -1986,7 +1986,7 @@
         },
         {
           "case_id": "code_013",
-          "latency_ms": 0.12750699897878803,
+          "latency_ms": 0.1596059992152732,
           "measured": {
             "matches": []
           },
@@ -1999,7 +1999,7 @@
         },
         {
           "case_id": "code_014",
-          "latency_ms": 0.12940200031152926,
+          "latency_ms": 0.13380800010054372,
           "measured": {
             "matches": []
           },
@@ -2012,7 +2012,7 @@
         },
         {
           "case_id": "code_015",
-          "latency_ms": 0.12904100003652275,
+          "latency_ms": 0.12961500033270568,
           "measured": {
             "matches": []
           },
@@ -2025,7 +2025,7 @@
         },
         {
           "case_id": "code_016",
-          "latency_ms": 0.15380399963760283,
+          "latency_ms": 0.12803600111510605,
           "measured": {
             "matches": []
           },
@@ -2038,7 +2038,7 @@
         },
         {
           "case_id": "code_017",
-          "latency_ms": 0.13404099991021212,
+          "latency_ms": 0.12916900050186086,
           "measured": {
             "matches": []
           },
@@ -2051,7 +2051,7 @@
         },
         {
           "case_id": "code_018",
-          "latency_ms": 0.12945799971930683,
+          "latency_ms": 0.13556499834521674,
           "measured": {
             "matches": []
           },
@@ -2064,7 +2064,7 @@
         },
         {
           "case_id": "code_019",
-          "latency_ms": 0.19390200031921268,
+          "latency_ms": 0.13100700016366318,
           "measured": {
             "matches": []
           },
@@ -2102,7 +2102,7 @@
       },
       "name": "code_filename_baseline",
       "summary": {
-        "average_latency_ms": 0.549045736797301,
+        "average_latency_ms": 0.7257993684585304,
         "average_metrics": {
           "exact_lookup": 0.10526315789473684,
           "reference_precision": 1.0,
@@ -2120,8 +2120,8 @@
           "successful_cases": 2,
           "total_cases": 19
         },
-        "total_latency_ms": 10.431868999148719,
-        "wall_time_ms": 37.6328239999566
+        "total_latency_ms": 13.790188000712078,
+        "wall_time_ms": 39.634203998502926
       },
       "version": "3.0.0"
     },
@@ -2129,7 +2129,7 @@
       "cases": [
         {
           "case_id": "proxy_001",
-          "latency_ms": 45.26033000001917,
+          "latency_ms": 56.464801000402076,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -2155,7 +2155,7 @@
         },
         {
           "case_id": "proxy_002",
-          "latency_ms": 1.1322020000079647,
+          "latency_ms": 1.7279459989367751,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -2172,7 +2172,7 @@
         },
         {
           "case_id": "proxy_003",
-          "latency_ms": 29.14980400055356,
+          "latency_ms": 33.571934000065085,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -2198,7 +2198,7 @@
         },
         {
           "case_id": "proxy_004",
-          "latency_ms": 41.72470999947109,
+          "latency_ms": 29.004893000092125,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -2224,7 +2224,7 @@
         },
         {
           "case_id": "proxy_005",
-          "latency_ms": 1.2200719993415987,
+          "latency_ms": 1.217747001646785,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -2241,7 +2241,7 @@
         },
         {
           "case_id": "proxy_006",
-          "latency_ms": 25.00844499991217,
+          "latency_ms": 29.572299999927054,
           "measured": {
             "blocked": false,
             "delivered_tokens": 315,
@@ -2267,7 +2267,7 @@
         },
         {
           "case_id": "proxy_007",
-          "latency_ms": 1.6820709988678573,
+          "latency_ms": 1.076459999239887,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -2284,7 +2284,7 @@
         },
         {
           "case_id": "proxy_008",
-          "latency_ms": 48.84314400078438,
+          "latency_ms": 52.68576100024802,
           "measured": {
             "blocked": false,
             "delivered_tokens": 3621,
@@ -2310,7 +2310,7 @@
         },
         {
           "case_id": "proxy_009",
-          "latency_ms": 27.906381999855512,
+          "latency_ms": 32.830259999172995,
           "measured": {
             "blocked": false,
             "delivered_tokens": 2012,
@@ -2336,7 +2336,7 @@
         },
         {
           "case_id": "proxy_010",
-          "latency_ms": 22.06273299998429,
+          "latency_ms": 23.275588999240426,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -2362,7 +2362,7 @@
         },
         {
           "case_id": "proxy_011",
-          "latency_ms": 0.7758689989714185,
+          "latency_ms": 1.0417940011393512,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -2379,19 +2379,19 @@
         },
         {
           "case_id": "proxy_012",
-          "latency_ms": 8734.462887001428,
+          "latency_ms": 7630.950449000011,
           "measured": {
             "blocked": false,
-            "delivered_tokens": 9023,
+            "delivered_tokens": 9054,
             "executed": true,
             "exit_status": 1,
-            "raw_bytes": 7765972,
-            "raw_tokens": 1763792,
+            "raw_bytes": 7784572,
+            "raw_tokens": 1769992,
             "reference_exit_status": 1,
-            "reference_sha256": "d54cb62d10b3817d44568fe2ef4ab56d675dd33a778791ed04857d7ecf36c3e0",
-            "reproducible": false,
+            "reference_sha256": "c72c02b7d74d5ad00cbc78f36bb5fca44623145a7db708f0b882e476f891762f",
+            "reproducible": true,
             "restoration_excluded": "the command reads live system state, so a direct run is no byte-for-byte reference",
-            "restored_sha256": "88338796a01486d1f89ff3cb1f2b6be7fcbe1fb10380ed39181ad8520b857b8a",
+            "restored_sha256": "c72c02b7d74d5ad00cbc78f36bb5fca44623145a7db708f0b882e476f891762f",
             "rewritten": false,
             "stderr_lines": 12,
             "stderr_lines_delivered": 12
@@ -2399,13 +2399,13 @@
           "metrics": {
             "failure_preservation": 1.0,
             "task_success": 1.0,
-            "token_reduction": 0.9948843174251839
+            "token_reduction": 0.9948847226428142
           },
           "task_success": true
         },
         {
           "case_id": "proxy_013",
-          "latency_ms": 41.84698100107198,
+          "latency_ms": 28.359693998936564,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -2431,7 +2431,7 @@
         },
         {
           "case_id": "proxy_014",
-          "latency_ms": 1.1280290000286186,
+          "latency_ms": 0.9399329992447747,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -2448,7 +2448,7 @@
         },
         {
           "case_id": "proxy_015",
-          "latency_ms": 31.327800001236028,
+          "latency_ms": 27.75925399873813,
           "measured": {
             "blocked": false,
             "delivered_tokens": 25,
@@ -2457,9 +2457,9 @@
             "raw_bytes": 45,
             "raw_tokens": 12,
             "reference_exit_status": 0,
-            "reference_sha256": "2bfc77c76beb8ce3492647a5994abd758a6c6175175f22be3e09eed2fdb453bf",
+            "reference_sha256": "b476507deb6bd741fe989014404da85025df7b2f105019c3dc20e38fab56ea90",
             "reproducible": true,
-            "restored_sha256": "2bfc77c76beb8ce3492647a5994abd758a6c6175175f22be3e09eed2fdb453bf",
+            "restored_sha256": "b476507deb6bd741fe989014404da85025df7b2f105019c3dc20e38fab56ea90",
             "rewritten": false,
             "stderr_lines": 0,
             "stderr_lines_delivered": 0
@@ -2474,19 +2474,19 @@
         },
         {
           "case_id": "proxy_016",
-          "latency_ms": 36.17681500145409,
+          "latency_ms": 37.044981998406,
           "measured": {
             "blocked": false,
-            "delivered_tokens": 627,
+            "delivered_tokens": 687,
             "executed": true,
             "exit_status": 0,
-            "raw_bytes": 4136,
-            "raw_tokens": 614,
+            "raw_bytes": 4571,
+            "raw_tokens": 674,
             "reference_exit_status": 0,
-            "reference_sha256": "c312116e6dac6b8c21195dffc642af72e575e78fb514f226ca34f22f0169d5c1",
+            "reference_sha256": "c961b14f81a2a86ad6c0a263a806cb7721da8f3336e9dd04defa0491bf333dd2",
             "reproducible": true,
             "restoration_excluded": "the command reads live system state, so a direct run is no byte-for-byte reference",
-            "restored_sha256": "c312116e6dac6b8c21195dffc642af72e575e78fb514f226ca34f22f0169d5c1",
+            "restored_sha256": "c961b14f81a2a86ad6c0a263a806cb7721da8f3336e9dd04defa0491bf333dd2",
             "rewritten": false,
             "stderr_lines": 0,
             "stderr_lines_delivered": 0
@@ -2494,13 +2494,13 @@
           "metrics": {
             "failure_preservation": 1.0,
             "task_success": 1.0,
-            "token_reduction": -0.021172638436482094
+            "token_reduction": -0.01928783382789323
           },
           "task_success": true
         },
         {
           "case_id": "proxy_017",
-          "latency_ms": 44.62653700102237,
+          "latency_ms": 39.37073599990981,
           "measured": {
             "blocked": false,
             "delivered_tokens": 12,
@@ -2525,7 +2525,7 @@
         },
         {
           "case_id": "proxy_018",
-          "latency_ms": 34.17049400013639,
+          "latency_ms": 41.24201800004812,
           "measured": {
             "blocked": false,
             "delivered_tokens": 5112,
@@ -2551,7 +2551,7 @@
         },
         {
           "case_id": "proxy_019",
-          "latency_ms": 1.0172389993385877,
+          "latency_ms": 3.1551709998893784,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -2568,7 +2568,7 @@
         },
         {
           "case_id": "proxy_020",
-          "latency_ms": 43.3526159995381,
+          "latency_ms": 51.08244399889372,
           "measured": {
             "blocked": false,
             "delivered_tokens": 25,
@@ -2612,7 +2612,7 @@
         },
         "token_reduction": {
           "lower": -3.033416886837337,
-          "upper": 0.5129701360804262
+          "upper": 0.5131008653143408
         }
       },
       "domain": "execution_proxy",
@@ -2624,12 +2624,12 @@
             "database": "pgvector/pgvector:pg17",
             "services": {
               "execution-proxy": {
-                "binary_built_from": "4b1dc58fc269cd84d4dadfce7cf64cf17a6aa147+dirty",
-                "url": "http://127.0.0.1:38169"
+                "binary_built_from": "69df051a564aac380fb4c3456a1b29055499b34a",
+                "url": "http://127.0.0.1:40121"
               },
               "tool-governance": {
-                "binary_built_from": "4b1dc58fc269cd84d4dadfce7cf64cf17a6aa147+dirty",
-                "url": "http://127.0.0.1:35851"
+                "binary_built_from": "69df051a564aac380fb4c3456a1b29055499b34a",
+                "url": "http://127.0.0.1:51141"
               }
             }
           }
@@ -2638,13 +2638,13 @@
       },
       "name": "execution_proxy_service",
       "summary": {
-        "average_latency_ms": 460.64375800015114,
+        "average_latency_ms": 406.1187082997094,
         "average_metrics": {
           "destructive_blocked": 1.0,
           "failure_preservation": 1.0,
           "raw_result_restoration": 1.0,
           "task_success": 1.0,
-          "token_reduction": -0.8004881997052503
+          "token_reduction": -0.800343183564772
         },
         "metric_case_counts": {
           "destructive_blocked": 6,
@@ -2658,8 +2658,8 @@
           "successful_cases": 20,
           "total_cases": 20
         },
-        "total_latency_ms": 9212.875160003023,
-        "wall_time_ms": 27387.268716000108
+        "total_latency_ms": 8122.374165994188,
+        "wall_time_ms": 24880.11762899987
       },
       "version": "3.0.0"
     },
@@ -2667,7 +2667,7 @@
       "cases": [
         {
           "case_id": "proxy_001",
-          "latency_ms": 2.4994029990921263,
+          "latency_ms": 2.1070250004413538,
           "measured": {
             "blocked": false,
             "delivered_tokens": 300,
@@ -2692,7 +2692,7 @@
         },
         {
           "case_id": "proxy_002",
-          "latency_ms": 0.0031639992812415585,
+          "latency_ms": 0.0022509993868879974,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -2706,7 +2706,7 @@
         },
         {
           "case_id": "proxy_003",
-          "latency_ms": 1.9541459987522103,
+          "latency_ms": 2.2009399999660673,
           "measured": {
             "blocked": false,
             "delivered_tokens": 300,
@@ -2731,7 +2731,7 @@
         },
         {
           "case_id": "proxy_004",
-          "latency_ms": 4.649079999580863,
+          "latency_ms": 2.208952000728459,
           "measured": {
             "blocked": false,
             "delivered_tokens": 500,
@@ -2756,7 +2756,7 @@
         },
         {
           "case_id": "proxy_005",
-          "latency_ms": 0.0037250010791467503,
+          "latency_ms": 0.0024000000848900527,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -2770,7 +2770,7 @@
         },
         {
           "case_id": "proxy_006",
-          "latency_ms": 5.862190999323502,
+          "latency_ms": 4.736283999591251,
           "measured": {
             "blocked": false,
             "delivered_tokens": 298,
@@ -2795,7 +2795,7 @@
         },
         {
           "case_id": "proxy_007",
-          "latency_ms": 0.003440000000409782,
+          "latency_ms": 0.00202999945031479,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -2809,7 +2809,7 @@
         },
         {
           "case_id": "proxy_008",
-          "latency_ms": 5.641812000249047,
+          "latency_ms": 4.66378400051326,
           "measured": {
             "blocked": false,
             "delivered_tokens": 3609,
@@ -2834,7 +2834,7 @@
         },
         {
           "case_id": "proxy_009",
-          "latency_ms": 4.72633100071107,
+          "latency_ms": 9.624381998946774,
           "measured": {
             "blocked": false,
             "delivered_tokens": 2000,
@@ -2859,7 +2859,7 @@
         },
         {
           "case_id": "proxy_010",
-          "latency_ms": 1.793612000255962,
+          "latency_ms": 1.6591540006629657,
           "measured": {
             "blocked": false,
             "delivered_tokens": 1,
@@ -2884,7 +2884,7 @@
         },
         {
           "case_id": "proxy_011",
-          "latency_ms": 0.0030810006137471646,
+          "latency_ms": 0.0019479994080029428,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -2898,21 +2898,21 @@
         },
         {
           "case_id": "proxy_012",
-          "latency_ms": 6982.338625000921,
+          "latency_ms": 7495.236234999538,
           "measured": {
             "blocked": false,
-            "delivered_tokens": 1643864,
+            "delivered_tokens": 1769992,
             "executed": true,
             "exit_status": 1,
-            "raw_bytes": 7042208,
-            "raw_tokens": 1643864,
+            "raw_bytes": 7784572,
+            "raw_tokens": 1769992,
             "reference_exit_status": 1,
-            "reference_sha256": "dcba53d9a09c8f1051a702fd0e9a18dfe7798124cacea30d3efb1abc10b2a348",
-            "reproducible": false,
+            "reference_sha256": "c72c02b7d74d5ad00cbc78f36bb5fca44623145a7db708f0b882e476f891762f",
+            "reproducible": true,
             "restoration_excluded": "the command reads live system state, so a direct run is no byte-for-byte reference",
-            "restored_sha256": "dcba53d9a09c8f1051a702fd0e9a18dfe7798124cacea30d3efb1abc10b2a348",
-            "stderr_lines": 17,
-            "stderr_lines_delivered": 17
+            "restored_sha256": "c72c02b7d74d5ad00cbc78f36bb5fca44623145a7db708f0b882e476f891762f",
+            "stderr_lines": 12,
+            "stderr_lines_delivered": 12
           },
           "metrics": {
             "failure_preservation": 1.0,
@@ -2923,7 +2923,7 @@
         },
         {
           "case_id": "proxy_013",
-          "latency_ms": 2.9179729990573833,
+          "latency_ms": 2.469806999215507,
           "measured": {
             "blocked": false,
             "delivered_tokens": 600,
@@ -2948,7 +2948,7 @@
         },
         {
           "case_id": "proxy_014",
-          "latency_ms": 0.003897999704349786,
+          "latency_ms": 0.0021729993022745475,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -2962,7 +2962,7 @@
         },
         {
           "case_id": "proxy_015",
-          "latency_ms": 2.4701080001250375,
+          "latency_ms": 1.7535419992782408,
           "measured": {
             "blocked": false,
             "delivered_tokens": 12,
@@ -2971,9 +2971,9 @@
             "raw_bytes": 45,
             "raw_tokens": 12,
             "reference_exit_status": 0,
-            "reference_sha256": "2bfc77c76beb8ce3492647a5994abd758a6c6175175f22be3e09eed2fdb453bf",
+            "reference_sha256": "b476507deb6bd741fe989014404da85025df7b2f105019c3dc20e38fab56ea90",
             "reproducible": true,
-            "restored_sha256": "2bfc77c76beb8ce3492647a5994abd758a6c6175175f22be3e09eed2fdb453bf",
+            "restored_sha256": "b476507deb6bd741fe989014404da85025df7b2f105019c3dc20e38fab56ea90",
             "stderr_lines": 0,
             "stderr_lines_delivered": 0
           },
@@ -2987,19 +2987,19 @@
         },
         {
           "case_id": "proxy_016",
-          "latency_ms": 6.4794999998412095,
+          "latency_ms": 7.401076998576173,
           "measured": {
             "blocked": false,
-            "delivered_tokens": 594,
+            "delivered_tokens": 674,
             "executed": true,
             "exit_status": 0,
-            "raw_bytes": 3991,
-            "raw_tokens": 594,
+            "raw_bytes": 4571,
+            "raw_tokens": 674,
             "reference_exit_status": 0,
-            "reference_sha256": "8866c92ae202e7a4d2920a6f14877d5386e12c15ba842d1c8ee6f46e5653736a",
+            "reference_sha256": "c961b14f81a2a86ad6c0a263a806cb7721da8f3336e9dd04defa0491bf333dd2",
             "reproducible": true,
             "restoration_excluded": "the command reads live system state, so a direct run is no byte-for-byte reference",
-            "restored_sha256": "8866c92ae202e7a4d2920a6f14877d5386e12c15ba842d1c8ee6f46e5653736a",
+            "restored_sha256": "c961b14f81a2a86ad6c0a263a806cb7721da8f3336e9dd04defa0491bf333dd2",
             "stderr_lines": 0,
             "stderr_lines_delivered": 0
           },
@@ -3012,7 +3012,7 @@
         },
         {
           "case_id": "proxy_017",
-          "latency_ms": 16.980427000817144,
+          "latency_ms": 12.8643860007287,
           "measured": {
             "blocked": false,
             "delivered_tokens": 0,
@@ -3036,7 +3036,7 @@
         },
         {
           "case_id": "proxy_018",
-          "latency_ms": 6.440728000598028,
+          "latency_ms": 5.969604999336298,
           "measured": {
             "blocked": false,
             "delivered_tokens": 5100,
@@ -3061,7 +3061,7 @@
         },
         {
           "case_id": "proxy_019",
-          "latency_ms": 0.00575299964111764,
+          "latency_ms": 0.004122999598621391,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -3075,7 +3075,7 @@
         },
         {
           "case_id": "proxy_020",
-          "latency_ms": 11.013996998372022,
+          "latency_ms": 9.783092998986831,
           "measured": {
             "blocked": false,
             "delivered_tokens": 12,
@@ -3129,7 +3129,7 @@
       },
       "name": "raw_output_baseline",
       "summary": {
-        "average_latency_ms": 352.7895496999008,
+        "average_latency_ms": 378.13465954968706,
         "average_metrics": {
           "destructive_blocked": 0.0,
           "failure_preservation": 1.0,
@@ -3149,8 +3149,8 @@
           "successful_cases": 14,
           "total_cases": 20
         },
-        "total_latency_ms": 7055.790993998016,
-        "wall_time_ms": 16204.729762999705
+        "total_latency_ms": 7562.693190993741,
+        "wall_time_ms": 16220.03362599935
       },
       "version": "3.0.0"
     },
@@ -3158,7 +3158,7 @@
       "cases": [
         {
           "case_id": "route_001",
-          "latency_ms": 1958.230737998747,
+          "latency_ms": 1623.5600370000611,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3187,7 +3187,7 @@
         },
         {
           "case_id": "route_002",
-          "latency_ms": 0.27755999872169923,
+          "latency_ms": 0.25623700094001833,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3219,7 +3219,7 @@
         },
         {
           "case_id": "route_003",
-          "latency_ms": 0.18281200027558953,
+          "latency_ms": 0.17837800078268629,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -3254,7 +3254,7 @@
         },
         {
           "case_id": "route_004",
-          "latency_ms": 0.17602300067665055,
+          "latency_ms": 0.13923199912824202,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3283,7 +3283,7 @@
         },
         {
           "case_id": "route_005",
-          "latency_ms": 0.13078499978291802,
+          "latency_ms": 0.28060200020263437,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3316,7 +3316,7 @@
         },
         {
           "case_id": "route_006",
-          "latency_ms": 0.11540500054252334,
+          "latency_ms": 0.308967999444576,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -3351,7 +3351,7 @@
         },
         {
           "case_id": "route_007",
-          "latency_ms": 0.11197099956916645,
+          "latency_ms": 0.27093499920738395,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3382,7 +3382,7 @@
         },
         {
           "case_id": "route_008",
-          "latency_ms": 0.13209300050220918,
+          "latency_ms": 0.25801999981922563,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -3417,7 +3417,7 @@
         },
         {
           "case_id": "route_009",
-          "latency_ms": 0.14951900084270164,
+          "latency_ms": 0.24824700085446239,
           "measured": {
             "intent_labels": [
               "code_lookup",
@@ -3450,7 +3450,7 @@
         },
         {
           "case_id": "route_010",
-          "latency_ms": 0.12442300067050382,
+          "latency_ms": 1.9067260000156239,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3479,7 +3479,7 @@
         },
         {
           "case_id": "route_011",
-          "latency_ms": 0.20247599968570285,
+          "latency_ms": 1.9465940004010918,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -3515,7 +3515,7 @@
         },
         {
           "case_id": "route_012",
-          "latency_ms": 0.1434780006093206,
+          "latency_ms": 0.29286799872352276,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3545,7 +3545,7 @@
         },
         {
           "case_id": "route_013",
-          "latency_ms": 0.12212799992994405,
+          "latency_ms": 0.13359600052353926,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3574,7 +3574,7 @@
         },
         {
           "case_id": "route_014",
-          "latency_ms": 0.11937099952774588,
+          "latency_ms": 0.11718899986590259,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3606,7 +3606,7 @@
         },
         {
           "case_id": "route_015",
-          "latency_ms": 0.2003600002353778,
+          "latency_ms": 0.12013599916826934,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3637,7 +3637,7 @@
         },
         {
           "case_id": "route_016",
-          "latency_ms": 0.13955299982626457,
+          "latency_ms": 0.1981939985853387,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -3672,7 +3672,7 @@
         },
         {
           "case_id": "route_017",
-          "latency_ms": 0.10444399958942086,
+          "latency_ms": 0.1091009999072412,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3701,7 +3701,7 @@
         },
         {
           "case_id": "route_018",
-          "latency_ms": 0.39560699951834977,
+          "latency_ms": 0.14250300046114717,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3732,7 +3732,7 @@
         },
         {
           "case_id": "route_019",
-          "latency_ms": 0.17116500021074899,
+          "latency_ms": 0.13295300050231162,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3765,7 +3765,7 @@
         },
         {
           "case_id": "route_020",
-          "latency_ms": 0.1191789997392334,
+          "latency_ms": 0.10759200085885823,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3794,7 +3794,7 @@
         },
         {
           "case_id": "route_021",
-          "latency_ms": 0.11754499973903876,
+          "latency_ms": 0.11542200081748888,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -3829,7 +3829,7 @@
         },
         {
           "case_id": "route_022",
-          "latency_ms": 0.11152800107083749,
+          "latency_ms": 0.1097169988497626,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3860,7 +3860,7 @@
         },
         {
           "case_id": "route_023",
-          "latency_ms": 0.1479619986639591,
+          "latency_ms": 0.14403500063053798,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3889,7 +3889,7 @@
         },
         {
           "case_id": "route_024",
-          "latency_ms": 0.113453001176822,
+          "latency_ms": 0.12438900012057275,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -3942,7 +3942,7 @@
       },
       "name": "control_plane_router",
       "summary": {
-        "average_latency_ms": 81.7433157499939,
+        "average_latency_ms": 67.96673629166132,
         "average_metrics": {
           "routing_precision": 1.0,
           "routing_recall": 1.0,
@@ -3958,8 +3958,8 @@
           "successful_cases": 24,
           "total_cases": 24
         },
-        "total_latency_ms": 1961.8395779998536,
-        "wall_time_ms": 1991.2166619997151
+        "total_latency_ms": 1631.2016709998716,
+        "wall_time_ms": 1665.4314259994862
       },
       "version": "3.0.0"
     },
@@ -3967,7 +3967,7 @@
       "cases": [
         {
           "case_id": "route_001",
-          "latency_ms": 0.01994299964280799,
+          "latency_ms": 0.019859999156324193,
           "measured": {
             "labels": [
               "memory",
@@ -3983,7 +3983,7 @@
         },
         {
           "case_id": "route_002",
-          "latency_ms": 0.007160999302868731,
+          "latency_ms": 0.0074520012276479974,
           "measured": {
             "labels": [
               "code"
@@ -3998,7 +3998,7 @@
         },
         {
           "case_id": "route_003",
-          "latency_ms": 0.0033300002542091534,
+          "latency_ms": 0.004624998837243766,
           "measured": {
             "labels": [
               "proxy",
@@ -4014,7 +4014,7 @@
         },
         {
           "case_id": "route_004",
-          "latency_ms": 0.003690000085043721,
+          "latency_ms": 0.0035440007195575163,
           "measured": {
             "labels": [
               "memory",
@@ -4030,7 +4030,7 @@
         },
         {
           "case_id": "route_005",
-          "latency_ms": 0.003533999915816821,
+          "latency_ms": 0.0036759993236046284,
           "measured": {
             "labels": [
               "context",
@@ -4046,7 +4046,7 @@
         },
         {
           "case_id": "route_006",
-          "latency_ms": 0.0032610005291644484,
+          "latency_ms": 0.0031740000849822536,
           "measured": {
             "labels": [
               "proxy",
@@ -4062,7 +4062,7 @@
         },
         {
           "case_id": "route_007",
-          "latency_ms": 0.004518000423558988,
+          "latency_ms": 0.004904999514110386,
           "measured": {
             "labels": [
               "memory",
@@ -4078,7 +4078,7 @@
         },
         {
           "case_id": "route_008",
-          "latency_ms": 0.0030270002753240988,
+          "latency_ms": 0.003189999915775843,
           "measured": {
             "labels": [
               "proxy",
@@ -4094,7 +4094,7 @@
         },
         {
           "case_id": "route_009",
-          "latency_ms": 0.0032539992389502004,
+          "latency_ms": 0.003266000931034796,
           "measured": {
             "labels": [
               "code"
@@ -4109,7 +4109,7 @@
         },
         {
           "case_id": "route_010",
-          "latency_ms": 0.0032309999369317666,
+          "latency_ms": 0.003200000719516538,
           "measured": {
             "labels": [
               "memory",
@@ -4125,7 +4125,7 @@
         },
         {
           "case_id": "route_011",
-          "latency_ms": 0.0030269984563346952,
+          "latency_ms": 0.002761998985079117,
           "measured": {
             "labels": [
               "proxy",
@@ -4141,7 +4141,7 @@
         },
         {
           "case_id": "route_012",
-          "latency_ms": 0.003130000550299883,
+          "latency_ms": 0.00305399953504093,
           "measured": {
             "labels": [
               "context",
@@ -4157,7 +4157,7 @@
         },
         {
           "case_id": "route_013",
-          "latency_ms": 0.0032659991120453924,
+          "latency_ms": 0.0033160013117594644,
           "measured": {
             "labels": [
               "memory"
@@ -4172,7 +4172,7 @@
         },
         {
           "case_id": "route_014",
-          "latency_ms": 0.0032539992389502004,
+          "latency_ms": 0.0032459993235534057,
           "measured": {
             "labels": [
               "code"
@@ -4187,7 +4187,7 @@
         },
         {
           "case_id": "route_015",
-          "latency_ms": 0.0031859999580774456,
+          "latency_ms": 0.00305399953504093,
           "measured": {
             "labels": [
               "context"
@@ -4202,7 +4202,7 @@
         },
         {
           "case_id": "route_016",
-          "latency_ms": 0.003185001332894899,
+          "latency_ms": 0.0031969993870006874,
           "measured": {
             "labels": [
               "proxy"
@@ -4217,7 +4217,7 @@
         },
         {
           "case_id": "route_017",
-          "latency_ms": 0.002970000423374586,
+          "latency_ms": 0.00329000067722518,
           "measured": {
             "labels": [
               "governance"
@@ -4232,7 +4232,7 @@
         },
         {
           "case_id": "route_018",
-          "latency_ms": 0.0032779989851405844,
+          "latency_ms": 0.00305399953504093,
           "measured": {
             "labels": [
               "context"
@@ -4247,7 +4247,7 @@
         },
         {
           "case_id": "route_019",
-          "latency_ms": 0.002861999746528454,
+          "latency_ms": 0.0028599988581845537,
           "measured": {
             "labels": [
               "code"
@@ -4262,7 +4262,7 @@
         },
         {
           "case_id": "route_020",
-          "latency_ms": 0.002983000740641728,
+          "latency_ms": 0.003006000042660162,
           "measured": {
             "labels": [
               "memory",
@@ -4278,7 +4278,7 @@
         },
         {
           "case_id": "route_021",
-          "latency_ms": 0.0029520015232264996,
+          "latency_ms": 0.0030529990908689797,
           "measured": {
             "labels": [
               "proxy",
@@ -4294,7 +4294,7 @@
         },
         {
           "case_id": "route_022",
-          "latency_ms": 0.003109000317635946,
+          "latency_ms": 0.0033400010579498485,
           "measured": {
             "labels": [
               "governance"
@@ -4309,7 +4309,7 @@
         },
         {
           "case_id": "route_023",
-          "latency_ms": 0.0033479991543572396,
+          "latency_ms": 0.0029430011636577547,
           "measured": {
             "labels": [
               "memory",
@@ -4325,7 +4325,7 @@
         },
         {
           "case_id": "route_024",
-          "latency_ms": 0.0030780011002207175,
+          "latency_ms": 0.003282999387010932,
           "measured": {
             "labels": [
               "code"
@@ -4361,7 +4361,7 @@
       },
       "name": "keyword_router_baseline",
       "summary": {
-        "average_latency_ms": 0.004107375010183508,
+        "average_latency_ms": 0.004181249929994617,
         "average_metrics": {
           "routing_precision": 0.7916666666666666,
           "routing_recall": 0.7708333333333334,
@@ -4377,8 +4377,8 @@
           "successful_cases": 18,
           "total_cases": 24
         },
-        "total_latency_ms": 0.09857700024440419,
-        "wall_time_ms": 28.287137000006624
+        "total_latency_ms": 0.10034999831987079,
+        "wall_time_ms": 30.85911100060912
       },
       "version": "3.0.0"
     }
@@ -4397,8 +4397,8 @@
       "candidate": "context_optimisation_service",
       "domain": "context_optimization",
       "latency_ms": {
-        "baseline_average": 0.0009095415407500695,
-        "candidate_average": 1.5966988335094356
+        "baseline_average": 0.0006036250397301046,
+        "candidate_average": 1.1123742084843495
       },
       "metric_deltas": {
         "evidence_retention": 0.0,
@@ -4459,8 +4459,8 @@
       "candidate": "code_intelligence_service",
       "domain": "code_intelligence",
       "latency_ms": {
-        "baseline_average": 0.549045736797301,
-        "candidate_average": 6.32529778914958
+        "baseline_average": 0.7257993684585304,
+        "candidate_average": 6.09162910558026
       },
       "metric_deltas": {
         "exact_lookup": 0.631578947368421,
@@ -4505,15 +4505,15 @@
       "candidate": "execution_proxy_service",
       "domain": "execution_proxy",
       "latency_ms": {
-        "baseline_average": 352.7895496999008,
-        "candidate_average": 460.64375800015114
+        "baseline_average": 378.13465954968706,
+        "candidate_average": 406.1187082997094
       },
       "metric_deltas": {
         "destructive_blocked": 1.0,
         "failure_preservation": 0.0,
         "raw_result_restoration": 0.0,
         "task_success": 0.30000000000000004,
-        "token_reduction": -0.8004881997052503
+        "token_reduction": -0.800343183564772
       },
       "status": "measured",
       "superiority_claim_permitted": false,
@@ -4559,8 +4559,8 @@
       "candidate": "control_plane_router",
       "domain": "control_plane_routing",
       "latency_ms": {
-        "baseline_average": 0.004107375010183508,
-        "candidate_average": 81.7433157499939
+        "baseline_average": 0.004181249929994617,
+        "candidate_average": 67.96673629166132
       },
       "metric_deltas": {
         "routing_precision": 0.20833333333333337,
@@ -4688,7 +4688,7 @@
       },
       "token_reduction": {
         "lower": -3.033416886837337,
-        "upper": 0.5129701360804262
+        "upper": 0.5131008653143408
       }
     },
     "keyword_router_baseline": {
@@ -4772,9 +4772,9 @@
     "routing scores exclude memory and context, which the router selects on every governed turn",
     "no measured service calls a language model, so no token cost is reported"
   ],
-  "generated_at": "2026-10-15T07:04:24.220896+00:00",
+  "generated_at": "2026-10-15T07:07:46.144193+00:00",
   "hardware": {
-    "git_commit": "4b1dc58fc269cd84d4dadfce7cf64cf17a6aa147",
+    "git_commit": "69df051a564aac380fb4c3456a1b29055499b34a",
     "implementation": "CPython",
     "machine": "x86_64",
     "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
@@ -4782,14 +4782,14 @@
     "python": "3.13.16"
   },
   "latency_ms": {
-    "code_filename_baseline": 0.549045736797301,
-    "code_intelligence_service": 6.32529778914958,
-    "context_optimisation_service": 1.5966988335094356,
-    "control_plane_router": 81.7433157499939,
-    "execution_proxy_service": 460.64375800015114,
-    "keyword_router_baseline": 0.004107375010183508,
-    "raw_output_baseline": 352.7895496999008,
-    "unoptimised_context_baseline": 0.0009095415407500695
+    "code_filename_baseline": 0.7257993684585304,
+    "code_intelligence_service": 6.09162910558026,
+    "context_optimisation_service": 1.1123742084843495,
+    "control_plane_router": 67.96673629166132,
+    "execution_proxy_service": 406.1187082997094,
+    "keyword_router_baseline": 0.004181249929994617,
+    "raw_output_baseline": 378.13465954968706,
+    "unoptimised_context_baseline": 0.0006036250397301046
   },
   "live": {
     "baseline": {
@@ -4812,7 +4812,7 @@
           "stale_hit_rate": 0.0,
           "task_success": 0.9
         },
-        "avg_latency_ms": 0.042858599772443995,
+        "avg_latency_ms": 0.033907999932125676,
         "categories": [
           "contradiction",
           "exact_identifier",
@@ -4843,14 +4843,14 @@
         },
         "suite": "scos_governance_quality_baseline",
         "total_cases": 10,
-        "total_latency_ms": 0.42858599772443995,
+        "total_latency_ms": 0.33907999932125676,
         "version": "2.0.0"
       }
     },
     "cases": [
       {
         "case_id": "case_001",
-        "latency_ms": 25.946605999706662,
+        "latency_ms": 111.76445899945975,
         "retrieved_ids": [
           "doc_journal_commit",
           "doc_turn_durability",
@@ -4859,9 +4859,9 @@
           "turn_step_3_proxy_log",
           "conflict_seq_412_resolved",
           "doc_generic_match",
-          "sec_denied_injection",
+          "prj_alpha_deploy_cfg",
           "mem_schema_v2_dup",
-          "recovery_checkpoint_412"
+          "mem_schema_v2"
         ],
         "scores": {
           "authority_accuracy": 0.2,
@@ -4881,17 +4881,17 @@
       },
       {
         "case_id": "case_002",
-        "latency_ms": 36.00108899991028,
+        "latency_ms": 39.76550799961842,
         "retrieved_ids": [
           "sys_memory_item_9921a",
           "doc_journal_commit",
           "doc_turn_durability",
           "doc_generic_match",
-          "sec_denied_injection",
-          "turn_step_3_proxy_log",
+          "conflict_seq_412",
+          "prj_alpha_deploy_cfg",
           "mem_schema_v2_dup",
-          "recovery_checkpoint_412",
-          "hist_rev_3"
+          "mem_schema_v2",
+          "stale_hook_sig_v1"
         ],
         "scores": {
           "mrr": 1.0,
@@ -4909,7 +4909,7 @@
       },
       {
         "case_id": "case_003",
-        "latency_ms": 23.60318399951211,
+        "latency_ms": 46.16008800076088,
         "retrieved_ids": [
           "mem_schema_v2",
           "mem_schema_v2_dup",
@@ -4935,7 +4935,7 @@
       },
       {
         "case_id": "case_004",
-        "latency_ms": 26.759025999126607,
+        "latency_ms": 42.50608800066402,
         "retrieved_ids": [
           "sec_denied_injection",
           "doc_journal_commit",
@@ -4959,7 +4959,7 @@
       },
       {
         "case_id": "case_005",
-        "latency_ms": 26.91921000041475,
+        "latency_ms": 34.161016999860294,
         "retrieved_ids": [
           "prj_alpha_deploy_cfg",
           "foreign:496829f8-69c8-42e2-bec1-f1c6b829557d",
@@ -4981,7 +4981,7 @@
       },
       {
         "case_id": "case_006",
-        "latency_ms": 23.182074999567703,
+        "latency_ms": 42.01106500113383,
         "retrieved_ids": [
           "conflict_seq_412",
           "conflict_seq_412_resolved",
@@ -5006,7 +5006,7 @@
       },
       {
         "case_id": "case_007",
-        "latency_ms": 22.17251000001852,
+        "latency_ms": 28.989481999815325,
         "retrieved_ids": [
           "recovery_checkpoint_412",
           "mem_schema_v2",
@@ -5029,7 +5029,7 @@
       },
       {
         "case_id": "case_008",
-        "latency_ms": 20.96110700040299,
+        "latency_ms": 21.822847998919315,
         "retrieved_ids": [
           "stale_hook_sig_v1",
           "sys_memory_item_9921a"
@@ -5050,7 +5050,7 @@
       },
       {
         "case_id": "case_009",
-        "latency_ms": 24.94776799903775,
+        "latency_ms": 26.956035999319283,
         "retrieved_ids": [
           "turn_step_3_proxy_log",
           "doc_turn_durability",
@@ -5077,7 +5077,7 @@
       },
       {
         "case_id": "case_010",
-        "latency_ms": 22.840523999548168,
+        "latency_ms": 18.31940699958068,
         "retrieved_ids": [
           "prj_alpha_deploy_cfg",
           "foreign:496829f8-69c8-42e2-bec1-f1c6b829557d",
@@ -5105,7 +5105,7 @@
       "merged_on_save": {
         "prj_beta_deploy_cfg": "prj_alpha_deploy_cfg"
       },
-      "run_tag": "[benchmark run 2abb5bd3e903]",
+      "run_tag": "[benchmark run 4ab2bfe83a89]",
       "seeded": 14
     },
     "summary": {
@@ -5127,7 +5127,7 @@
         "stale_hit_rate": 0.0,
         "task_success": 0.9
       },
-      "avg_latency_ms": 25.333309899724554,
+      "avg_latency_ms": 41.24559979991318,
       "categories": [
         "contradiction",
         "exact_identifier",
@@ -5158,7 +5158,7 @@
       },
       "suite": "scos_governance_quality_baseline",
       "total_cases": 10,
-      "total_latency_ms": 253.33309899724554,
+      "total_latency_ms": 412.4559979991318,
       "version": "2.0.0"
     },
     "system_under_test": "MCP gateway scos_remember/scos_recall/scos_forget"
@@ -5169,13 +5169,13 @@
       "cases": [
         {
           "case_id": "ctx_001",
-          "latency_ms": 3.2736470002419082,
+          "latency_ms": 2.6847810004255734,
           "measured": {
-            "capsule_id": "42c361cfbd71420a-949a-ee1a74d8b501",
+            "capsule_id": "16fc049fc33e4229-a289-41c666efa86a",
             "input_tokens": 50,
             "output": "--- optional_background ---\nretain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit",
             "output_tokens": 57,
-            "restore_latency_ms": 1.5740240014565643,
+            "restore_latency_ms": 2.525451000110479,
             "restored": "retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit ",
             "service_reported_tokens": {
               "compiled": 86,
@@ -5194,13 +5194,13 @@
         },
         {
           "case_id": "ctx_002",
-          "latency_ms": 1.2642460005736211,
+          "latency_ms": 1.9879659994330723,
           "measured": {
-            "capsule_id": "68c474a0079d4328-9f31-20cd4f2c82e3",
+            "capsule_id": "375a49658fcd4d83-9fd7-e4049634de7d",
             "input_tokens": 55,
             "output": "--- optional_background ---\nrestore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation",
             "output_tokens": 62,
-            "restore_latency_ms": 0.7440959998348262,
+            "restore_latency_ms": 1.1404699998820433,
             "restored": "restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation ",
             "service_reported_tokens": {
               "compiled": 102,
@@ -5219,13 +5219,13 @@
         },
         {
           "case_id": "ctx_003",
-          "latency_ms": 0.9513160002825316,
+          "latency_ms": 1.035645000229124,
           "measured": {
-            "capsule_id": "c2bda1660e4a46c7-b0cf-b81577e89841",
+            "capsule_id": "67539abf04ca4b8f-914e-9d6827df4b98",
             "input_tokens": 50,
             "output": "--- optional_background ---\nanswer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha",
             "output_tokens": 57,
-            "restore_latency_ms": 0.7900580003479263,
+            "restore_latency_ms": 1.5215430012176512,
             "restored": "answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha ",
             "service_reported_tokens": {
               "compiled": 98,
@@ -5244,13 +5244,13 @@
         },
         {
           "case_id": "ctx_004",
-          "latency_ms": 0.9234970002580667,
+          "latency_ms": 0.7316929986700416,
           "measured": {
-            "capsule_id": "c1fdd5b3dbd747e3-99a4-0aeeb840d0e2",
+            "capsule_id": "80bea011f5dc4bec-a37d-91b2d54a04b8",
             "input_tokens": 65,
             "output": "--- optional_background ---\npreserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger",
             "output_tokens": 72,
-            "restore_latency_ms": 0.922077999348403,
+            "restore_latency_ms": 1.5375270013464615,
             "restored": "preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger ",
             "service_reported_tokens": {
               "compiled": 93,
@@ -5269,13 +5269,13 @@
         },
         {
           "case_id": "ctx_005",
-          "latency_ms": 1.041591000102926,
+          "latency_ms": 0.8117990000755526,
           "measured": {
-            "capsule_id": "6ab6d0f6ab714eee-b966-c32f5102ce8f",
+            "capsule_id": "0f3ad139128a41f6-88f5-d73c9dfd4f12",
             "input_tokens": 50,
             "output": "--- optional_background ---\ncite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result",
             "output_tokens": 57,
-            "restore_latency_ms": 1.1323319995426573,
+            "restore_latency_ms": 0.8734439998079324,
             "restored": "cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result ",
             "service_reported_tokens": {
               "compiled": 98,
@@ -5294,13 +5294,13 @@
         },
         {
           "case_id": "ctx_006",
-          "latency_ms": 5.865826999070123,
+          "latency_ms": 0.6190269996295683,
           "measured": {
-            "capsule_id": "0b43597f80c64307-8ace-c24176f48fa2",
+            "capsule_id": "68f6fe3a251e4949-9a47-04e4e8100ea3",
             "input_tokens": 45,
             "output": "--- governing_policy ---\nquote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages",
             "output_tokens": 52,
-            "restore_latency_ms": 1.220972999362857,
+            "restore_latency_ms": 0.7490299994969973,
             "restored": "quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages ",
             "service_reported_tokens": {
               "compiled": 91,
@@ -5319,13 +5319,13 @@
         },
         {
           "case_id": "ctx_007",
-          "latency_ms": 2.8331230005278485,
+          "latency_ms": 0.7197319991973927,
           "measured": {
-            "capsule_id": "89a24c6f52ef4a1b-a8d8-ab5f16f99307",
+            "capsule_id": "01cb4896c64d48d9-b952-e8e3829565e5",
             "input_tokens": 45,
             "output": "--- optional_background ---\nreference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision",
             "output_tokens": 52,
-            "restore_latency_ms": 1.3880830010748468,
+            "restore_latency_ms": 0.7371210012934171,
             "restored": "reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision ",
             "service_reported_tokens": {
               "compiled": 101,
@@ -5344,13 +5344,13 @@
         },
         {
           "case_id": "ctx_008",
-          "latency_ms": 1.4081259996601148,
+          "latency_ms": 0.6490650011983234,
           "measured": {
-            "capsule_id": "c13d31773e5447e8-be17-2d460d9f3970",
+            "capsule_id": "c29b8e1518de43b2-a5e5-f2db3eab2d06",
             "input_tokens": 45,
             "output": "--- optional_background ---\nkeep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact",
             "output_tokens": 52,
-            "restore_latency_ms": 0.9406550016137771,
+            "restore_latency_ms": 0.764541000535246,
             "restored": "keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact ",
             "service_reported_tokens": {
               "compiled": 86,
@@ -5369,13 +5369,13 @@
         },
         {
           "case_id": "ctx_009",
-          "latency_ms": 1.465441000618739,
+          "latency_ms": 1.1751479996746639,
           "measured": {
-            "capsule_id": "e5a875cba298475e-8196-15e99b2ba0bc",
+            "capsule_id": "d73d0cd297c04288-83ae-8b1f991ba304",
             "input_tokens": 55,
             "output": "--- optional_background ---\npreserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay",
             "output_tokens": 62,
-            "restore_latency_ms": 1.3255750000098487,
+            "restore_latency_ms": 0.6870609995530685,
             "restored": "preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay ",
             "service_reported_tokens": {
               "compiled": 89,
@@ -5394,13 +5394,13 @@
         },
         {
           "case_id": "ctx_010",
-          "latency_ms": 1.6072620001068572,
+          "latency_ms": 2.025364001383423,
           "measured": {
-            "capsule_id": "9b3df34f43224229-a723-1a7e0c8f6035",
+            "capsule_id": "7d024e4a66d14430-a0a2-e9c9191b6079",
             "input_tokens": 60,
             "output": "--- optional_background ---\nretain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter",
             "output_tokens": 67,
-            "restore_latency_ms": 0.8195799982786411,
+            "restore_latency_ms": 1.0460209996381309,
             "restored": "retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter ",
             "service_reported_tokens": {
               "compiled": 104,
@@ -5419,13 +5419,13 @@
         },
         {
           "case_id": "ctx_011",
-          "latency_ms": 1.3063269998383475,
+          "latency_ms": 0.9039510005095508,
           "measured": {
-            "capsule_id": "2dd6258656e14d3f-b4ee-83dd90130964",
+            "capsule_id": "6c83c3d153b9401b-a203-da4437fd9082",
             "input_tokens": 65,
             "output": "--- optional_background ---\ncite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery",
             "output_tokens": 72,
-            "restore_latency_ms": 1.1377759983588476,
+            "restore_latency_ms": 0.8184649996110238,
             "restored": "cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery ",
             "service_reported_tokens": {
               "compiled": 103,
@@ -5444,13 +5444,13 @@
         },
         {
           "case_id": "ctx_012",
-          "latency_ms": 1.5020720002212329,
+          "latency_ms": 0.8872640009940369,
           "measured": {
-            "capsule_id": "820a4f1cdc604167-91d8-86b5bc5d34ca",
+            "capsule_id": "e930995955114bd4-8d32-4e7b42a49173",
             "input_tokens": 45,
             "output": "--- optional_background ---\nhonor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation",
             "output_tokens": 52,
-            "restore_latency_ms": 0.8347179991687881,
+            "restore_latency_ms": 0.8648799994261935,
             "restored": "honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation ",
             "service_reported_tokens": {
               "compiled": 97,
@@ -5469,13 +5469,13 @@
         },
         {
           "case_id": "ctx_013",
-          "latency_ms": 1.265244000023813,
+          "latency_ms": 0.9249840004486032,
           "measured": {
-            "capsule_id": "aa6fcf24a46a45e4-924d-8275ec8896a5",
+            "capsule_id": "26a1d7f032784d97-b015-f03abdb16bce",
             "input_tokens": 60,
             "output": "--- optional_background ---\nkeep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source",
             "output_tokens": 67,
-            "restore_latency_ms": 1.0255540000798646,
+            "restore_latency_ms": 0.7494550009141676,
             "restored": "keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source ",
             "service_reported_tokens": {
               "compiled": 92,
@@ -5494,13 +5494,13 @@
         },
         {
           "case_id": "ctx_014",
-          "latency_ms": 1.1203049998584902,
+          "latency_ms": 1.1996070006716764,
           "measured": {
-            "capsule_id": "5b4e538d13a54cbe-8c45-52fe3034beba",
+            "capsule_id": "fe0ab38500064391-a88f-b650a1d3f807",
             "input_tokens": 75,
             "output": "--- optional_background ---\ncite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check",
             "output_tokens": 82,
-            "restore_latency_ms": 1.065915999788558,
+            "restore_latency_ms": 0.9482929999649059,
             "restored": "cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check ",
             "service_reported_tokens": {
               "compiled": 97,
@@ -5519,13 +5519,13 @@
         },
         {
           "case_id": "ctx_015",
-          "latency_ms": 1.1300790010864148,
+          "latency_ms": 0.8969249993242556,
           "measured": {
-            "capsule_id": "9e4dd50ed0c14d3f-bfa6-91ba4366aa7d",
+            "capsule_id": "7ba1af955c274859-bc8b-0f7454d844b6",
             "input_tokens": 50,
             "output": "--- optional_background ---\npreserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report",
             "output_tokens": 57,
-            "restore_latency_ms": 0.9458980002818862,
+            "restore_latency_ms": 0.7662700008950196,
             "restored": "preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report ",
             "service_reported_tokens": {
               "compiled": 93,
@@ -5544,13 +5544,13 @@
         },
         {
           "case_id": "ctx_016",
-          "latency_ms": 1.0890539997490123,
+          "latency_ms": 0.8154549996106653,
           "measured": {
-            "capsule_id": "0ab6abb74c444bb8-9f1c-3d55ea2e6449",
+            "capsule_id": "953d4a8748e34b1f-b340-78f50a34f231",
             "input_tokens": 55,
             "output": "--- optional_background ---\nkeep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact",
             "output_tokens": 62,
-            "restore_latency_ms": 1.0266580011375481,
+            "restore_latency_ms": 0.7231020008475753,
             "restored": "keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact ",
             "service_reported_tokens": {
               "compiled": 91,
@@ -5569,13 +5569,13 @@
         },
         {
           "case_id": "ctx_017",
-          "latency_ms": 1.2281300005270168,
+          "latency_ms": 0.8548299992980901,
           "measured": {
-            "capsule_id": "d6c03901ae184c81-ad91-701d1a4689b1",
+            "capsule_id": "620c95b913124653-b8f7-f4ca294d525b",
             "input_tokens": 60,
             "output": "--- optional_background ---\ncite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it",
             "output_tokens": 67,
-            "restore_latency_ms": 0.7588939988636412,
+            "restore_latency_ms": 0.6117089997133007,
             "restored": "cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it ",
             "service_reported_tokens": {
               "compiled": 81,
@@ -5594,13 +5594,13 @@
         },
         {
           "case_id": "ctx_018",
-          "latency_ms": 1.2614089991984656,
+          "latency_ms": 1.3127099991834257,
           "measured": {
-            "capsule_id": "40ace348638b4336-8178-ab6a091deb1c",
+            "capsule_id": "a72c49912a764af7-82aa-2db897bd8e02",
             "input_tokens": 60,
             "output": "--- optional_background ---\nretain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11",
             "output_tokens": 67,
-            "restore_latency_ms": 0.83199000073364,
+            "restore_latency_ms": 0.5563060003623832,
             "restored": "retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 ",
             "service_reported_tokens": {
               "compiled": 88,
@@ -5619,13 +5619,13 @@
         },
         {
           "case_id": "ctx_019",
-          "latency_ms": 1.3165939999453258,
+          "latency_ms": 0.749783001083415,
           "measured": {
-            "capsule_id": "077ea644c4724edc-b3e8-2b56a6a79a8e",
+            "capsule_id": "92f8b2d2af314e50-b660-0c2cd46b94b2",
             "input_tokens": 65,
             "output": "--- optional_background ---\npreserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207",
             "output_tokens": 72,
-            "restore_latency_ms": 0.9956060002878075,
+            "restore_latency_ms": 0.6512630006909603,
             "restored": "preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 ",
             "service_reported_tokens": {
               "compiled": 91,
@@ -5644,13 +5644,13 @@
         },
         {
           "case_id": "ctx_020",
-          "latency_ms": 1.1366379985702224,
+          "latency_ms": 1.34090600113268,
           "measured": {
-            "capsule_id": "f2643353f82f4992-9c08-b89f821dc95f",
+            "capsule_id": "cfae2493f2634fb8-978f-ead4a2bfd33d",
             "input_tokens": 60,
             "output": "--- optional_background ---\ncite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337",
             "output_tokens": 67,
-            "restore_latency_ms": 0.908733998585376,
+            "restore_latency_ms": 0.594729999647825,
             "restored": "cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 ",
             "service_reported_tokens": {
               "compiled": 78,
@@ -5669,13 +5669,13 @@
         },
         {
           "case_id": "ctx_021",
-          "latency_ms": 1.4308120007626712,
+          "latency_ms": 1.0489950000192039,
           "measured": {
-            "capsule_id": "6a928d4fbf8c427a-a3b3-1b86910143cb",
+            "capsule_id": "60d8c5aa04a042e8-a591-c56384248373",
             "input_tokens": 60,
             "output": "--- optional_background ---\nkeep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556",
             "output_tokens": 67,
-            "restore_latency_ms": 1.1206839990336448,
+            "restore_latency_ms": 0.5421920013759518,
             "restored": "keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 ",
             "service_reported_tokens": {
               "compiled": 86,
@@ -5694,13 +5694,13 @@
         },
         {
           "case_id": "ctx_022",
-          "latency_ms": 1.3507130006473744,
+          "latency_ms": 1.790713000445976,
           "measured": {
-            "capsule_id": "d3ffb6fb0dfc43f9-8661-a2aacf6506f4",
+            "capsule_id": "bf5fca5ab72d4f61-883d-6c8a101d5d66",
             "input_tokens": 50,
             "output": "--- optional_background ---\npreserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931",
             "output_tokens": 57,
-            "restore_latency_ms": 0.9713799991004635,
+            "restore_latency_ms": 0.7030010001471965,
             "restored": "preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 ",
             "service_reported_tokens": {
               "compiled": 82,
@@ -5719,13 +5719,13 @@
         },
         {
           "case_id": "ctx_023",
-          "latency_ms": 1.2770950015692506,
+          "latency_ms": 0.8606080009485595,
           "measured": {
-            "capsule_id": "3a51aaafb7ad446a-9d95-acae2ec14ae7",
+            "capsule_id": "f3b0030bfc3a423a-b9b2-705d4977d563",
             "input_tokens": 55,
             "output": "--- optional_background ---\ncite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice",
             "output_tokens": 62,
-            "restore_latency_ms": 1.1350540007697418,
+            "restore_latency_ms": 0.6958939993637614,
             "restored": "cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice ",
             "service_reported_tokens": {
               "compiled": 86,
@@ -5744,13 +5744,13 @@
         },
         {
           "case_id": "ctx_024",
-          "latency_ms": 1.2722240007860819,
+          "latency_ms": 0.6700300000375137,
           "measured": {
-            "capsule_id": "e12f2151d85d4e2d-b6f7-49282004c470",
+            "capsule_id": "59cacb350e9f469c-a460-998039610b0c",
             "input_tokens": 65,
             "output": "--- optional_background ---\nkeep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii",
             "output_tokens": 72,
-            "restore_latency_ms": 1.2220730004628422,
+            "restore_latency_ms": 0.655796000501141,
             "restored": "keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii ",
             "service_reported_tokens": {
               "compiled": 89,
@@ -5775,7 +5775,7 @@
       "cases": [
         {
           "case_id": "ctx_001",
-          "latency_ms": 0.003163000656059012,
+          "latency_ms": 0.0026279994926881045,
           "measured": {
             "input_tokens": 50,
             "output": "retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit retain mandatory instruction exact value 412 and cite journal commit ",
@@ -5794,7 +5794,7 @@
         },
         {
           "case_id": "ctx_002",
-          "latency_ms": 0.0011710017133736983,
+          "latency_ms": 0.0012709988368442282,
           "measured": {
             "input_tokens": 55,
             "output": "restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation restore source material before answering; preserve error diagnostics and citation ",
@@ -5813,7 +5813,7 @@
         },
         {
           "case_id": "ctx_003",
-          "latency_ms": 0.001115000486606732,
+          "latency_ms": 0.0007210001058410853,
           "measured": {
             "input_tokens": 50,
             "output": "answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha answer using the authoritative deployment configuration and keep project alpha ",
@@ -5832,7 +5832,7 @@
         },
         {
           "case_id": "ctx_004",
-          "latency_ms": 0.0008089991752058268,
+          "latency_ms": 0.0006359987310133874,
           "measured": {
             "input_tokens": 65,
             "output": "preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger preserve the exact operation id op-7734 recorded by the idempotency ledger ",
@@ -5851,7 +5851,7 @@
         },
         {
           "case_id": "ctx_005",
-          "latency_ms": 0.0005099991540191695,
+          "latency_ms": 0.0003469995135674253,
           "measured": {
             "input_tokens": 50,
             "output": "cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result cite the acceptance criteria before promoting the manifest verification result ",
@@ -5870,7 +5870,7 @@
         },
         {
           "case_id": "ctx_006",
-          "latency_ms": 0.00039600126910954714,
+          "latency_ms": 0.0003330005711177364,
           "measured": {
             "input_tokens": 45,
             "output": "quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages quote the governing policy clause forbidding unsigned extension packages ",
@@ -5889,7 +5889,7 @@
         },
         {
           "case_id": "ctx_007",
-          "latency_ms": 0.0006689988367725164,
+          "latency_ms": 0.00034600088838487864,
           "measured": {
             "input_tokens": 45,
             "output": "reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision reference the retrieval run evidence supporting namespace authorization decision ",
@@ -5908,7 +5908,7 @@
         },
         {
           "case_id": "ctx_008",
-          "latency_ms": 0.0004320008883951232,
+          "latency_ms": 0.0003149998519802466,
           "measured": {
             "input_tokens": 45,
             "output": "keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact keep the tool schema contract for operation prepare_operation intact ",
@@ -5927,7 +5927,7 @@
         },
         {
           "case_id": "ctx_009",
-          "latency_ms": 0.0012229993444634601,
+          "latency_ms": 0.0003650002327049151,
           "measured": {
             "input_tokens": 55,
             "output": "preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay preserve the checkpoint identifier ckpt-2290 across the recovery replay ",
@@ -5946,7 +5946,7 @@
         },
         {
           "case_id": "ctx_010",
-          "latency_ms": 0.000878999344422482,
+          "latency_ms": 0.0004749999789055437,
           "measured": {
             "input_tokens": 60,
             "output": "retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter retain the code symbol OutputReducer.reduce_output from the execution proxy adapter ",
@@ -5965,7 +5965,7 @@
         },
         {
           "case_id": "ctx_011",
-          "latency_ms": 0.0008179995347745717,
+          "latency_ms": 0.0003020013537025079,
           "measured": {
             "input_tokens": 65,
             "output": "cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery cite the prior episode where turn sequence 588 was reconciled after crash recovery ",
@@ -5984,7 +5984,7 @@
         },
         {
           "case_id": "ctx_012",
-          "latency_ms": 0.0007910002750577405,
+          "latency_ms": 0.00042200008465442806,
           "measured": {
             "input_tokens": 45,
             "output": "honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation honor the confirmation policy blocking unconfirmed destructive tool operation ",
@@ -6003,7 +6003,7 @@
         },
         {
           "case_id": "ctx_013",
-          "latency_ms": 0.000471998646389693,
+          "latency_ms": 0.0001900007191579789,
           "measured": {
             "input_tokens": 60,
             "output": "keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source keep the restoration handle capsule-8842 tied to its authoritative source ",
@@ -6022,7 +6022,7 @@
         },
         {
           "case_id": "ctx_014",
-          "latency_ms": 0.0004470002750167623,
+          "latency_ms": 0.0003879995347233489,
           "measured": {
             "input_tokens": 75,
             "output": "cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check cite the security finding cve-slot-9 flagged by the extension signature check ",
@@ -6041,7 +6041,7 @@
         },
         {
           "case_id": "ctx_015",
-          "latency_ms": 0.0006850004865555093,
+          "latency_ms": 0.0005300007615005597,
           "measured": {
             "input_tokens": 50,
             "output": "preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report preserve the failing assertion from the frozen benchmark regression report ",
@@ -6060,7 +6060,7 @@
         },
         {
           "case_id": "ctx_016",
-          "latency_ms": 0.0004069988790433854,
+          "latency_ms": 0.0004880002961726859,
           "measured": {
             "input_tokens": 55,
             "output": "keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact keep the dependency edge between service alpha and namespace beta intact ",
@@ -6079,7 +6079,7 @@
         },
         {
           "case_id": "ctx_017",
-          "latency_ms": 0.0012700002116616815,
+          "latency_ms": 0.000672000169288367,
           "measured": {
             "input_tokens": 60,
             "output": "cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it cite the rollback plan for migration rev-2044 before applying it ",
@@ -6098,7 +6098,7 @@
         },
         {
           "case_id": "ctx_018",
-          "latency_ms": 0.00094600000011269,
+          "latency_ms": 0.0005609999789157882,
           "measured": {
             "input_tokens": 60,
             "output": "retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 retain the capability contract input schema for skill export bundle-11 ",
@@ -6117,7 +6117,7 @@
         },
         {
           "case_id": "ctx_019",
-          "latency_ms": 0.0011039992386940867,
+          "latency_ms": 0.0005869987944606692,
           "measured": {
             "input_tokens": 65,
             "output": "preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 preserve the contradiction set flagged between belief-204 and belief-207 ",
@@ -6136,7 +6136,7 @@
         },
         {
           "case_id": "ctx_020",
-          "latency_ms": 0.0007839989848434925,
+          "latency_ms": 0.00039999940781854093,
           "measured": {
             "input_tokens": 60,
             "output": "cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 cite the risk score threshold for change impact ticket chg-337 ",
@@ -6155,7 +6155,7 @@
         },
         {
           "case_id": "ctx_021",
-          "latency_ms": 0.0007689995982218534,
+          "latency_ms": 0.0003969998942920938,
           "measured": {
             "input_tokens": 60,
             "output": "keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 keep the retention rule reference for archived diary entry diary-556 ",
@@ -6174,7 +6174,7 @@
         },
         {
           "case_id": "ctx_022",
-          "latency_ms": 0.0010950006981147453,
+          "latency_ms": 0.0007380003808066249,
           "measured": {
             "input_tokens": 50,
             "output": "preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 preserve the reconciliation method declared for operation op-9931 ",
@@ -6193,7 +6193,7 @@
         },
         {
           "case_id": "ctx_023",
-          "latency_ms": 0.0008400002116104588,
+          "latency_ms": 0.0005270012479741126,
           "measured": {
             "input_tokens": 55,
             "output": "cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice cite the capacity budget allocation for context class evidence-slice ",
@@ -6212,7 +6212,7 @@
         },
         {
           "case_id": "ctx_024",
-          "latency_ms": 0.0010339990694774315,
+          "latency_ms": 0.0008480001270072535,
           "measured": {
             "input_tokens": 65,
             "output": "keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii keep the supersession chain reference linking version-vi to version-vii ",
@@ -6237,7 +6237,7 @@
       "cases": [
         {
           "case_id": "code_001",
-          "latency_ms": 15.148261998547241,
+          "latency_ms": 13.872482999431668,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -6278,7 +6278,7 @@
         },
         {
           "case_id": "code_002",
-          "latency_ms": 4.550028999801725,
+          "latency_ms": 8.287098000437254,
           "measured": {
             "matches": [
               "packages/execution-adapters/adapters.go"
@@ -6302,7 +6302,7 @@
         },
         {
           "case_id": "code_003",
-          "latency_ms": 5.541941998671973,
+          "latency_ms": 9.125167000092915,
           "measured": {
             "matches": [
               "packages/execution-adapters/python/scos_execution/reducer.py"
@@ -6326,7 +6326,7 @@
         },
         {
           "case_id": "code_004",
-          "latency_ms": 12.641106999581098,
+          "latency_ms": 10.318987000573543,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -6367,7 +6367,7 @@
         },
         {
           "case_id": "code_005",
-          "latency_ms": 12.241776999871945,
+          "latency_ms": 9.182854999380652,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -6408,7 +6408,7 @@
         },
         {
           "case_id": "code_006",
-          "latency_ms": 11.152651999509544,
+          "latency_ms": 7.328115001655533,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -6449,7 +6449,7 @@
         },
         {
           "case_id": "code_007",
-          "latency_ms": 4.974444000254152,
+          "latency_ms": 3.749622001123498,
           "measured": {
             "matches": [
               "packages/database/tls.go"
@@ -6473,7 +6473,7 @@
         },
         {
           "case_id": "code_008",
-          "latency_ms": 3.28089999857184,
+          "latency_ms": 4.926977000650368,
           "measured": {
             "matches": [
               "packages/execution-adapters/python/scos_execution/reducer.py"
@@ -6517,7 +6517,7 @@
         },
         {
           "case_id": "code_009",
-          "latency_ms": 12.481086001571384,
+          "latency_ms": 12.906895999549306,
           "measured": {
             "matches": [],
             "retrieval_mode": "lexical",
@@ -6557,7 +6557,7 @@
         },
         {
           "case_id": "code_010",
-          "latency_ms": 6.599931999517139,
+          "latency_ms": 4.610985999534023,
           "measured": {
             "matches": [
               "packages/context-contracts/context.go"
@@ -6581,7 +6581,7 @@
         },
         {
           "case_id": "code_011",
-          "latency_ms": 4.135699000471504,
+          "latency_ms": 3.0320980004034936,
           "measured": {
             "matches": [
               "packages/context-contracts/context.go"
@@ -6605,7 +6605,7 @@
         },
         {
           "case_id": "code_012",
-          "latency_ms": 3.5636810007417807,
+          "latency_ms": 3.5523830010788515,
           "measured": {
             "matches": [
               "packages/extension-contracts/extensions.go"
@@ -6629,7 +6629,7 @@
         },
         {
           "case_id": "code_013",
-          "latency_ms": 3.4429459992679767,
+          "latency_ms": 3.872150000461261,
           "measured": {
             "matches": [
               "packages/benchmark-harness/harness.go"
@@ -6653,7 +6653,7 @@
         },
         {
           "case_id": "code_014",
-          "latency_ms": 3.533512999638333,
+          "latency_ms": 3.976663998400909,
           "measured": {
             "matches": [
               "packages/benchmark-harness/harness.go"
@@ -6677,7 +6677,7 @@
         },
         {
           "case_id": "code_015",
-          "latency_ms": 3.7004259993409505,
+          "latency_ms": 3.155170001264196,
           "measured": {
             "matches": [
               "packages/benchmark-harness/harness.go"
@@ -6701,7 +6701,7 @@
         },
         {
           "case_id": "code_016",
-          "latency_ms": 3.51839599898085,
+          "latency_ms": 3.4245910010213265,
           "measured": {
             "matches": [
               "packages/auth/middleware.go"
@@ -6725,7 +6725,7 @@
         },
         {
           "case_id": "code_017",
-          "latency_ms": 3.3706719987094402,
+          "latency_ms": 3.750672000023769,
           "measured": {
             "matches": [
               "packages/auth/middleware.go"
@@ -6749,7 +6749,7 @@
         },
         {
           "case_id": "code_018",
-          "latency_ms": 3.034255001693964,
+          "latency_ms": 3.5458840011415305,
           "measured": {
             "matches": [
               "packages/auth/middleware.go"
@@ -6773,7 +6773,7 @@
         },
         {
           "case_id": "code_019",
-          "latency_ms": 3.2689389990991913,
+          "latency_ms": 3.1221549998008413,
           "measured": {
             "matches": [
               "packages/language-adapters/adapters.go"
@@ -6803,7 +6803,7 @@
       "cases": [
         {
           "case_id": "code_001",
-          "latency_ms": 7.822654999472434,
+          "latency_ms": 11.19284800006426,
           "measured": {
             "matches": []
           },
@@ -6816,7 +6816,7 @@
         },
         {
           "case_id": "code_002",
-          "latency_ms": 0.18257000010635238,
+          "latency_ms": 0.1465759996790439,
           "measured": {
             "matches": []
           },
@@ -6829,7 +6829,7 @@
         },
         {
           "case_id": "code_003",
-          "latency_ms": 0.14334899969981052,
+          "latency_ms": 0.19803900067927316,
           "measured": {
             "matches": []
           },
@@ -6842,7 +6842,7 @@
         },
         {
           "case_id": "code_004",
-          "latency_ms": 0.18927800010715146,
+          "latency_ms": 0.18574199930299073,
           "measured": {
             "matches": []
           },
@@ -6855,7 +6855,7 @@
         },
         {
           "case_id": "code_005",
-          "latency_ms": 0.13815300007991027,
+          "latency_ms": 0.1381660003971774,
           "measured": {
             "matches": []
           },
@@ -6868,7 +6868,7 @@
         },
         {
           "case_id": "code_006",
-          "latency_ms": 0.13614900126412977,
+          "latency_ms": 0.17416500122635625,
           "measured": {
             "matches": []
           },
@@ -6881,7 +6881,7 @@
         },
         {
           "case_id": "code_007",
-          "latency_ms": 0.13194100029068068,
+          "latency_ms": 0.13958499948785175,
           "measured": {
             "matches": []
           },
@@ -6894,7 +6894,7 @@
         },
         {
           "case_id": "code_008",
-          "latency_ms": 0.12901099944429006,
+          "latency_ms": 0.1329930000792956,
           "measured": {
             "matches": [
               "packages/execution-adapters/python/scos_execution/reducer.py"
@@ -6910,7 +6910,7 @@
         },
         {
           "case_id": "code_009",
-          "latency_ms": 0.17377800031681545,
+          "latency_ms": 0.13434799984679557,
           "measured": {
             "matches": []
           },
@@ -6922,7 +6922,7 @@
         },
         {
           "case_id": "code_010",
-          "latency_ms": 0.13031799971940927,
+          "latency_ms": 0.13015500007895753,
           "measured": {
             "matches": []
           },
@@ -6935,7 +6935,7 @@
         },
         {
           "case_id": "code_011",
-          "latency_ms": 0.1304500001424458,
+          "latency_ms": 0.13586699969891924,
           "measured": {
             "matches": []
           },
@@ -6948,7 +6948,7 @@
         },
         {
           "case_id": "code_012",
-          "latency_ms": 0.12706199959211517,
+          "latency_ms": 0.13489800039678812,
           "measured": {
             "matches": []
           },
@@ -6961,7 +6961,7 @@
         },
         {
           "case_id": "code_013",
-          "latency_ms": 0.12750699897878803,
+          "latency_ms": 0.1596059992152732,
           "measured": {
             "matches": []
           },
@@ -6974,7 +6974,7 @@
         },
         {
           "case_id": "code_014",
-          "latency_ms": 0.12940200031152926,
+          "latency_ms": 0.13380800010054372,
           "measured": {
             "matches": []
           },
@@ -6987,7 +6987,7 @@
         },
         {
           "case_id": "code_015",
-          "latency_ms": 0.12904100003652275,
+          "latency_ms": 0.12961500033270568,
           "measured": {
             "matches": []
           },
@@ -7000,7 +7000,7 @@
         },
         {
           "case_id": "code_016",
-          "latency_ms": 0.15380399963760283,
+          "latency_ms": 0.12803600111510605,
           "measured": {
             "matches": []
           },
@@ -7013,7 +7013,7 @@
         },
         {
           "case_id": "code_017",
-          "latency_ms": 0.13404099991021212,
+          "latency_ms": 0.12916900050186086,
           "measured": {
             "matches": []
           },
@@ -7026,7 +7026,7 @@
         },
         {
           "case_id": "code_018",
-          "latency_ms": 0.12945799971930683,
+          "latency_ms": 0.13556499834521674,
           "measured": {
             "matches": []
           },
@@ -7039,7 +7039,7 @@
         },
         {
           "case_id": "code_019",
-          "latency_ms": 0.19390200031921268,
+          "latency_ms": 0.13100700016366318,
           "measured": {
             "matches": []
           },
@@ -7058,7 +7058,7 @@
       "cases": [
         {
           "case_id": "proxy_001",
-          "latency_ms": 45.26033000001917,
+          "latency_ms": 56.464801000402076,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -7084,7 +7084,7 @@
         },
         {
           "case_id": "proxy_002",
-          "latency_ms": 1.1322020000079647,
+          "latency_ms": 1.7279459989367751,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -7101,7 +7101,7 @@
         },
         {
           "case_id": "proxy_003",
-          "latency_ms": 29.14980400055356,
+          "latency_ms": 33.571934000065085,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -7127,7 +7127,7 @@
         },
         {
           "case_id": "proxy_004",
-          "latency_ms": 41.72470999947109,
+          "latency_ms": 29.004893000092125,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -7153,7 +7153,7 @@
         },
         {
           "case_id": "proxy_005",
-          "latency_ms": 1.2200719993415987,
+          "latency_ms": 1.217747001646785,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -7170,7 +7170,7 @@
         },
         {
           "case_id": "proxy_006",
-          "latency_ms": 25.00844499991217,
+          "latency_ms": 29.572299999927054,
           "measured": {
             "blocked": false,
             "delivered_tokens": 315,
@@ -7196,7 +7196,7 @@
         },
         {
           "case_id": "proxy_007",
-          "latency_ms": 1.6820709988678573,
+          "latency_ms": 1.076459999239887,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -7213,7 +7213,7 @@
         },
         {
           "case_id": "proxy_008",
-          "latency_ms": 48.84314400078438,
+          "latency_ms": 52.68576100024802,
           "measured": {
             "blocked": false,
             "delivered_tokens": 3621,
@@ -7239,7 +7239,7 @@
         },
         {
           "case_id": "proxy_009",
-          "latency_ms": 27.906381999855512,
+          "latency_ms": 32.830259999172995,
           "measured": {
             "blocked": false,
             "delivered_tokens": 2012,
@@ -7265,7 +7265,7 @@
         },
         {
           "case_id": "proxy_010",
-          "latency_ms": 22.06273299998429,
+          "latency_ms": 23.275588999240426,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -7291,7 +7291,7 @@
         },
         {
           "case_id": "proxy_011",
-          "latency_ms": 0.7758689989714185,
+          "latency_ms": 1.0417940011393512,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -7308,19 +7308,19 @@
         },
         {
           "case_id": "proxy_012",
-          "latency_ms": 8734.462887001428,
+          "latency_ms": 7630.950449000011,
           "measured": {
             "blocked": false,
-            "delivered_tokens": 9023,
+            "delivered_tokens": 9054,
             "executed": true,
             "exit_status": 1,
-            "raw_bytes": 7765972,
-            "raw_tokens": 1763792,
+            "raw_bytes": 7784572,
+            "raw_tokens": 1769992,
             "reference_exit_status": 1,
-            "reference_sha256": "d54cb62d10b3817d44568fe2ef4ab56d675dd33a778791ed04857d7ecf36c3e0",
-            "reproducible": false,
+            "reference_sha256": "c72c02b7d74d5ad00cbc78f36bb5fca44623145a7db708f0b882e476f891762f",
+            "reproducible": true,
             "restoration_excluded": "the command reads live system state, so a direct run is no byte-for-byte reference",
-            "restored_sha256": "88338796a01486d1f89ff3cb1f2b6be7fcbe1fb10380ed39181ad8520b857b8a",
+            "restored_sha256": "c72c02b7d74d5ad00cbc78f36bb5fca44623145a7db708f0b882e476f891762f",
             "rewritten": false,
             "stderr_lines": 12,
             "stderr_lines_delivered": 12
@@ -7328,13 +7328,13 @@
           "metrics": {
             "failure_preservation": 1.0,
             "task_success": 1.0,
-            "token_reduction": 0.9948843174251839
+            "token_reduction": 0.9948847226428142
           },
           "task_success": true
         },
         {
           "case_id": "proxy_013",
-          "latency_ms": 41.84698100107198,
+          "latency_ms": 28.359693998936564,
           "measured": {
             "blocked": false,
             "delivered_tokens": 14,
@@ -7360,7 +7360,7 @@
         },
         {
           "case_id": "proxy_014",
-          "latency_ms": 1.1280290000286186,
+          "latency_ms": 0.9399329992447747,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -7377,7 +7377,7 @@
         },
         {
           "case_id": "proxy_015",
-          "latency_ms": 31.327800001236028,
+          "latency_ms": 27.75925399873813,
           "measured": {
             "blocked": false,
             "delivered_tokens": 25,
@@ -7386,9 +7386,9 @@
             "raw_bytes": 45,
             "raw_tokens": 12,
             "reference_exit_status": 0,
-            "reference_sha256": "2bfc77c76beb8ce3492647a5994abd758a6c6175175f22be3e09eed2fdb453bf",
+            "reference_sha256": "b476507deb6bd741fe989014404da85025df7b2f105019c3dc20e38fab56ea90",
             "reproducible": true,
-            "restored_sha256": "2bfc77c76beb8ce3492647a5994abd758a6c6175175f22be3e09eed2fdb453bf",
+            "restored_sha256": "b476507deb6bd741fe989014404da85025df7b2f105019c3dc20e38fab56ea90",
             "rewritten": false,
             "stderr_lines": 0,
             "stderr_lines_delivered": 0
@@ -7403,19 +7403,19 @@
         },
         {
           "case_id": "proxy_016",
-          "latency_ms": 36.17681500145409,
+          "latency_ms": 37.044981998406,
           "measured": {
             "blocked": false,
-            "delivered_tokens": 627,
+            "delivered_tokens": 687,
             "executed": true,
             "exit_status": 0,
-            "raw_bytes": 4136,
-            "raw_tokens": 614,
+            "raw_bytes": 4571,
+            "raw_tokens": 674,
             "reference_exit_status": 0,
-            "reference_sha256": "c312116e6dac6b8c21195dffc642af72e575e78fb514f226ca34f22f0169d5c1",
+            "reference_sha256": "c961b14f81a2a86ad6c0a263a806cb7721da8f3336e9dd04defa0491bf333dd2",
             "reproducible": true,
             "restoration_excluded": "the command reads live system state, so a direct run is no byte-for-byte reference",
-            "restored_sha256": "c312116e6dac6b8c21195dffc642af72e575e78fb514f226ca34f22f0169d5c1",
+            "restored_sha256": "c961b14f81a2a86ad6c0a263a806cb7721da8f3336e9dd04defa0491bf333dd2",
             "rewritten": false,
             "stderr_lines": 0,
             "stderr_lines_delivered": 0
@@ -7423,13 +7423,13 @@
           "metrics": {
             "failure_preservation": 1.0,
             "task_success": 1.0,
-            "token_reduction": -0.021172638436482094
+            "token_reduction": -0.01928783382789323
           },
           "task_success": true
         },
         {
           "case_id": "proxy_017",
-          "latency_ms": 44.62653700102237,
+          "latency_ms": 39.37073599990981,
           "measured": {
             "blocked": false,
             "delivered_tokens": 12,
@@ -7454,7 +7454,7 @@
         },
         {
           "case_id": "proxy_018",
-          "latency_ms": 34.17049400013639,
+          "latency_ms": 41.24201800004812,
           "measured": {
             "blocked": false,
             "delivered_tokens": 5112,
@@ -7480,7 +7480,7 @@
         },
         {
           "case_id": "proxy_019",
-          "latency_ms": 1.0172389993385877,
+          "latency_ms": 3.1551709998893784,
           "measured": {
             "blocked": true,
             "executed": false,
@@ -7497,7 +7497,7 @@
         },
         {
           "case_id": "proxy_020",
-          "latency_ms": 43.3526159995381,
+          "latency_ms": 51.08244399889372,
           "measured": {
             "blocked": false,
             "delivered_tokens": 25,
@@ -7529,7 +7529,7 @@
       "cases": [
         {
           "case_id": "proxy_001",
-          "latency_ms": 2.4994029990921263,
+          "latency_ms": 2.1070250004413538,
           "measured": {
             "blocked": false,
             "delivered_tokens": 300,
@@ -7554,7 +7554,7 @@
         },
         {
           "case_id": "proxy_002",
-          "latency_ms": 0.0031639992812415585,
+          "latency_ms": 0.0022509993868879974,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -7568,7 +7568,7 @@
         },
         {
           "case_id": "proxy_003",
-          "latency_ms": 1.9541459987522103,
+          "latency_ms": 2.2009399999660673,
           "measured": {
             "blocked": false,
             "delivered_tokens": 300,
@@ -7593,7 +7593,7 @@
         },
         {
           "case_id": "proxy_004",
-          "latency_ms": 4.649079999580863,
+          "latency_ms": 2.208952000728459,
           "measured": {
             "blocked": false,
             "delivered_tokens": 500,
@@ -7618,7 +7618,7 @@
         },
         {
           "case_id": "proxy_005",
-          "latency_ms": 0.0037250010791467503,
+          "latency_ms": 0.0024000000848900527,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -7632,7 +7632,7 @@
         },
         {
           "case_id": "proxy_006",
-          "latency_ms": 5.862190999323502,
+          "latency_ms": 4.736283999591251,
           "measured": {
             "blocked": false,
             "delivered_tokens": 298,
@@ -7657,7 +7657,7 @@
         },
         {
           "case_id": "proxy_007",
-          "latency_ms": 0.003440000000409782,
+          "latency_ms": 0.00202999945031479,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -7671,7 +7671,7 @@
         },
         {
           "case_id": "proxy_008",
-          "latency_ms": 5.641812000249047,
+          "latency_ms": 4.66378400051326,
           "measured": {
             "blocked": false,
             "delivered_tokens": 3609,
@@ -7696,7 +7696,7 @@
         },
         {
           "case_id": "proxy_009",
-          "latency_ms": 4.72633100071107,
+          "latency_ms": 9.624381998946774,
           "measured": {
             "blocked": false,
             "delivered_tokens": 2000,
@@ -7721,7 +7721,7 @@
         },
         {
           "case_id": "proxy_010",
-          "latency_ms": 1.793612000255962,
+          "latency_ms": 1.6591540006629657,
           "measured": {
             "blocked": false,
             "delivered_tokens": 1,
@@ -7746,7 +7746,7 @@
         },
         {
           "case_id": "proxy_011",
-          "latency_ms": 0.0030810006137471646,
+          "latency_ms": 0.0019479994080029428,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -7760,21 +7760,21 @@
         },
         {
           "case_id": "proxy_012",
-          "latency_ms": 6982.338625000921,
+          "latency_ms": 7495.236234999538,
           "measured": {
             "blocked": false,
-            "delivered_tokens": 1643864,
+            "delivered_tokens": 1769992,
             "executed": true,
             "exit_status": 1,
-            "raw_bytes": 7042208,
-            "raw_tokens": 1643864,
+            "raw_bytes": 7784572,
+            "raw_tokens": 1769992,
             "reference_exit_status": 1,
-            "reference_sha256": "dcba53d9a09c8f1051a702fd0e9a18dfe7798124cacea30d3efb1abc10b2a348",
-            "reproducible": false,
+            "reference_sha256": "c72c02b7d74d5ad00cbc78f36bb5fca44623145a7db708f0b882e476f891762f",
+            "reproducible": true,
             "restoration_excluded": "the command reads live system state, so a direct run is no byte-for-byte reference",
-            "restored_sha256": "dcba53d9a09c8f1051a702fd0e9a18dfe7798124cacea30d3efb1abc10b2a348",
-            "stderr_lines": 17,
-            "stderr_lines_delivered": 17
+            "restored_sha256": "c72c02b7d74d5ad00cbc78f36bb5fca44623145a7db708f0b882e476f891762f",
+            "stderr_lines": 12,
+            "stderr_lines_delivered": 12
           },
           "metrics": {
             "failure_preservation": 1.0,
@@ -7785,7 +7785,7 @@
         },
         {
           "case_id": "proxy_013",
-          "latency_ms": 2.9179729990573833,
+          "latency_ms": 2.469806999215507,
           "measured": {
             "blocked": false,
             "delivered_tokens": 600,
@@ -7810,7 +7810,7 @@
         },
         {
           "case_id": "proxy_014",
-          "latency_ms": 0.003897999704349786,
+          "latency_ms": 0.0021729993022745475,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -7824,7 +7824,7 @@
         },
         {
           "case_id": "proxy_015",
-          "latency_ms": 2.4701080001250375,
+          "latency_ms": 1.7535419992782408,
           "measured": {
             "blocked": false,
             "delivered_tokens": 12,
@@ -7833,9 +7833,9 @@
             "raw_bytes": 45,
             "raw_tokens": 12,
             "reference_exit_status": 0,
-            "reference_sha256": "2bfc77c76beb8ce3492647a5994abd758a6c6175175f22be3e09eed2fdb453bf",
+            "reference_sha256": "b476507deb6bd741fe989014404da85025df7b2f105019c3dc20e38fab56ea90",
             "reproducible": true,
-            "restored_sha256": "2bfc77c76beb8ce3492647a5994abd758a6c6175175f22be3e09eed2fdb453bf",
+            "restored_sha256": "b476507deb6bd741fe989014404da85025df7b2f105019c3dc20e38fab56ea90",
             "stderr_lines": 0,
             "stderr_lines_delivered": 0
           },
@@ -7849,19 +7849,19 @@
         },
         {
           "case_id": "proxy_016",
-          "latency_ms": 6.4794999998412095,
+          "latency_ms": 7.401076998576173,
           "measured": {
             "blocked": false,
-            "delivered_tokens": 594,
+            "delivered_tokens": 674,
             "executed": true,
             "exit_status": 0,
-            "raw_bytes": 3991,
-            "raw_tokens": 594,
+            "raw_bytes": 4571,
+            "raw_tokens": 674,
             "reference_exit_status": 0,
-            "reference_sha256": "8866c92ae202e7a4d2920a6f14877d5386e12c15ba842d1c8ee6f46e5653736a",
+            "reference_sha256": "c961b14f81a2a86ad6c0a263a806cb7721da8f3336e9dd04defa0491bf333dd2",
             "reproducible": true,
             "restoration_excluded": "the command reads live system state, so a direct run is no byte-for-byte reference",
-            "restored_sha256": "8866c92ae202e7a4d2920a6f14877d5386e12c15ba842d1c8ee6f46e5653736a",
+            "restored_sha256": "c961b14f81a2a86ad6c0a263a806cb7721da8f3336e9dd04defa0491bf333dd2",
             "stderr_lines": 0,
             "stderr_lines_delivered": 0
           },
@@ -7874,7 +7874,7 @@
         },
         {
           "case_id": "proxy_017",
-          "latency_ms": 16.980427000817144,
+          "latency_ms": 12.8643860007287,
           "measured": {
             "blocked": false,
             "delivered_tokens": 0,
@@ -7898,7 +7898,7 @@
         },
         {
           "case_id": "proxy_018",
-          "latency_ms": 6.440728000598028,
+          "latency_ms": 5.969604999336298,
           "measured": {
             "blocked": false,
             "delivered_tokens": 5100,
@@ -7923,7 +7923,7 @@
         },
         {
           "case_id": "proxy_019",
-          "latency_ms": 0.00575299964111764,
+          "latency_ms": 0.004122999598621391,
           "measured": {
             "blocked": false,
             "executed": false,
@@ -7937,7 +7937,7 @@
         },
         {
           "case_id": "proxy_020",
-          "latency_ms": 11.013996998372022,
+          "latency_ms": 9.783092998986831,
           "measured": {
             "blocked": false,
             "delivered_tokens": 12,
@@ -7968,7 +7968,7 @@
       "cases": [
         {
           "case_id": "route_001",
-          "latency_ms": 1958.230737998747,
+          "latency_ms": 1623.5600370000611,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -7997,7 +7997,7 @@
         },
         {
           "case_id": "route_002",
-          "latency_ms": 0.27755999872169923,
+          "latency_ms": 0.25623700094001833,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8029,7 +8029,7 @@
         },
         {
           "case_id": "route_003",
-          "latency_ms": 0.18281200027558953,
+          "latency_ms": 0.17837800078268629,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -8064,7 +8064,7 @@
         },
         {
           "case_id": "route_004",
-          "latency_ms": 0.17602300067665055,
+          "latency_ms": 0.13923199912824202,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8093,7 +8093,7 @@
         },
         {
           "case_id": "route_005",
-          "latency_ms": 0.13078499978291802,
+          "latency_ms": 0.28060200020263437,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8126,7 +8126,7 @@
         },
         {
           "case_id": "route_006",
-          "latency_ms": 0.11540500054252334,
+          "latency_ms": 0.308967999444576,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -8161,7 +8161,7 @@
         },
         {
           "case_id": "route_007",
-          "latency_ms": 0.11197099956916645,
+          "latency_ms": 0.27093499920738395,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8192,7 +8192,7 @@
         },
         {
           "case_id": "route_008",
-          "latency_ms": 0.13209300050220918,
+          "latency_ms": 0.25801999981922563,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -8227,7 +8227,7 @@
         },
         {
           "case_id": "route_009",
-          "latency_ms": 0.14951900084270164,
+          "latency_ms": 0.24824700085446239,
           "measured": {
             "intent_labels": [
               "code_lookup",
@@ -8260,7 +8260,7 @@
         },
         {
           "case_id": "route_010",
-          "latency_ms": 0.12442300067050382,
+          "latency_ms": 1.9067260000156239,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8289,7 +8289,7 @@
         },
         {
           "case_id": "route_011",
-          "latency_ms": 0.20247599968570285,
+          "latency_ms": 1.9465940004010918,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -8325,7 +8325,7 @@
         },
         {
           "case_id": "route_012",
-          "latency_ms": 0.1434780006093206,
+          "latency_ms": 0.29286799872352276,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8355,7 +8355,7 @@
         },
         {
           "case_id": "route_013",
-          "latency_ms": 0.12212799992994405,
+          "latency_ms": 0.13359600052353926,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8384,7 +8384,7 @@
         },
         {
           "case_id": "route_014",
-          "latency_ms": 0.11937099952774588,
+          "latency_ms": 0.11718899986590259,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8416,7 +8416,7 @@
         },
         {
           "case_id": "route_015",
-          "latency_ms": 0.2003600002353778,
+          "latency_ms": 0.12013599916826934,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8447,7 +8447,7 @@
         },
         {
           "case_id": "route_016",
-          "latency_ms": 0.13955299982626457,
+          "latency_ms": 0.1981939985853387,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -8482,7 +8482,7 @@
         },
         {
           "case_id": "route_017",
-          "latency_ms": 0.10444399958942086,
+          "latency_ms": 0.1091009999072412,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8511,7 +8511,7 @@
         },
         {
           "case_id": "route_018",
-          "latency_ms": 0.39560699951834977,
+          "latency_ms": 0.14250300046114717,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8542,7 +8542,7 @@
         },
         {
           "case_id": "route_019",
-          "latency_ms": 0.17116500021074899,
+          "latency_ms": 0.13295300050231162,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8575,7 +8575,7 @@
         },
         {
           "case_id": "route_020",
-          "latency_ms": 0.1191789997392334,
+          "latency_ms": 0.10759200085885823,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8604,7 +8604,7 @@
         },
         {
           "case_id": "route_021",
-          "latency_ms": 0.11754499973903876,
+          "latency_ms": 0.11542200081748888,
           "measured": {
             "intent_labels": [
               "command_execution",
@@ -8639,7 +8639,7 @@
         },
         {
           "case_id": "route_022",
-          "latency_ms": 0.11152800107083749,
+          "latency_ms": 0.1097169988497626,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8670,7 +8670,7 @@
         },
         {
           "case_id": "route_023",
-          "latency_ms": 0.1479619986639591,
+          "latency_ms": 0.14403500063053798,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8699,7 +8699,7 @@
         },
         {
           "case_id": "route_024",
-          "latency_ms": 0.113453001176822,
+          "latency_ms": 0.12438900012057275,
           "measured": {
             "intent_labels": [
               "conversation",
@@ -8737,7 +8737,7 @@
       "cases": [
         {
           "case_id": "route_001",
-          "latency_ms": 0.01994299964280799,
+          "latency_ms": 0.019859999156324193,
           "measured": {
             "labels": [
               "memory",
@@ -8753,7 +8753,7 @@
         },
         {
           "case_id": "route_002",
-          "latency_ms": 0.007160999302868731,
+          "latency_ms": 0.0074520012276479974,
           "measured": {
             "labels": [
               "code"
@@ -8768,7 +8768,7 @@
         },
         {
           "case_id": "route_003",
-          "latency_ms": 0.0033300002542091534,
+          "latency_ms": 0.004624998837243766,
           "measured": {
             "labels": [
               "proxy",
@@ -8784,7 +8784,7 @@
         },
         {
           "case_id": "route_004",
-          "latency_ms": 0.003690000085043721,
+          "latency_ms": 0.0035440007195575163,
           "measured": {
             "labels": [
               "memory",
@@ -8800,7 +8800,7 @@
         },
         {
           "case_id": "route_005",
-          "latency_ms": 0.003533999915816821,
+          "latency_ms": 0.0036759993236046284,
           "measured": {
             "labels": [
               "context",
@@ -8816,7 +8816,7 @@
         },
         {
           "case_id": "route_006",
-          "latency_ms": 0.0032610005291644484,
+          "latency_ms": 0.0031740000849822536,
           "measured": {
             "labels": [
               "proxy",
@@ -8832,7 +8832,7 @@
         },
         {
           "case_id": "route_007",
-          "latency_ms": 0.004518000423558988,
+          "latency_ms": 0.004904999514110386,
           "measured": {
             "labels": [
               "memory",
@@ -8848,7 +8848,7 @@
         },
         {
           "case_id": "route_008",
-          "latency_ms": 0.0030270002753240988,
+          "latency_ms": 0.003189999915775843,
           "measured": {
             "labels": [
               "proxy",
@@ -8864,7 +8864,7 @@
         },
         {
           "case_id": "route_009",
-          "latency_ms": 0.0032539992389502004,
+          "latency_ms": 0.003266000931034796,
           "measured": {
             "labels": [
               "code"
@@ -8879,7 +8879,7 @@
         },
         {
           "case_id": "route_010",
-          "latency_ms": 0.0032309999369317666,
+          "latency_ms": 0.003200000719516538,
           "measured": {
             "labels": [
               "memory",
@@ -8895,7 +8895,7 @@
         },
         {
           "case_id": "route_011",
-          "latency_ms": 0.0030269984563346952,
+          "latency_ms": 0.002761998985079117,
           "measured": {
             "labels": [
               "proxy",
@@ -8911,7 +8911,7 @@
         },
         {
           "case_id": "route_012",
-          "latency_ms": 0.003130000550299883,
+          "latency_ms": 0.00305399953504093,
           "measured": {
             "labels": [
               "context",
@@ -8927,7 +8927,7 @@
         },
         {
           "case_id": "route_013",
-          "latency_ms": 0.0032659991120453924,
+          "latency_ms": 0.0033160013117594644,
           "measured": {
             "labels": [
               "memory"
@@ -8942,7 +8942,7 @@
         },
         {
           "case_id": "route_014",
-          "latency_ms": 0.0032539992389502004,
+          "latency_ms": 0.0032459993235534057,
           "measured": {
             "labels": [
               "code"
@@ -8957,7 +8957,7 @@
         },
         {
           "case_id": "route_015",
-          "latency_ms": 0.0031859999580774456,
+          "latency_ms": 0.00305399953504093,
           "measured": {
             "labels": [
               "context"
@@ -8972,7 +8972,7 @@
         },
         {
           "case_id": "route_016",
-          "latency_ms": 0.003185001332894899,
+          "latency_ms": 0.0031969993870006874,
           "measured": {
             "labels": [
               "proxy"
@@ -8987,7 +8987,7 @@
         },
         {
           "case_id": "route_017",
-          "latency_ms": 0.002970000423374586,
+          "latency_ms": 0.00329000067722518,
           "measured": {
             "labels": [
               "governance"
@@ -9002,7 +9002,7 @@
         },
         {
           "case_id": "route_018",
-          "latency_ms": 0.0032779989851405844,
+          "latency_ms": 0.00305399953504093,
           "measured": {
             "labels": [
               "context"
@@ -9017,7 +9017,7 @@
         },
         {
           "case_id": "route_019",
-          "latency_ms": 0.002861999746528454,
+          "latency_ms": 0.0028599988581845537,
           "measured": {
             "labels": [
               "code"
@@ -9032,7 +9032,7 @@
         },
         {
           "case_id": "route_020",
-          "latency_ms": 0.002983000740641728,
+          "latency_ms": 0.003006000042660162,
           "measured": {
             "labels": [
               "memory",
@@ -9048,7 +9048,7 @@
         },
         {
           "case_id": "route_021",
-          "latency_ms": 0.0029520015232264996,
+          "latency_ms": 0.0030529990908689797,
           "measured": {
             "labels": [
               "proxy",
@@ -9064,7 +9064,7 @@
         },
         {
           "case_id": "route_022",
-          "latency_ms": 0.003109000317635946,
+          "latency_ms": 0.0033400010579498485,
           "measured": {
             "labels": [
               "governance"
@@ -9079,7 +9079,7 @@
         },
         {
           "case_id": "route_023",
-          "latency_ms": 0.0033479991543572396,
+          "latency_ms": 0.0029430011636577547,
           "measured": {
             "labels": [
               "memory",
@@ -9095,7 +9095,7 @@
         },
         {
           "case_id": "route_024",
-          "latency_ms": 0.0030780011002207175,
+          "latency_ms": 0.003282999387010932,
           "measured": {
             "labels": [
               "code"
@@ -9117,7 +9117,7 @@
     "live_requested": true
   },
   "schema_version": "3.0.0",
-  "source_sha": "4b1dc58fc269cd84d4dadfce7cf64cf17a6aa147+dirty",
+  "source_sha": "69df051a564aac380fb4c3456a1b29055499b34a",
   "suite": {
     "domains": {
       "code_intelligence": {
