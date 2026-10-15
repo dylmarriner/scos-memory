@@ -33,44 +33,66 @@ func (p *pgHistoryStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 	return tx.Commit(ctx)
 }
 
-func (p *pgHistoryStore) UpsertRollups(ctx context.Context, rows []rollupRow) error {
+// Checkpoint upserts the changed rollup buckets and replaces the raw signal
+// snapshot (the service_state document servicestate.Repository loads) in a
+// single transaction: either both reflect the same journal position or
+// neither changes.
+func (p *pgHistoryStore) Checkpoint(ctx context.Context, rows []rollupRow, state persistedObservabilityState) error {
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return p.tx(ctx, func(tx pgx.Tx) error {
+		if err := upsertRollups(ctx, tx, rows); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO service_state (service, state, updated_at) VALUES ($1, $2, now())
+			ON CONFLICT (service) DO UPDATE SET state = EXCLUDED.state, updated_at = EXCLUDED.updated_at`,
+			observabilityServiceID, raw)
+		if err != nil {
+			return fmt.Errorf("save signal snapshot: %w", err)
+		}
+		return nil
+	})
+}
+
+func upsertRollups(ctx context.Context, tx pgx.Tx, rows []rollupRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	return p.tx(ctx, func(tx pgx.Tx) error {
-		batch := &pgx.Batch{}
-		for _, row := range rows {
-			hist := row.Agg.Histogram
-			if hist == nil {
-				hist = []int64{}
-			}
-			batch.Queue(`
-				INSERT INTO observability_rollups
-					(resolution, bucket_start, name, service, caller, route, unit,
-					 sample_count, value_sum, value_min, value_max, value_last, error_count, histogram, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
-				ON CONFLICT (resolution, bucket_start, name, service, caller, route) DO UPDATE SET
-					unit = EXCLUDED.unit,
-					sample_count = EXCLUDED.sample_count,
-					value_sum = EXCLUDED.value_sum,
-					value_min = EXCLUDED.value_min,
-					value_max = EXCLUDED.value_max,
-					value_last = EXCLUDED.value_last,
-					error_count = EXCLUDED.error_count,
-					histogram = EXCLUDED.histogram,
-					updated_at = now()`,
-				row.Key.Resolution, time.Unix(row.Key.Bucket, 0).UTC(), row.Key.Name, row.Key.Service, row.Key.Caller, row.Key.Route, row.Agg.Unit,
-				row.Agg.Count, row.Agg.Sum, row.Agg.Min, row.Agg.Max, row.Agg.Last, row.Agg.Errors, hist)
+	batch := &pgx.Batch{}
+	for _, row := range rows {
+		hist := row.Agg.Histogram
+		if hist == nil {
+			hist = []int64{}
 		}
-		results := tx.SendBatch(ctx, batch)
-		for range rows {
-			if _, err := results.Exec(); err != nil {
-				results.Close()
-				return fmt.Errorf("upsert rollup: %w", err)
-			}
+		batch.Queue(`
+			INSERT INTO observability_rollups
+				(resolution, bucket_start, name, service, caller, route, unit,
+				 sample_count, value_sum, value_min, value_max, value_last, error_count, histogram, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+			ON CONFLICT (resolution, bucket_start, name, service, caller, route) DO UPDATE SET
+				unit = EXCLUDED.unit,
+				sample_count = EXCLUDED.sample_count,
+				value_sum = EXCLUDED.value_sum,
+				value_min = EXCLUDED.value_min,
+				value_max = EXCLUDED.value_max,
+				value_last = EXCLUDED.value_last,
+				error_count = EXCLUDED.error_count,
+				histogram = EXCLUDED.histogram,
+				updated_at = now()`,
+			row.Key.Resolution, time.Unix(row.Key.Bucket, 0).UTC(), row.Key.Name, row.Key.Service, row.Key.Caller, row.Key.Route, row.Agg.Unit,
+			row.Agg.Count, row.Agg.Sum, row.Agg.Min, row.Agg.Max, row.Agg.Last, row.Agg.Errors, hist)
+	}
+	results := tx.SendBatch(ctx, batch)
+	for range rows {
+		if _, err := results.Exec(); err != nil {
+			results.Close()
+			return fmt.Errorf("upsert rollup: %w", err)
 		}
-		return results.Close()
-	})
+	}
+	return results.Close()
 }
 
 func (p *pgHistoryStore) LoadRollups(ctx context.Context, minuteSince, hourSince time.Time) ([]rollupRow, error) {

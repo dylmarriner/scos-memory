@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -82,12 +85,15 @@ func TestQueuePrefetchRequiresValidSession(t *testing.T) {
 	}
 }
 
-func TestSessionEndDrainsOnlyThatSession(t *testing.T) {
+func TestSessionEndCancelsOnlyTheCallersWorkForThatSession(t *testing.T) {
 	srv := newHermesServer()
 	other := "11111111-2222-3333-4444-555555555555"
 
 	post(t, srv.handleQueuePrefetch, "/v1/provider/queue_prefetch", map[string]any{"session_id": testSessionID})
 	post(t, srv.handleQueuePrefetch, "/v1/provider/queue_prefetch", map[string]any{"session_id": other})
+	// Another principal's work for the same session id is not the caller's.
+	srv.prefetchQueue.enqueue(queuedPrefetch{TenantID: testTenantID, PrincipalID: "principal-2", SessionID: testSessionID})
+	srv.warm.put(warmKey{testTenantID, testPrincipalID, testSessionID}, warmEntry{warmedAt: time.Now()})
 
 	w := post(t, srv.handleSessionEnd, "/v1/provider/session_end", map[string]any{"session_id": testSessionID})
 	if w.Code != http.StatusOK {
@@ -97,12 +103,89 @@ func TestSessionEndDrainsOnlyThatSession(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if result["drained"].(float64) != 1 {
-		t.Fatalf("expected 1 drained item, got %v", result["drained"])
+	if result["cancelled_prefetch"].(float64) != 1 || result["evicted_warm"].(float64) != 1 {
+		t.Fatalf("expected one cancelled item and one evicted result, got %v", result)
 	}
-	// The other session's pre-warm work must survive as replayable pending work.
-	if result["pending"].(float64) != 1 {
-		t.Fatalf("expected the other session's work to remain, got %v", result["pending"])
+	if result["pending"].(float64) != 2 {
+		t.Fatalf("expected the other session's and principal's work to remain, got %v", result["pending"])
+	}
+}
+
+func TestPrefetchQueueIsConsumedInOrder(t *testing.T) {
+	var q prefetchQueue
+	q.enqueue(queuedPrefetch{SessionID: "a"})
+	q.enqueue(queuedPrefetch{SessionID: "b"})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	first, ok := q.next(ctx)
+	second, ok2 := q.next(ctx)
+	if !ok || !ok2 || first.SessionID != "a" || second.SessionID != "b" || q.depth() != 0 {
+		t.Fatalf("consumed %v %v, depth %d", first, second, q.depth())
+	}
+
+	// A waiting consumer wakes for work queued after it started waiting.
+	got := make(chan queuedPrefetch, 1)
+	go func() {
+		item, _ := q.next(ctx)
+		got <- item
+	}()
+	time.Sleep(10 * time.Millisecond)
+	q.enqueue(queuedPrefetch{SessionID: "c"})
+	select {
+	case item := <-got:
+		if item.SessionID != "c" {
+			t.Fatalf("woke with %v", item)
+		}
+	case <-ctx.Done():
+		t.Fatal("consumer was not woken by new work")
+	}
+
+	q.record(nil)
+	q.record(errors.New("retrieval down"))
+	stats := q.stats()
+	if stats["prefetch_warmed"].(int64) != 1 || stats["prefetch_failed"].(int64) != 1 || stats["prefetch_last_error"] != "retrieval down" {
+		t.Fatalf("stats = %v", stats)
+	}
+}
+
+func TestWarmEntryIsServedOnlyWhileCurrent(t *testing.T) {
+	var c warmCache
+	key := warmKey{"t", "p", testSessionID}
+	now := time.Now()
+	c.put(key, warmEntry{sequence: 3, warmedAt: now})
+	if _, ok := c.current(warmKey{"t", "other", testSessionID}, 3, now); ok {
+		t.Fatal("a warm result must not be served to another principal")
+	}
+	if _, ok := c.current(key, 3, now.Add(time.Second)); !ok {
+		t.Fatal("a current warm result was not served")
+	}
+	if _, ok := c.current(key, 4, now); ok {
+		t.Fatal("a result warmed before a newer turn was served")
+	}
+	c.put(key, warmEntry{sequence: 3, warmedAt: now})
+	if _, ok := c.current(key, 3, now.Add(prefetchWarmTTL+time.Second)); ok {
+		t.Fatal("an expired warm result was served")
+	}
+}
+
+func TestShutdownReportsDroppedWorkInsteadOfClaimingReplay(t *testing.T) {
+	srv := newHermesServer()
+	post(t, srv.handleQueuePrefetch, "/v1/provider/queue_prefetch", map[string]any{"session_id": testSessionID})
+	w := post(t, srv.handleShutdown, "/v1/provider/shutdown", map[string]any{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// No store is configured and one queued pre-warm was dropped: neither
+	// flushed nor replayable may be claimed.
+	if out["flushed"] != false || out["replayable"] != false || out["dropped_prefetch"].(float64) != 1 {
+		t.Fatalf("shutdown = %v", out)
+	}
+	if srv.prefetchQueue.depth() != 0 {
+		t.Fatalf("caller's work still queued: %d", srv.prefetchQueue.depth())
 	}
 }
 
@@ -132,11 +215,19 @@ func TestConfigSchemaMatchesGovernedContract(t *testing.T) {
 func TestSaveConfigValidation(t *testing.T) {
 	srv := newHermesServer()
 	valid := map[string]any{
-		"base_url": "https://scos.internal", "tenant_id": "t-1", "principal_id": "u-1",
+		"base_url": "https://scos.internal", "tenant_id": testTenantID, "principal_id": testPrincipalID,
 	}
 
-	if w := post(t, srv.handleSaveConfig, "/v1/provider/save_config", valid); w.Code != http.StatusOK {
-		t.Fatalf("valid config rejected: %d %s", w.Code, w.Body.String())
+	// A valid configuration passes validation and is refused only because
+	// there is nowhere to store it: save_config never reports an unsaved
+	// configuration as saved.
+	if w := post(t, srv.handleSaveConfig, "/v1/provider/save_config", valid); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("valid config without a store: %d %s", w.Code, w.Body.String())
+	}
+	// The configuration must be for the authenticated identity.
+	mine := map[string]any{"base_url": "https://scos.internal", "tenant_id": testTenantID, "principal_id": "someone-else"}
+	if w := post(t, srv.handleSaveConfig, "/v1/provider/save_config", mine); w.Code != http.StatusForbidden {
+		t.Fatalf("config for another principal: %d %s", w.Code, w.Body.String())
 	}
 
 	// §24.4: secrets must never be accepted inline.

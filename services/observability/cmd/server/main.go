@@ -9,6 +9,8 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -178,24 +180,41 @@ func newUnavailableObservabilityServer(err error) *observabilityServer {
 	return &observabilityServer{metrics: make([]*MetricPoint, 0), traces: make([]*TraceSpan, 0), logs: make([]*LogEntry, 0), maxLogs: 10000, maxMetrics: 10000, maxTraces: 10000, storageErr: err, rollups: newRollupStore(), benchmarks: &benchmarkStore{}}
 }
 
+// journalRecord is one line of the JSONL journal. Every signal record carries
+// a sequence number, increasing within the journal; a "journal" record names
+// the journal so a snapshot can say which journal its position refers to.
+// Lines written before sequencing existed have Seq 0.
 type journalRecord struct {
-	Kind   string       `json:"kind"`
-	Metric *MetricPoint `json:"metric,omitempty"`
-	Trace  *TraceSpan   `json:"trace,omitempty"`
-	Log    *LogEntry    `json:"log,omitempty"`
+	Kind      string       `json:"kind"`
+	Seq       uint64       `json:"seq,omitempty"`
+	JournalID string       `json:"journal_id,omitempty"`
+	Metric    *MetricPoint `json:"metric,omitempty"`
+	Trace     *TraceSpan   `json:"trace,omitempty"`
+	Log       *LogEntry    `json:"log,omitempty"`
 }
 
+// persistedObservabilityState is the PostgreSQL restart snapshot. JournalID
+// and JournalSeq record the journal position it (and the rollups written in
+// the same checkpoint) includes: every journaled record after that position
+// was acknowledged after the snapshot and is replayed from the journal.
 type persistedObservabilityState struct {
-	Metrics []*MetricPoint       `json:"metrics"`
-	Traces  []*TraceSpan         `json:"traces"`
-	Logs    []*LogEntry          `json:"logs"`
-	Targets ObservabilityTargets `json:"targets"`
+	Metrics    []*MetricPoint       `json:"metrics"`
+	Traces     []*TraceSpan         `json:"traces"`
+	Logs       []*LogEntry          `json:"logs"`
+	Targets    ObservabilityTargets `json:"targets"`
+	JournalID  string               `json:"journal_id,omitempty"`
+	JournalSeq uint64               `json:"journal_seq,omitempty"`
 }
 
 type observabilityStore struct {
 	path string
 	file *os.File
 	mu   sync.Mutex
+	// id names this journal; seq is the last sequence number written.
+	id  string
+	seq uint64
+	// records counts the signal records found in the journal at load.
+	records int
 }
 
 func openObservabilityStore(path string) (*observabilityStore, error) {
@@ -209,9 +228,7 @@ func openObservabilityStore(path string) (*observabilityStore, error) {
 	return &observabilityStore{path: path, file: f}, nil
 }
 
-func (st *observabilityStore) append(record journalRecord) error {
-	st.mu.Lock()
-	defer st.mu.Unlock()
+func (st *observabilityStore) writeLocked(record journalRecord) error {
 	b, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -223,38 +240,109 @@ func (st *observabilityStore) append(record journalRecord) error {
 	return st.file.Sync()
 }
 
-func (st *observabilityStore) load(s *observabilityServer) error {
+// append journals one signal record under the next sequence number and
+// fsyncs it before returning.
+func (st *observabilityStore) append(record journalRecord) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	record.Seq = st.seq + 1
+	if err := st.writeLocked(record); err != nil {
+		return err
+	}
+	st.seq = record.Seq
+	return nil
+}
+
+// position is the journal's identity and last written sequence number.
+func (st *observabilityStore) position() (string, uint64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.id, st.seq
+}
+
+// scan reads every journal line in order.
+func (st *observabilityStore) scan(fn func(journalRecord)) error {
 	f, err := os.Open(st.path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 2<<20)
 	for scanner.Scan() {
 		var record journalRecord
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			return err
 		}
-		switch record.Kind {
-		case "metric":
-			if record.Metric != nil {
-				s.metrics = append(s.metrics, record.Metric)
-			}
-		case "trace":
-			if record.Trace != nil {
-				s.traces = append(s.traces, record.Trace)
-			}
-		case "log":
-			if record.Log != nil {
-				s.logs = append(s.logs, record.Log)
-			}
-		}
+		fn(record)
 	}
-	if err := scanner.Err(); err != nil {
+	return scanner.Err()
+}
+
+// load applies the journal to s, learns the journal's identity and last
+// sequence number, and names a journal that has no identity yet so later
+// snapshots can refer to positions in it.
+func (st *observabilityStore) load(s *observabilityServer) error {
+	err := st.scan(func(record journalRecord) {
+		if record.Kind == "journal" {
+			st.id = record.JournalID
+			return
+		}
+		if record.Seq > st.seq {
+			st.seq = record.Seq
+		}
+		if s.applyRecord(record) {
+			st.records++
+		}
+	})
+	if err != nil {
 		return err
 	}
 	s.trimRetention()
+	if st.id == "" {
+		id, err := newJournalID()
+		if err != nil {
+			return err
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if err := st.writeLocked(journalRecord{Kind: "journal", JournalID: id}); err != nil {
+			return err
+		}
+		st.id = id
+	}
 	return nil
+}
+
+func newJournalID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// applyRecord adds one journaled signal to the in-memory ring, reporting
+// whether it was a signal record.
+func (s *observabilityServer) applyRecord(record journalRecord) bool {
+	switch record.Kind {
+	case "metric":
+		if record.Metric != nil {
+			s.metrics = append(s.metrics, record.Metric)
+			return true
+		}
+	case "trace":
+		if record.Trace != nil {
+			s.traces = append(s.traces, record.Trace)
+			return true
+		}
+	case "log":
+		if record.Log != nil {
+			s.logs = append(s.logs, record.Log)
+			return true
+		}
+	}
+	return false
 }
 
 func (st *observabilityStore) ready() error {
@@ -281,14 +369,17 @@ func (s *observabilityServer) trimRetention() {
 	}
 }
 
-// persistDB marks the raw signal state for the next background save. Each
-// ingested record is already fsynced to the JSONL journal before the ingest
-// is acknowledged; the PostgreSQL document is the restart snapshot, and
-// rewriting the whole ring (up to 30k records) on every ingest call would
-// dominate the collector's cost under fabric request traffic. A failed save
-// is surfaced on /health/ready and retried on the next tick.
+// persistDB marks the raw signal state for the next background checkpoint.
+// Each ingested record is already fsynced to the JSONL journal before the
+// ingest is acknowledged; the PostgreSQL document is the restart snapshot,
+// and rewriting the whole ring (up to 30k records) on every ingest call
+// would dominate the collector's cost under fabric request traffic. A
+// restart restores the snapshot and replays every journal record written
+// after the snapshot's journal position (restoreSnapshot), so nothing
+// acknowledged between checkpoints is lost. A failed checkpoint is surfaced
+// on /health/ready and retried on the next tick.
 func (s *observabilityServer) persistDB() error {
-	if s.db == nil {
+	if s.history == nil {
 		return nil
 	}
 	s.persistMu.Lock()
@@ -297,45 +388,140 @@ func (s *observabilityServer) persistDB() error {
 	return s.lastPersistErr
 }
 
-// saveState writes the raw signal snapshot when it has changed.
-func (s *observabilityServer) saveState(ctx context.Context) error {
-	if s.db == nil {
+// checkpoint persists the raw signal snapshot and the changed rollup buckets
+// together, tagged with the journal position they include. Ingest appends to
+// the journal and applies to memory under s.mu, so reading under s.mu gives
+// a cut in which the ring, the rollups and the journal position agree.
+func (s *observabilityServer) checkpoint(ctx context.Context) error {
+	if s.history == nil {
 		return nil
 	}
 	s.persistMu.Lock()
 	dirty := s.stateDirty
 	s.stateDirty = false
 	s.persistMu.Unlock()
-	if !dirty {
+
+	s.mu.RLock()
+	rows := s.rollups.takeDirty()
+	if !dirty && len(rows) == 0 {
+		s.mu.RUnlock()
 		return nil
 	}
-	s.mu.RLock()
 	state := persistedObservabilityState{Metrics: s.metrics, Traces: s.traces, Logs: s.logs, Targets: s.targets}
+	if s.store != nil {
+		state.JournalID, state.JournalSeq = s.store.position()
+	}
 	s.mu.RUnlock()
-	err := s.db.Save(ctx, "observability", state)
+
+	err := s.history.Checkpoint(ctx, rows, state)
 	s.persistMu.Lock()
 	s.lastPersistErr = err
 	if err != nil {
 		s.stateDirty = true
 	}
 	s.persistMu.Unlock()
+	if err != nil {
+		s.rollups.requeue(rows)
+	}
 	return err
 }
 
-// flushHistory persists changed rollup buckets; failures are requeued.
-func (s *observabilityServer) flushHistory(ctx context.Context) error {
-	if s.history == nil {
+// restoreSnapshot rebuilds the raw signal ring from the PostgreSQL snapshot
+// plus the journal records written after the snapshot's journal position,
+// and returns the replayed metrics so they can be folded into rollups that
+// were loaded from the same checkpoint. The journal was already applied at
+// open; this replaces that view only where the snapshot is the better
+// source:
+//   - no snapshot: the journal alone is the state.
+//   - snapshot from this journal: records after JournalSeq are replayed.
+//   - snapshot from another journal (the journal volume was replaced):
+//     every sequenced record in this journal postdates it and is replayed.
+//   - snapshot written before journal positions existed: the journal, when
+//     it holds any records, is complete and kept; otherwise the snapshot is
+//     used. Rollups cannot be reconciled in this one case.
+func (s *observabilityServer) restoreSnapshot(state persistedObservabilityState) ([]*MetricPoint, error) {
+	if state.Targets.P95RetrievalLatency != "" {
+		s.mu.Lock()
+		s.targets = state.Targets
+		s.mu.Unlock()
+	}
+	hasSnapshot := state.Metrics != nil || state.Traces != nil || state.Logs != nil || state.JournalID != ""
+	if !hasSnapshot || s.store == nil {
+		return nil, nil
+	}
+	journalID, _ := s.store.position()
+	if state.JournalID == "" {
+		if s.store.records > 0 {
+			return nil, nil
+		}
+		s.mu.Lock()
+		s.metrics, s.traces, s.logs = state.Metrics, state.Traces, state.Logs
+		s.trimRetention()
+		s.mu.Unlock()
+		return nil, nil
+	}
+	after := uint64(0)
+	if state.JournalID == journalID {
+		after = state.JournalSeq
+	}
+	restored := &observabilityServer{
+		metrics: append([]*MetricPoint(nil), state.Metrics...),
+		traces:  append([]*TraceSpan(nil), state.Traces...),
+		logs:    append([]*LogEntry(nil), state.Logs...),
+	}
+	var replayed []*MetricPoint
+	err := s.store.scan(func(record journalRecord) {
+		if record.Seq == 0 || record.Seq <= after {
+			return
+		}
+		if restored.applyRecord(record) && record.Kind == "metric" {
+			replayed = append(replayed, record.Metric)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.metrics, s.traces, s.logs = restored.metrics, restored.traces, restored.logs
+	s.trimRetention()
+	s.mu.Unlock()
+	return replayed, nil
+}
+
+// restoreDurableState loads the stored rollups and rebuilds the raw ring
+// from the snapshot plus the journal, folding metrics acknowledged after the
+// last checkpoint into the rollups.
+func (s *observabilityServer) restoreDurableState(ctx context.Context, state persistedObservabilityState) error {
+	now := time.Now()
+	rows, err := s.history.LoadRollups(ctx, now.Add(-minuteRetention), now.Add(-hourRetention))
+	if err != nil {
+		return fmt.Errorf("load observability rollups: %w", err)
+	}
+	s.rollups.load(rows)
+	rollupsWereEmpty := s.rollups.empty()
+	replayed, err := s.restoreSnapshot(state)
+	if err != nil {
+		return fmt.Errorf("replay observability journal: %w", err)
+	}
+	if rollupsWereEmpty {
+		// First start on a database without rollups: fold the retained raw
+		// ring into history so existing measurements are not discarded.
+		s.mu.RLock()
+		for _, m := range s.metrics {
+			s.rollups.add(m)
+		}
+		s.mu.RUnlock()
 		return nil
 	}
-	rows := s.rollups.takeDirty()
-	if err := s.history.UpsertRollups(ctx, rows); err != nil {
-		s.rollups.requeue(rows)
-		return err
+	// Metrics journaled after the last checkpoint are not in the stored
+	// rollups; fold them in so the restart loses none of them.
+	for _, m := range replayed {
+		s.rollups.add(m)
 	}
 	return nil
 }
 
-// runBackground persists state and rollups every interval and prunes
+// runBackground checkpoints state and rollups every interval and prunes
 // expired history hourly, until ctx ends (then flushes once more).
 func (s *observabilityServer) runBackground(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
@@ -345,17 +531,15 @@ func (s *observabilityServer) runBackground(ctx context.Context, interval time.D
 		select {
 		case <-ctx.Done():
 			final, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_ = s.saveState(final)
-			_ = s.flushHistory(final)
+			if err := s.checkpoint(final); err != nil {
+				log.Printf("observability: final checkpoint: %v", err)
+			}
 			cancel()
 			return
 		case <-ticker.C:
 			opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			if err := s.saveState(opCtx); err != nil {
-				log.Printf("observability: persist signal state: %v", err)
-			}
-			if err := s.flushHistory(opCtx); err != nil {
-				log.Printf("observability: persist rollups: %v", err)
+			if err := s.checkpoint(opCtx); err != nil {
+				log.Printf("observability: checkpoint signal state and rollups: %v", err)
 			}
 			if time.Since(lastPrune) > time.Hour {
 				s.rollups.prune()
@@ -384,31 +568,11 @@ func main() {
 	if err := repo.Load(context.Background(), "observability", &state); err != nil {
 		log.Fatal(err)
 	}
-	s.mu.Lock()
-	if state.Metrics != nil {
-		s.metrics, s.traces, s.logs = state.Metrics, state.Traces, state.Logs
-	}
-	if state.Targets.P95RetrievalLatency != "" {
-		s.targets = state.Targets
-	}
-	s.mu.Unlock()
 
 	history := &pgHistoryStore{db: repo.DB}
 	s.history = history
-	now := time.Now()
-	rows, err := history.LoadRollups(context.Background(), now.Add(-minuteRetention), now.Add(-hourRetention))
-	if err != nil {
-		log.Fatalf("load observability rollups: %v", err)
-	}
-	s.rollups.load(rows)
-	if s.rollups.empty() {
-		// First start on a database without rollups: fold the retained raw
-		// ring into history so existing measurements are not discarded.
-		s.mu.RLock()
-		for _, m := range s.metrics {
-			s.rollups.add(m)
-		}
-		s.mu.RUnlock()
+	if err := s.restoreDurableState(context.Background(), state); err != nil {
+		log.Fatal(err)
 	}
 	runs, err := history.LoadBenchmarkRuns(context.Background(), maxBenchmarkRuns)
 	if err != nil {

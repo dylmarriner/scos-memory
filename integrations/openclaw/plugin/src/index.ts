@@ -3,6 +3,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 import {
   deterministicTurnId,
+  filterByMinScore,
   extractLastCompletedTurn,
   formatRecallContext,
   normalizeRecallResult,
@@ -22,6 +23,7 @@ const RecallMemorySchema = Type.Object(
     confidenceScore: Type.Union([Type.Number(), Type.Null()]),
     authorityLevel: Type.Union([Type.Number(), Type.Null()]),
     rank: Type.Union([Type.Number(), Type.Null()]),
+    score: Type.Union([Type.Number(), Type.Null()]),
     createdAt: Type.String(),
   },
   { additionalProperties: false },
@@ -77,8 +79,7 @@ function formatMemorySearchText(memories: ReturnType<typeof memoriesWithPaths>):
   const body = memories
     .map((memory, index) => {
       const label = memory.title || memory.type || "memory";
-      const score = memory.rank ?? memory.confidenceScore;
-      const suffix = score === null ? "" : ` (${Math.round(score * 100)}%)`;
+      const suffix = memory.score === null ? "" : ` (score ${memory.score.toPrecision(3)})`;
       return `${index + 1}. ${label} [${memory.path}]${suffix}\n${memory.content}`;
     })
     .join("\n\n");
@@ -169,7 +170,12 @@ export default definePluginEntry({
               query: Type.String({ minLength: 1, maxLength: 4000 }),
               maxResults: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
               max_items: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
-              minScore: Type.Optional(Type.Number()),
+              minScore: Type.Optional(
+                Type.Number({
+                  description:
+                    "Drop memories whose SCOS relevance score (the fused score recall ranks by) is below this value.",
+                }),
+              ),
               corpus: Type.Optional(
                 Type.Union([
                   Type.Literal("memory"),
@@ -187,6 +193,7 @@ export default definePluginEntry({
               query: string;
               maxResults?: number;
               max_items?: number;
+              minScore?: number;
               corpus?: string;
             };
             const hookCtx = ctx as unknown as {
@@ -207,7 +214,9 @@ export default definePluginEntry({
             }
             const maxItems = raw.maxResults ?? raw.max_items ?? config.recallLimit;
             const result = await client.recall(raw.query, maxItems, sessionId);
-            const memories = memoriesWithPaths(normalizeRecallResult(result));
+            const memories = memoriesWithPaths(
+              filterByMinScore(normalizeRecallResult(result), raw.minScore),
+            );
             const details = {
               provider: "scos" as const,
               query: raw.query,

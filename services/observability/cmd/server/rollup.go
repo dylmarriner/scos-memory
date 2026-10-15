@@ -169,8 +169,12 @@ func (a *rollupAgg) quantile(q float64) (float64, bool) {
 
 // rollupPersister durably stores aggregates. The PostgreSQL implementation
 // lives in pgstore.go; tests run without one.
+//
+// Checkpoint writes changed rollup buckets and the raw signal snapshot in one
+// transaction, so the snapshot's journal position also marks exactly which
+// journaled metrics the stored rollups include.
 type rollupPersister interface {
-	UpsertRollups(ctx context.Context, rows []rollupRow) error
+	Checkpoint(ctx context.Context, rows []rollupRow, state persistedObservabilityState) error
 	LoadRollups(ctx context.Context, minuteSince, hourSince time.Time) ([]rollupRow, error)
 	PruneRollups(ctx context.Context, minuteBefore, hourBefore time.Time) error
 }

@@ -204,17 +204,43 @@ func TestMetricsFilterByNameFragment(t *testing.T) {
 	}
 }
 
+// fakeHistory mirrors pgHistoryStore: a checkpoint upserts rollups by key
+// and replaces the snapshot, both or neither.
 type fakeHistory struct {
 	rollups []rollupRow
 	runs    []BenchmarkRun
+	state   persistedObservabilityState
+	saved   bool
 	fail    error
 }
 
-func (f *fakeHistory) UpsertRollups(_ context.Context, rows []rollupRow) error {
+func (f *fakeHistory) Checkpoint(_ context.Context, rows []rollupRow, state persistedObservabilityState) error {
 	if f.fail != nil {
 		return f.fail
 	}
-	f.rollups = append(f.rollups, rows...)
+	for _, row := range rows {
+		replaced := false
+		for i := range f.rollups {
+			if f.rollups[i].Key == row.Key {
+				f.rollups[i] = row
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			f.rollups = append(f.rollups, row)
+		}
+	}
+	// Round-trip through JSON as the service_state document does.
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	f.state = persistedObservabilityState{}
+	if err := json.Unmarshal(raw, &f.state); err != nil {
+		return err
+	}
+	f.saved = true
 	return nil
 }
 func (f *fakeHistory) LoadRollups(context.Context, time.Time, time.Time) ([]rollupRow, error) {
@@ -232,16 +258,16 @@ func (f *fakeHistory) LoadBenchmarkRuns(context.Context, int) ([]BenchmarkRun, e
 	return f.runs, nil
 }
 
-func TestRollupFlushRequeuesOnFailureAndRestores(t *testing.T) {
+func TestCheckpointRequeuesOnFailureAndRestores(t *testing.T) {
 	s := newTestServer(t)
 	hist := &fakeHistory{fail: errors.New("db down")}
 	s.history = hist
 	ingest(t, s, []MetricPoint{requestPoint(time.Now(), "ingress", "memory-gateway", "/v1/turns", "200", 4)})
-	if err := s.flushHistory(context.Background()); err == nil {
-		t.Fatal("expected flush failure")
+	if err := s.checkpoint(context.Background()); err == nil {
+		t.Fatal("expected checkpoint failure")
 	}
 	hist.fail = nil
-	if err := s.flushHistory(context.Background()); err != nil {
+	if err := s.checkpoint(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(hist.rollups) != 2 { // one minute + one hour bucket

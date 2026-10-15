@@ -50,21 +50,30 @@ func TestHandleStatusReflectsRealReadiness(t *testing.T) {
 	}
 }
 
-func TestInitialize(t *testing.T) {
+func TestInitializeRequiresIdentityProfileAndStore(t *testing.T) {
 	srv := newHermesServer()
-	body, _ := json.Marshal(map[string]string{
-		"profile_path": "/home/user/.hermes/profiles/default",
-		"tenant_id":    "tenant-1",
-	})
-	r := httptest.NewRequest(http.MethodPost, "/v1/provider/initialize", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.handleInit(w, r)
-	var out map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
-		t.Fatalf("decode response: %v", err)
+	call := func(body map[string]string, withIdentity bool) int {
+		encoded, _ := json.Marshal(body)
+		r := httptest.NewRequest(http.MethodPost, "/v1/provider/initialize", bytes.NewReader(encoded))
+		if withIdentity {
+			r.Header.Set("X-SCOS-Tenant-ID", "tenant-1")
+			r.Header.Set("X-SCOS-Principal-ID", "principal-1")
+		}
+		w := httptest.NewRecorder()
+		srv.handleInit(w, r)
+		return w.Code
 	}
-	if out["status"] != "initialized" || out["profile_path"] != "/home/user/.hermes/profiles/default" {
-		t.Fatalf("unexpected init response: %#v", out)
+	profile := map[string]string{"profile_path": "/home/user/.hermes/profiles/default"}
+	if code := call(map[string]string{}, true); code != http.StatusBadRequest {
+		t.Fatalf("missing profile_path: %d", code)
+	}
+	if code := call(profile, false); code != http.StatusUnauthorized {
+		t.Fatalf("missing identity: %d", code)
+	}
+	// Without a store there is nothing to bind the profile to; initialize
+	// must not report success.
+	if code := call(profile, true); code != http.StatusServiceUnavailable {
+		t.Fatalf("initialize without a store: %d", code)
 	}
 }
 

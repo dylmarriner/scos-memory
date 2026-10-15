@@ -162,16 +162,24 @@ func resolveMessage(raw any) resolvedMessage {
 	return resolvedMessage{Role: "assistant", Content: string(b)}
 }
 
-// insertTurnWithMessages inserts one turn row plus one message row per
-// resolved message, advancing the session's sequence counter.
-func insertTurnWithMessages(ctx context.Context, tx *sql.Tx, id requestIdentity, sessionID, turnID string, messages []any) error {
+// insertTurnWithMessages inserts one turn row, carrying the turn's tool
+// calls, plus one message row per resolved message, advancing the session's
+// sequence counter.
+func insertTurnWithMessages(ctx context.Context, tx *sql.Tx, id requestIdentity, sessionID, turnID string, messages, toolCalls []any) error {
+	if toolCalls == nil {
+		toolCalls = []any{}
+	}
+	encodedCalls, err := json.Marshal(toolCalls)
+	if err != nil {
+		return fmt.Errorf("encode tool calls: %w", err)
+	}
 	var sequence int64
 	if err := tx.QueryRowContext(ctx, `UPDATE sessions SET last_sequence = last_sequence + 1, updated_at = now() WHERE id=$1 AND tenant_id=$2 RETURNING last_sequence`,
 		sessionID, id.TenantID).Scan(&sequence); err != nil {
 		return fmt.Errorf("advance session sequence: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO turns (id, session_id, sequence, actor_id, status, started_at, completed_at) VALUES ($1,$2,$3,$4,'completed',now(),now())`,
-		turnID, sessionID, sequence, id.PrincipalID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO turns (id, session_id, sequence, actor_id, status, started_at, completed_at, tool_calls) VALUES ($1,$2,$3,$4,'completed',now(),now(),$5)`,
+		turnID, sessionID, sequence, id.PrincipalID, string(encodedCalls)); err != nil {
 		return fmt.Errorf("insert turn: %w", err)
 	}
 	for _, raw := range messages {
@@ -194,7 +202,7 @@ func insertTurnWithMessages(ctx context.Context, tx *sql.Tx, id requestIdentity,
 // session, newest first, bounded by limit.
 func recentTurns(ctx context.Context, db *sql.Tx, tenantID, sessionID string, limit int) ([]StoredTurn, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT t.id, t.accepted_at
+		SELECT t.id, t.accepted_at, t.tool_calls
 		FROM turns t
 		JOIN sessions s ON s.id = t.session_id
 		WHERE s.id = $1 AND s.tenant_id = $2
@@ -209,12 +217,17 @@ func recentTurns(ctx context.Context, db *sql.Tx, tenantID, sessionID string, li
 	type turnMeta struct {
 		id        string
 		createdAt time.Time
+		toolCalls []any
 	}
 	var metas []turnMeta
 	for rows.Next() {
 		var m turnMeta
-		if err := rows.Scan(&m.id, &m.createdAt); err != nil {
+		var rawCalls []byte
+		if err := rows.Scan(&m.id, &m.createdAt, &rawCalls); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal(rawCalls, &m.toolCalls); err != nil {
+			return nil, fmt.Errorf("decode tool calls of turn %s: %w", m.id, err)
 		}
 		metas = append(metas, m)
 	}
@@ -250,10 +263,104 @@ func recentTurns(ctx context.Context, db *sql.Tx, tenantID, sessionID string, li
 			SessionID: sessionID,
 			TurnID:    m.id,
 			Messages:  messages,
+			ToolCalls: m.toolCalls,
 			CreatedAt: m.createdAt.UTC().Format(time.RFC3339),
 		})
 	}
 	return turns, nil
+}
+
+// providerConfig is a principal's saved Hermes setup for one profile scope
+// and the profile the provider was last initialised against.
+type providerConfig struct {
+	ProfileScope    string         `json:"profile_scope"`
+	Config          map[string]any `json:"config"`
+	ProfilePath     string         `json:"profile_path,omitempty"`
+	Workspace       string         `json:"workspace,omitempty"`
+	InitializedAt   string         `json:"initialized_at,omitempty"`
+	ConfigUpdatedAt string         `json:"config_updated_at,omitempty"`
+}
+
+func formatOptionalTime(t sql.NullTime) string {
+	if !t.Valid {
+		return ""
+	}
+	return t.Time.UTC().Format(time.RFC3339Nano)
+}
+
+// withPrincipalTx runs fn in a transaction scoped to id for RLS.
+func withPrincipalTx(ctx context.Context, db *sql.DB, id requestIdentity, fn func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func scanProviderConfig(row *sql.Row) (providerConfig, error) {
+	var out providerConfig
+	var rawConfig []byte
+	var profilePath, workspace sql.NullString
+	var initializedAt, configUpdatedAt sql.NullTime
+	if err := row.Scan(&out.ProfileScope, &rawConfig, &profilePath, &workspace, &initializedAt, &configUpdatedAt); err != nil {
+		return providerConfig{}, err
+	}
+	if err := json.Unmarshal(rawConfig, &out.Config); err != nil {
+		return providerConfig{}, fmt.Errorf("decode stored config: %w", err)
+	}
+	out.ProfilePath, out.Workspace = profilePath.String, workspace.String
+	out.InitializedAt, out.ConfigUpdatedAt = formatOptionalTime(initializedAt), formatOptionalTime(configUpdatedAt)
+	return out, nil
+}
+
+const providerConfigColumns = `profile_scope, config, profile_path, workspace, initialized_at, config_updated_at`
+
+// saveProviderConfig stores config as id's setup for scope, replacing any
+// earlier one and keeping the profile binding.
+func saveProviderConfig(ctx context.Context, db *sql.DB, id requestIdentity, scope string, config map[string]any) (providerConfig, error) {
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return providerConfig{}, err
+	}
+	var out providerConfig
+	err = withPrincipalTx(ctx, db, id, func(tx *sql.Tx) error {
+		var scanErr error
+		out, scanErr = scanProviderConfig(tx.QueryRowContext(ctx, `
+			INSERT INTO hermes_provider_configs (tenant_id, principal_id, profile_scope, config, config_updated_at, updated_at)
+			VALUES ($1, $2, $3, $4, now(), now())
+			ON CONFLICT (tenant_id, principal_id, profile_scope) DO UPDATE
+			SET config = EXCLUDED.config, config_updated_at = now(), updated_at = now()
+			RETURNING `+providerConfigColumns,
+			id.TenantID, id.PrincipalID, scope, string(encoded)))
+		return scanErr
+	})
+	return out, err
+}
+
+// bindProviderProfile records that the provider was initialised for id and
+// scope against profilePath, and returns the setup saved for that scope.
+func bindProviderProfile(ctx context.Context, db *sql.DB, id requestIdentity, scope, profilePath, workspace string) (providerConfig, error) {
+	var out providerConfig
+	err := withPrincipalTx(ctx, db, id, func(tx *sql.Tx) error {
+		var scanErr error
+		out, scanErr = scanProviderConfig(tx.QueryRowContext(ctx, `
+			INSERT INTO hermes_provider_configs (tenant_id, principal_id, profile_scope, profile_path, workspace, initialized_at, updated_at)
+			VALUES ($1, $2, $3, $4, NULLIF($5, ''), now(), now())
+			ON CONFLICT (tenant_id, principal_id, profile_scope) DO UPDATE
+			SET profile_path = EXCLUDED.profile_path, workspace = EXCLUDED.workspace,
+			    initialized_at = now(), updated_at = now()
+			RETURNING `+providerConfigColumns,
+			id.TenantID, id.PrincipalID, scope, profilePath, workspace))
+		return scanErr
+	})
+	return out, err
 }
 
 // mirroredMemoryTransition decodes the state transition encoded by the Hermes

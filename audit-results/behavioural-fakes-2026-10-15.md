@@ -103,12 +103,12 @@ fixed), **VERIFY** (auditor claim not yet independently reproduced).
 - Harness metrics `answer_regression`, `promotion_*`, `citation_accuracy` hard-wired; `--suite` crashes. — OPEN
 
 ### Packages, scripts, integrations
-- Python agent SDK returns a fabricated envelope with granted permissions on any error. — OPEN
-- Python Hermes provider `flush()` discards the queue and reports it as drained. — OPEN
-- `GoAdapter` "AST parsing" is a line-prefix scan. — OPEN (unused)
-- Integration doctor marks claude-code and codex VERIFIED on any machine. — OPEN
+- Python agent SDK returns a fabricated envelope with granted permissions on any error. — FIXED: every failure (unreachable, non-2xx, bad JSON, not an envelope, wrong identity) raises `EnvelopeRenderError`; no local envelope or permissions are ever made
+- Python Hermes provider `flush()` discards the queue and reports it as drained. — FIXED: `flush()` runs prefetch work (served by the next matching `prefetch`) and hands turns to an `ingester`; anything undelivered stays queued and persisted, and is returned with its reason
+- `GoAdapter` "AST parsing" is a line-prefix scan. — FIXED: parses with `go/parser`; functions, methods, types with full line spans; invalid source is an error
+- Integration doctor marks claude-code and codex VERIFIED on any machine. — FIXED: VERIFIED now also requires, on this machine, the binary, the SCOS plugin/MCP entry in the agent's config, and an MCP `tools/list` answered by the gateway that config points at; failed checks are listed
 - `verify_definition_of_done.py` passes items by test name existing. — VERIFY
-- OpenClaw `minScore` ignored. — OPEN
+- OpenClaw `minScore` ignored. — FIXED: recall results carry SCOS's fused score and `memory_search`/`scos_recall` drop those below `minScore` (unscored results too)
 
 ### Fixed in this pass, outside the user flows
 - Four compiled service binaries (10-29MB) were committed; untracked and ignored.
@@ -124,10 +124,10 @@ fixed), **VERIFY** (auditor claim not yet independently reproduced).
 - Restore-drill types are labels; one restore satisfies every cadence; drill validates no data. — OPEN
 - Recovery checklist steps 4 and 9 report work that is not done; event "replay" is a flag flip. — OPEN
 - Recovery status served from an in-memory map; database never read back, so status is lost on restart. — FIXED (000050)
-- Hermes prefetch queue never consumed; `cache_hit` invented; shutdown `replayable` constant; `save_config`/`initialize` do nothing; sync_turn returns the caller's turn id instead of the stored one and drops tool calls. — OPEN
+- Hermes prefetch queue never consumed; `cache_hit` invented; shutdown `replayable` constant; `save_config`/`initialize` do nothing; sync_turn returns the caller's turn id instead of the stored one and drops tool calls. — FIXED (000056): a worker consumes the queue (session turns + governed recall as the requester); `cache_hit` is true only when that result is served and still current; shutdown cancels and reports the caller's pending work and computes `replayable`; `save_config` stores per principal/profile scope and `initialize` binds the profile and returns it; sync_turn returns the stored turn id (plus `client_turn_id`) and stores tool calls on the turn. Verified against PostgreSQL as `scos_app`
 - Gateway: `scos_auth_issue` can never work (issuer-secret header not forwardable); backup/recovery admin tools always 403 on the hosted path; `scos_benchmarks` description promises runs it cannot do; `scos_recall` session id unused; error text names the wrong service. — Error text FIXED; local mode now carries the backup/recovery admin scopes. The rest OPEN
 - Cloud plan tiers promise quotas and feature gating nothing enforces. — OPEN
-- Observability restart discards up to 15s of acknowledged, fsynced records. — OPEN
+- Observability restart discards up to 15s of acknowledged, fsynced records. — FIXED: journal records are sequenced; snapshot and rollups are checkpointed in one transaction with the journal position, and a restart replays every later journal record into the ring and rollups. Verified against PostgreSQL as `scos_app`
 - Model runtime reports configured model labels, not served ones; readiness ok with no backend. — VERIFY
 
 ## Limits of this audit

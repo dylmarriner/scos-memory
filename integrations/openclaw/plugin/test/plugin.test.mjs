@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import test from "node:test";
 
 import plugin from "../dist/index.js";
@@ -101,4 +102,60 @@ test("plugin fails closed instead of registering a half-configured memory provid
   assert.equal(service?.id, "scos-memory");
   service.start();
   assert.ok(warnings.some((message) => /disabled until configured/i.test(message)));
+});
+
+test("memory_search applies minScore to the recalled memories", async (t) => {
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const recall = {
+      memories: [
+        { memory_id: "m-high", content: "deploy window is Tuesday", fused_score: 0.42, rank: 1 },
+        { memory_id: "m-low", content: "unrelated note", fused_score: 0.01, rank: 2 },
+      ],
+    };
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: { content: [{ type: "text", text: JSON.stringify(recall) }] },
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const { port } = server.address();
+
+  const factories = new Map();
+  plugin.register({
+    id: "scos-memory",
+    name: "SCOS Memory Fabric",
+    version: "2.0.0",
+    source: "test",
+    registrationMode: "runtime",
+    pluginConfig: {
+      gatewayUrl: `http://127.0.0.1:${port}/mcp`,
+      providerUrl: `http://127.0.0.1:${port}`,
+      token: "test-token",
+      tenantId: "tenant",
+      principalId: "principal",
+      namespaceId: "namespace",
+    },
+    registerMemoryCapability() {},
+    registerTool(factory, options) {
+      if (options?.name) factories.set(options.name, factory);
+    },
+    on() {},
+    registerService() {},
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+
+  const tool = factories.get("memory_search")({ agentId: "main", sessionKey: "s" });
+  const filtered = await tool.execute("call-1", { query: "deploy", minScore: 0.1 });
+  assert.deepEqual(filtered.details.memories.map((m) => m.memoryId), ["m-high"]);
+  assert.equal(filtered.details.count, 1);
+  assert.equal(filtered.details.memories[0].score, 0.42);
+
+  const unfiltered = await tool.execute("call-2", { query: "deploy" });
+  assert.deepEqual(unfiltered.details.memories.map((m) => m.memoryId), ["m-high", "m-low"]);
 });
