@@ -34,8 +34,20 @@ type outboxStatus struct {
 func (s server) readOutboxStatus(ctx context.Context, rc requestContext) (outboxStatus, error) {
 	status := outboxStatus{ObservedAt: time.Now().UTC().Format(time.RFC3339)}
 
+	// outbox_jobs and outbox_dead_letters are under FORCE RLS: the counts
+	// must be read inside a transaction carrying the tenant context, or the
+	// restricted runtime role sees no rows and reports an empty backlog.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return outboxStatus{}, err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, rc); err != nil {
+		return outboxStatus{}, err
+	}
+
 	var oldest sql.NullFloat64
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT
 			count(*) FILTER (WHERE status = 'pending'),
 			count(*) FILTER (WHERE status = 'processing'),
@@ -52,9 +64,12 @@ func (s server) readOutboxStatus(ctx context.Context, rc requestContext) (outbox
 		status.OldestPendingAge = int(oldest.Float64)
 	}
 
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM outbox_dead_letters WHERE tenant_id = $1`, rc.TenantID).
 		Scan(&status.DeadLetters); err != nil {
+		return outboxStatus{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return outboxStatus{}, err
 	}
 	return status, nil
