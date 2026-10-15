@@ -39,15 +39,16 @@ var logger = httpmid.NewLogger("credential-vault")
 const version = "0.1.0"
 
 type credentialVaultServer struct {
-	db *sql.DB
+	db   *sql.DB
+	keys *keyring
 }
 
 func (s *credentialVaultServer) readinessCheck() error {
 	if s.db == nil {
 		return errors.New("postgres dependency is not configured")
 	}
-	if _, err := masterKey(); err != nil {
-		return err
+	if s.keys == nil {
+		return errors.New("credential vault keyring is not configured")
 	}
 	return s.db.PingContext(context.Background())
 }
@@ -157,12 +158,7 @@ func (s *credentialVaultServer) createCredential(w http.ResponseWriter, r *http.
 			return
 		}
 	}
-	key, err := masterKey()
-	if err != nil {
-		http.Error(w, "vault not configured: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	ciphertext, nonce, err := encryptValue(key, req.Value)
+	ciphertext, nonce, keyVersion, err := s.keys.seal(req.Value)
 	if err != nil {
 		http.Error(w, "encrypt credential: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -182,10 +178,10 @@ func (s *credentialVaultServer) createCredential(w http.ResponseWriter, r *http.
 
 	var meta credentialMetadata
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO credentials (tenant_id, name, ciphertext, nonce, created_by)
-		VALUES ($1,$2,$3,$4,$5)
+		INSERT INTO credentials (tenant_id, name, ciphertext, nonce, key_version, created_by)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		RETURNING id::text, name, key_version, created_by::text, created_at, updated_at
-	`, identity.TenantID, req.Name, ciphertext, nonce, identity.PrincipalID).Scan(
+	`, identity.TenantID, req.Name, ciphertext, nonce, keyVersion, identity.PrincipalID).Scan(
 		&meta.ID, &meta.Name, &meta.KeyVersion, &meta.CreatedBy, &meta.CreatedAt, &meta.UpdatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") {
@@ -307,13 +303,14 @@ func (s *credentialVaultServer) getCredential(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	key, err := masterKey()
+	value, err := s.keys.open(meta.KeyVersion, ciphertext, nonce)
 	if err != nil {
-		http.Error(w, "vault not configured: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	value, err := decryptValue(key, ciphertext, nonce)
-	if err != nil {
+		// An unreadable value is an operational failure, not a denial, but
+		// it is still recorded: a missing retired key or a tampered row must
+		// leave a trace even though no value was released.
+		if auditErr := insertAuditEntry(ctx, tx, identity, "credential_read", id, "error", err.Error()); auditErr == nil {
+			_ = tx.Commit()
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -338,12 +335,7 @@ func (s *credentialVaultServer) updateCredential(w http.ResponseWriter, r *http.
 		http.Error(w, "value is required", http.StatusBadRequest)
 		return
 	}
-	key, err := masterKey()
-	if err != nil {
-		http.Error(w, "vault not configured: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	ciphertext, nonce, err := encryptValue(key, req.Value)
+	ciphertext, nonce, keyVersion, err := s.keys.seal(req.Value)
 	if err != nil {
 		http.Error(w, "encrypt credential: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -374,10 +366,10 @@ func (s *credentialVaultServer) updateCredential(w http.ResponseWriter, r *http.
 
 	var meta credentialMetadata
 	err = tx.QueryRowContext(ctx, `
-		UPDATE credentials SET ciphertext = $1, nonce = $2, updated_at = now()
-		WHERE id = $3 AND tenant_id = $4
+		UPDATE credentials SET ciphertext = $1, nonce = $2, key_version = $3, updated_at = now()
+		WHERE id = $4 AND tenant_id = $5
 		RETURNING id::text, name, key_version, created_by::text, created_at, updated_at
-	`, ciphertext, nonce, id, identity.TenantID).Scan(&meta.ID, &meta.Name, &meta.KeyVersion, &meta.CreatedBy, &meta.CreatedAt, &meta.UpdatedAt)
+	`, ciphertext, nonce, keyVersion, id, identity.TenantID).Scan(&meta.ID, &meta.Name, &meta.KeyVersion, &meta.CreatedBy, &meta.CreatedAt, &meta.UpdatedAt)
 	if err == sql.ErrNoRows {
 		http.Error(w, "credential not found", http.StatusNotFound)
 		return
@@ -584,8 +576,9 @@ func main() {
 		logger.Error("database TLS requirement not met", "error", err)
 		os.Exit(1)
 	}
-	if _, err := masterKey(); err != nil {
-		logger.Error("credential vault master key not configured", "error", err)
+	keys, err := loadKeyring()
+	if err != nil {
+		logger.Error("credential vault keyring not configured", "error", err)
 		os.Exit(1)
 	}
 	db, err := sql.Open("pgx", databaseURL)
@@ -600,7 +593,7 @@ func main() {
 	database.TuneSQLDB(db)
 	defer db.Close()
 
-	s := &credentialVaultServer{db: db}
+	s := &credentialVaultServer{db: db, keys: keys}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -608,12 +601,14 @@ func main() {
 	mux.HandleFunc("/health/ready", readiness.Handler(s.readinessCheck))
 	mux.HandleFunc("/v1/credentials", s.handleCredentials)
 	mux.HandleFunc("/v1/credentials/", s.handleCredentialByID)
+	mux.Handle("/v1/admin/keys", auth.RequireScope(credentialsAdminScope, http.HandlerFunc(s.handleKeyStatus)))
+	mux.Handle("/v1/admin/keys/rotate", auth.RequireScope(credentialsAdminScope, http.HandlerFunc(s.handleKeyRotate)))
 
 	addr := os.Getenv("SCOS_CREDENTIAL_VAULT_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8100"
 	}
-	logger.Info("credential vault listening", "addr", addr, "version", version)
+	logger.Info("credential vault listening", "addr", addr, "version", version, "key_version", keys.currentVersion(), "configured_key_versions", keys.versions())
 	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("credential-vault", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)

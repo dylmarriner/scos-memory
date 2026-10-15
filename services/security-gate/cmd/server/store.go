@@ -198,6 +198,9 @@ func insertAuditEntry(ctx context.Context, db *sql.DB, id requestIdentity, recor
 		"reason":     record.Reason,
 		"trace_id":   record.TraceID,
 	}
+	if record.CallerAnnotation != nil {
+		details["caller_annotation"] = record.CallerAnnotation
+	}
 	var auditID string
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO audit_entries (tenant_id, actor_id, action, resource_type, resource_id, decision, details)
@@ -283,6 +286,10 @@ func scanAuditRows(rows *sql.Rows) ([]*AuditRecord, error) {
 			DataClass DataClass `json:"data_class"`
 			Reason    string    `json:"reason"`
 			TraceID   string    `json:"trace_id"`
+			// CallerAnnotation is only ever present on entries written by
+			// POST /v1/audit/record and is surfaced under its own key so a
+			// reader can never mistake it for a gate-attested field.
+			CallerAnnotation *CallerAnnotation `json:"caller_annotation"`
 		}
 		if err := jsonInto(detailsJSON, &details); err == nil {
 			rec.AgentID = details.AgentID
@@ -290,6 +297,7 @@ func scanAuditRows(rows *sql.Rows) ([]*AuditRecord, error) {
 			rec.DataClass = details.DataClass
 			rec.Reason = details.Reason
 			rec.TraceID = details.TraceID
+			rec.CallerAnnotation = details.CallerAnnotation
 		}
 		rec.Timestamp = occurredAt.UTC().Format(time.RFC3339)
 		out = append(out, &rec)
@@ -309,12 +317,12 @@ func upsertSecretReference(ctx context.Context, db *sql.DB, id requestIdentity, 
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO secret_references (tenant_id, ref_id, name, provider, ref, scope, updated_at)
-		VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),now())
+		INSERT INTO secret_references (tenant_id, ref_id, name, provider, ref, scope, data_class, updated_at)
+		VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7::sensitivity_class,now())
 		ON CONFLICT (tenant_id, ref_id) DO UPDATE SET
 			name = EXCLUDED.name, provider = EXCLUDED.provider, ref = EXCLUDED.ref,
-			scope = EXCLUDED.scope, updated_at = now()
-	`, id.TenantID, ref.ID, ref.Name, ref.Provider, ref.Ref, ref.Scope); err != nil {
+			scope = EXCLUDED.scope, data_class = EXCLUDED.data_class, updated_at = now()
+	`, id.TenantID, ref.ID, ref.Name, ref.Provider, ref.Ref, ref.Scope, string(ref.DataClass)); err != nil {
 		return fmt.Errorf("upsert secret reference: %w", err)
 	}
 	return tx.Commit()
@@ -330,7 +338,7 @@ func listSecretReferences(ctx context.Context, db *sql.DB, id requestIdentity) (
 		return nil, err
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT ref_id, name, provider, ref, COALESCE(scope,''), updated_at
+		SELECT ref_id, name, provider, ref, COALESCE(scope,''), data_class::text, updated_at
 		FROM secret_references WHERE tenant_id = $1 ORDER BY updated_at DESC
 	`, id.TenantID)
 	if err != nil {
@@ -341,7 +349,7 @@ func listSecretReferences(ctx context.Context, db *sql.DB, id requestIdentity) (
 	for rows.Next() {
 		var ref SecretReference
 		var updatedAt time.Time
-		if err := rows.Scan(&ref.ID, &ref.Name, &ref.Provider, &ref.Ref, &ref.Scope, &updatedAt); err != nil {
+		if err := rows.Scan(&ref.ID, &ref.Name, &ref.Provider, &ref.Ref, &ref.Scope, &ref.DataClass, &updatedAt); err != nil {
 			return nil, err
 		}
 		ref.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
@@ -365,9 +373,9 @@ func getSecretReference(ctx context.Context, db *sql.DB, id requestIdentity, ref
 	var ref SecretReference
 	var updatedAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT ref_id, name, provider, ref, COALESCE(scope,''), updated_at
+		SELECT ref_id, name, provider, ref, COALESCE(scope,''), data_class::text, updated_at
 		FROM secret_references WHERE tenant_id = $1 AND ref_id = $2
-	`, id.TenantID, refID).Scan(&ref.ID, &ref.Name, &ref.Provider, &ref.Ref, &ref.Scope, &updatedAt)
+	`, id.TenantID, refID).Scan(&ref.ID, &ref.Name, &ref.Provider, &ref.Ref, &ref.Scope, &ref.DataClass, &updatedAt)
 	if err != nil {
 		return nil, err
 	}

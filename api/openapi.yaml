@@ -419,7 +419,7 @@ paths:
           application/json: {schema: {type: object}}
       responses:
         '200': {description: Secret reference created or updated}
-        '400': {description: Missing fields or unsupported provider}
+        '400': {description: Missing fields, unsupported provider, invalid scope selector, or unknown data_class}
   /v1/secrets/{id}:
     get:
       operationId: getSecretReference
@@ -436,9 +436,12 @@ paths:
       operationId: resolveSecretReference
       description: >-
         Resolves a securestore-provider SecretReference to its live value via
-        the Securestore platform. Fails closed (502/503) if Securestore is
-        unreachable, returns approval_required, or the integration is not
-        configured. Never caches or persists the resolved value.
+        the Securestore platform. The caller's signed claims must match the
+        reference's scope (tenant, principal:<id>, agent:<id>) and carry a
+        data_class:<class> scope at or above the reference's data_class.
+        Fails closed (502/503) if Securestore is unreachable, returns
+        approval_required, or the integration is not configured. Never caches
+        or persists the resolved value.
       parameters:
         - name: id
           in: path
@@ -447,6 +450,7 @@ paths:
       responses:
         '200': {description: Resolved secret value from Securestore}
         '400': {description: Secret reference provider is not securestore}
+        '403': {description: Caller is outside the reference scope, lacks a data_class claims scope covering the reference's data class, or presented no signed claims; the refusal is audited}
         '404': {description: Secret reference not found}
         '502': {description: Securestore unreachable or returned an error}
         '503': {description: Securestore integration not configured, or approval required}
