@@ -27,11 +27,11 @@
   "uiHints": {
     "gatewayUrl": {
       "label": "SCOS MCP Gateway URL",
-      "placeholder": "https://127.0.0.1:8098/mcp"
+      "help": "MCP gateway endpoint, for example https://127.0.0.1:8098/mcp"
     },
     "providerUrl": {
       "label": "SCOS Memory Lifecycle URL",
-      "placeholder": "https://127.0.0.1:8088"
+      "help": "Hermes memory lifecycle endpoint, for example https://127.0.0.1:8088"
     },
     "token": {
       "label": "SCOS Bearer Token",
