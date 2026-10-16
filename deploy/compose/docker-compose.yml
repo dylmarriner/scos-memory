@@ -128,21 +128,36 @@ services:
     command:
       - |
         set -eu
-        if [ -f /etc/scos/tls/tls.crt ] && [ -f /etc/scos/tls/tls.key ]; then
-          echo "tls-certs: existing certificate found, leaving it in place"
-          exit 0
-        fi
         apk add --no-cache openssl >/dev/null
-        SAN="DNS:localhost,IP:127.0.0.1"
+        # Every https://<service> hostname in this file, plus the host IP the
+        # ports are published on, so agents on the tailnet can verify the
+        # gateway against this certificate instead of skipping verification.
+        SAN="DNS:localhost,IP:127.0.0.1,IP:${SCOS_TAILSCALE_IP:-100.93.75.87}"
         for svc in memory-gateway autonomous-control-plane retrieval-orchestrator \
                    context-optimisation code-intelligence execution-proxy \
                    extension-manager compatibility-gateway hermes-provider \
                    memory-intelligence okf-synchroniser security-gate \
                    tool-governance agent-registry recovery-orchestrator \
                    backup-manager observability transparency-projection \
-                   graphify-provider; do
+                   graphify-provider credential-vault mcp-gateway \
+                   cloud-control-plane; do
           SAN="$$SAN,DNS:$$svc"
         done
+        if [ -f /etc/scos/tls/tls.crt ] && [ -f /etc/scos/tls/tls.key ]; then
+          # Keep an existing certificate only while it still covers every
+          # name above; one issued before a service was added would fail
+          # verification for that service.
+          HAVE=$$(openssl x509 -in /etc/scos/tls/tls.crt -noout -ext subjectAltName 2>/dev/null | tail -n 1 | sed 's/IP Address:/IP:/g; s/ //g')
+          MISSING=""
+          for want in $$(echo "$$SAN" | tr ',' ' '); do
+            case ",$$HAVE," in *",$$want,"*) ;; *) MISSING="$$MISSING $$want" ;; esac
+          done
+          if [ -z "$$MISSING" ]; then
+            echo "tls-certs: existing certificate covers every service, leaving it in place"
+            exit 0
+          fi
+          echo "tls-certs: existing certificate lacks$$MISSING; reissuing"
+        fi
         openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
           -keyout /etc/scos/tls/tls.key -out /etc/scos/tls/tls.crt \
           -subj "/O=scos-internal-dev" -addext "subjectAltName=$$SAN"
