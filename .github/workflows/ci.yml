@@ -112,8 +112,10 @@ jobs:
       - name: Python dependency vulnerability scan (pip-audit)
         run: |
           pip install pip-audit
-          pip install -e workers/consolidation
-          pip-audit --strict --skip-editable
+          # Audit the project's resolved dependencies. Installing it editable
+          # and passing --skip-editable fails under --strict, which treats
+          # the skipped local package as an audit failure.
+          pip-audit --strict workers/consolidation
 
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v3
