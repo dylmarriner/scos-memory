@@ -175,7 +175,9 @@ def frozen_acceptance_cases() -> dict[str, list[dict[str, Any]]]:
             {"id": "proxy_009", "command": "grep -R FIXME_MARKER " + "src/ " * 200, "failure": False, "deterministic": True},
             {"id": "proxy_010", "command": "echo ok", "failure": False, "deterministic": True},
             {"id": "proxy_011", "command": "rm -rf / --no-preserve-root", "failure": True},
-            {"id": "proxy_012", "command": "find / -name '*.log' " + "-print " * 200, "failure": False, "deterministic": False},
+            # /usr rather than /: a full-filesystem walk on a host with large
+            # data mounts outlasts the request timeout and stalls the programme.
+            {"id": "proxy_012", "command": "find /usr -xdev -name '*.so*' " + "-print " * 200, "failure": False, "deterministic": False},
             {"id": "proxy_013", "command": "printf '%s\\n' " + "warn " * 600, "failure": False, "deterministic": True},
             {"id": "proxy_014", "command": "rm -rf / ", "failure": True},
             {"id": "proxy_015", "command": "pwd", "failure": False, "deterministic": True},

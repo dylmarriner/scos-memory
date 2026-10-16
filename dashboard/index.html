@@ -2061,8 +2061,9 @@
         for (const n of nodes) (columns[depth.get(n.id)] = columns[depth.get(n.id)] || []).push(n);
         const padX = 80, padY = 44;
         // Each node in a column needs room for its circle plus its two label
-        // lines; grow the canvas instead of letting a busy column overlap.
-        const rowPx = 48;
+        // lines (up to ~22px radius + ~26px of text); grow the canvas instead
+        // of letting a busy column overlap.
+        const rowPx = 64;
         const tallest = Math.max(1, ...columns.map((col) => (col ? col.length : 0)));
         const H = Math.max(minH, 2 * padY + (tallest - 1) * rowPx);
         columns.forEach((col, c) => {
