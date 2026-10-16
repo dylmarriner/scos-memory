@@ -2028,7 +2028,7 @@
 
       // ── service flow graph ────────────────────────────────────────────
       let anim = null;
-      function layoutFlows(flows, W, H) {
+      function layoutFlows(flows, W, minH) {
         const nodes = flows.nodes.map((n) => ({ ...n, traffic: n.inbound_requests + n.outbound_requests }));
         const byId = new Map(nodes.map((n) => [n.id, n]));
         const out = new Map(nodes.map((n) => [n.id, []]));
@@ -2060,6 +2060,11 @@
         const columns = [];
         for (const n of nodes) (columns[depth.get(n.id)] = columns[depth.get(n.id)] || []).push(n);
         const padX = 80, padY = 44;
+        // Each node in a column needs room for its circle plus its two label
+        // lines; grow the canvas instead of letting a busy column overlap.
+        const rowPx = 48;
+        const tallest = Math.max(1, ...columns.map((col) => (col ? col.length : 0)));
+        const H = Math.max(minH, 2 * padY + (tallest - 1) * rowPx);
         columns.forEach((col, c) => {
           col.sort((a, b) => b.traffic - a.traffic || a.id.localeCompare(b.id));
           col.forEach((n, i) => {
@@ -2070,7 +2075,7 @@
         });
         const maxTraffic = Math.max(1, ...nodes.map((n) => n.traffic));
         for (const n of nodes) n.r = 9 + 13 * Math.sqrt(n.traffic / maxTraffic);
-        return { nodes, byId };
+        return { nodes, byId, H };
       }
 
       function edgeGeometry(a, b, offset) {
@@ -2101,9 +2106,9 @@
         }
         meta.textContent = `${flows.nodes.length} nodes · ${flows.edges.length} edges · ${fmtNum(flows.requests)} requests`;
         const W = Math.max(mount.clientWidth || 900, 320);
-        const H = 460;
-        const { nodes, byId } = layoutFlows(flows, W, H);
+        const { nodes, byId, H } = layoutFlows(flows, W, 460);
         const svg = el('svg', { class: 'fx-graph-svg', viewBox: `0 0 ${W} ${H}` }, mount);
+        svg.style.height = H + 'px';
         const defs = el('defs', {}, svg);
         const pg = el('radialGradient', { id: 'fx-particle-grad' }, defs);
         el('stop', { offset: '0%', 'stop-color': '#ffffff', 'stop-opacity': 1 }, pg);
