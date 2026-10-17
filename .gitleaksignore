@@ -1,2 +1,5 @@
 # A made-up Bitwarden item id in a test (commit 794435b), not a secret.
 794435bd567a43d85b9e68bcb882f208bc854949:services/backup-manager/cmd/server/secretrecovery_test.go:generic-api-key:59
+# Classifier test fixtures (commit 6337961): a truncated sk_live_ prefix and the jwt.io example token, not secrets.
+63379613b088bdebccfd63557f46aa15bf554c4c:services/security-gate/cmd/server/main_test.go:stripe-access-token:235
+63379613b088bdebccfd63557f46aa15bf554c4c:services/security-gate/cmd/server/main_test.go:jwt:238
