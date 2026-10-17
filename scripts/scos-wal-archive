@@ -37,7 +37,9 @@ fi
 # crash or a dropped mount never appears under the segment's own name.
 tmp="$target.tmp.$$"
 trap 'rm -f "$tmp"' EXIT
-cp "$source_path" "$tmp"
+# A redirect creates the file with the umask's mode (0640); cp would copy
+# pg_wal's 0600 instead.
+cat "$source_path" > "$tmp"
 sync "$tmp"
 mv "$tmp" "$target"
 trap - EXIT
