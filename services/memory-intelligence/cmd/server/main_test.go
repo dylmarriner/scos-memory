@@ -91,7 +91,7 @@ func TestDashboardSystemReportsUnreachablePeersTruthfully(t *testing.T) {
 			t.Fatalf("unexpected entry type: %T", raw)
 		}
 		if entry["service"] == "memory-intelligence" {
-			if entry["version"] != version || entry["status"] != "degraded" {
+			if entry["version"] != buildVersion() || entry["status"] != "degraded" {
 				t.Fatalf("invalid self telemetry: %#v", entry)
 			}
 			continue

@@ -41,7 +41,16 @@ var serviceMetrics = telemetry.FromEnvironment("memory-intelligence")
 // fallbacks when it is nil rather than requiring it at startup.
 var llmClient = llmclient.FromEnvironment(nil)
 
-const version = "0.1.0"
+// buildVersion is the build this process runs, as every service reports it
+// at /health/version: the commit it was built from, shortened like the
+// peers' entries in the system map ("unknown" for a local build).
+func buildVersion() string {
+	v := release.SourceSHA
+	if len(v) > 12 {
+		v = v[:12]
+	}
+	return v
+}
 
 // ── Memory network types (§25.2) ────────────────────────────────────────
 
@@ -300,7 +309,7 @@ func (s *engineServer) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(versionInfo{
 		Status:        "ok",
-		Version:       version,
+		Version:       buildVersion(),
 		UptimeSeconds: int(uptime.Seconds()),
 	})
 }
@@ -1811,8 +1820,8 @@ func (s *engineServer) handleDashboardSystem(w http.ResponseWriter, r *http.Requ
 	entries = append(entries, SystemMapEntry{
 		Service: "memory-intelligence",
 		Status:  selfStatus,
-		Version: version,
-		Uptime:  selfUptime.String(),
+		Version: buildVersion(),
+		Uptime:  selfUptime.Round(time.Second).String(),
 	})
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -2243,7 +2252,7 @@ func (s *engineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	writeTransparencySSE(w, "connected", transparencyStreamFrame{
 		EventID: "0", Sequence: lastSequence, Timestamp: time.Now().UTC(),
 		Source: "scos.memory-intelligence", TenantID: identity.TenantID,
-		Scope: "tenant", ProjectionVersion: "events-v1", Data: map[string]any{"status": "live", "version": version},
+		Scope: "tenant", ProjectionVersion: "events-v1", Data: map[string]any{"status": "live", "version": buildVersion()},
 	})
 	flusher.Flush()
 
