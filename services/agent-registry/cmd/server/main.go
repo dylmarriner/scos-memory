@@ -79,6 +79,10 @@ type HandoffPacket struct {
 	RespondedByAgent     string `json:"responded_by_agent,omitempty"`
 	RespondedAt          string `json:"responded_at,omitempty"`
 	ResponseReason       string `json:"response_reason,omitempty"`
+	CompletedByPrincipal string `json:"completed_by_principal,omitempty"`
+	CompletedByAgent     string `json:"completed_by_agent,omitempty"`
+	CompletedAt          string `json:"completed_at,omitempty"`
+	CompletionSummary    string `json:"completion_summary,omitempty"`
 }
 
 // ── server ───────────────────────────────────────────────────────────────
@@ -202,6 +206,7 @@ func main() {
 	mux.HandleFunc("/v1/handoffs/", s.handleHandoffByID)
 	mux.HandleFunc("/v1/handoffs/initiate", s.handleHandoffInitiate)
 	mux.HandleFunc("/v1/handoffs/respond", s.handleHandoffRespond)
+	mux.HandleFunc("/v1/handoffs/complete", s.handleHandoffComplete)
 
 	addr := os.Getenv("SCOS_AGENT_REGISTRY_HTTP_ADDR")
 	if addr == "" {

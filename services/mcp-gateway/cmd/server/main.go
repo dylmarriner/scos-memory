@@ -531,6 +531,8 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardPOST(ctx, r, s.agentRegistryURL+"/v1/handoffs/initiate", args)
 	case "scos_handoff_respond":
 		return s.forwardPOST(ctx, r, s.agentRegistryURL+"/v1/handoffs/respond", args)
+	case "scos_handoff_complete":
+		return s.forwardPOST(ctx, r, s.agentRegistryURL+"/v1/handoffs/complete", args)
 
 	// ── autonomous-control-plane ─────────────────────────────────────────
 	case "scos_control_decision_get":
@@ -1752,6 +1754,10 @@ func governedTools() []map[string]any {
 			"response":   strField("accepted or rejected"),
 			"reason":     strField("Optional reason recorded with the answer"),
 		}, "handoff_id", "response"),
+		tool("scos_handoff_complete", "Complete an accepted handoff once the handed-over work is done. Only the addressed agent, or the principal that registered it, may complete it", map[string]any{
+			"handoff_id": strField("Handoff UUID"),
+			"summary":    strField("What was delivered"),
+		}, "handoff_id", "summary"),
 	)
 
 	// ── autonomous-control-plane ─────────────────────────────────────────
