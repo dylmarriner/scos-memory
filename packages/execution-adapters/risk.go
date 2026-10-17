@@ -90,6 +90,34 @@ func ClassifyRisk(command string) string {
 	return sharedRiskPolicy.classify(strings.TrimSpace(command), 0)
 }
 
+// IsKnownProgram reports whether name (compared in lower case) is a program
+// the shared risk policy names: a shell, interpreter, launcher, HTTP client
+// or a read, test, write or destructive program. It lets a caller recognise
+// a request to run a program by name ("run git status") without its own
+// list of command names.
+func IsKnownProgram(name string) bool {
+	_, ok := sharedKnownPrograms[strings.ToLower(name)]
+	return ok
+}
+
+var sharedKnownPrograms = func() map[string]struct{} {
+	p := sharedRiskPolicy
+	known := map[string]struct{}{}
+	for _, list := range [][]string{p.PrivilegedLaunchers, p.Shells, p.Interpreters, p.DestructivePrograms,
+		p.WritePrograms, p.ReadPrograms, p.TestPrograms, p.HTTPClients} {
+		for _, name := range list {
+			known[strings.ToLower(name)] = struct{}{}
+		}
+	}
+	for name := range p.Launchers {
+		known[strings.ToLower(name)] = struct{}{}
+	}
+	for name := range p.Subcommands {
+		known[strings.ToLower(name)] = struct{}{}
+	}
+	return known
+}()
+
 func (p riskPolicy) classify(command string, depth int) string {
 	if depth > p.MaxDepth {
 		return RiskDestructive
