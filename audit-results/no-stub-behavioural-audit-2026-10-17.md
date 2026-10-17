@@ -141,3 +141,9 @@ Regenerated with every domain measured (aa23e9f), on the service binaries with a
 | Execution proxy | 95% token reduction; destructive commands blocked; failures and raw output preserved |
 | Routing, frozen cases | Precision 1.0, recall 1.0 |
 | Routing, held-out cases | Precision 0.98, recall 1.0 |
+
+## Retrieval models on kubuntux: complete
+
+The reranker now runs too. cross-encoder/ms-marco-MiniLM-L-6-v2 (22M parameters) uses 276 MiB under a 768 MB cap, with no restarts and about 4.6 GB of host memory left. bge-reranker-v2-m3 and bge-reranker-base were both tried first and did not fit beside bge-m3 on this 15 GB host. model-runtime and retrieval record the model name, so results carry the reranker that ranked them.
+
+`scos_recall` through MCP now reports `degraded_models: []` and `degraded_sources: []`. Hits come from the full-text and semantic lanes and are reranked by the model.
