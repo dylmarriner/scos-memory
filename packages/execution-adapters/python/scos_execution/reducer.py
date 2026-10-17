@@ -255,7 +255,7 @@ def _lex_shell(s: str) -> list[tuple[list[str], list[str]]]:
         return not state["in_word"] and all(_ASSIGNMENT.match(w) for w in words)
 
     def close_substitution(frame: tuple[bool, int, bool]) -> int:
-        # A substitution that produced the command name leaves a placeholder
+        # A substitution that produced the command name leaves a stand-in
         # name, so the command is graded as one whose program is only known
         # at run time.
         if frame[2]:

@@ -426,7 +426,7 @@ func lexShell(s string) []shellSegment {
 		return true
 	}
 	// closeSubstitution ends a substitution; one that produced the command
-	// name leaves a placeholder name, so the command is graded as one whose
+	// name leaves a stand-in name, so the command is graded as one whose
 	// program is only known at run time.
 	closeSubstitution := func(f frame) {
 		quote = f.quote
