@@ -186,6 +186,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 		wal = walCoverage(st, s.config.walArchiveDestination, s.config.walMaxSegmentLag)
 	}
 	plan.Items["postgresql_wal_archiving"] = wal
+	plan.Items["encrypted_off_host_wal"] = s.walShipCoverage(ctx, wal, plan.Provider)
 
 	plan.Items["pitr_configured"] = s.pitrCoverage(ctx, wal, now)
 

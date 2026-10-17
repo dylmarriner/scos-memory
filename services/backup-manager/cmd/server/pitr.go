@@ -183,6 +183,9 @@ func (s *backupServer) createPhysicalBackup(ctx context.Context, actor string) (
 	if err := waitForArchivedWAL(ctx, walDir, end, pitrWALWait); err != nil {
 		return backupStartResponse{}, fmt.Errorf("physical backup %s is not restorable: %w", id, err)
 	}
+	if err := s.ensureShipped(ctx, end); err != nil {
+		return backupStartResponse{}, fmt.Errorf("physical backup %s is not restorable off-host: %w", id, err)
+	}
 	archive, err := tarFiles(out, "base.tar.gz", "backup_manifest")
 	if err != nil {
 		return backupStartResponse{}, err
@@ -331,7 +334,12 @@ func (s *backupServer) pitrDrill(ctx context.Context, m backupManifest, archive 
 	if err != nil {
 		return nil, fmt.Errorf("point-in-time recovery needs working WAL archiving: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(walDir, m.WALStart)); err != nil {
+	_, _, shipping := s.walShipDir()
+	if shipping {
+		if err := s.ensureShipped(ctx, m.WALStart); err != nil {
+			return nil, fmt.Errorf("WAL segment %s, where backup %s starts: %w", m.WALStart, m.ID, err)
+		}
+	} else if _, err := os.Stat(filepath.Join(walDir, m.WALStart)); err != nil {
 		return nil, fmt.Errorf("WAL segment %s, where backup %s starts, is no longer in the archive", m.WALStart, m.ID)
 	}
 	bin, err := postgresBinary()
@@ -378,6 +386,21 @@ func (s *backupServer) pitrDrill(ctx context.Context, m backupManifest, archive 
 	if err := waitForArchivedWAL(ctx, walDir, segment, pitrWALWait); err != nil {
 		return nil, err
 	}
+	if err := s.ensureShipped(ctx, segment); err != nil {
+		return nil, err
+	}
+	// Recovery replays the encrypted off-host copies when WAL is shipped
+	// (that is the copy a disaster leaves), else the archive directory.
+	restoreCommand := fmt.Sprintf("cp '%s/%%f' '%%p'", walDir)
+	walSource := "the WAL archive at " + walDir
+	if shipping {
+		self, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		restoreCommand = fmt.Sprintf("'%s' wal-fetch '%%f' '%%p'", self)
+		walSource = "the encrypted off-host WAL copies"
+	}
 
 	// Restore into a scratch cluster reachable only on a private socket.
 	work, err := os.MkdirTemp(s.backupDir, "pitr-")
@@ -409,7 +432,7 @@ func (s *backupServer) pitrDrill(ctx context.Context, m backupManifest, archive 
 		"-c", "listen_addresses=", "-c", "unix_socket_directories="+sock, "-c", "port=5432",
 		"-c", "archive_mode=off", "-c", "hot_standby=off", "-c", "ssl=off", "-c", "logging_collector=off",
 		"-c", "shared_buffers=32MB", "-c", "max_connections=20",
-		"-c", fmt.Sprintf("restore_command=cp '%s/%%f' '%%p'", walDir),
+		"-c", "restore_command="+restoreCommand,
 		"-c", "recovery_target_name="+target, "-c", "recovery_target_action=promote")
 	srv.Stdout, srv.Stderr = logFile, logFile
 	if err := srv.Start(); err != nil {
@@ -457,7 +480,7 @@ func (s *backupServer) pitrDrill(ctx context.Context, m backupManifest, archive 
 	}
 	return []string{
 		fmt.Sprintf("restored physical base backup %s (WAL %s..%s) into a scratch cluster", m.ID, m.WALStart, m.WALEnd),
-		fmt.Sprintf("replayed archived WAL through %s to restore point %s at %s", segment, target, restoreLSN),
+		fmt.Sprintf("replayed WAL from %s through %s to restore point %s at %s", walSource, segment, target, restoreLSN),
 		"marker written before the restore point is present",
 		"marker written after the restore point is absent",
 		fmt.Sprintf("recovered schema catalog matches the live one (%d tables, %s)", restoredCatalog.Tables, restoredCatalog.Hash[:12]),
@@ -538,7 +561,12 @@ func (s *backupServer) pitrCoverage(ctx context.Context, wal Coverage, now time.
 		c.Reason = fmt.Sprintf("the newest physical base backup %s (%s) is older than the %s freshness bound", m.ID, m.CreatedAt, s.config.coverageMaxAge)
 		return c
 	}
-	if dir, err := walArchiveDir(s.config.walArchiveDestination); err != nil {
+	if _, _, shipping := s.walShipDir(); shipping {
+		if err := s.shippedWALPresent(m.WALStart); err != nil {
+			c.Reason = fmt.Sprintf("WAL segment %s, where physical base backup %s starts: %v", m.WALStart, m.ID, err)
+			return c
+		}
+	} else if dir, err := walArchiveDir(s.config.walArchiveDestination); err != nil {
 		c.Reason = err.Error()
 		return c
 	} else if _, err := os.Stat(filepath.Join(dir, m.WALStart)); err != nil {

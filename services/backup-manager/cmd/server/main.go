@@ -127,6 +127,8 @@ type backupServer struct {
 	// opMu serialises the operations that read or change the stored
 	// backups: taking one, expiring them, drilling them, mirroring.
 	opMu sync.Mutex
+	// walShipMu serialises shipping archived WAL to the provider.
+	walShipMu sync.Mutex
 	// dump, fingerprintTarget and walState reach PostgreSQL; tests replace
 	// them.
 	dump              func(ctx context.Context, databaseURL string) ([]byte, dataFingerprint, error)
@@ -237,6 +239,11 @@ func main() {
 	}
 	if s.providerErr != nil {
 		log.Printf("backup manager: no backup provider: %v", s.providerErr)
+	}
+	if _, _, ok := s.walShipDir(); ok && s.config.walArchiveDestination != "" {
+		interval := envDuration("SCOS_WAL_SHIP_INTERVAL", 30*time.Second)
+		go s.runWALShipper(context.Background(), interval)
+		log.Printf("WAL shipper enabled: archived WAL is encrypted to the provider every %s", interval)
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED")), "true") {
 		interval := restoreSchedulerInterval()

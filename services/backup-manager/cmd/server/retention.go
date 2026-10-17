@@ -276,7 +276,48 @@ func (s *backupServer) applyWALRetention(actor string, now time.Time, res *Reten
 		}
 		deleted++
 	}
-	return deleted, fmt.Sprintf("%d archived WAL segment(s) older than %d days removed from %s", deleted, s.retention.WALAndDaily, dir)
+	detail := fmt.Sprintf("%d archived WAL segment(s) older than %d days removed from %s", deleted, s.retention.WALAndDaily, dir)
+	// The encrypted off-host copies follow the same window and the same
+	// physical-backup floor.
+	if _, shipDir, ok := s.walShipDir(); ok {
+		n := s.expireShippedWAL(shipDir, actor, cutoff, keepFrom, res)
+		deleted += n
+		detail += fmt.Sprintf("; %d encrypted copies removed from %s", n, shipDir)
+	}
+	return deleted, detail
+}
+
+func (s *backupServer) expireShippedWAL(shipDir, actor string, cutoff time.Time, keepFrom string, res *RetentionResult) int {
+	entries, err := os.ReadDir(shipDir)
+	if err != nil {
+		return 0
+	}
+	deleted := 0
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), walShipSuffix)
+		if e.IsDir() || name == e.Name() || !walSegmentFile.MatchString(name) {
+			continue
+		}
+		if keepFrom != "" && name[:24] >= keepFrom {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(shipDir, e.Name())
+		if err := s.appendAudit(retentionAuditRecord{At: time.Now().UTC().Format(time.RFC3339Nano), Action: "wal_segment_deleted", Actor: actor,
+			Target: path, TakenAt: info.ModTime().UTC().Format(time.RFC3339), Reason: fmt.Sprintf("encrypted copy outside the %d-day WAL window", s.retention.WALAndDaily)}); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("WAL %s kept: audit record could not be written: %v", e.Name(), err))
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("WAL %s: %v", e.Name(), err))
+			continue
+		}
+		deleted++
+	}
+	return deleted
 }
 
 // walArchiveDir resolves a file:// (or absolute) WAL archive destination.
