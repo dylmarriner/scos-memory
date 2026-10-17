@@ -139,28 +139,53 @@ def relay(rpc_request, timeout=30.0):
         }
 
 
-log(f"relaying to {GATEWAY_URL}")
 
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    if os.environ.get("SCOS_MCP_DEBUG"):
-        sys.stderr.write(f"[scos-mcp-bridge:debug] GOT: {line}\n")
-        sys.stderr.flush()
-    try:
-        msg = json.loads(line)
-    except json.JSONDecodeError:
-        continue
+def rpc_error(msg_id, code, message):
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
+
+def handle(msg):
+    """Relay one JSON-RPC message; returns the response to write, or None
+    for a notification (which gets no response)."""
+    if not isinstance(msg, dict):
+        return rpc_error(None, -32600, "invalid request: a JSON-RPC message must be an object")
     is_notification = "id" not in msg
     response = relay(msg, timeout=call_timeout(msg))
-
     if response is None or is_notification:
-        continue
+        return None
+    return response
 
-    if os.environ.get("SCOS_MCP_DEBUG"):
-        sys.stderr.write(f"[scos-mcp-bridge:debug] SENT: {json.dumps(response)[:200]}\n")
-        sys.stderr.flush()
-    sys.stdout.write(json.dumps(response) + "\n")
-    sys.stdout.flush()
+
+def handle_line(line):
+    """The response to one line of input: an object for a single message,
+    an array for a batch (one response per request, in order, notifications
+    omitted), or None when nothing is owed."""
+    try:
+        msg = json.loads(line)
+    except json.JSONDecodeError as e:
+        return rpc_error(None, -32700, f"parse error: {e}")
+    if isinstance(msg, list):
+        if not msg:
+            return rpc_error(None, -32600, "invalid request: empty batch")
+        responses = [r for r in (handle(m) for m in msg) if r is not None]
+        return responses or None
+    return handle(msg)
+
+
+if __name__ == "__main__":
+    log(f"relaying to {GATEWAY_URL}")
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if os.environ.get("SCOS_MCP_DEBUG"):
+            sys.stderr.write(f"[scos-mcp-bridge:debug] GOT: {line}\n")
+            sys.stderr.flush()
+        response = handle_line(line)
+        if response is None:
+            continue
+        if os.environ.get("SCOS_MCP_DEBUG"):
+            sys.stderr.write(f"[scos-mcp-bridge:debug] SENT: {json.dumps(response)[:200]}\n")
+            sys.stderr.flush()
+        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()
