@@ -61,15 +61,21 @@ func appliedMigrations(ctx context.Context, databaseURL string) ([]string, error
 }
 
 // exportMigrations stores the migration export for base backup baseID and
-// reads it back. Callers hold s.opMu.
-func (s *backupServer) exportMigrations(ctx context.Context, baseID string) (string, error) {
+// reads it back. applied is the version list read just before the base
+// backup's dump; it is read again now, and an export is refused if a
+// migration ran while the dump was taken, since the versions recorded would
+// then not describe the schema the dump holds. Callers hold s.opMu.
+func (s *backupServer) exportMigrations(ctx context.Context, baseID string, applied []string) (string, error) {
 	paths := migrationExportPaths()
 	if len(paths) == 0 {
 		return "", fmt.Errorf("SCOS_MIGRATION_EXPORT_PATHS names no migration directories")
 	}
-	applied, err := s.applied(ctx, s.config.databaseURL)
+	after, err := s.applied(ctx, s.config.databaseURL)
 	if err != nil {
 		return "", fmt.Errorf("read applied migrations: %w", err)
+	}
+	if strings.Join(after, ",") != strings.Join(applied, ",") {
+		return "", fmt.Errorf("migrations changed while base backup %s was taken (%d applied before the dump, %d after); its migration export is refused -- take another backup", baseID, len(applied), len(after))
 	}
 	archive, files, err := archiveConfig(paths)
 	if err != nil {

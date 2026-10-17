@@ -230,3 +230,21 @@ func TestBackupStartAcceptsOnlyKnownTypes(t *testing.T) {
 		t.Fatalf("physical backup without WAL archiving: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestPhysicalBackupRefusesTablespaces(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"base.tar.gz", "backup_manifest"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := basebackupHoldsOnlyTheMainTablespace(dir); err != nil {
+		t.Fatalf("main data directory only: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "16384.tar.gz"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := basebackupHoldsOnlyTheMainTablespace(dir); err == nil || !strings.Contains(err.Error(), "16384.tar.gz") {
+		t.Fatalf("a tablespace tar must be refused, got %v", err)
+	}
+}

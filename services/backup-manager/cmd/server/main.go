@@ -468,6 +468,14 @@ func (s *backupServer) createBackup(ctx context.Context, actor string) (backupSt
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
+	// The migration export records the versions applied when the dump was
+	// taken: they are read before the dump and checked unchanged after it.
+	exporting := len(migrationExportPaths()) > 0
+	var appliedBefore []string
+	var appliedErr error
+	if exporting {
+		appliedBefore, appliedErr = s.applied(ctx, s.config.databaseURL)
+	}
 	archive, fp, err := s.dump(ctx, s.config.databaseURL)
 	if err != nil {
 		return backupStartResponse{}, err
@@ -483,9 +491,10 @@ func (s *backupServer) createBackup(ctx context.Context, actor string) (backupSt
 		return backupStartResponse{}, fmt.Errorf("stored backup %s does not verify: %w", m.ID, err)
 	}
 	resp := backupStartResponse{BackupRecord: recordFromManifest(stored, location, time.Now())}
-	if len(migrationExportPaths()) > 0 {
-		resp.MigrationExport, err = s.exportMigrations(ctx, m.ID)
-		if err != nil {
+	if exporting {
+		if appliedErr != nil {
+			resp.MigrationExportError = "read applied migrations: " + appliedErr.Error()
+		} else if resp.MigrationExport, err = s.exportMigrations(ctx, m.ID, appliedBefore); err != nil {
 			resp.MigrationExportError = err.Error()
 		}
 	}

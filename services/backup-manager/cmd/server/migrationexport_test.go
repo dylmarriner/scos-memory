@@ -70,4 +70,23 @@ func TestBaseBackupCarriesAMigrationExport(t *testing.T) {
 	if c := s.evaluatePlan(ctx, time.Now()).Items["schema_and_migration_exports"]; c.Covered || !strings.Contains(c.Reason, "000003_missing") {
 		t.Fatalf("missing file coverage: %+v", c)
 	}
+
+	// A migration applied while the dump is taken: the versions read before
+	// the dump no longer describe the database, so the export is refused.
+	applied = applied[:3]
+	calls := 0
+	s.applied = func(context.Context, string) ([]string, error) {
+		calls++
+		if calls == 1 {
+			return applied, nil
+		}
+		return append(append([]string{}, applied...), "000004_during_dump"), nil
+	}
+	rec = httptest.NewRecorder()
+	newBackupMux(s).ServeHTTP(rec, adminRequest(http.MethodPost, "/v1/backups/start", `{}`))
+	resp = backupStartResponse{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.MigrationExport != "" || !strings.Contains(resp.MigrationExportError, "migrations changed while base backup") {
+		t.Fatalf("a migration during the dump must refuse the export: %+v", resp)
+	}
 }

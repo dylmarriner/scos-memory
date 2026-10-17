@@ -163,6 +163,9 @@ func (s *backupServer) createPhysicalBackup(ctx context.Context, actor string) (
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return backupStartResponse{}, fmt.Errorf("pg_basebackup failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
+	if err := basebackupHoldsOnlyTheMainTablespace(out); err != nil {
+		return backupStartResponse{}, err
+	}
 	manifest, err := os.ReadFile(filepath.Join(out, "backup_manifest"))
 	if err != nil {
 		return backupStartResponse{}, fmt.Errorf("pg_basebackup wrote no backup_manifest: %w", err)
@@ -203,6 +206,28 @@ func (s *backupServer) createPhysicalBackup(ctx context.Context, actor string) (
 	resp := backupStartResponse{BackupRecord: recordFromManifest(stored, location, time.Now())}
 	s.finishBackup(ctx, actor, &resp)
 	return resp, nil
+}
+
+// basebackupHoldsOnlyTheMainTablespace refuses a tar-format pg_basebackup
+// that wrote anything besides base.tar.gz and backup_manifest. pg_basebackup
+// writes one more tar per non-default tablespace, and the physical backup
+// stores and restores the main data directory only: storing it would report
+// a backup that silently lacks every tablespace's data.
+func basebackupHoldsOnlyTheMainTablespace(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var extra []string
+	for _, e := range entries {
+		if e.Name() != "base.tar.gz" && e.Name() != "backup_manifest" {
+			extra = append(extra, e.Name())
+		}
+	}
+	if len(extra) > 0 {
+		return fmt.Errorf("pg_basebackup wrote %s besides the main data directory: the cluster uses tablespaces, which physical backups do not store; refusing an incomplete backup", strings.Join(extra, ", "))
+	}
+	return nil
 }
 
 func (s *backupServer) walSegmentFor(timeline int, lsn string, segmentSize int64) (string, error) {
