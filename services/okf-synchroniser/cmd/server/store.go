@@ -27,16 +27,16 @@ func prepareOKFStore(root, seed string) error {
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return err
 	}
-	added := 0
+	var added []string
 	if seed != "" {
 		seedAbs, _ := filepath.Abs(seed)
 		rootAbs, _ := filepath.Abs(root)
 		if seedAbs != rootAbs {
-			n, err := copyNewFiles(seed, root)
+			copied, err := copyNewFiles(seed, root)
 			if err != nil {
 				return fmt.Errorf("seed the OKF store from %s: %w", seed, err)
 			}
-			added = n
+			added = copied
 		}
 	}
 	if _, err := os.Stat(filepath.Join(root, ".git")); os.IsNotExist(err) {
@@ -44,21 +44,32 @@ func prepareOKFStore(root, seed string) error {
 			return fmt.Errorf("git init: %v: %s", err, out)
 		}
 	}
-	if out, err := gitIn(root, "add", "-A"); err != nil {
-		return fmt.Errorf("git add: %v: %s", err, out)
-	}
-	status, err := gitIn(root, "status", "--porcelain")
-	if err != nil {
-		return fmt.Errorf("git status: %v: %s", err, status)
-	}
-	if strings.TrimSpace(status) == "" && gitCommit(root) != "" {
+	if gitCommit(root) == "" {
+		// A store with no history holds only the seed just copied in.
+		if out, err := gitIn(root, "add", "-A"); err != nil {
+			return fmt.Errorf("git add: %v: %s", err, out)
+		}
+		if out, err := gitIn(root, "-c", "user.name=SCOS OKF", "-c", "user.email=scos-okf@localhost", "commit", "-q", "--allow-empty", "-m", "OKF store initialised from the image's approved content"); err != nil {
+			return fmt.Errorf("git commit: %v: %s", err, out)
+		}
 		return nil
 	}
-	msg := "OKF store initialised from the image's approved content"
-	if gitCommit(root) != "" {
-		msg = fmt.Sprintf("OKF seed: %d new file(s) from the image", added)
+	// An existing store commits only the seed files it just received.
+	// Anything else uncommitted -- an edit made outside the proposal flow, or
+	// what an interrupted merge left behind -- is unstaged and left as it
+	// is, never made authoritative here: sync reports it as diverged and a
+	// merge over it is refused until it is reviewed.
+	if out, err := gitIn(root, "reset", "-q"); err != nil {
+		return fmt.Errorf("git reset: %v: %s", err, out)
 	}
-	if out, err := gitIn(root, "-c", "user.name=SCOS OKF", "-c", "user.email=scos-okf@localhost", "commit", "-q", "--allow-empty", "-m", msg); err != nil {
+	if len(added) == 0 {
+		return nil
+	}
+	if out, err := gitIn(root, append([]string{"add", "--"}, added...)...); err != nil {
+		return fmt.Errorf("git add: %v: %s", err, out)
+	}
+	msg := fmt.Sprintf("OKF seed: %d new file(s) from the image", len(added))
+	if out, err := gitIn(root, "-c", "user.name=SCOS OKF", "-c", "user.email=scos-okf@localhost", "commit", "-q", "-m", msg); err != nil {
 		return fmt.Errorf("git commit: %v: %s", err, out)
 	}
 	return nil
@@ -69,9 +80,10 @@ func gitIn(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// copyNewFiles copies every regular file under src that dst does not have.
-func copyNewFiles(src, dst string) (int, error) {
-	n := 0
+// copyNewFiles copies every regular file under src that dst does not have
+// and returns the copied paths, relative to dst.
+func copyNewFiles(src, dst string) ([]string, error) {
+	var copied []string
 	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -106,8 +118,8 @@ func copyNewFiles(src, dst string) (int, error) {
 			out.Close()
 			return err
 		}
-		n++
+		copied = append(copied, rel)
 		return out.Close()
 	})
-	return n, err
+	return copied, err
 }

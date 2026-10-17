@@ -53,3 +53,43 @@ func TestPrepareOKFStoreSeedsOnceAndNeverOverwrites(t *testing.T) {
 		t.Fatal("a new seed file must be copied in")
 	}
 }
+
+// A restart commits only the seed files it copies: uncommitted content left
+// in the store -- an out-of-band edit, or what an interrupted merge staged --
+// is never made authoritative.
+func TestPrepareOKFStoreNeverCommitsUnreviewedContent(t *testing.T) {
+	seed, root := t.TempDir(), filepath.Join(t.TempDir(), "repo")
+	write := func(dir, name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(seed, "policy.md", "# policy\n")
+	if err := prepareOKFStore(root, seed); err != nil {
+		t.Fatal(err)
+	}
+	// An interrupted merge: the proposal's content written and staged.
+	write(root, "policy.md", "# unreviewed proposal\n")
+	if out, err := gitIn(root, "add", "policy.md"); err != nil {
+		t.Fatal(out)
+	}
+	write(root, "stray.md", "# edited by hand\n")
+	write(seed, "glossary.md", "# glossary\n")
+	if err := prepareOKFStore(root, seed); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := gitIn(root, "show", "--name-only", "--format=", "HEAD")
+	if err != nil || changed != "glossary.md" {
+		t.Fatalf("restart committed %q (%v), want only the new seed file", changed, err)
+	}
+	if committed, _ := gitIn(root, "show", "HEAD:policy.md"); committed != "# policy" {
+		t.Fatalf("unreviewed content became authoritative: %q", committed)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "policy.md")); string(b) != "# unreviewed proposal\n" {
+		t.Fatal("the uncommitted working copy must be left for review, not discarded")
+	}
+}
