@@ -1172,6 +1172,9 @@ services:
       # overdue restore drills, retention and the OKF mirror.
       SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED: ${SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED:-false}
       SCOS_BACKUP_INTERVAL: ${SCOS_BACKUP_INTERVAL:-24h}
+      # Files and directories (as mounted into this container, read only)
+      # taken as configuration backups; empty means none are taken.
+      SCOS_CONFIG_BACKUP_PATHS: ${SCOS_CONFIG_BACKUP_PATHS:-}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - backup-data:/var/lib/scos/backups

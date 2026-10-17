@@ -1769,7 +1769,7 @@ func governedTools() []map[string]any {
 	tools = append(tools,
 		tool("scos_backup_list", "List backups", map[string]any{}),
 		tool("scos_backup_get", "Get a backup by ID", map[string]any{"id": strField("Backup ID")}, "id"),
-		tool("scos_backup_start", "Take a backup, verify it as stored, then apply retention: base_backup (pg_dump archive plus a data fingerprint of the same snapshot) or physical_base_backup (pg_basebackup for point-in-time recovery; needs working WAL archiving); requires backups:admin", map[string]any{"type": strField("base_backup (default) or physical_base_backup")}),
+		tool("scos_backup_start", "Take a backup, verify it as stored, then apply retention: base_backup (pg_dump archive plus a data fingerprint of the same snapshot) physical_base_backup (pg_basebackup for point-in-time recovery; needs working WAL archiving) or configuration_backup (the deployment's configuration files, SCOS_CONFIG_BACKUP_PATHS); requires backups:admin", map[string]any{"type": strField("base_backup (default), physical_base_backup or configuration_backup")}),
 		tool("scos_backup_complete", "Re-verify a stored backup against its manifest (backups are completed when taken); requires backups:admin", map[string]any{
 			"backup_id": strField("Backup ID"),
 		}, "backup_id"),

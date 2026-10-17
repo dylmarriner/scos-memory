@@ -209,7 +209,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 	plan.Items["remote_git_mirrors"] = mirror
 
 	plan.Items["secret_manager_recovery"] = Coverage{Reason: "secret-manager recovery procedures are not provided or exercised by this service"}
-	plan.Items["configuration_backups"] = Coverage{Reason: "configuration backups are not provided by this service"}
+	plan.Items["configuration_backups"] = s.configCoverage(ctx, plan.Provider.Working, now)
 
 	plan.BaseBackups = plan.Items["base_backups"].Covered
 	plan.SchemaExports = plan.Items["schema_and_migration_exports"].Covered

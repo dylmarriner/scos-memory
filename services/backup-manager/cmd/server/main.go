@@ -103,7 +103,11 @@ type backupManifest struct {
 	WALEndLSN   string `json:"wal_end_lsn,omitempty"`
 	WALStart    string `json:"wal_start,omitempty"`
 	WALEnd      string `json:"wal_end,omitempty"`
-	ManifestMAC string `json:"manifest_mac"`
+	// Files and Sources of a configuration_backup: every file with its
+	// digest, and the configured paths they were read from.
+	Files       []fileDigest `json:"files,omitempty"`
+	Sources     []string     `json:"sources,omitempty"`
+	ManifestMAC string       `json:"manifest_mac"`
 }
 
 // backupArtifact is the manifest file of a local development backup; the
@@ -222,6 +226,9 @@ func loadBackupConfig() backupConfig {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		os.Exit(runCommand(os.Args[1:]))
+	}
 	s := newBackupServer()
 	mux := newBackupMux(s)
 	addr := os.Getenv("SCOS_BACKUP_MANAGER_HTTP_ADDR")
@@ -452,8 +459,8 @@ func (s *backupServer) handleBackupStart(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Type != "" && req.Type != backupTypeLogical && req.Type != backupTypePhysical {
-		http.Error(w, "type must be base_backup (pg_dump archive) or physical_base_backup (pg_basebackup for point-in-time recovery); daily, weekly and monthly retention is derived from when each backup was taken", http.StatusBadRequest)
+	if req.Type != "" && req.Type != backupTypeLogical && req.Type != backupTypePhysical && req.Type != backupTypeConfig {
+		http.Error(w, "type must be base_backup (pg_dump archive), physical_base_backup (pg_basebackup for point-in-time recovery) or configuration_backup (SCOS_CONFIG_BACKUP_PATHS); daily, weekly and monthly retention is derived from when each backup was taken", http.StatusBadRequest)
 		return
 	}
 	if s.provider == nil {
@@ -461,8 +468,11 @@ func (s *backupServer) handleBackupStart(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	take := s.createBackup
-	if req.Type == backupTypePhysical {
+	switch req.Type {
+	case backupTypePhysical:
 		take = s.createPhysicalBackup
+	case backupTypeConfig:
+		take = s.createConfigBackup
 	}
 	s.opMu.Lock()
 	resp, err := take(context.WithoutCancel(r.Context()), actorOf(r))
@@ -772,6 +782,13 @@ func (s *backupServer) runScheduledWork(ctx context.Context) {
 			log.Printf("backup scheduler: base backup failed: %v", err)
 		} else {
 			log.Printf("backup scheduler: base backup %s %s", resp.ID, resp.Status)
+		}
+	}
+	if s.configBackupDue(ctx, time.Now()) {
+		if resp, err := s.createConfigBackup(ctx, schedulerActor); err != nil {
+			log.Printf("backup scheduler: configuration backup failed: %v", err)
+		} else {
+			log.Printf("backup scheduler: configuration backup %s %s", resp.ID, resp.Status)
 		}
 	}
 	if s.physicalBackupDue(ctx, time.Now()) {
