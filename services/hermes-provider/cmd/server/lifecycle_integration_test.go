@@ -98,7 +98,7 @@ func (f *hermesFixture) warmNext() error {
 		f.t.Fatal("no queued pre-warm to consume")
 	}
 	err := f.srv.warmPrefetch(ctx, item)
-	f.srv.prefetchQueue.record(err)
+	f.srv.prefetchQueue.record(item.TenantID, err)
 	return err
 }
 

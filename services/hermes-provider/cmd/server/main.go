@@ -506,7 +506,7 @@ func (s *hermesServer) handleToolSchemas(w http.ResponseWriter, r *http.Request)
 		},
 		{
 			"name":        "scos_status",
-			"description": "Check SCOS Nexus memory provider status",
+			"description": "Check the memory provider status for your tenant: queued and completed pre-warms and the last pre-warm error",
 			"input_schema": map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},

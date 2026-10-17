@@ -16,9 +16,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -287,14 +289,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/dashboard/memory-graph")
 	case "scos_memory_summary":
 		u := s.memoryIntelligenceURL + "/v1/dashboard/summary"
-		q := url.Values{}
-		if n := stringArg(args, "network"); n != "" {
-			q.Set("network", n)
-		}
-		if mf := stringArg(args, "max_facts"); mf != "" {
-			q.Set("max_facts", mf)
-		}
-		if encoded := q.Encode(); encoded != "" {
+		if encoded := queryFromArgs(args, "network", "max_facts"); encoded != "" {
 			u += "?" + encoded
 		}
 		return s.forwardGET(ctx, r, u)
@@ -802,19 +797,19 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 
 	// ── observability ────────────────────────────────────────────────────
 	case "scos_metrics_list":
-		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/metrics")
+		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/metrics?"+queryFromArgs(args, "metric", "limit"))
 	case "scos_metrics_ingest":
 		return s.forwardPOST(ctx, r, s.observabilityURL+"/v1/metrics/ingest", args["points"])
 	case "scos_metrics_query":
 		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/metrics/query?"+queryFromArgs(args, "name", "service", "since"))
 	case "scos_traces_list":
-		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/traces")
+		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/traces?"+queryFromArgs(args, "service", "limit"))
 	case "scos_trace_ingest":
 		return s.forwardPOST(ctx, r, s.observabilityURL+"/v1/traces/ingest", args["spans"])
 	case "scos_trace_get":
 		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/traces/"+pathArg(args, "id"))
 	case "scos_logs_list":
-		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/logs")
+		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/logs?"+queryFromArgs(args, "level", "service", "limit"))
 	case "scos_log_ingest":
 		return s.forwardPOST(ctx, r, s.observabilityURL+"/v1/logs/ingest", args["entries"])
 	case "scos_observability_targets":
@@ -1107,11 +1102,21 @@ func stringArg(args map[string]any, key string) string {
 	return value
 }
 
+// queryFromArgs encodes the named arguments as a query string. A string is
+// passed as is and a whole number (JSON numbers decode as float64) in
+// decimal; anything else is left out.
 func queryFromArgs(args map[string]any, keys ...string) string {
 	values := url.Values{}
 	for _, key := range keys {
-		if value := stringArg(args, key); value != "" {
-			values.Set(key, value)
+		switch value := args[key].(type) {
+		case string:
+			if value != "" {
+				values.Set(key, value)
+			}
+		case float64:
+			if value == math.Trunc(value) && !math.IsInf(value, 0) {
+				values.Set(key, strconv.FormatInt(int64(value), 10))
+			}
 		}
 	}
 	return values.Encode()
@@ -1371,7 +1376,7 @@ func governedTools() []map[string]any {
 		},
 		{
 			"name":        "scos_status",
-			"description": "Check SCOS Nexus memory provider status",
+			"description": "Check the memory provider status for your tenant: queued and completed pre-warms and the last pre-warm error",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
@@ -2269,7 +2274,10 @@ func governedTools() []map[string]any {
 
 	// ── observability ────────────────────────────────────────────────────
 	tools = append(tools,
-		tool("scos_metrics_list", "List all recorded metric points", map[string]any{}),
+		tool("scos_metrics_list", "List the newest recorded metric points (100 unless limit says otherwise, at most 1000)", map[string]any{
+			"metric": strField("Keep points whose name contains this fragment (case-insensitive)"),
+			"limit":  intField("Number of newest points to return (1-1000, default 100)"),
+		}),
 		tool("scos_metrics_ingest", "Ingest metric points", map[string]any{
 			"points": arrField(objField("Metric point"), "Metric points to ingest"),
 		}, "points"),
@@ -2278,12 +2286,19 @@ func governedTools() []map[string]any {
 			"service": strField("Service filter"),
 			"since":   strField("RFC3339 timestamp lower bound"),
 		}),
-		tool("scos_traces_list", "List all recorded trace spans", map[string]any{}),
+		tool("scos_traces_list", "List the newest recorded trace spans (100 unless limit says otherwise, at most 1000)", map[string]any{
+			"service": strField("Keep one service's spans"),
+			"limit":   intField("Number of newest spans to return (1-1000, default 100)"),
+		}),
 		tool("scos_trace_ingest", "Ingest trace spans", map[string]any{
 			"spans": arrField(objField("Trace span"), "Trace spans to ingest"),
 		}, "spans"),
 		tool("scos_trace_get", "Get a trace by ID", map[string]any{"id": strField("Trace ID")}, "id"),
-		tool("scos_logs_list", "List all recorded log entries", map[string]any{}),
+		tool("scos_logs_list", "List the newest recorded log entries (100 unless limit says otherwise, at most 1000)", map[string]any{
+			"level":   strField("Keep entries at this level"),
+			"service": strField("Keep one service's entries"),
+			"limit":   intField("Number of newest entries to return (1-1000, default 100)"),
+		}),
 		tool("scos_log_ingest", "Ingest log entries", map[string]any{
 			"entries": arrField(objField("Log entry"), "Log entries to ingest"),
 		}, "entries"),

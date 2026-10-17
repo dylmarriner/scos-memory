@@ -672,19 +672,37 @@ func (s *observabilityServer) storageAvailable(w http.ResponseWriter) bool {
 
 // ── metrics ──────────────────────────────────────────────────────────────
 
-// handleMetrics returns retained raw points. ?metric= keeps only points
-// whose name contains that fragment (case-insensitive), e.g. "token" or
-// "cost"; ?limit= returns the newest N matches.
+// List endpoints return the newest matches, defaultListLimit of them unless
+// ?limit= asks for up to maxListLimit, so a list never returns everything
+// retained.
+const (
+	defaultListLimit = 100
+	maxListLimit     = 1000
+)
+
+// listLimit reads ?limit=; ok is false (and the response written) when it
+// is not an integer in [1, maxListLimit].
+func listLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return defaultListLimit, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > maxListLimit {
+		http.Error(w, fmt.Sprintf("limit must be an integer from 1 to %d", maxListLimit), http.StatusBadRequest)
+		return 0, false
+	}
+	return n, true
+}
+
+// handleMetrics returns the newest retained raw points. ?metric= keeps only
+// points whose name contains that fragment (case-insensitive), e.g. "token"
+// or "cost"; ?limit= bounds the count (see listLimit).
 func (s *observabilityServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fragment := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("metric")))
-	limit := 0
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 {
-			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
-			return
-		}
-		limit = n
+	limit, ok := listLimit(w, r)
+	if !ok {
+		return
 	}
 	scope := scopeOf(r)
 	s.mu.RLock()
@@ -698,7 +716,7 @@ func (s *observabilityServer) handleMetrics(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		out = append(out, m)
-		if limit > 0 && len(out) >= limit {
+		if len(out) >= limit {
 			break
 		}
 	}
@@ -810,16 +828,28 @@ func (s *observabilityServer) handleMetricsQuery(w http.ResponseWriter, r *http.
 
 // ── traces ───────────────────────────────────────────────────────────────
 
+// handleTraces returns the newest retained spans, oldest first. ?service=
+// keeps one service's spans; ?limit= bounds the count (see listLimit).
 func (s *observabilityServer) handleTraces(w http.ResponseWriter, r *http.Request) {
+	limit, ok := listLimit(w, r)
+	if !ok {
+		return
+	}
+	service := r.URL.Query().Get("service")
 	scope := scopeOf(r)
 	s.mu.RLock()
-	t := make([]*TraceSpan, 0, len(s.traces))
-	for _, sp := range s.traces {
-		if scope.sees(sp.Tenant) {
-			t = append(t, sp)
+	t := make([]*TraceSpan, 0)
+	for i := len(s.traces) - 1; i >= 0 && len(t) < limit; i-- {
+		sp := s.traces[i]
+		if !scope.sees(sp.Tenant) || (service != "" && sp.Service != service) {
+			continue
 		}
+		t = append(t, sp)
 	}
 	s.mu.RUnlock()
+	for i, j := 0, len(t)-1; i < j; i, j = i+1, j-1 {
+		t[i], t[j] = t[j], t[i]
+	}
 	writeJSON(w, t)
 }
 
@@ -916,14 +946,19 @@ func (s *observabilityServer) handleTraceByID(w http.ResponseWriter, r *http.Req
 
 // ── logs ─────────────────────────────────────────────────────────────────
 
+// handleLogs returns the newest matching entries, newest first. ?level= and
+// ?service= filter; ?limit= bounds the count (see listLimit).
 func (s *observabilityServer) handleLogs(w http.ResponseWriter, r *http.Request) {
-	limit := 100
+	limit, ok := listLimit(w, r)
+	if !ok {
+		return
+	}
 	level := r.URL.Query().Get("level")
 	service := r.URL.Query().Get("service")
 
 	scope := scopeOf(r)
 	s.mu.RLock()
-	var entries []*LogEntry
+	entries := make([]*LogEntry, 0)
 	for i := len(s.logs) - 1; i >= 0 && len(entries) < limit; i-- {
 		e := s.logs[i]
 		if level != "" && e.Level != level {

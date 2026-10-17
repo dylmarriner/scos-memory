@@ -57,8 +57,14 @@ type prefetchQueue struct {
 	mu     sync.Mutex
 	items  []queuedPrefetch
 	notify chan struct{}
-	// warmed and failed count consumed items by outcome; lastError is the
-	// most recent failure, for scos_status.
+	// outcomes counts each tenant's consumed items by outcome, with the
+	// tenant's most recent failure, for scos_status. They are kept per
+	// tenant so one tenant's status never reveals another's activity or
+	// error text.
+	outcomes map[string]*prefetchOutcomes
+}
+
+type prefetchOutcomes struct {
 	warmed    int64
 	failed    int64
 	lastError string
@@ -133,23 +139,43 @@ func (q *prefetchQueue) cancel(match func(queuedPrefetch) bool) int {
 	return removed
 }
 
-func (q *prefetchQueue) record(err error) {
+// record counts one consumed item of tenantID's by outcome.
+func (q *prefetchQueue) record(tenantID string, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.outcomes == nil {
+		q.outcomes = map[string]*prefetchOutcomes{}
+	}
+	o := q.outcomes[tenantID]
+	if o == nil {
+		o = &prefetchOutcomes{}
+		q.outcomes[tenantID] = o
+	}
 	if err != nil {
-		q.failed++
-		q.lastError = err.Error()
+		o.failed++
+		o.lastError = err.Error()
 		return
 	}
-	q.warmed++
+	o.warmed++
 }
 
-func (q *prefetchQueue) stats() map[string]any {
+// stats is tenantID's view of the queue: its own queued items and outcomes.
+func (q *prefetchQueue) stats(tenantID string) map[string]any {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	out := map[string]any{"queue_depth": len(q.items), "prefetch_warmed": q.warmed, "prefetch_failed": q.failed}
-	if q.lastError != "" {
-		out["prefetch_last_error"] = q.lastError
+	depth := 0
+	for _, item := range q.items {
+		if item.TenantID == tenantID {
+			depth++
+		}
+	}
+	o := q.outcomes[tenantID]
+	if o == nil {
+		o = &prefetchOutcomes{}
+	}
+	out := map[string]any{"queue_depth": depth, "prefetch_warmed": o.warmed, "prefetch_failed": o.failed}
+	if o.lastError != "" {
+		out["prefetch_last_error"] = o.lastError
 	}
 	return out
 }
@@ -224,7 +250,7 @@ func (s *hermesServer) runPrefetchWorker(ctx context.Context) {
 		workCtx, cancel := context.WithTimeout(ctx, prefetchWorkTimeout)
 		err := s.warmPrefetch(workCtx, item)
 		cancel()
-		s.prefetchQueue.record(err)
+		s.prefetchQueue.record(item.TenantID, err)
 		if err != nil && !errors.Is(err, errPrefetchSessionUnknown) {
 			log.Printf("hermes-provider: pre-warm session %s: %v", item.SessionID, err)
 		}
