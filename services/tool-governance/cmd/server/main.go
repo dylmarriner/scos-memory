@@ -1013,8 +1013,8 @@ func (s *toolGovernanceServer) handleReconcile(w http.ResponseWriter, r *http.Re
 		http.Error(w, "load operation: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if op.State != StateExecuting && op.State != StateUnknown && op.State != StateFailed {
-		http.Error(w, "only failed or unknown operations can be reconciled", http.StatusConflict)
+	if op.State != StateExecuting && op.State != StateUnknown && op.State != StateFailed && op.State != StateReconciling {
+		http.Error(w, "only executing, failed, unknown or reconciling operations can be reconciled", http.StatusConflict)
 		return
 	}
 	// Settling an executing operation is its completion; resolving a failed
@@ -1025,18 +1025,9 @@ func (s *toolGovernanceServer) handleReconcile(w http.ResponseWriter, r *http.Re
 		http.Error(w, fmt.Sprintf("tool %q is not declared reconcilable; its %s operations cannot be reconciled", op.ToolID, op.State), http.StatusConflict)
 		return
 	}
-	var newState ToolState
-	switch req.Result {
-	case "":
-		newState = StateReconciling
-	case "succeeded":
-		newState = StateSucceeded
-	case "failed":
-		newState = StateFailed
-	case "unknown":
-		newState = StateReconciling
-	default:
-		http.Error(w, "result must be succeeded, failed, or unknown", http.StatusBadRequest)
+	newState, err := reconciledState(op.State, req.Result)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	if err := completeOperation(ctx, tx, identity.TenantID, req.OperationID, newState, req.Output, op.Error); err != nil {
@@ -1053,6 +1044,35 @@ func (s *toolGovernanceServer) handleReconcile(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, op)
+}
+
+// reconciledState is where a reconcile with result takes an operation in
+// state from, following validTransitions. An executing operation settles
+// directly (succeeded, failed or unknown). A failed or unknown one enters
+// reconciling while its outcome is established ("" or "unknown"), and once
+// it is: an effect found applied is reconciled, one found not applied is
+// failed. Reaching reconciled or failed from failed or unknown passes
+// through reconciling, as the transition table requires.
+func reconciledState(state ToolState, result string) (ToolState, error) {
+	var target ToolState
+	switch {
+	case result != "" && result != "succeeded" && result != "failed" && result != "unknown":
+		return "", fmt.Errorf("result must be succeeded, failed, or unknown")
+	case state == StateExecuting && result == "":
+		return "", fmt.Errorf("settling an executing operation needs a result: succeeded, failed, or unknown")
+	case state == StateExecuting:
+		target = ToolState(result)
+	case result == "" || result == "unknown":
+		target = StateReconciling
+	case result == "succeeded":
+		target = StateReconciled
+	default:
+		target = StateFailed
+	}
+	if canTransition(state, target) || (canTransition(state, StateReconciling) && canTransition(StateReconciling, target)) {
+		return target, nil
+	}
+	return "", fmt.Errorf("an operation in state %s cannot be reconciled to %s", state, target)
 }
 
 func requiredIdempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
