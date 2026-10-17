@@ -125,7 +125,7 @@ func TestMergeTransitionRecordsTheMerger(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "policy.md"), []byte("# old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, root, "init")
+	runGit(t, root, "init", "-b", "main")
 	runGit(t, root, "add", "policy.md")
 	runGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
 	s := &okfServer{db: app, okfRoot: root, proposals: map[string]*OKFProposal{}, documents: map[string]*OKFDocument{}, projections: map[string]*IndexProjection{}, statePath: filepath.Join(t.TempDir(), "projections.json")}

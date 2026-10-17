@@ -40,7 +40,7 @@ func prepareOKFStore(root, seed string) error {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(root, ".git")); os.IsNotExist(err) {
-		if out, err := gitIn(root, "init", "-q", "-b", "main"); err != nil {
+		if out, err := gitIn(root, "init", "-q", "-b", defaultProtectedBranch); err != nil {
 			return fmt.Errorf("git init: %v: %s", err, out)
 		}
 	}

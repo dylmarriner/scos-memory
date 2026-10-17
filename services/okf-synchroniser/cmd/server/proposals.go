@@ -285,7 +285,11 @@ func (s *okfServer) createProposal(req okfProposalRequest) (*OKFProposal, error)
 		return nil, err
 	}
 	base, _ := os.ReadFile(path)
-	p := &OKFProposal{ID: newProposalID(), Path: req.Path, BaseCommit: gitCommit(s.okfRoot), BaseHash: sha256Hex(base), Content: req.Content, Diff: makeProposalDiff(string(base), req.Content), Status: "proposed", Proposer: req.Proposer, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+	diff, err := makeProposalDiff(req.Path, string(base), req.Content)
+	if err != nil {
+		return nil, err
+	}
+	p := &OKFProposal{ID: newProposalID(), Path: req.Path, BaseCommit: gitCommit(s.okfRoot), BaseHash: sha256Hex(base), Content: req.Content, Diff: diff, Status: "proposed", Proposer: req.Proposer, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
 	if p.Diff == "" {
 		return nil, errors.New("proposal does not change the authoritative content")
 	}
@@ -325,7 +329,11 @@ func (s *okfServer) diffProposal(ctx context.Context, id string) (*OKFProposal, 
 	if err != nil {
 		return nil, err
 	}
-	p.Diff = makeProposalDiff(string(readFileOrEmpty(mustProposalPath(s, p.Path))), p.Content)
+	diff, err := makeProposalDiff(p.Path, string(readFileOrEmpty(mustProposalPath(s, p.Path))), p.Content)
+	if err != nil {
+		return nil, err
+	}
+	p.Diff = diff
 	if p.Diff == "" {
 		return nil, errors.New("proposal has no diff")
 	}
@@ -415,8 +423,9 @@ func (s *okfServer) mergeProposal(ctx context.Context, id, merger string) (*OKFP
 	if err != nil {
 		return nil, err
 	}
-	if os.Getenv("SCOS_OKF_PROTECTED_BRANCH") != "main" {
-		return nil, errors.New("protected branch is not configured")
+	branch := protectedBranch()
+	if head, err := gitIn(s.okfRoot, "symbolic-ref", "--short", "HEAD"); err != nil || head != branch {
+		return nil, fmt.Errorf("the OKF store is not on the protected branch %s; refusing to merge", branch)
 	}
 	path, err := s.proposalPath(p.Path)
 	if err != nil {
@@ -427,7 +436,10 @@ func (s *okfServer) mergeProposal(ctx context.Context, id, merger string) (*OKFP
 		_ = s.persistProposal(ctx, p, p.Status, merger, role, "authoritative commit diverged; explicit re-review required")
 		return nil, errors.New("authoritative branch changed; divergence requires review")
 	}
-	current, _ := os.ReadFile(path)
+	current, readErr := os.ReadFile(path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return nil, readErr
+	}
 	if sha256Hex(current) != p.BaseHash {
 		p.Diverged = true
 		// Documents and projections are keyed by the okfRoot-joined path.
@@ -440,16 +452,48 @@ func (s *okfServer) mergeProposal(ctx context.Context, id, merger string) (*OKFP
 		_ = s.persistProposal(ctx, p, p.Status, merger, role, "working tree diverged; explicit re-review required")
 		return nil, errors.New("working tree diverged; explicit re-review required")
 	}
+	// The merge commits the index, so anything else staged in the store
+	// would ride along unreviewed.
+	if staged, e := gitIn(s.okfRoot, "diff", "--cached", "--name-only"); e != nil || staged != "" {
+		return nil, fmt.Errorf("the OKF store has staged changes outside this proposal (%s); refusing to merge", staged)
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, err
+	}
 	if err = os.WriteFile(path, []byte(p.Content), 0600); err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", s.okfRoot, "add", p.Path)
-	if out, e := cmd.CombinedOutput(); e != nil {
-		return nil, fmt.Errorf("stage proposal: %s", strings.TrimSpace(string(out)))
+	// Only the proposal's own path is committed, and the commit lands on the
+	// protected branch only if that branch still points at the reviewed base
+	// (a compare-and-swap on the ref); anything else restores the file.
+	restore := func() {
+		if readErr != nil {
+			_ = os.Remove(path)
+		} else {
+			_ = os.WriteFile(path, current, 0600)
+		}
+		_, _ = gitIn(s.okfRoot, "reset", "-q", "--", p.Path)
 	}
-	cmd = exec.CommandContext(ctx, "git", "-C", s.okfRoot, "-c", "user.name=SCOS OKF", "-c", "user.email=scos-okf@localhost", "commit", "-m", "OKF proposal "+p.ID)
-	if out, e := cmd.CombinedOutput(); e != nil {
-		return nil, fmt.Errorf("protected merge: %s", strings.TrimSpace(string(out)))
+	if out, e := gitIn(s.okfRoot, "add", "--", p.Path); e != nil {
+		restore()
+		return nil, fmt.Errorf("stage proposal: %s", out)
+	}
+	tree, e := gitIn(s.okfRoot, "write-tree")
+	if e != nil {
+		restore()
+		return nil, fmt.Errorf("protected merge: write tree: %s", tree)
+	}
+	commit, e := gitIn(s.okfRoot, "-c", "user.name=SCOS OKF", "-c", "user.email=scos-okf@localhost",
+		"commit-tree", tree, "-p", p.BaseCommit, "-m", fmt.Sprintf("OKF proposal %s: %s\n\nProposed-by: %s\nReviewed-by: %s (%s)\nMerged-by: %s (%s)", p.ID, p.Path, p.Proposer, p.Reviewer, p.ReviewRole, merger, role))
+	if e != nil {
+		restore()
+		return nil, fmt.Errorf("protected merge: commit: %s", commit)
+	}
+	if out, e := gitIn(s.okfRoot, "update-ref", "-m", "OKF proposal "+p.ID, "refs/heads/"+branch, commit, p.BaseCommit); e != nil {
+		restore()
+		p.Diverged = true
+		_ = s.persistProposal(ctx, p, p.Status, merger, role, "authoritative commit moved during merge; explicit re-review required")
+		return nil, fmt.Errorf("protected merge: %s moved during the merge: %s", branch, out)
 	}
 	p.Status = "merged"
 	p.MergedCommit = gitCommit(s.okfRoot)
@@ -569,11 +613,52 @@ func newProposalID() string {
 	_, _ = rand.Read(b)
 	return "okf-proposal-" + hex.EncodeToString(b)
 }
-func makeProposalDiff(old, new string) string {
-	if old == new {
-		return ""
+// defaultProtectedBranch is the branch the OKF store is initialised on and
+// the only branch approved proposals are merged into, unless
+// SCOS_OKF_PROTECTED_BRANCH names another.
+const defaultProtectedBranch = "main"
+
+func protectedBranch() string {
+	if b := strings.TrimSpace(os.Getenv("SCOS_OKF_PROTECTED_BRANCH")); b != "" {
+		return b
 	}
-	return "--- authoritative\n+++ proposal\n-" + strings.ReplaceAll(old, "\n", "\n-") + "\n+" + strings.ReplaceAll(new, "\n", "\n+")
+	return defaultProtectedBranch
+}
+
+// makeProposalDiff is the unified diff (three lines of context) from the
+// authoritative content of path to the proposed content, as git computes
+// it; "" when they are equal.
+func makeProposalDiff(path, old, new string) (string, error) {
+	if old == new {
+		return "", nil
+	}
+	dir, err := os.MkdirTemp("", "okf-diff-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	if err := os.WriteFile(filepath.Join(dir, "a"), []byte(old), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b"), []byte(new), 0o600); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("git", "diff", "--no-index", "--no-color", "--no-ext-diff", "-U3", "--", "a", "b")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	// git diff --no-index exits 1 when the files differ.
+	var exit *exec.ExitError
+	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
+		return "", fmt.Errorf("diff: %w", err)
+	}
+	// Drop git's own header lines and name both sides by the document path.
+	lines := strings.SplitAfter(string(out), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "@@") {
+			return "--- a/" + path + "\n+++ b/" + path + "\n" + strings.Join(lines[i:], ""), nil
+		}
+	}
+	return "", errors.New("diff: git produced no hunks for differing content")
 }
 func readFileOrEmpty(path string) []byte             { b, _ := os.ReadFile(path); return b }
 func mustProposalPath(s *okfServer, p string) string { x, _ := s.proposalPath(p); return x }

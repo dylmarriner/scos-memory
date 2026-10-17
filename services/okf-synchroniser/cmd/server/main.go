@@ -239,6 +239,14 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 	}
 	commitHash := gitCommit(s.okfRoot)
 
+	// Divergence is judged against what the index holds now, not what this
+	// process loaded at startup: an out-of-band edit to okf_concepts must be
+	// detected here, and must not be overwritten by the write-back below.
+	if err := s.refreshIndexedContent(ctx); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("read indexed content: %v; sync not applied", err))
+		return result
+	}
+
 	// Track seen paths
 	seen := make(map[string]bool)
 
@@ -318,17 +326,30 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 		}
 	}
 
-	// Detect removed files
-	for path := range s.projections {
-		if !seen[path] {
-			// A missing repository file is a destructive change. Preserve the
-			// indexed record until an explicit governance action resolves it.
-			if doc := s.documentForPath(path); doc != nil {
-				doc.Status = "diverged"
-			}
-			s.projections[path].ImportStatus = "diverged"
-			result.Diverged = appendUnique(result.Diverged, path)
+	// Detect removed files. A file deleted from the authoritative repository
+	// whose indexed copy is exactly what was last imported is a removal: the
+	// document is marked removed (its record and the Git history remain) and
+	// reported once. If the indexed copy was edited since, the deletion and
+	// the edit conflict, so it is diverged and left for explicit review.
+	for path, proj := range s.projections {
+		if seen[path] || proj.ImportStatus == "removed" {
+			continue
 		}
+		doc := s.documentForPath(path)
+		if doc != nil && indexedContentHash(doc) != proj.ContentHash {
+			doc.Status = "diverged"
+			proj.ImportStatus = "diverged"
+			result.Diverged = appendUnique(result.Diverged, path)
+			continue
+		}
+		if doc != nil {
+			doc.Status = "removed"
+			doc.CommitID = commitHash
+			doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		proj.ImportStatus = "removed"
+		proj.CommitHash = commitHash
+		result.Removed = append(result.Removed, path)
 	}
 
 	// Detect divergence between the indexed (DB) content and the projection
@@ -429,6 +450,30 @@ func (s *okfServer) documentForPath(path string) *OKFDocument {
 		}
 	}
 	return nil
+}
+
+// refreshIndexedContent reloads each indexed document's content from
+// okf_concepts, so the divergence checks compare what the index holds now.
+// Callers must hold s.mu.
+func (s *okfServer) refreshIndexedContent(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT path, content FROM okf_concepts`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path, content string
+		if err := rows.Scan(&path, &content); err != nil {
+			return err
+		}
+		if doc := s.documentForPath(path); doc != nil {
+			doc.Content = content
+		}
+	}
+	return rows.Err()
 }
 
 // loadConceptsFromDB hydrates in-memory documents and projections from the
