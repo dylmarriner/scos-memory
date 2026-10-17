@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 func TestExtensionStateSurvivesRestart(t *testing.T) {
@@ -29,12 +32,12 @@ func TestExtensionStateSurvivesRestart(t *testing.T) {
 	}
 	manifest = sealManifest(t, manifest, privateKey)
 	res := httptest.NewRecorder()
-	first.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
+	first.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusOK {
 		t.Fatalf("install returned %d: %s", res.Code, res.Body.String())
 	}
 	res = httptest.NewRecorder()
-	first.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/restart.ext/disable", nil))
+	first.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/restart.ext/disable", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("disable returned %d", res.Code)
 	}
@@ -214,14 +217,14 @@ func TestInstallRefusesIsolationTheRuntimeDoesNotProvide(t *testing.T) {
 		m.Isolation = mode
 		m = sealManifest(t, m, key)
 		res := httptest.NewRecorder()
-		srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+		srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
 		if res.Code != http.StatusForbidden || !strings.Contains(res.Body.String(), "isolation") {
 			t.Fatalf("isolation %s install = %d %s", mode, res.Code, res.Body.String())
 		}
 	}
 	m := sealManifest(t, validManifest("iso-remote"), key)
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
 	if res.Code != http.StatusOK {
 		t.Fatalf("remote_endpoint install = %d %s", res.Code, res.Body.String())
 	}
@@ -270,7 +273,7 @@ func TestUninstallRemovesExactlyThatExtension(t *testing.T) {
 		m.SkillsExported = []string{"summarise"}
 		m = sealManifest(t, m, key)
 		res := httptest.NewRecorder()
-		srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+		srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
 		if res.Code != http.StatusOK {
 			t.Fatalf("install %s = %d %s", id, res.Code, res.Body.String())
 		}
@@ -279,7 +282,7 @@ func TestUninstallRemovesExactlyThatExtension(t *testing.T) {
 	install("ext-2")
 
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodDelete, "/v1/extensions/ext-1", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodDelete, "/v1/extensions/ext-1", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("uninstall = %d %s", res.Code, res.Body.String())
 	}
@@ -307,14 +310,14 @@ func TestUninstallAndDisableRefusedWhileAnEnabledExtensionDependsOnIt(t *testing
 	consumer = sealManifest(t, consumer, key)
 	for _, m := range []ExtensionManifest{provider, consumer} {
 		res := httptest.NewRecorder()
-		srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+		srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
 		if res.Code != http.StatusOK {
 			t.Fatalf("install %s = %d %s", m.PackageID, res.Code, res.Body.String())
 		}
 	}
 	for _, req := range []*http.Request{
-		httptest.NewRequest(http.MethodDelete, "/v1/extensions/provider", nil),
-		httptest.NewRequest(http.MethodPost, "/v1/extensions/provider/disable", nil),
+		operatorRequest(http.MethodDelete, "/v1/extensions/provider", nil),
+		operatorRequest(http.MethodPost, "/v1/extensions/provider/disable", nil),
 	} {
 		res := httptest.NewRecorder()
 		srv.handleExtensionByID(res, req)
@@ -376,7 +379,7 @@ func TestExtensionLifecycleEndpoints(t *testing.T) {
 	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, validManifest("ext"), key), Status: "enabled"}
 	for _, action := range []string{"disable", "enable"} {
 		res := httptest.NewRecorder()
-		srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/"+action, nil))
+		srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/"+action, nil))
 		if res.Code != http.StatusOK {
 			t.Fatalf("%s returned %d", action, res.Code)
 		}
@@ -390,7 +393,7 @@ func TestRollbackUnavailableWithoutHistory(t *testing.T) {
 	srv := newExtServer()
 	srv.extensions["ext"] = &Extension{Manifest: ExtensionManifest{PackageID: "ext"}}
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", res.Code)
 	}
@@ -404,7 +407,7 @@ func TestRollbackRestoresPreviousManifest(t *testing.T) {
 	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, current, key), Status: "enabled"}
 	srv.history["ext"] = []ExtensionManifest{sealManifest(t, previous, key)}
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
 	if res.Code != http.StatusOK || srv.extensions["ext"].Manifest.Version != "1" {
 		t.Fatalf("expected previous manifest to be restored, got %d: %#v", res.Code, srv.extensions["ext"])
 	}
@@ -414,7 +417,7 @@ func TestInstallRejectsMaliciousManifest(t *testing.T) {
 	srv := newExtServer()
 	manifest := ExtensionManifest{PackageID: "evil", Version: "1.0.0", Signature: "not-a-signature"}
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusForbidden || len(srv.extensions) != 0 {
 		t.Fatalf("malicious manifest was accepted: status=%d state=%#v", res.Code, srv.extensions)
 	}
@@ -428,7 +431,7 @@ func TestInstallRejectsMissingRollbackPlan(t *testing.T) {
 	manifest.RollbackPlan = ""
 	manifest = sealManifest(t, manifest, privateKey)
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusForbidden || srv.extensions["no-rollback"] != nil {
 		t.Fatalf("manifest missing rollback_plan should fail closed: status=%d", res.Code)
 	}
@@ -441,7 +444,7 @@ func TestInstallRejectsInvalidSignature(t *testing.T) {
 	manifest := validManifest("bad-signature")
 	manifest.Signature = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusForbidden {
 		t.Fatalf("expected invalid signature rejection, got %d", res.Code)
 	}
@@ -456,7 +459,7 @@ func TestInstallRejectsDependencyConflict(t *testing.T) {
 	manifest.Dependencies = []ExtensionDependency{{PackageID: "provider", Version: ">=2.0.0"}}
 	manifest = sealManifest(t, manifest, privateKey)
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusForbidden || srv.extensions["consumer"] != nil {
 		t.Fatalf("dependency conflict was accepted: status=%d", res.Code)
 	}
@@ -472,7 +475,7 @@ func TestRollbackRestoresRegistrationsAndIsolation(t *testing.T) {
 	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, current, key), Isolation: isolationRemoteEndpoint, Status: "enabled"}
 	srv.history["ext"] = []ExtensionManifest{sealManifest(t, previous, key)}
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
 	if res.Code != http.StatusOK || srv.extensions["ext"].Isolation != isolationRemoteEndpoint || srv.extensions["ext"].Status != "enabled" ||
 		srv.skills["ext/restored"] == nil || srv.skills["ext/restored"].ExtensionID != "ext" {
 		t.Fatalf("rollback did not restore complete previous state: status=%d ext=%#v skills=%#v", res.Code, srv.extensions["ext"], srv.skills)
@@ -489,7 +492,7 @@ func TestRollbackRefusesTamperedPriorManifest(t *testing.T) {
 	tampered.HookEndpoints = map[string]string{"turn.completed": "https://attacker.example/hook"}
 	srv.history["ext"] = []ExtensionManifest{tampered}
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
 	if res.Code != http.StatusConflict || srv.extensions["ext"].Manifest.Version != "2" {
 		t.Fatalf("rollback to a tampered manifest = %d, version %s", res.Code, srv.extensions["ext"].Manifest.Version)
 	}
@@ -863,7 +866,7 @@ func TestAllRequiredLifecycleHooksAreRegistrable(t *testing.T) {
 	manifest = sealManifest(t, manifest, privateKey)
 
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
 	if res.Code != http.StatusOK {
 		t.Fatalf("install with full lifecycle hook set returned %d: %s", res.Code, res.Body.String())
 	}
@@ -886,7 +889,7 @@ func TestInstallDryRunReportsTheInstallVerdict(t *testing.T) {
 	srv := newExtServer()
 	body := `{"schema_version":"1.0","package_id":"com.example.unsigned","name":"Unsigned","version":"1.0.0","publisher":"Pub","license":"MIT","extension_types":["ui_extension"],"required_core_version":"^0.1.0","isolation":"wasm_sandbox","content_hash":"abc","rollback_plan":"remove","permissions":["filesystem.root"]}`
 	w := httptest.NewRecorder()
-	srv.handleInstallDryRun(w, httptest.NewRequest(http.MethodPost, "/v1/install/dryrun", strings.NewReader(body)))
+	srv.handleInstallDryRun(w, operatorRequest(http.MethodPost, "/v1/install/dryrun", strings.NewReader(body)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("dry run status = %d: %s", w.Code, w.Body.String())
 	}
@@ -899,8 +902,86 @@ func TestInstallDryRunReportsTheInstallVerdict(t *testing.T) {
 	}
 
 	w = httptest.NewRecorder()
-	srv.handleInstallDryRun(w, httptest.NewRequest(http.MethodPost, "/v1/install/dryrun", strings.NewReader(`{"manifest":{}}`)))
+	srv.handleInstallDryRun(w, operatorRequest(http.MethodPost, "/v1/install/dryrun", strings.NewReader(`{"manifest":{}}`)))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("a wrapped manifest must be rejected as malformed, got %d", w.Code)
+	}
+}
+
+// operatorRequest is a request from an operator: its token carries the
+// extensions:admin scope that changing installed extensions requires.
+func operatorRequest(method, target string, body io.Reader) *http.Request {
+	r := httptest.NewRequest(method, target, body)
+	return r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "operator-tenant", PrincipalID: "operator", Scopes: []string{extensionsAdminScope}}))
+}
+
+func TestChangingExtensionsRequiresTheAdminScope(t *testing.T) {
+	srv := newExtServer()
+	srv.extensions["x"] = &Extension{Manifest: ExtensionManifest{PackageID: "x"}, Status: "enabled"}
+	tenantUser := func(method, target string) *http.Request {
+		r := httptest.NewRequest(method, target, bytes.NewBufferString(`{}`))
+		return r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "t", PrincipalID: "p"}))
+	}
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		req     *http.Request
+	}{
+		{"install", srv.handleInstall, tenantUser(http.MethodPost, "/v1/install")},
+		{"patch", srv.handleExtensionByID, tenantUser(http.MethodPatch, "/v1/extensions/x")},
+		{"delete", srv.handleExtensionByID, tenantUser(http.MethodDelete, "/v1/extensions/x")},
+		{"disable", srv.handleExtensionByID, tenantUser(http.MethodPost, "/v1/extensions/x/disable")},
+		{"canary", srv.handleExtensionByID, tenantUser(http.MethodPost, "/v1/extensions/x/canary")},
+	} {
+		rec := httptest.NewRecorder()
+		tc.handler(rec, tc.req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s by a tenant user = %d, want 403", tc.name, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.handleExtensionByID(rec, tenantUser(http.MethodGet, "/v1/extensions/x"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reading an extension = %d", rec.Code)
+	}
+}
+
+func TestHookDispatchHonoursAgentScopeSendsConfigAndRecordsHealth(t *testing.T) {
+	var got map[string]any
+	fail := false
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		if fail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hookServer.Close()
+	srv := newExtServer()
+	srv.extensions["scoped"] = &Extension{Manifest: ExtensionManifest{PackageID: "scoped"}, Status: "enabled",
+		AgentScope: []string{"agent-a"}, Config: map[string]any{"threshold": 3.0}, Health: "unknown"}
+	srv.hooks["pre_turn"] = []*Hook{{Event: "pre_turn", ExtensionID: "scoped", Endpoint: hookServer.URL, TimeoutMs: 1000, FallbackPolicy: "continue"}}
+
+	results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{Event: "pre_turn", TenantID: "t", PrincipalID: "p", AgentID: "agent-b"})
+	if err != nil || len(results) != 0 {
+		t.Fatalf("an agent outside the scope got deliveries: %#v, %v", results, err)
+	}
+	results, err = srv.dispatchHooks(context.Background(), hookDispatchRequest{Event: "pre_turn", TenantID: "t", PrincipalID: "p", AgentID: "agent-a"})
+	if err != nil || len(results) != 1 || results[0].Status != "succeeded" {
+		t.Fatalf("in-scope dispatch = %#v, %v", results, err)
+	}
+	if cfg, _ := got["config"].(map[string]any); cfg["threshold"] != 3.0 {
+		t.Fatalf("hook body config = %#v", got["config"])
+	}
+	if h := srv.extensions["scoped"].Health; h != "healthy" {
+		t.Fatalf("health after a delivery = %q", h)
+	}
+	fail = true
+	if _, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{Event: "pre_turn", TenantID: "t", PrincipalID: "p", AgentID: "agent-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if h := srv.extensions["scoped"].Health; h != "failing" {
+		t.Fatalf("health after a failed delivery = %q", h)
 	}
 }

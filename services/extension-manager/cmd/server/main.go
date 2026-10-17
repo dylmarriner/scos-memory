@@ -94,9 +94,13 @@ type Extension struct {
 	IsolationEnforcement string         `json:"isolation_enforcement"`
 	AgentScope           []string       `json:"agent_scope,omitempty"`
 	Config               map[string]any `json:"config,omitempty"`
-	Health               string         `json:"health,omitempty"`
-	InstalledAt          string         `json:"installed_at"`
-	UpdatedAt            string         `json:"updated_at"`
+	// Health is what the latest hook delivery showed: unknown until one is
+	// made, then healthy, failing or circuit_open.
+	Health          string `json:"health,omitempty"`
+	HealthCheckedAt string `json:"health_checked_at,omitempty"`
+	InstalledBy     string `json:"installed_by,omitempty"`
+	InstalledAt     string `json:"installed_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 type InstallationReceipt struct {
@@ -431,6 +435,9 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 		s.handleExtensionAction(w, r, parts[0], parts[1])
 		return
 	}
+	if r.Method != http.MethodGet && !operatorOnly(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.mu.RLock()
@@ -522,6 +529,9 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request, id, action string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !operatorOnly(w, r) {
 		return
 	}
 	s.mu.Lock()
@@ -984,10 +994,45 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"event": req.Event, "results": results})
 }
 
-// hookTarget is one hook delivery a dispatch will make.
+// hookTarget is one hook delivery a dispatch will make, with the
+// extension's operator-set configuration, which travels with the event.
 type hookTarget struct {
 	hook    *Hook
 	channel string
+	config  map[string]any
+}
+
+// extensionsAdminScope gates every change to what is installed. Extensions
+// are platform-wide: an enabled extension's hooks receive the events of
+// every tenant its agent scope admits, so only an operator may install,
+// reconfigure, enable, disable, roll back, canary or remove one.
+const extensionsAdminScope = "extensions:admin"
+
+// operatorOnly reports whether the caller may change installed extensions,
+// answering 403 when not: a token whose claims carry extensions:admin, or a
+// service authenticated with the shared service token (no claims).
+func operatorOnly(w http.ResponseWriter, r *http.Request) bool {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		if auth.HasScope(claims, extensionsAdminScope) {
+			return true
+		}
+	} else if auth.Identity(r.Context()) != "" {
+		return true
+	}
+	http.Error(w, "changing installed extensions requires the "+extensionsAdminScope+" scope", http.StatusForbidden)
+	return false
+}
+
+// installer names who made a change: the token's principal, or the
+// authenticated service.
+func installer(r *http.Request) string {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok && claims.PrincipalID != "" {
+		return claims.TenantID + "/" + claims.PrincipalID
+	}
+	if id := auth.Identity(r.Context()); id != "" {
+		return "service:" + id
+	}
+	return ""
 }
 
 // hookTargetsLocked lists the deliveries for an event and caller, in
@@ -1013,13 +1058,16 @@ func (s *extServer) hookTargetsLocked(event string, c CanaryContext) []hookTarge
 			continue
 		}
 		handled[hook.ExtensionID] = true
+		if !ext.admitsAgent(c.AgentID) {
+			continue
+		}
 		if d, selected := inCanary(hook.ExtensionID); selected {
 			if candidate := d.Hooks[event]; candidate != nil {
-				targets = append(targets, hookTarget{hook: candidate, channel: "canary"})
+				targets = append(targets, hookTarget{hook: candidate, channel: "canary", config: copyConfig(ext.Config)})
 			}
 			continue
 		}
-		targets = append(targets, hookTarget{hook: hook, channel: "stable"})
+		targets = append(targets, hookTarget{hook: hook, channel: "stable", config: copyConfig(ext.Config)})
 	}
 	packages := make([]string, 0, len(s.canaries))
 	for packageID := range s.canaries {
@@ -1031,14 +1079,49 @@ func (s *extServer) hookTargetsLocked(event string, c CanaryContext) []hookTarge
 			continue
 		}
 		ext, ok := s.extensions[packageID]
-		if !ok || ext.Status != "enabled" {
+		if !ok || ext.Status != "enabled" || !ext.admitsAgent(c.AgentID) {
 			continue
 		}
 		if d, selected := inCanary(packageID); selected && d.Hooks[event] != nil {
-			targets = append(targets, hookTarget{hook: d.Hooks[event], channel: "canary"})
+			targets = append(targets, hookTarget{hook: d.Hooks[event], channel: "canary", config: copyConfig(ext.Config)})
 		}
 	}
 	return targets
+}
+
+// admitsAgent reports whether the extension's hooks run for agentID: an
+// extension with no agent scope runs for every agent, one with a scope only
+// for the agents it names.
+func (e *Extension) admitsAgent(agentID string) bool {
+	if len(e.AgentScope) == 0 {
+		return true
+	}
+	for _, id := range e.AgentScope {
+		if id == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+func copyConfig(c map[string]any) map[string]any {
+	if c == nil {
+		return nil
+	}
+	out := make(map[string]any, len(c))
+	for k, v := range c {
+		out[k] = v
+	}
+	return out
+}
+
+// setHealthLocked records what the latest delivery to an extension's hook
+// showed. Callers hold s.mu.
+func (s *extServer) setHealthLocked(extensionID, health string) {
+	if ext, ok := s.extensions[extensionID]; ok {
+		ext.Health = health
+		ext.HealthCheckedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 }
 
 func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchRequest) ([]hookDispatchResult, error) {
@@ -1064,6 +1147,9 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		}
 		if hook.CircuitOpenUntil != "" {
 			if until, err := time.Parse(time.RFC3339, hook.CircuitOpenUntil); err == nil && time.Now().UTC().Before(until) {
+				s.mu.Lock()
+				s.setHealthLocked(hook.ExtensionID, "circuit_open")
+				s.mu.Unlock()
 				done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "circuit_open", Reason: "hook circuit breaker is open"})
 				continue
 			}
@@ -1072,7 +1158,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		if err != nil || (parsed.Scheme != "https" && !(parsed.Scheme == "http" && (parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost"))) {
 			return nil, fmt.Errorf("hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID)
 		}
-		body, err := json.Marshal(map[string]any{"event": req.Event, "tenant_id": req.TenantID, "principal_id": req.PrincipalID, "payload": req.Payload})
+		body, err := json.Marshal(map[string]any{"event": req.Event, "tenant_id": req.TenantID, "principal_id": req.PrincipalID, "payload": req.Payload, "config": target.config})
 		if err != nil {
 			return nil, err
 		}
@@ -1103,6 +1189,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			s.mu.Lock()
 			hook.ConsecutiveFailures = 0
 			hook.CircuitOpenUntil = ""
+			s.setHealthLocked(hook.ExtensionID, "healthy")
 			s.mu.Unlock()
 			done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "succeeded"})
 			continue
@@ -1111,6 +1198,9 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		hook.ConsecutiveFailures++
 		if hook.ConsecutiveFailures >= 3 {
 			hook.CircuitOpenUntil = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+			s.setHealthLocked(hook.ExtensionID, "circuit_open")
+		} else {
+			s.setHealthLocked(hook.ExtensionID, "failing")
 		}
 		fallback := hook.FallbackPolicy
 		s.mu.Unlock()
@@ -1130,6 +1220,9 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !operatorOnly(w, r) {
 		return
 	}
 
@@ -1162,6 +1255,7 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		Isolation:            isolationRemoteEndpoint,
 		IsolationEnforcement: isolationEnforcement,
 		Health:               "unknown",
+		InstalledBy:          installer(r),
 		InstalledAt:          now,
 		UpdatedAt:            now,
 	}
@@ -1173,7 +1267,8 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 	receipt := &InstallationReceipt{
 		PackageID:   manifest.PackageID,
 		Version:     manifest.Version,
-		InstalledBy: "system",
+		InstalledBy: installer(r),
+		AgentIDs:    []string{},
 		Timestamp:   now,
 		Warnings:    warnings,
 	}

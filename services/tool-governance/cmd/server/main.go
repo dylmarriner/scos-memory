@@ -90,9 +90,9 @@ type ToolOperation struct {
 }
 
 var validTransitions = map[ToolState][]ToolState{
-	StateProposed:    {StatePrepared, StateCancelled},
-	StatePrepared:    {StateAuthorised, StateCancelled},
-	StateAuthorised:  {StateExecuting, StateCancelled},
+	StateProposed:   {StatePrepared, StateCancelled},
+	StatePrepared:   {StateAuthorised, StateCancelled},
+	StateAuthorised: {StateExecuting, StateCancelled},
 	// Executing -> Cancelled is a dry run: authorised and planned, then
 	// deliberately not run.
 	StateExecuting:   {StateSucceeded, StateFailed, StateUnknown, StateCancelled},

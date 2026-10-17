@@ -1167,7 +1167,7 @@ func (l *localIdentityToken) token() (string, error) {
 		Subject:     localModePrincipalID,
 		AgentID:     "mcp-gateway-local",
 		ExpiresAt:   expires,
-		Scopes:      []string{"backups:admin", "recovery:admin", "tools:admin"},
+		Scopes:      []string{"backups:admin", "recovery:admin", "tools:admin", "extensions:admin"},
 	}, os.Getenv("SCOS_SECURITY_ISSUER_SECRET"))
 	if err != nil {
 		return "", err
@@ -1960,7 +1960,7 @@ func governedTools() []map[string]any {
 			"project_id":   strField("Caller project for canary routing"),
 		}, "event"),
 		tool("scos_hook_get", "List hooks subscribed to an event", map[string]any{"event": strField("Hook event name")}, "event"),
-		tool("scos_extension_install", "Install an extension from its manifest", map[string]any{
+		tool("scos_extension_install", "Install an extension from its manifest (operators only: requires the extensions:admin scope, because an extension's hooks receive the events of every tenant)", map[string]any{
 			"schema_version":        strField("Manifest schema version"),
 			"package_id":            strField("Package ID"),
 			"name":                  strField("Extension name"),
@@ -1975,6 +1975,7 @@ func governedTools() []map[string]any {
 			"capabilities_provided": arrField(strField(""), "Capabilities provided"),
 			"capabilities_consumed": arrField(strField(""), "Capabilities consumed"),
 			"hooks_subscribed":      arrField(strField(""), "Hooks subscribed"),
+			"hook_endpoints":        objField("Map of each subscribed hook event to the HTTPS endpoint it is delivered to"),
 			"skills_exported":       arrField(strField(""), "Skills exported"),
 			"permissions":           arrField(strField(""), "Permissions"),
 			"rollback_plan":         strField("Rollback plan"),
@@ -1996,6 +1997,7 @@ func governedTools() []map[string]any {
 			"capabilities_provided": arrField(strField(""), "Capabilities provided"),
 			"capabilities_consumed": arrField(strField(""), "Capabilities consumed"),
 			"hooks_subscribed":      arrField(strField(""), "Hooks subscribed"),
+			"hook_endpoints":        objField("Map of each subscribed hook event to the HTTPS endpoint it is delivered to"),
 			"skills_exported":       arrField(strField(""), "Skills exported"),
 			"permissions":           arrField(strField(""), "Permissions"),
 			"rollback_plan":         strField("Rollback plan"),
