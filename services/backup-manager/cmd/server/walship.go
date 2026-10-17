@@ -47,7 +47,10 @@ func (s *backupServer) shipWAL(ctx context.Context) (int, error) {
 	if err := os.MkdirAll(shipDir, 0o750); err != nil {
 		return 0, err
 	}
+	// One segment that cannot be read or written must not hold back every
+	// segment after it: ship the rest and report what failed.
 	shipped := 0
+	var failed []error
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !(walSegmentFile.MatchString(name) || strings.HasSuffix(name, ".history")) {
@@ -62,18 +65,21 @@ func (s *backupServer) shipWAL(ctx context.Context) (int, error) {
 		}
 		plain, err := os.ReadFile(filepath.Join(src, name))
 		if err != nil {
-			return shipped, err
+			failed = append(failed, err)
+			continue
 		}
 		enc, err := encryptBackup(p.key, plain)
 		if err != nil {
-			return shipped, err
+			failed = append(failed, fmt.Errorf("encrypt %s: %w", name, err))
+			continue
 		}
 		if err := writeAtomic(target, enc, 0o600); err != nil {
-			return shipped, fmt.Errorf("ship %s: %w", name, err)
+			failed = append(failed, fmt.Errorf("ship %s: %w", name, err))
+			continue
 		}
 		shipped++
 	}
-	return shipped, nil
+	return shipped, errors.Join(failed...)
 }
 
 // fetchShippedWAL decrypts one shipped segment to dest: the restore_command
@@ -143,12 +149,17 @@ func (s *backupServer) ensureShipped(ctx context.Context, segment string) error 
 		return nil
 	}
 	s.walShipMu.Lock()
-	_, err := s.shipWAL(ctx)
+	_, shipErr := s.shipWAL(ctx)
 	s.walShipMu.Unlock()
-	if err != nil {
-		return fmt.Errorf("ship WAL: %w", err)
+	// What matters here is the segment asked for; a failure elsewhere is
+	// reported only if this one did not make it.
+	if err := s.shippedWALPresent(segment); err != nil {
+		if shipErr != nil {
+			return fmt.Errorf("%w (shipping: %v)", err, shipErr)
+		}
+		return err
 	}
-	return s.shippedWALPresent(segment)
+	return nil
 }
 
 // walShipCoverage is encrypted_off_host_wal: the newest archived segment has

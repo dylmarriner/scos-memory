@@ -127,3 +127,25 @@ func TestShippedWALRetentionKeepsWhatAPhysicalBackupNeeds(t *testing.T) {
 		}
 	}
 }
+
+func TestShipWALContinuesPastAnUnreadableSegment(t *testing.T) {
+	s, dest, walDir := newShippingServer(t)
+	// A dangling link stands in for a segment that cannot be read (as any
+	// user, root included).
+	if err := os.Symlink(filepath.Join(walDir, "gone"), filepath.Join(walDir, "000000010000000000000001")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(walDir, "000000010000000000000002"), []byte("wal 2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.shipWAL(context.Background())
+	if n != 1 || err == nil {
+		t.Fatalf("shipped %d, err %v; want the readable segment shipped and the other reported", n, err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "wal", "000000010000000000000002"+walShipSuffix)); err != nil {
+		t.Fatal("the segment after an unreadable one must still ship")
+	}
+	if err := s.ensureShipped(context.Background(), "000000010000000000000002"); err != nil {
+		t.Fatalf("the segment asked for is shipped, so a failure elsewhere must not fail it: %v", err)
+	}
+}
