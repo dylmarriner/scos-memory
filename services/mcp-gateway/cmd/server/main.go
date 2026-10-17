@@ -358,7 +358,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			}
 		}
 		payload := map[string]any{"repository_id": repositoryID, "branch": branch, "commit_id": commitID, "files": files}
-		for _, key := range []string{"extractor_version", "configuration_hash"} {
+		for _, key := range []string{"configuration_hash"} {
 			if value := stringArg(args, key); value != "" {
 				payload[key] = value
 			}

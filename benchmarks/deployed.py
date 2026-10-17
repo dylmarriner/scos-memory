@@ -146,13 +146,12 @@ class DeployedCodeClient:
         return repository_id
 
     def index(self, repository_id: str, branch: str, commit_id: str,
-              files: list[dict[str, Any]], extractor_version: str = "benchmark-v1",
+              files: list[dict[str, Any]],
               configuration_hash: str = "benchmark-config-v1") -> dict[str, Any]:
         value = self._request("POST", "/v2/code/index", {
             "repository_id": repository_id,
             "branch": branch,
             "commit_id": commit_id,
-            "extractor_version": extractor_version,
             "configuration_hash": configuration_hash,
             "files": files,
         })

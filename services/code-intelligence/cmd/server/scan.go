@@ -246,7 +246,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 	if head != "" {
 		commit = head + "+" + strings.TrimPrefix(tree, "worktree-")[:16]
 	}
-	if existing, status, err := s.pgStore.SnapshotByKey(r.Context(), req.RepositoryID, branch, commit, scanExtractorVersion, ""); err != nil {
+	if existing, status, err := s.pgStore.SnapshotByKey(r.Context(), req.RepositoryID, branch, commit, extractorVersion, ""); err != nil {
 		http.Error(w, "look up snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	} else if existing != "" && status != "failed" {
@@ -266,7 +266,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	snapshotID, err := s.pgStore.CreateSnapshot(r.Context(), req.RepositoryID, tenant, branch, commit, scanExtractorVersion, "")
+	snapshotID, err := s.pgStore.CreateSnapshot(r.Context(), req.RepositoryID, tenant, branch, commit, extractorVersion, "")
 	if err != nil {
 		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -407,11 +407,13 @@ func (s *server) handlePGSnapshot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// scanExtractorVersion names the extractor set a scan runs (Go AST with
-// import-qualified call names, plus Tree-sitter), part of the snapshot's
-// identity. Bump it whenever extraction output changes, so snapshots never
-// reuse declarations parsed by an older extractor.
-const scanExtractorVersion = "scan-goast-treesitter-v3"
+// extractorVersion names the extractor set every snapshot built here runs
+// (Go AST with import-qualified call names, plus Tree-sitter) -- a scan and
+// an uploaded /v2/code/index alike, since both index through buildSnapshot
+// -- and is part of the snapshot's identity. Bump it whenever extraction
+// output changes, so snapshots never reuse declarations parsed by an older
+// extractor. SCIP imports are labelled by their own indexer instead.
+const extractorVersion = "scan-goast-treesitter-v3"
 
 // errSnapshotConflict marks a request for a snapshot key that already
 // names a different tree, or one still being built.
