@@ -54,6 +54,11 @@ type graphifyServer struct {
 
 	jobsMu sync.Mutex
 	jobs   map[string]*extractJob
+
+	// issuerSecret signs the short-lived tokens an extraction job writes
+	// under (see jobCredential); without it a job writes under the caller's
+	// own token and stops when that token expires.
+	issuerSecret string
 }
 
 // extractorVersion identifies which graphify build this process will run,
@@ -173,6 +178,7 @@ func main() {
 	srv.namespaceID = strings.TrimSpace(os.Getenv("GRAPHIFY_NAMESPACE_ID"))
 	srv.backend = strings.TrimSpace(os.Getenv("GRAPHIFY_BACKEND"))
 	srv.buildWait = 10 * time.Second
+	srv.issuerSecret = strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -211,14 +217,17 @@ func writeJSON(w http.ResponseWriter, v any) {
 // ── extraction / ingestion ──────────────────────────────────────────────
 
 // relationTypeFor maps graphify's edge confidence tag onto a
-// memory_relations relation_type; graphify's own EXTRACTED/INFERRED/
-// AMBIGUOUS vocabulary is preserved (lowercased) rather than collapsed,
-// since callers of GET /v1/relations may want to distinguish AMBIGUOUS
-// edges from INFERRED ones.
+// memory_relations relation_type. Each of graphify's EXTRACTED/INFERRED/
+// AMBIGUOUS tags keeps its own relation type, so callers of GET
+// /v1/relations can tell an edge graphify flagged as ambiguous from one it
+// inferred. An untagged edge is treated as inferred: nothing vouches that it
+// was read from the source.
 func relationTypeFor(confidenceTag string) string {
 	switch strings.ToUpper(confidenceTag) {
 	case "EXTRACTED":
 		return "extracted_from"
+	case "AMBIGUOUS":
+		return "ambiguous_with"
 	default:
 		return "inferred_from"
 	}
