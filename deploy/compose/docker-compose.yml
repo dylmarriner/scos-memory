@@ -1010,6 +1010,9 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_OKF_SYNCHRONISER_HTTP_ADDR: ${SCOS_OKF_SYNCHRONISER_HTTP_ADDR:-:8090}
       SCOS_OKF_SYNCHRONISER_STATE_PATH: ${SCOS_OKF_SYNCHRONISER_STATE_PATH:-/var/lib/scos/okf/projections.json}
+      # The Git-tracked OKF store on the okf-data volume, seeded from the
+      # image's /okf on first start (services/okf-synchroniser store.go).
+      SCOS_OKF_ROOT: ${SCOS_OKF_ROOT:-/var/lib/scos/okf/repo}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
@@ -1162,7 +1165,7 @@ services:
       SCOS_BACKUP_RESTORE_DATABASE_URL: ${SCOS_BACKUP_RESTORE_DATABASE_URL:-}
       SCOS_BACKUP_DIR: ${SCOS_BACKUP_DIR:-/var/lib/scos/backups}
       SCOS_WAL_ARCHIVE_DESTINATION: "${SCOS_WAL_ARCHIVE_DESTINATION:-file:///var/lib/scos/wal-archive}"
-      SCOS_OKF_GIT_REPO: ${SCOS_OKF_GIT_REPO:-}
+      SCOS_OKF_GIT_REPO: ${SCOS_OKF_GIT_REPO:-/var/lib/scos/okf/repo}
       SCOS_OKF_GIT_MIRROR_REMOTE: ${SCOS_OKF_GIT_MIRROR_REMOTE:-}
       # The scheduler takes a base backup once SCOS_BACKUP_INTERVAL has
       # passed since the newest verified one (0 = only on request), then runs
@@ -1174,6 +1177,9 @@ services:
       - backup-data:/var/lib/scos/backups
       # Read-write: WAL retention removes segments older than 35 days.
       - postgres-wal-archive:/var/lib/scos/wal-archive
+      # The OKF store, read only: the mirror pushes it to
+      # SCOS_OKF_GIT_MIRROR_REMOTE and never writes to it.
+      - okf-data:/var/lib/scos/okf:ro
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8095:8095"
     depends_on:

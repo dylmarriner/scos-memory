@@ -56,7 +56,14 @@ func remoteIsOffHost(remote string) (bool, string) {
 	switch {
 	case r == "":
 		return false, "no remote is configured"
-	case strings.HasPrefix(r, "file://"), strings.HasPrefix(r, "/"), strings.HasPrefix(r, "."), strings.HasPrefix(r, "~"):
+	case strings.HasPrefix(r, "file://"), strings.HasPrefix(r, "/"):
+		// A path is off-host only when the kernel mount table puts it on a
+		// network filesystem (an sshfs or NFS mount of another machine).
+		if offHost, evidence := networkMount(localRemotePath(r)); offHost {
+			return true, "remote " + r + ": " + evidence
+		}
+		return false, fmt.Sprintf("remote %q is a path on this host", r)
+	case strings.HasPrefix(r, "."), strings.HasPrefix(r, "~"):
 		return false, fmt.Sprintf("remote %q is a path on this host", r)
 	case strings.Contains(r, "://"):
 		return true, "remote " + r
@@ -65,6 +72,11 @@ func remoteIsOffHost(remote string) (bool, string) {
 		return true, "remote " + r
 	}
 	return false, fmt.Sprintf("remote %q is not a recognisable remote URL", r)
+}
+
+// localRemotePath is the directory a path or file:// remote names.
+func localRemotePath(remote string) string {
+	return strings.TrimPrefix(strings.TrimSpace(remote), "file://")
 }
 
 func gitCommand(ctx context.Context, repo string, args ...string) ([]byte, error) {
@@ -106,6 +118,16 @@ func (s *backupServer) runGitMirror(ctx context.Context, actor string) (*GitMirr
 	local := parseRefs(string(localRaw))
 	if len(local) == 0 {
 		return finish("the OKF repository has no refs to mirror")
+	}
+	// A path remote is created as a bare repository the first time; a URL
+	// remote must already exist on its server.
+	if r := run.Remote; strings.HasPrefix(r, "/") || strings.HasPrefix(r, "file://") {
+		dir := localRemotePath(r)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			if out, err := commandContext(ctx, "git", "init", "--bare", "-q", dir).CombinedOutput(); err != nil {
+				return finish(fmt.Sprintf("create the bare mirror repository %s: %v: %s", dir, err, strings.TrimSpace(string(out))))
+			}
+		}
 	}
 	if out, err := gitCommand(ctx, run.Repository, "push", "--mirror", run.Remote); err != nil {
 		return finish(fmt.Sprintf("git push --mirror failed: %v: %s", err, strings.TrimSpace(string(out))))

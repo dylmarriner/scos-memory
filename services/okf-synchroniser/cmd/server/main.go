@@ -120,6 +120,12 @@ func findOKFRoot() string {
 
 func main() {
 	srv := newOKFServer()
+	if root := strings.TrimSpace(os.Getenv("SCOS_OKF_ROOT")); root != "" {
+		if err := prepareOKFStore(root, srv.okfRoot); err != nil {
+			log.Fatalf("prepare the OKF store at %s: %v", root, err)
+		}
+		srv.okfRoot = root
+	}
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		log.Fatal("DATABASE_URL is required")

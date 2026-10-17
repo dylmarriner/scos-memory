@@ -867,8 +867,13 @@ func TestGitMirrorPushesAndVerifiesEveryRef(t *testing.T) {
 		t.Fatalf("local-path mirror covered: %+v", plan.Items["remote_git_mirrors"])
 	}
 
-	// A broken remote is recorded as a failed run.
-	s.config.gitMirrorRemote = filepath.Join(t.TempDir(), "missing.git")
+	// A broken remote (here a plain file where the repository should be)
+	// is recorded as a failed run.
+	broken := filepath.Join(t.TempDir(), "not-a-repo.git")
+	if err := os.WriteFile(broken, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.config.gitMirrorRemote = broken
 	if run, err := s.runGitMirror(context.Background(), "t"); err != nil || run.Status != "failed" || !strings.Contains(run.Detail, "push --mirror failed") {
 		t.Fatalf("broken remote run = %+v %v", run, err)
 	}
@@ -964,5 +969,46 @@ func TestBackupIntervalFromEnv(t *testing.T) {
 		if got := backupIntervalFromEnv(); got != want {
 			t.Errorf("SCOS_BACKUP_INTERVAL=%q: got %v, want %v", raw, got, want)
 		}
+	}
+}
+
+func TestGitMirrorToANetworkMountedPathIsOffHost(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	repo, mount := t.TempDir(), t.TempDir()
+	runGit(t, repo, "init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "policy.md"), []byte("# policy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "policy.md")
+	runGit(t, repo, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-qm", "initial")
+	mountinfo := filepath.Join(t.TempDir(), "mountinfo")
+	lines := "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n" +
+		fmt.Sprintf("40 22 0:50 / %s rw,relatime shared:9 - fuse.sshfs root@backup-host:/srv/scos rw\n", mount)
+	if err := os.WriteFile(mountinfo, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := mountInfoPath
+	mountInfoPath = mountinfo
+	t.Cleanup(func() { mountInfoPath = prev })
+
+	remote := filepath.Join(mount, "okf.git")
+	t.Setenv("SCOS_OKF_GIT_REPO", repo)
+	t.Setenv("SCOS_OKF_GIT_MIRROR_REMOTE", remote)
+	s := newBackupServerWithDir(t.TempDir())
+	run, err := s.runGitMirror(context.Background(), "t")
+	if err != nil || run.Status != "verified" {
+		t.Fatalf("first mirror run must create the bare repository and verify: %+v %v", run, err)
+	}
+	if _, err := os.Stat(filepath.Join(remote, "HEAD")); err != nil {
+		t.Fatal("the bare mirror repository was not created")
+	}
+	item := s.evaluatePlan(context.Background(), time.Now()).Items["remote_git_mirrors"]
+	if !item.Covered {
+		t.Fatalf("a verified mirror on an sshfs mount is off-host: %+v", item)
+	}
+	if off, why := remoteIsOffHost(filepath.Join(t.TempDir(), "x.git")); off || !strings.Contains(why, "path on this host") {
+		t.Fatalf("a local path is not off-host: %v %q", off, why)
 	}
 }
