@@ -106,6 +106,18 @@ def gateway_headers():
     return h
 
 
+# Tool calls that do bounded but long work upstream (taking a backup,
+# running a restore drill); mcp-gateway gives them 30 minutes, so the bridge
+# must not give up first.
+LONG_TOOLS = {"scos_backup_start", "scos_restore_test_start"}
+
+
+def call_timeout(msg):
+    if msg.get("method") == "tools/call" and (msg.get("params") or {}).get("name") in LONG_TOOLS:
+        return 1800.0
+    return 30.0
+
+
 def relay(rpc_request, timeout=30.0):
     """POST one JSON-RPC message to mcp-gateway and return the decoded
     response, or a JSON-RPC error object on transport failure."""
@@ -153,7 +165,7 @@ for line in sys.stdin:
         continue
 
     is_notification = "id" not in msg
-    response = relay(msg)
+    response = relay(msg, timeout=call_timeout(msg))
 
     if response is None or is_notification:
         continue
