@@ -685,8 +685,6 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardGET(ctx, r, s.memoryGatewayURL+"/v1/turns")
 	case "scos_mg_turn_complete":
 		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/turns/"+stringArg(args, "turn_id")+"/complete", args)
-	case "scos_mg_operation_prepare":
-		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/operations", args)
 	case "scos_mg_outbox_status":
 		return s.forwardGET(ctx, r, s.memoryGatewayURL+"/v1/outbox/status")
 	case "scos_mg_outbox_dead_letters":
@@ -2033,14 +2031,6 @@ func governedTools() []map[string]any {
 			"content": strField("Final response content"),
 			"state":   objField("Task state to checkpoint"),
 		}, "turn_id", "content"),
-		tool("scos_mg_operation_prepare", "Prepare a governed tool operation for journalling", map[string]any{
-			"tool_name":             strField("Tool name"),
-			"tool_version":          strField("Tool version"),
-			"input":                 objField("Tool input"),
-			"expected_effects":      objField("Expected effects"),
-			"retry_policy":          objField("Retry policy"),
-			"reconciliation_method": strField("Reconciliation method"),
-		}, "tool_name"),
 		tool("scos_mg_outbox_status", "Get outbox delivery status", map[string]any{}),
 		tool("scos_mg_outbox_dead_letters", "List outbox dead letters", map[string]any{}),
 	)

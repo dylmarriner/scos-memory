@@ -112,7 +112,6 @@ func (s server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/turns/{turnID}/response", s.handleStartResponse)
 	mux.HandleFunc("GET /v1/turns", s.handleListTurns)
 	mux.HandleFunc("POST /v1/turns/{turnID}/complete", s.handleCompleteTurn)
-	mux.HandleFunc("POST /v1/operations", s.handlePrepareOperation)
 	mux.HandleFunc("GET /v1/outbox/status", s.handleOutboxStatus)
 	mux.HandleFunc("GET /v1/outbox/dead-letters", s.handleDeadLetters)
 	return httpmid.Recover(logger, "memory-gateway")(httpmid.RequestLogging(logger)(mux))
@@ -300,30 +299,6 @@ func (s server) handleStartResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.journal().startResponse(r.Context(), rc, r.PathValue("turnID"), r.Header.Get("Idempotency-Key"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusCreated, result)
-}
-
-func (s server) handlePrepareOperation(w http.ResponseWriter, r *http.Request) {
-	if s.db == nil {
-		writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "not_ready"})
-		return
-	}
-	rc, err := s.journalContext(r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-		return
-	}
-	var req prepareOperationRequest
-	defer r.Body.Close()
-	if err = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON or request too large"})
-		return
-	}
-	result, err := s.journal().prepareOperation(r.Context(), rc, r.Header.Get("Idempotency-Key"), req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

@@ -87,20 +87,6 @@ type listTurnsResponse struct {
 	Limit int          `json:"limit"`
 }
 
-type prepareOperationRequest struct {
-	ToolName             string         `json:"tool_name"`
-	ToolVersion          string         `json:"tool_version"`
-	Input                map[string]any `json:"input"`
-	ExpectedEffects      map[string]any `json:"expected_effects"`
-	RetryPolicy          map[string]any `json:"retry_policy"`
-	ReconciliationMethod string         `json:"reconciliation_method"`
-}
-
-type prepareOperationResponse struct {
-	OperationID string `json:"operation_id"`
-	Status      string `json:"status"`
-}
-
 func (s journalStore) listTurns(ctx context.Context, rc requestContext, limit int) (listTurnsResponse, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -147,80 +133,6 @@ func (s journalStore) listTurns(ctx context.Context, rc requestContext, limit in
 	}
 	if err = tx.Commit(); err != nil {
 		return listTurnsResponse{}, err
-	}
-	return result, nil
-}
-
-func (s journalStore) prepareOperation(ctx context.Context, rc requestContext, idempotencyKey string, req prepareOperationRequest) (prepareOperationResponse, error) {
-	if idempotencyKey == "" {
-		return prepareOperationResponse{}, fmt.Errorf("Idempotency-Key is required")
-	}
-	if strings.TrimSpace(req.ToolName) == "" || strings.TrimSpace(req.ToolVersion) == "" {
-		return prepareOperationResponse{}, fmt.Errorf("tool_name and tool_version are required")
-	}
-	requestJSON, err := json.Marshal(req.Input)
-	if err != nil {
-		return prepareOperationResponse{}, err
-	}
-	requestHash := fmt.Sprintf("%x", sha256Bytes(requestJSON))
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return prepareOperationResponse{}, err
-	}
-	defer tx.Rollback()
-	if err = setPrincipalContext(ctx, tx, rc); err != nil {
-		return prepareOperationResponse{}, err
-	}
-	var oldHash, oldResponse string
-	err = tx.QueryRowContext(ctx, `SELECT request_hash, COALESCE(response_reference,'') FROM idempotency_keys WHERE tenant_id=$1 AND principal_id=$2 AND key=$3`, rc.TenantID, rc.PrincipalID, idempotencyKey).Scan(&oldHash, &oldResponse)
-	if err == nil {
-		if oldHash != requestHash {
-			return prepareOperationResponse{}, fmt.Errorf("Idempotency-Key was already used with different input")
-		}
-		var result prepareOperationResponse
-		if json.Unmarshal([]byte(oldResponse), &result) != nil {
-			return prepareOperationResponse{}, fmt.Errorf("stored idempotency result is invalid")
-		}
-		return result, nil
-	}
-	if err != sql.ErrNoRows {
-		return prepareOperationResponse{}, err
-	}
-	operationID, err := newID()
-	if err != nil {
-		return prepareOperationResponse{}, err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO operations (id,tenant_id,tool_name,tool_version,request_hash,idempotency_key,status,request) VALUES ($1,$2,$3,$4,$5,$6,'prepared',$7)`, operationID, rc.TenantID, req.ToolName, req.ToolVersion, requestHash, idempotencyKey, requestJSON); err != nil {
-		return prepareOperationResponse{}, err
-	}
-	props, err := json.Marshal(map[string]any{"read_only": false, "externally_side_effecting": true, "reconcilable": req.ReconciliationMethod != ""})
-	if err != nil {
-		return prepareOperationResponse{}, err
-	}
-	expected, err := json.Marshal(req.ExpectedEffects)
-	if err != nil {
-		return prepareOperationResponse{}, err
-	}
-	retry, err := json.Marshal(req.RetryPolicy)
-	if err != nil {
-		return prepareOperationResponse{}, err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO tool_executions (id,operation_id,tool_identity,declared_properties,input_hash,expected_effects,retry_policy,reconciliation_method) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, operationID, operationID, req.ToolName+"@"+req.ToolVersion, props, requestHash, expected, retry, req.ReconciliationMethod); err != nil {
-		return prepareOperationResponse{}, err
-	}
-	if _, err = appendEvent(ctx, tx, s.validator, rc.TenantID, operationID, "operation.prepared", "operation/"+operationID, rc.PrincipalID, map[string]any{"tool_name": req.ToolName, "tool_version": req.ToolVersion}); err != nil {
-		return prepareOperationResponse{}, err
-	}
-	result := prepareOperationResponse{OperationID: operationID, Status: "prepared"}
-	resultJSON, err := json.Marshal(result)
-	if err != nil {
-		return prepareOperationResponse{}, err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO idempotency_keys (tenant_id,principal_id,key,operation_type,request_hash,status,response_reference,expires_at) VALUES ($1,$2,$3,'prepare_operation',$4,'succeeded',$5,now()+interval '24 hours')`, rc.TenantID, rc.PrincipalID, idempotencyKey, requestHash, string(resultJSON)); err != nil {
-		return prepareOperationResponse{}, err
-	}
-	if err = tx.Commit(); err != nil {
-		return prepareOperationResponse{}, err
 	}
 	return result, nil
 }

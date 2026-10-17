@@ -188,11 +188,20 @@ paths:
       responses:
         '200': {description: Current OKF documents discovered by the synchroniser}
   /v1/operations:
+    get:
+      operationId: listOperations
+      description: Tool governance's operations for the caller's tenant, newest first.
+      responses:
+        '200': {description: Governed operations and their states}
+  /v1/operations/prepare:
     post:
       operationId: prepareOperation
+      description: >-
+        Prepares a governed operation. The tool must be registered and
+        authorised, and the effective risk (the declared risk and the shared
+        classifier's grade of every planned command) must fit the tool's
+        declared properties; destructive work needs a recorded confirmation.
       parameters:
-        - $ref: '#/components/parameters/TenantID'
-        - $ref: '#/components/parameters/PrincipalID'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
@@ -201,12 +210,13 @@ paths:
             schema:
               $ref: '#/components/schemas/PrepareOperationRequest'
       responses:
-        '201':
-          description: Side-effecting operation durably prepared.
+        '200':
+          description: Operation prepared and authorised by tool governance.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/OperationReceipt'
+        '403': {description: Governance refused the operation}
   /v1/control/route:
     post:
       operationId: routeInteraction
@@ -817,20 +827,28 @@ components:
         checkpoint_id: {type: string, format: uuid}
     PrepareOperationRequest:
       type: object
-      required: [tool_name, tool_version, input]
-      properties:
-        tool_name: {type: string, minLength: 1}
-        tool_version: {type: string, minLength: 1}
-        input: {type: object}
-        expected_effects: {type: object}
-        retry_policy: {type: object}
-        reconciliation_method: {type: string}
-    OperationReceipt:
-      type: object
-      required: [operation_id, status]
+      required: [tool_name]
       properties:
         operation_id: {type: string, format: uuid}
-        status: {type: string, enum: [prepared]}
+        tool_name: {type: string, minLength: 1}
+        input: {type: object}
+        risk: {type: string, enum: [read, test, write, destructive]}
+        plan:
+          type: object
+          properties:
+            original_request: {type: string}
+            executed_request: {type: string}
+            risk_level: {type: string}
+            dry_run: {type: boolean}
+    OperationReceipt:
+      type: object
+      required: [operation_id, prepared, authorized]
+      properties:
+        operation_id: {type: string, format: uuid}
+        prepared: {type: boolean}
+        authorized: {type: boolean}
+        risk_level: {type: string}
+        confirmed: {type: boolean}
     BenchmarkCase:
       type: object
       required: [case_id, latency_ms]
