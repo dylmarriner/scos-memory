@@ -210,7 +210,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-scos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be provided by the deployment secret manager}
       SCOS_WAL_ARCHIVE_ENABLED: ${SCOS_WAL_ARCHIVE_ENABLED:-false}
-      SCOS_WAL_ARCHIVE_DESTINATION: ${SCOS_WAL_ARCHIVE_DESTINATION:-}
+      # The postgres-wal-archive volume mounted below; backup-manager reads the
+      # same path with the same default, so turning archiving on needs only
+      # SCOS_WAL_ARCHIVE_ENABLED=true.
+      SCOS_WAL_ARCHIVE_DESTINATION: "${SCOS_WAL_ARCHIVE_DESTINATION:-file:///var/lib/scos/wal-archive}"
     # Sized for the 4 GB budget described at the top of this file. Postgres
     # ships defaults for a 1990s workstation (shared_buffers=128MB) and then
     # sizes several structures off max_connections, so both matter here:
