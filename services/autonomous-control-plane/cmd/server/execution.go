@@ -123,12 +123,24 @@ func newLifecycle(req RouteRequest, decision RouteDecision, status string) lifec
 
 // executionState carries what earlier stages produced to later ones.
 type executionState struct {
-	confirmed           bool
-	memory, code        []byte
+	confirmed    bool
+	memory, code []byte
+	// context is the compiled, validated context the optimiser returned;
+	// the agent receives it in place of the raw retrieval results.
+	context             string
 	reply               agentReply
 	receipt             turnCommitReceipt
 	committed           bool
 	governedOperationID string
+}
+
+// agentContext is what the agent is given: the compiled context when the
+// optimiser produced a validated one, otherwise the raw retrieval results.
+func (s *executionState) agentContext() string {
+	if s.context != "" {
+		return s.context
+	}
+	return strings.Join([]string{string(s.memory), string(s.code)}, "\n\n")
 }
 
 type stageResult struct {
@@ -313,19 +325,38 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 		// Sensitivity and risk travel with the request so the optimiser can
 		// apply its §18 profile floor; a hardcoded "balanced" here would
 		// silently compress high-impact work.
-		if _, err := c.callService(ctx, step.System, "/v1/context/compile", map[string]any{
+		compiled, err := c.callService(ctx, step.System, "/v1/context/compile", map[string]any{
 			"input": strings.Join(parts, "\n\n"), "task_type": contextTaskType(decision),
 			"profile": "", "token_budget": 8000,
-			"risk_class": decision.RiskClass, "sensitivity": req.DataClassification,
-		}, req); err != nil {
+			"risk_class": decision.RiskClass, "sensitivity": dataClassificationFor(req),
+		}, req)
+		if err != nil {
 			return degradedStage(err.Error())
 		}
-		return completedStage("")
+		var out struct {
+			CompiledText string `json:"compiled_text"`
+			Validated    bool   `json:"validated"`
+			Capsule      struct {
+				Profile        string `json:"compression_profile"`
+				OriginalTokens int    `json:"original_token_count"`
+				CompiledTokens int    `json:"compiled_token_count"`
+			} `json:"capsule"`
+		}
+		if err := json.Unmarshal(compiled, &out); err != nil {
+			return degradedStage("compile response: " + err.Error())
+		}
+		// An unvalidated capsule is not handed to the agent: the agent gets
+		// the raw retrieval results and the stage reports why.
+		if !out.Validated || strings.TrimSpace(out.CompiledText) == "" {
+			return degradedStage("the compiled context did not pass the optimiser's validation; the agent receives the uncompiled context")
+		}
+		state.context = out.CompiledText
+		return completedStage(fmt.Sprintf("profile %s, %d of %d tokens", out.Capsule.Profile, out.Capsule.CompiledTokens, out.Capsule.OriginalTokens))
 	case "agent-router":
 		if err := c.dispatchHook(ctx, "on_before_model", map[string]any{"interaction_id": req.InteractionID, "input": req.Input}, req); err != nil {
 			return degradedStage("on_before_model hook: " + err.Error())
 		}
-		reply, err := c.dispatchAgent(ctx, agentRequest{InteractionID: req.InteractionID, TenantID: req.TenantID, PrincipalID: req.ActorID, AgentID: req.AgentID, Input: req.Input, Context: strings.Join([]string{string(state.memory), string(state.code)}, "\n\n")})
+		reply, err := c.dispatchAgent(ctx, agentRequest{InteractionID: req.InteractionID, TenantID: req.TenantID, PrincipalID: req.ActorID, AgentID: req.AgentID, Input: req.Input, Context: state.agentContext()})
 		if err != nil {
 			return degradedStage(err.Error())
 		}

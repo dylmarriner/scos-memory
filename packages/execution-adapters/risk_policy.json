@@ -1,105 +1,916 @@
 {
-  "description": "Shared shell-command risk policy (GOVERNANCE.md \u00a720.3). Loaded by packages/execution-adapters (Go, embedded) and scos_execution (Python). A command is destructive if it starts with a destructive prefix, or if it is composed (contains ; | & newline ` $( or )) and contains any destructive token; otherwise write or test by prefix; otherwise read.",
-  "composition_characters": ";|&\n`)$(",
-  "destructive_prefixes": [
-    "rm ",
-    "rmdir ",
-    "dd ",
+  "description": "Shared shell-command risk policy (GOVERNANCE.md \u00a720.3), loaded by packages/execution-adapters (Go, embedded) and scos_execution (Python); both implement the same algorithm and are checked against risk_cases.json. A command is split on unquoted ; | & && || newlines, command substitution and subshells; leading VAR=value assignments and the launchers below are unwrapped (a shell's -c script is classified in turn); the program is the basename of the first word, compared in lower case (flags keep their case). Each segment is graded by its program, and the command takes its most dangerous segment. Only programs listed as read (with read subcommands where listed) are read: any program not named here is write, so an unrecognised command always needs governance. Output redirection to a file is at least write, to a block device destructive.",
+  "version": 2,
+  "max_depth": 6,
+  "privileged_launchers": [
+    "sudo",
+    "doas",
+    "su",
+    "pkexec",
+    "runuser"
+  ],
+  "launchers": {
+    "env": {
+      "skip_flags_with_value": [
+        "-u",
+        "--unset",
+        "-C",
+        "--chdir",
+        "-S",
+        "--split-string"
+      ]
+    },
+    "nohup": {},
+    "nice": {
+      "skip_flags_with_value": [
+        "-n",
+        "--adjustment"
+      ]
+    },
+    "ionice": {
+      "skip_flags_with_value": [
+        "-c",
+        "--class",
+        "-n",
+        "--classdata",
+        "-p",
+        "--pid"
+      ]
+    },
+    "time": {},
+    "command": {},
+    "exec": {},
+    "builtin": {},
+    "stdbuf": {},
+    "setsid": {},
+    "chrt": {
+      "skip_positional": 1
+    },
+    "taskset": {
+      "skip_positional": 1
+    },
+    "timeout": {
+      "skip_flags_with_value": [
+        "-s",
+        "--signal",
+        "-k",
+        "--kill-after"
+      ],
+      "skip_positional": 1
+    },
+    "watch": {
+      "skip_flags_with_value": [
+        "-n",
+        "--interval",
+        "-d"
+      ]
+    },
+    "xargs": {
+      "skip_flags_with_value": [
+        "-a",
+        "--arg-file",
+        "-d",
+        "--delimiter",
+        "-E",
+        "-e",
+        "-I",
+        "-i",
+        "-L",
+        "-l",
+        "-n",
+        "--max-args",
+        "-P",
+        "--max-procs",
+        "-s",
+        "--max-chars"
+      ]
+    }
+  },
+  "shells": [
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "ash",
+    "busybox"
+  ],
+  "interpreters": [
+    "python",
+    "python2",
+    "python3",
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "ruby",
+    "perl",
+    "php",
+    "lua",
+    "tclsh",
+    "osascript",
+    "pwsh",
+    "powershell"
+  ],
+  "destructive_programs": [
+    "rm",
+    "rmdir",
+    "unlink",
+    "shred",
+    "wipefs",
+    "dd",
     "mkfs",
-    "format",
+    "mke2fs",
+    "mkswap",
     "fdisk",
-    "drop ",
+    "sfdisk",
+    "gdisk",
+    "parted",
+    "format",
     "truncate",
-    "> /dev/",
-    "chmod 0",
-    "chown ",
-    ":(){ :|:&};:",
-    "mv ",
-    "sudo ",
-    "su ",
-    "passwd",
-    "useradd",
-    "usermod",
-    "groupadd",
+    "mv",
+    "chown",
+    "chgrp",
+    "chattr",
+    "setfacl",
+    "kill",
+    "killall",
+    "pkill",
+    "skill",
     "shutdown",
     "reboot",
     "poweroff",
-    "init ",
-    "systemctl ",
-    "service ",
+    "halt",
+    "init",
+    "telinit",
+    "systemctl",
+    "service",
+    "launchctl",
+    "mount",
+    "umount",
+    "swapoff",
+    "swapon",
+    "insmod",
+    "rmmod",
+    "modprobe",
+    "sysctl",
+    "passwd",
+    "chpasswd",
+    "useradd",
+    "userdel",
+    "usermod",
+    "adduser",
+    "deluser",
+    "groupadd",
+    "groupdel",
+    "groupmod",
+    "visudo",
     "iptables",
-    "ufw ",
+    "ip6tables",
+    "nft",
+    "ufw",
+    "firewall-cmd",
     "tcpdump",
     "nmap",
-    "git push",
-    "git merge",
-    "git rebase",
-    "git reset",
-    "git commit",
-    "pip install",
-    "npm install -g",
-    "apt install",
-    "yum install",
-    "brew install",
-    "docker rm",
-    "docker rmi",
-    "docker stop",
-    "docker kill",
-    "kubectl delete",
-    "kubectl apply",
-    "helm install",
-    "helm delete",
-    "mysql ",
-    "psql ",
-    "post ",
-    "put ",
-    "delete ",
-    "patch "
+    "psql",
+    "mysql",
+    "mariadb",
+    "mongo",
+    "mongosh",
+    "redis-cli",
+    "sqlite3",
+    "dropdb",
+    "createdb",
+    "pg_restore",
+    "crontab",
+    "at",
+    "batch",
+    "systemd-run"
   ],
-  "write_prefixes": [
-    "touch ",
-    "mkdir ",
-    "cp ",
-    "ln ",
-    ">",
-    ">>",
-    "echo ",
-    "printf ",
-    "write",
+  "destructive_program_prefixes": [
+    "mkfs."
+  ],
+  "write_programs": [
+    "touch",
+    "mkdir",
+    "cp",
+    "ln",
+    "install",
     "tee",
-    "sed -i",
     "awk",
-    "git add",
-    "git checkout",
-    "git branch",
-    "git tag",
-    "npm install",
-    "npm run",
-    "yarn ",
-    "npx ",
-    "docker build",
-    "docker compose",
-    "docker-compose",
-    "make ",
-    "go build",
-    "go install",
-    "cargo build",
-    "terraform ",
-    "ansible-",
+    "gawk",
+    "mawk",
+    "patch",
+    "tar",
+    "zip",
+    "unzip",
+    "gzip",
+    "gunzip",
+    "bzip2",
+    "xz",
+    "7z",
+    "chmod",
+    "make",
+    "cmake",
+    "ninja",
+    "bazel",
+    "gradle",
+    "mvn",
+    "ant",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "ftp",
+    "npx",
+    "pnpx",
+    "yarn",
+    "pnpm",
+    "bundle",
+    "gem",
+    "composer",
+    "poetry",
+    "pipenv",
+    "uv",
+    "conda",
+    "ansible",
+    "ansible-playbook",
     "pulumi",
-    "ssh ",
-    "scp ",
-    "rsync"
+    "vagrant",
+    "packer"
   ],
-  "test_prefixes": [
-    "go test",
-    "python -m pytest",
-    "npm test",
-    "yarn test",
-    "cargo test",
-    "jest",
+  "read_programs": [
+    "ls",
+    "ll",
+    "dir",
+    "cat",
+    "tac",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "nl",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ag",
+    "ack",
+    "fd",
+    "locate",
+    "wc",
+    "sort",
+    "uniq",
+    "cut",
+    "paste",
+    "join",
+    "column",
+    "tr",
+    "fold",
+    "fmt",
+    "rev",
+    "diff",
+    "cmp",
+    "comm",
+    "file",
+    "stat",
+    "du",
+    "df",
+    "lsblk",
+    "blkid",
+    "pwd",
+    "echo",
+    "printf",
+    "which",
+    "whereis",
+    "type",
+    "uname",
+    "hostname",
+    "whoami",
+    "id",
+    "groups",
+    "date",
+    "cal",
+    "printenv",
+    "ps",
+    "pgrep",
+    "free",
+    "uptime",
+    "vmstat",
+    "iostat",
+    "lsof",
+    "ss",
+    "netstat",
+    "ip",
+    "ifconfig",
+    "ping",
+    "dig",
+    "nslookup",
+    "host",
+    "traceroute",
+    "jq",
+    "yq",
+    "tree",
+    "realpath",
+    "dirname",
+    "basename",
+    "readlink",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "sha512sum",
+    "b2sum",
+    "cksum",
+    "base64",
+    "xxd",
+    "od",
+    "hexdump",
+    "strings",
+    "true",
+    "false",
+    "test",
+    "[",
+    "sleep",
+    "seq",
+    "expr",
+    "bc",
+    "man",
+    "help",
+    "tldr",
+    "history",
+    "alias",
+    "env",
+    "nproc",
+    "lscpu",
+    "lsmod",
+    "dmesg",
+    "journalctl",
+    "top",
+    "htop"
+  ],
+  "test_programs": [
     "pytest",
+    "jest",
+    "vitest",
+    "mocha",
     "rspec",
-    "mocha"
+    "phpunit",
+    "tox",
+    "nox"
+  ],
+  "subcommands": {
+    "git": {
+      "read": [
+        "status",
+        "log",
+        "diff",
+        "show",
+        "blame",
+        "rev-parse",
+        "ls-files",
+        "ls-tree",
+        "ls-remote",
+        "grep",
+        "describe",
+        "shortlog",
+        "reflog",
+        "cat-file",
+        "rev-list",
+        "name-rev",
+        "merge-base",
+        "whatchanged",
+        "version",
+        "help",
+        "count-objects",
+        "check-ignore",
+        "for-each-ref",
+        "show-ref",
+        "var"
+      ],
+      "destructive": [
+        "push",
+        "merge",
+        "rebase",
+        "reset",
+        "commit",
+        "clean",
+        "filter-branch",
+        "filter-repo",
+        "gc",
+        "prune",
+        "rm",
+        "revert",
+        "cherry-pick",
+        "am",
+        "update-ref",
+        "reflog-expire"
+      ],
+      "destructive_flags": [
+        "--force",
+        "-f",
+        "-D",
+        "--hard",
+        "--delete",
+        "-d"
+      ],
+      "global_flags_with_value": [
+        "-C",
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--exec-path"
+      ]
+    },
+    "docker": {
+      "read": [
+        "ps",
+        "images",
+        "logs",
+        "inspect",
+        "version",
+        "info",
+        "stats",
+        "top",
+        "port",
+        "diff",
+        "history",
+        "events",
+        "search"
+      ],
+      "destructive": [
+        "rm",
+        "rmi",
+        "stop",
+        "kill",
+        "prune",
+        "system",
+        "volume",
+        "network",
+        "swarm",
+        "service",
+        "stack",
+        "secret",
+        "update",
+        "restart",
+        "pause"
+      ],
+      "nested": {
+        "compose": {
+          "read": [
+            "ps",
+            "logs",
+            "config",
+            "ls",
+            "images",
+            "top",
+            "version",
+            "port"
+          ],
+          "destructive": [
+            "down",
+            "rm",
+            "stop",
+            "kill",
+            "restart",
+            "pause"
+          ],
+          "global_flags_with_value": [
+            "-f",
+            "--file",
+            "-p",
+            "--project-name",
+            "--env-file",
+            "--profile"
+          ]
+        }
+      },
+      "global_flags_with_value": [
+        "-h",
+        "--host",
+        "--context",
+        "--config",
+        "-l",
+        "--log-level"
+      ]
+    },
+    "docker-compose": {
+      "read": [
+        "ps",
+        "logs",
+        "config",
+        "ls",
+        "images",
+        "top",
+        "version",
+        "port"
+      ],
+      "destructive": [
+        "down",
+        "rm",
+        "stop",
+        "kill",
+        "restart",
+        "pause"
+      ],
+      "global_flags_with_value": [
+        "-f",
+        "--file",
+        "-p",
+        "--project-name",
+        "--env-file",
+        "--profile"
+      ]
+    },
+    "podman": {
+      "read": [
+        "ps",
+        "images",
+        "logs",
+        "inspect",
+        "version",
+        "info",
+        "stats",
+        "top",
+        "port"
+      ],
+      "destructive": [
+        "rm",
+        "rmi",
+        "stop",
+        "kill",
+        "prune",
+        "system",
+        "volume",
+        "network",
+        "restart",
+        "pause"
+      ],
+      "global_flags_with_value": [
+        "--url",
+        "--connection",
+        "--root",
+        "--runroot"
+      ]
+    },
+    "kubectl": {
+      "read": [
+        "get",
+        "describe",
+        "logs",
+        "top",
+        "version",
+        "explain",
+        "api-resources",
+        "api-versions",
+        "cluster-info",
+        "auth"
+      ],
+      "destructive": [
+        "delete",
+        "apply",
+        "replace",
+        "patch",
+        "drain",
+        "cordon",
+        "uncordon",
+        "taint",
+        "scale",
+        "rollout",
+        "edit",
+        "exec",
+        "create",
+        "set",
+        "label",
+        "annotate",
+        "autoscale",
+        "expose",
+        "run",
+        "cp",
+        "attach",
+        "port-forward",
+        "debug"
+      ],
+      "global_flags_with_value": [
+        "-n",
+        "--namespace",
+        "--context",
+        "--kubeconfig",
+        "--cluster",
+        "--user",
+        "-s",
+        "--server",
+        "--token"
+      ]
+    },
+    "helm": {
+      "read": [
+        "list",
+        "ls",
+        "status",
+        "get",
+        "history",
+        "show",
+        "search",
+        "version",
+        "template",
+        "lint",
+        "env"
+      ],
+      "destructive": [
+        "install",
+        "upgrade",
+        "uninstall",
+        "delete",
+        "rollback"
+      ],
+      "global_flags_with_value": [
+        "-n",
+        "--namespace",
+        "--kube-context",
+        "--kubeconfig"
+      ]
+    },
+    "terraform": {
+      "read": [
+        "plan",
+        "validate",
+        "show",
+        "output",
+        "version",
+        "providers",
+        "graph"
+      ],
+      "destructive": [
+        "apply",
+        "destroy",
+        "import",
+        "taint",
+        "untaint",
+        "state",
+        "force-unlock"
+      ]
+    },
+    "go": {
+      "read": [
+        "version",
+        "env",
+        "list",
+        "vet",
+        "doc",
+        "help"
+      ],
+      "test": [
+        "test"
+      ]
+    },
+    "cargo": {
+      "read": [
+        "check",
+        "tree",
+        "metadata",
+        "search",
+        "version",
+        "clippy"
+      ],
+      "test": [
+        "test",
+        "bench"
+      ]
+    },
+    "npm": {
+      "read": [
+        "ls",
+        "list",
+        "view",
+        "info",
+        "outdated",
+        "audit",
+        "search",
+        "help",
+        "version",
+        "root",
+        "prefix"
+      ],
+      "test": [
+        "test",
+        "t"
+      ],
+      "destructive_flags": [
+        "-g",
+        "--global"
+      ]
+    },
+    "pip": {
+      "read": [
+        "list",
+        "show",
+        "freeze",
+        "check",
+        "search",
+        "help",
+        "--version"
+      ],
+      "destructive": [
+        "install",
+        "uninstall"
+      ]
+    },
+    "pip3": {
+      "read": [
+        "list",
+        "show",
+        "freeze",
+        "check",
+        "search",
+        "help",
+        "--version"
+      ],
+      "destructive": [
+        "install",
+        "uninstall"
+      ]
+    },
+    "apt": {
+      "read": [
+        "list",
+        "search",
+        "show",
+        "policy"
+      ],
+      "destructive": [
+        "install",
+        "remove",
+        "purge",
+        "autoremove",
+        "upgrade",
+        "full-upgrade",
+        "dist-upgrade"
+      ]
+    },
+    "apt-get": {
+      "read": [],
+      "destructive": [
+        "install",
+        "remove",
+        "purge",
+        "autoremove",
+        "upgrade",
+        "dist-upgrade"
+      ]
+    },
+    "yum": {
+      "read": [
+        "list",
+        "search",
+        "info"
+      ],
+      "destructive": [
+        "install",
+        "remove",
+        "erase",
+        "update",
+        "upgrade"
+      ]
+    },
+    "dnf": {
+      "read": [
+        "list",
+        "search",
+        "info"
+      ],
+      "destructive": [
+        "install",
+        "remove",
+        "erase",
+        "update",
+        "upgrade"
+      ]
+    },
+    "apk": {
+      "read": [
+        "info",
+        "search",
+        "list"
+      ],
+      "destructive": [
+        "add",
+        "del",
+        "upgrade"
+      ]
+    },
+    "brew": {
+      "read": [
+        "list",
+        "info",
+        "search",
+        "outdated",
+        "doctor"
+      ],
+      "destructive": [
+        "install",
+        "uninstall",
+        "remove",
+        "upgrade"
+      ]
+    }
+  },
+  "test_commands": [
+    "python -m pytest",
+    "python3 -m pytest",
+    "python -m unittest",
+    "python3 -m unittest",
+    "yarn test",
+    "pnpm test",
+    "make test"
+  ],
+  "http_clients": [
+    "curl",
+    "wget",
+    "http",
+    "https",
+    "httpie"
+  ],
+  "http_mutating_methods": [
+    "post",
+    "put",
+    "patch",
+    "delete"
+  ],
+  "http_data_flags": [
+    "-d",
+    "--data",
+    "--data-raw",
+    "--data-binary",
+    "--data-urlencode",
+    "--data-ascii",
+    "-F",
+    "--form",
+    "--form-string",
+    "-T",
+    "--upload-file",
+    "--json",
+    "--post-data",
+    "--post-file",
+    "--body-data",
+    "--body-file"
+  ],
+  "http_output_flags": [
+    "-o",
+    "--output",
+    "-O",
+    "--remote-name",
+    "--output-document"
+  ],
+  "find_destructive_flags": [
+    "-delete"
+  ],
+  "find_exec_flags": [
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir"
+  ],
+  "sed_inplace_flags": [
+    "-i",
+    "--in-place"
+  ],
+  "chmod_destructive_flags": [
+    "-R",
+    "--recursive"
+  ],
+  "block_device_prefixes": [
+    "/dev/sd",
+    "/dev/hd",
+    "/dev/vd",
+    "/dev/xvd",
+    "/dev/nvme",
+    "/dev/mmcblk",
+    "/dev/disk",
+    "/dev/md",
+    "/dev/dm-",
+    "/dev/mapper/"
+  ],
+  "harmless_redirect_targets": [
+    "/dev/null",
+    "/dev/stdout",
+    "/dev/stderr",
+    "/dev/tty"
+  ],
+  "fork_bomb_markers": [
+    ":(){"
+  ],
+  "interpreter_read_args": [
+    "--version",
+    "-v",
+    "-V",
+    "--help",
+    "-h"
+  ],
+  "http_method_flags": [
+    "-X",
+    "--request",
+    "--method"
   ]
 }

@@ -335,7 +335,19 @@ func TestControlStatusReadsPersistedLifecycle(t *testing.T) {
 	}
 }
 
+// compiledContextResponse is what context-optimisation answers a compile
+// with: a validated capsule and its compiled text.
+const compiledContextResponse = `{"compiled_text":"COMPILED CONTEXT","validated":true,"capsule":{"compression_profile":"conservative","original_token_count":40,"compiled_token_count":30}}`
+
 type testDispatcher struct{ content string }
+
+// capturingDispatcher records the request the agent was given.
+type capturingDispatcher struct{ got *agentRequest }
+
+func (d capturingDispatcher) Dispatch(_ context.Context, in agentRequest) (agentReply, error) {
+	*d.got = in
+	return agentReply{Content: "agent reply"}, nil
+}
 
 func (d testDispatcher) Dispatch(_ context.Context, _ agentRequest) (agentReply, error) {
 	return agentReply{Content: d.content}, nil

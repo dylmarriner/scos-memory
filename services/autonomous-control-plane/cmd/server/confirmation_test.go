@@ -59,6 +59,8 @@ func newFabric(t *testing.T) *fabric {
 			_, _ = w.Write([]byte(`{"repository_id":"repo-1"}`))
 		case "/v2/code/query":
 			_, _ = w.Write([]byte(`{"results":[],"retrieval_mode":"lexical","degraded_models":[]}`))
+		case "/v1/context/compile":
+			_, _ = w.Write([]byte(compiledContextResponse))
 		default:
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		}
@@ -614,5 +616,35 @@ func TestCommandOutcomeRequiresAnExitStatus(t *testing.T) {
 	}
 	if err := commandOutcome([]byte(`{"exit_status":0}`)); err != nil {
 		t.Fatalf("exit 0 is a success: %v", err)
+	}
+}
+
+func TestAgentReceivesTheCompiledContext(t *testing.T) {
+	f := newFabric(t)
+	plane := newConfirmPlane(t, f)
+	var got agentRequest
+	plane.dispatcher = capturingDispatcher{got: &got}
+	response, _ := controlCall(t, plane.handleIngest, "/v1/control/ingest", "actor",
+		`{"interaction_id":"ctx-1","input":"Explain the retry loop","agent_id":"agent","turn_id":"turn-1","repository_path":"/repo"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("ingest = %d; body=%s", response.Code, response.Body.String())
+	}
+	if got.Context != "COMPILED CONTEXT" {
+		t.Fatalf("agent context = %q, want the compiled text", got.Context)
+	}
+	// An unclassified request is compiled as confidential, as it is routed.
+	if s := f.body("/v1/context/compile")["sensitivity"]; s != "confidential" {
+		t.Fatalf("compile sensitivity = %v", s)
+	}
+}
+
+func TestUnvalidatedCompileFallsBackToRawContextAndDegrades(t *testing.T) {
+	state := &executionState{memory: []byte("M"), code: []byte("C")}
+	if got := state.agentContext(); got != "M\n\nC" {
+		t.Fatalf("raw context = %q", got)
+	}
+	state.context = "compiled"
+	if got := state.agentContext(); got != "compiled" {
+		t.Fatalf("compiled context = %q", got)
 	}
 }
