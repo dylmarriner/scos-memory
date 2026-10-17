@@ -573,6 +573,10 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/restore-tests/cadence")
 	case "scos_backup_plan":
 		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/plan")
+	case "scos_okf_mirror_status":
+		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/git-mirror")
+	case "scos_okf_mirror_push":
+		return s.forwardLongPOST(ctx, r, s.backupManagerURL+"/v1/git-mirror/push", args)
 	case "scos_backup_retention":
 		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/retention")
 
@@ -1780,6 +1784,8 @@ func governedTools() []map[string]any {
 		tool("scos_restore_cadence", "Check restore-test cadence status against §31 targets, each from passing drills of its own type", map[string]any{}),
 		tool("scos_backup_plan", "Get §31 backup coverage, each item derived from current evidence with the reason when not covered", map[string]any{}),
 		tool("scos_backup_retention", "Get the retention policy", map[string]any{}),
+		tool("scos_okf_mirror_status", "Get the last OKF repository mirror run: remote, refs pushed and verified, head, and why it failed if it did", map[string]any{}),
+		tool("scos_okf_mirror_push", "Mirror the OKF Git repository to the configured remote now (git push --mirror, then every ref read back with git ls-remote); requires backups:admin", map[string]any{}),
 	)
 
 	// ── compatibility-gateway ────────────────────────────────────────────

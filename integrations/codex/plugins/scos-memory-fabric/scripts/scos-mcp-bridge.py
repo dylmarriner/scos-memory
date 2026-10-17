@@ -98,7 +98,7 @@ def gateway_headers():
 # Tool calls that do bounded but long work upstream (taking a backup,
 # running a restore drill); mcp-gateway gives them 30 minutes, so the bridge
 # must not give up first.
-LONG_TOOLS = {"scos_backup_start", "scos_restore_test_start"}
+LONG_TOOLS = {"scos_backup_start", "scos_restore_test_start", "scos_okf_mirror_push"}
 
 
 def call_timeout(msg):
