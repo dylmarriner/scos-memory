@@ -130,3 +130,21 @@ func TestSSEStreamFormat(t *testing.T) {
 		t.Fatal("SSE format incorrect")
 	}
 }
+
+func TestContradictionIgnoresRefinementsAndUnrelatedNegations(t *testing.T) {
+	f := func(s string) *Fact { return &Fact{Content: s, Network: NetworkWorld, Scope: "global"} }
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"Deploys happen on Friday", "Deploys happen on Friday afternoon", false},
+		{"We use PostgreSQL for the journal", "We do not use PostgreSQL for the journal", true},
+		{"The API is a monolith", "The API is no longer a monolith", true},
+		{"The cache never stores secrets", "The cache runs on Redis", false},
+		{"deploys ships every tuesday", "deploys ships every thursday", true},
+	} {
+		if got := isContradictory(f(tc.a), f(tc.b)); got != tc.want {
+			t.Errorf("isContradictory(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

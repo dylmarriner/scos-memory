@@ -11,6 +11,7 @@ package release
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 // SourceSHA and BuildTime are stamped at image-build time via `go build
@@ -23,16 +24,23 @@ var (
 	BuildTime = "unknown"
 )
 
-// Info is what every service reports at GET /health/version.
+// startedAt is when this process started (package initialisation).
+var startedAt = time.Now().UTC()
+
+// Info is what every service reports at GET /health/version: the build it
+// runs and how long this process has been up.
 type Info struct {
-	Service   string `json:"service"`
-	SourceSHA string `json:"source_sha"`
-	BuildTime string `json:"build_time"`
+	Service       string `json:"service"`
+	SourceSHA     string `json:"source_sha"`
+	BuildTime     string `json:"build_time"`
+	StartedAt     string `json:"started_at"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
 }
 
 // Current returns this process's release info for the named service.
 func Current(service string) Info {
-	return Info{Service: service, SourceSHA: SourceSHA, BuildTime: BuildTime}
+	return Info{Service: service, SourceSHA: SourceSHA, BuildTime: BuildTime,
+		StartedAt: startedAt.Format(time.RFC3339), UptimeSeconds: int64(time.Since(startedAt).Seconds())}
 }
 
 // Handler serves Current(service) as JSON. Deploy tooling polls this on
@@ -40,9 +48,8 @@ func Current(service string) Info {
 // it just deployed, so a container left on a stale image is caught
 // immediately instead of being discovered later by accident.
 func Handler(service string) http.HandlerFunc {
-	info := Current(service)
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(info)
+		_ = json.NewEncoder(w).Encode(Current(service))
 	}
 }

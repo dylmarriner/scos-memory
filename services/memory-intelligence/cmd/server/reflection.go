@@ -467,6 +467,16 @@ func (s *engineServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 		if sn.facts, err = loadFacts(ctx, q, identity.TenantID, ""); err != nil {
 			return sn, err
 		}
+		// A scope reflects over the facts recorded at that scope only.
+		if req.Scope != "" {
+			scoped := sn.facts[:0]
+			for _, f := range sn.facts {
+				if f.Scope == req.Scope {
+					scoped = append(scoped, f)
+				}
+			}
+			sn.facts = scoped
+		}
 		if sn.beliefs, err = loadBeliefs(ctx, q, identity.TenantID); err != nil {
 			return sn, err
 		}
