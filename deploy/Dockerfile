@@ -83,8 +83,10 @@ FROM alpine:3.24
 ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
 # backup-manager execs pg_dump, pg_restore, createdb and dropdb; the client
 # major version matches the pgvector/pgvector:pg17 server so dumps load.
-# git is what backup-manager mirrors the OKF repository with.
-RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client git \
+# git is what backup-manager mirrors the OKF repository with. The postgresql17
+# server runs only inside backup-manager's point-in-time recovery drill, as a
+# scratch cluster on a private socket that replays archived WAL.
+RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client postgresql17 git \
     && pipx install graphifyy \
     # pip is only needed to install graphify. Every pip release vendors its
     # own urllib3/msgpack/setuptools copies, which carry HIGH CVEs, so pip

@@ -27,6 +27,8 @@ import (
 //	                         and compares every table and the schema
 //	                         catalog with the manifest; a table missing or
 //	                         extra on either side fails the drill.
+//	pitr_recovery            replays archived WAL onto a physical base
+//	                         backup up to a fresh restore point (pitr.go).
 const (
 	restoreTestTypeIntegrity = "automated_integrity"
 	restoreTestTypeMonthly   = "monthly_restore"
@@ -40,6 +42,15 @@ var drillTypes = map[string]bool{
 	restoreTestTypeIntegrity: true,
 	restoreTestTypeMonthly:   true,
 	restoreTestTypeQuarterly: true,
+	restoreTestTypePITR:      true,
+}
+
+// drillBackupType is the kind of backup a drill type restores.
+func drillBackupType(testType string) string {
+	if testType == restoreTestTypePITR {
+		return backupTypePhysical
+	}
+	return backupTypeLogical
 }
 
 // defaultKeyTables are the tables a monthly restore test validates when
@@ -53,6 +64,12 @@ var defaultKeyTables = []string{
 // runDrill executes one drill of testType against a loaded backup and
 // returns what it validated.
 func (s *backupServer) runDrill(ctx context.Context, testType string, m backupManifest, archive []byte) ([]string, error) {
+	if testType == restoreTestTypePITR {
+		return s.pitrDrill(ctx, m, archive)
+	}
+	if m.Type == backupTypePhysical {
+		return nil, fmt.Errorf("backup %s is a physical base backup; %s drills restore pg_dump archives", m.ID, testType)
+	}
 	if m.Fingerprint == nil {
 		return nil, fmt.Errorf("backup %s has no data fingerprint in its manifest, so its contents cannot be validated", m.ID)
 	}

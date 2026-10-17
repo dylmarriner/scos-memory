@@ -55,8 +55,15 @@ type BackupPlan struct {
 	EvaluatedAt      string              `json:"evaluated_at"`
 }
 
-// newestVerified returns the manifest of the newest backup that verifies.
+// newestVerified returns the manifest of the newest pg_dump backup that
+// verifies.
 func (s *backupServer) newestVerified(ctx context.Context) (backupManifest, error) {
+	return s.newestVerifiedOfType(ctx, backupTypeLogical)
+}
+
+// newestVerifiedOfType returns the manifest of the newest backup of typ that
+// verifies.
+func (s *backupServer) newestVerifiedOfType(ctx context.Context, typ string) (backupManifest, error) {
 	if s.provider == nil {
 		return backupManifest{}, s.providerErr
 	}
@@ -68,7 +75,7 @@ func (s *backupServer) newestVerified(ctx context.Context) (backupManifest, erro
 	var newestAt time.Time
 	for _, id := range ids {
 		m, _, _, err := s.provider.Load(ctx, id)
-		if err != nil {
+		if err != nil || m.Type != typ {
 			continue
 		}
 		at, err := time.Parse(time.RFC3339, m.CreatedAt)
@@ -180,9 +187,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 	}
 	plan.Items["postgresql_wal_archiving"] = wal
 
-	// Point-in-time recovery needs a physical base backup to replay WAL
-	// onto; this service takes logical ones.
-	plan.Items["pitr_configured"] = Coverage{Reason: "base backups are logical pg_dump archives, onto which WAL cannot be replayed; point-in-time recovery needs a physical base backup (pg_basebackup), which this service does not take"}
+	plan.Items["pitr_configured"] = s.pitrCoverage(ctx, wal, now)
 
 	// Remote Git mirror.
 	mirror := Coverage{}

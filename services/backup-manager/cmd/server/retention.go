@@ -43,6 +43,11 @@ type retentionBackup struct {
 	Taken   time.Time
 	Expired bool
 	Reason  string
+	// Type groups backups for retention: pg_dump and physical base backups
+	// each keep their own daily/weekly/monthly set. WALStart is where a
+	// physical backup's replay begins.
+	Type     string
+	WALStart string
 }
 
 // classifyRetention marks which backups the policy keeps, and why.
@@ -186,9 +191,25 @@ func (s *backupServer) applyRetention(ctx context.Context, actor string, now tim
 			res.Unverifiable = append(res.Unverifiable, id)
 			continue
 		}
-		verified = append(verified, retentionBackup{ID: id, Taken: taken})
+		verified = append(verified, retentionBackup{ID: id, Taken: taken, Type: m.Type, WALStart: m.WALStart})
 	}
-	for _, b := range classifyRetention(s.retention, verified, now) {
+	byType := map[string][]retentionBackup{}
+	for _, b := range verified {
+		byType[b.Type] = append(byType[b.Type], b)
+	}
+	var classified []retentionBackup
+	for _, group := range byType {
+		classified = append(classified, classifyRetention(s.retention, group, now)...)
+	}
+	// WAL from the start of the oldest physical backup that is kept must
+	// stay archived, or that backup can no longer be recovered.
+	keepWALFrom := ""
+	for _, b := range classified {
+		if !b.Expired && b.Type == backupTypePhysical && b.WALStart != "" && (keepWALFrom == "" || b.WALStart < keepWALFrom) {
+			keepWALFrom = b.WALStart
+		}
+	}
+	for _, b := range classified {
 		if !b.Expired {
 			res.Kept = append(res.Kept, b.ID)
 			continue
@@ -208,7 +229,7 @@ func (s *backupServer) applyRetention(ctx context.Context, actor string, now tim
 		}
 		res.Deleted = append(res.Deleted, b.ID)
 	}
-	res.WALDeleted, res.WALDetail = s.applyWALRetention(actor, now, &res)
+	res.WALDeleted, res.WALDetail = s.applyWALRetention(actor, now, &res, keepWALFrom)
 	sort.Strings(res.Kept)
 	return res, nil
 }
@@ -218,8 +239,10 @@ func (s *backupServer) applyRetention(ctx context.Context, actor string, now tim
 var walSegmentFile = regexp.MustCompile(`^[0-9A-F]{24}(\.partial|\.[0-9A-F]{8}\.backup)?$`)
 
 // applyWALRetention removes archived WAL older than the WAL window from a
-// file:// archive destination this service can reach.
-func (s *backupServer) applyWALRetention(actor string, now time.Time, res *RetentionResult) (int, string) {
+// file:// archive destination this service can reach. Segments at or after
+// keepFrom (the start of the oldest kept physical base backup) are kept
+// whatever their age: point-in-time recovery replays them.
+func (s *backupServer) applyWALRetention(actor string, now time.Time, res *RetentionResult, keepFrom string) (int, string) {
 	dir, err := walArchiveDir(s.config.walArchiveDestination)
 	if err != nil {
 		return 0, "WAL retention not applied: " + err.Error()
@@ -232,6 +255,9 @@ func (s *backupServer) applyWALRetention(actor string, now time.Time, res *Reten
 	deleted := 0
 	for _, e := range entries {
 		if e.IsDir() || !walSegmentFile.MatchString(e.Name()) {
+			continue
+		}
+		if keepFrom != "" && e.Name()[:24] >= keepFrom {
 			continue
 		}
 		info, err := e.Info()

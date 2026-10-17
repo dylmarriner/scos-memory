@@ -601,7 +601,7 @@ func TestWALRetentionExpiresOldSegmentsOnly(t *testing.T) {
 		}
 	}
 	res := RetentionResult{}
-	n, _ := s.applyWALRetention("t", time.Now(), &res)
+	n, _ := s.applyWALRetention("t", time.Now(), &res, "")
 	if n != 1 {
 		t.Fatalf("deleted %d WAL files", n)
 	}

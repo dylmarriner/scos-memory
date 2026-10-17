@@ -1765,13 +1765,13 @@ func governedTools() []map[string]any {
 	tools = append(tools,
 		tool("scos_backup_list", "List backups", map[string]any{}),
 		tool("scos_backup_get", "Get a backup by ID", map[string]any{"id": strField("Backup ID")}, "id"),
-		tool("scos_backup_start", "Take a base backup (pg_dump archive plus a data fingerprint of the same snapshot), verify it as stored, then apply retention; requires backups:admin", map[string]any{"type": strField("Backup type; only base_backup is implemented")}),
+		tool("scos_backup_start", "Take a backup, verify it as stored, then apply retention: base_backup (pg_dump archive plus a data fingerprint of the same snapshot) or physical_base_backup (pg_basebackup for point-in-time recovery; needs working WAL archiving); requires backups:admin", map[string]any{"type": strField("base_backup (default) or physical_base_backup")}),
 		tool("scos_backup_complete", "Re-verify a stored backup against its manifest (backups are completed when taken); requires backups:admin", map[string]any{
 			"backup_id": strField("Backup ID"),
 		}, "backup_id"),
 		tool("scos_restore_test_list", "List restore-test results", map[string]any{}),
-		tool("scos_restore_test_start", "Run a restore drill to completion: automated_integrity (archive and table of contents), monthly_restore (restore and validate key tables) or quarterly_full_recovery (restore and validate every table and the schema); requires backups:admin", map[string]any{
-			"test_type": strField("automated_integrity, monthly_restore or quarterly_full_recovery"),
+		tool("scos_restore_test_start", "Run a restore drill to completion: automated_integrity (archive and table of contents), monthly_restore (restore and validate key tables), quarterly_full_recovery (restore and validate every table and the schema) or pitr_recovery (replay archived WAL onto a physical base backup up to a fresh restore point); requires backups:admin", map[string]any{
+			"test_type": strField("automated_integrity, monthly_restore, quarterly_full_recovery or pitr_recovery"),
 			"backup_id": strField("Backup ID; defaults to the newest verified backup"),
 		}, "test_type"),
 		tool("scos_restore_test_complete", "Return a recorded restore drill result (drills run to completion when started); requires backups:admin", map[string]any{

@@ -260,6 +260,8 @@ services:
       - -c
       - wal_compression=on
       - -c
+      - hba_file=/etc/scos/postgres/pg_hba.conf
+      - -c
       - ssl=on
       - -c
       - ssl_cert_file=/etc/postgresql-tls/server.crt
@@ -311,6 +313,7 @@ services:
       - ../../database/migrations:/scos-database/migrations:ro
       - ../../database/policies:/scos-database/policies:ro
       - ../../scripts/scos-wal-archive:/usr/local/bin/scos-wal-archive:ro
+      - ./postgres/pg_hba.conf:/etc/scos/postgres/pg_hba.conf:ro
       - postgres-wal-archive:/var/lib/scos/wal-archive
       - postgres-tls-certs:/etc/postgresql-tls:ro
     depends_on:

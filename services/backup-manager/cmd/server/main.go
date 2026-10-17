@@ -96,7 +96,14 @@ type backupManifest struct {
 	Production   bool             `json:"production"`
 	CreatedAt    string           `json:"created_at"`
 	Fingerprint  *dataFingerprint `json:"fingerprint,omitempty"`
-	ManifestMAC  string           `json:"manifest_mac"`
+	// WAL range of a physical_base_backup: replay starts at WALStart and the
+	// backup is consistent once WALEnd has been replayed.
+	WALTimeline int    `json:"wal_timeline,omitempty"`
+	WALStartLSN string `json:"wal_start_lsn,omitempty"`
+	WALEndLSN   string `json:"wal_end_lsn,omitempty"`
+	WALStart    string `json:"wal_start,omitempty"`
+	WALEnd      string `json:"wal_end,omitempty"`
+	ManifestMAC string `json:"manifest_mac"`
 }
 
 // backupArtifact is the manifest file of a local development backup; the
@@ -410,7 +417,7 @@ func (s *backupServer) createBackup(ctx context.Context, actor string) (backupSt
 		return backupStartResponse{}, err
 	}
 	now := time.Now().UTC()
-	m := backupManifest{ID: s.nextID(), Type: "base_backup", Format: "postgresql-custom-v1", ContentHash: hashBytes(archive), SizeBytes: int64(len(archive)),
+	m := backupManifest{ID: s.nextID(), Type: backupTypeLogical, Format: "postgresql-custom-v1", ContentHash: hashBytes(archive), SizeBytes: int64(len(archive)),
 		Production: s.provider.Encrypted(), CreatedAt: now.Format(time.RFC3339), Fingerprint: &fp}
 	if _, err := s.provider.Store(ctx, m, archive); err != nil {
 		return backupStartResponse{}, fmt.Errorf("backup upload failed: %w", err)
@@ -445,16 +452,20 @@ func (s *backupServer) handleBackupStart(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Type != "" && req.Type != "base_backup" {
-		http.Error(w, "only base_backup is implemented; daily, weekly and monthly retention is derived from when each base backup was taken", http.StatusBadRequest)
+	if req.Type != "" && req.Type != backupTypeLogical && req.Type != backupTypePhysical {
+		http.Error(w, "type must be base_backup (pg_dump archive) or physical_base_backup (pg_basebackup for point-in-time recovery); daily, weekly and monthly retention is derived from when each backup was taken", http.StatusBadRequest)
 		return
 	}
 	if s.provider == nil {
 		s.unavailable(w)
 		return
 	}
+	take := s.createBackup
+	if req.Type == backupTypePhysical {
+		take = s.createPhysicalBackup
+	}
 	s.opMu.Lock()
-	resp, err := s.createBackup(context.WithoutCancel(r.Context()), actorOf(r))
+	resp, err := take(context.WithoutCancel(r.Context()), actorOf(r))
 	s.opMu.Unlock()
 	if err != nil {
 		var ue *unavailableError
@@ -542,7 +553,7 @@ func (s *backupServer) executeRestoreTest(ctx context.Context, testType, backupI
 			return s.providerErr
 		}
 		if t.BackupID == "" {
-			m, err := s.newestVerified(ctx)
+			m, err := s.newestVerifiedOfType(ctx, drillBackupType(testType))
 			if err != nil {
 				return err
 			}
@@ -593,7 +604,7 @@ func (s *backupServer) handleRestoreTestStart(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if !drillTypes[req.TestType] {
-		http.Error(w, "test_type must be automated_integrity, monthly_restore or quarterly_full_recovery", http.StatusBadRequest)
+		http.Error(w, "test_type must be automated_integrity, monthly_restore, quarterly_full_recovery or pitr_recovery", http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, s.executeRestoreTest(context.WithoutCancel(r.Context()), req.TestType, req.BackupID, actorOf(r)))
@@ -649,6 +660,7 @@ func restoreCadenceStatus(tests map[string]*RestoreTestResult, now time.Time) []
 		{restoreTestTypeIntegrity, integrityCadenceInterval},
 		{restoreTestTypeMonthly, monthlyCadenceInterval},
 		{restoreTestTypeQuarterly, quarterlyCadenceInterval},
+		{restoreTestTypePITR, pitrCadenceInterval},
 	}
 	result := make([]CadenceStatus, 0, len(cadences))
 	for _, c := range cadences {
@@ -762,6 +774,13 @@ func (s *backupServer) runScheduledWork(ctx context.Context) {
 			log.Printf("backup scheduler: base backup %s %s", resp.ID, resp.Status)
 		}
 	}
+	if s.physicalBackupDue(ctx, time.Now()) {
+		if resp, err := s.createPhysicalBackup(ctx, schedulerActor); err != nil {
+			log.Printf("backup scheduler: physical base backup failed: %v", err)
+		} else {
+			log.Printf("backup scheduler: physical base backup %s %s", resp.ID, resp.Status)
+		}
+	}
 	if res, err := s.applyRetention(ctx, schedulerActor, time.Now()); err != nil {
 		log.Printf("backup scheduler: retention not applied: %v", err)
 	} else if len(res.Deleted) > 0 || res.WALDeleted > 0 || len(res.Errors) > 0 {
@@ -789,8 +808,37 @@ func (s *backupServer) backupDue(ctx context.Context, now time.Time) bool {
 		log.Printf("backup scheduler: cannot list backups: %v", err)
 		return false
 	}
-	age, ok := newestVerifiedBackupAge(backups, now)
+	age, ok := newestVerifiedBackupAge(backupsOfType(backups, backupTypeLogical), now)
 	return !ok || age >= s.config.backupInterval
+}
+
+// physicalBackupDue reports whether a scheduled physical base backup should
+// be taken: scheduling is on, WAL archiving works (without it a physical
+// backup cannot be recovered), and the newest one is older than the interval.
+func (s *backupServer) physicalBackupDue(ctx context.Context, now time.Time) bool {
+	if s.provider == nil || s.config.backupInterval <= 0 {
+		return false
+	}
+	if _, _, err := s.walArchivingReady(ctx); err != nil {
+		return false
+	}
+	backups, err := s.listBackups(ctx)
+	if err != nil {
+		log.Printf("backup scheduler: cannot list backups: %v", err)
+		return false
+	}
+	age, ok := newestVerifiedBackupAge(backupsOfType(backups, backupTypePhysical), now)
+	return !ok || age >= s.config.backupInterval
+}
+
+func backupsOfType(backups []*BackupRecord, typ string) []*BackupRecord {
+	out := make([]*BackupRecord, 0, len(backups))
+	for _, b := range backups {
+		if b != nil && b.Type == typ {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func (s *backupServer) mirrorDue(now time.Time) bool {
@@ -806,6 +854,17 @@ func (s *backupServer) runDueRestoreTests(ctx context.Context) {
 	for _, c := range restoreCadenceStatus(s.restoreTestSnapshot(), time.Now().UTC()) {
 		if !c.Overdue {
 			continue
+		}
+		if c.TestType == restoreTestTypePITR {
+			// A deployment without WAL archiving or a physical base backup
+			// cannot run this drill; recording a failure every tick would
+			// only bury the plan's reason (pitr_configured) in noise.
+			if _, _, err := s.walArchivingReady(ctx); err != nil {
+				continue
+			}
+			if _, err := s.newestVerifiedOfType(ctx, backupTypePhysical); err != nil {
+				continue
+			}
 		}
 		result := s.executeRestoreTest(ctx, c.TestType, "", schedulerActor)
 		log.Printf("restore-test scheduler: ran overdue %s on %s -> %s", c.TestType, result.BackupID, result.Status)
