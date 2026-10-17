@@ -1040,10 +1040,6 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 	writeJSON(w, map[string]any{"ingested": len(entries)})
 }
 
-func (s *observabilityServer) handleTargets(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.targets)
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
