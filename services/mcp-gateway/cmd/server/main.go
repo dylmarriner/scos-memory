@@ -9,6 +9,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -279,7 +280,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return s.callHermesProvider(ctx, r, identity, tool, args)
 	case "scos_explain":
 		memoryID, _ := args["memory_id"].(string)
-		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+memoryID)
+		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+url.PathEscape(memoryID))
 	case "scos_user_model":
 		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/dashboard/user-model")
 	case "scos_memory_graph":
@@ -469,7 +470,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		if memoryID == "" {
 			return nil, fmt.Errorf("memory_id is required")
 		}
-		return s.forwardPATCH(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+memoryID, map[string]any{
+		return s.forwardPATCH(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+url.PathEscape(memoryID), map[string]any{
 			"content": stringArg(args, "value"),
 			"reason":  stringArg(args, "reason"),
 		})
@@ -497,7 +498,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		if memoryID == "" {
 			return nil, fmt.Errorf("memory_id is required")
 		}
-		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+memoryID+"/feedback", map[string]any{
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+url.PathEscape(memoryID)+"/feedback", map[string]any{
 			"feedback": stringArg(args, "feedback"),
 			"reason":   stringArg(args, "reason"),
 		})
@@ -506,7 +507,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		if memoryID == "" {
 			return nil, fmt.Errorf("memory_id is required")
 		}
-		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+memoryID+"/history")
+		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+url.PathEscape(memoryID)+"/history")
 	case "scos_forget_all":
 		confirm, _ := args["confirm"].(bool)
 		if !confirm {
@@ -522,7 +523,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_agent_list":
 		return s.forwardGET(ctx, r, s.agentRegistryURL+"/v1/agents")
 	case "scos_agent_get":
-		return s.forwardGET(ctx, r, s.agentRegistryURL+"/v1/agents/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.agentRegistryURL+"/v1/agents/"+pathArg(args, "id"))
 	case "scos_agent_register":
 		return s.forwardPOST(ctx, r, s.agentRegistryURL+"/v1/agents/register", args)
 	case "scos_agent_heartbeat":
@@ -530,7 +531,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_handoff_list":
 		return s.forwardGET(ctx, r, s.agentRegistryURL+"/v1/handoffs")
 	case "scos_handoff_get":
-		return s.forwardGET(ctx, r, s.agentRegistryURL+"/v1/handoffs/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.agentRegistryURL+"/v1/handoffs/"+pathArg(args, "id"))
 	case "scos_handoff_initiate":
 		return s.forwardPOST(ctx, r, s.agentRegistryURL+"/v1/handoffs/initiate", args)
 	case "scos_handoff_respond":
@@ -538,7 +539,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 
 	// ── autonomous-control-plane ─────────────────────────────────────────
 	case "scos_control_decision_get":
-		return s.forwardGET(ctx, r, s.controlPlaneURL+"/v1/control/decisions/"+stringArg(args, "interaction_id"))
+		return s.forwardGET(ctx, r, s.controlPlaneURL+"/v1/control/decisions/"+pathArg(args, "interaction_id"))
 	case "scos_control_route":
 		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/control/route", args)
 	case "scos_control_ingest":
@@ -550,7 +551,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_control_confirm":
 		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/control/confirm", args)
 	case "scos_control_status_get":
-		return s.forwardGET(ctx, r, s.controlPlaneURL+"/v1/control/status/"+stringArg(args, "interaction_id"))
+		return s.forwardGET(ctx, r, s.controlPlaneURL+"/v1/control/status/"+pathArg(args, "interaction_id"))
 	case "scos_control_trigger":
 		return s.forwardPOST(ctx, r, s.controlPlaneURL+"/v1/triggers", args)
 
@@ -558,7 +559,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_backup_list":
 		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/backups")
 	case "scos_backup_get":
-		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/backups/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/backups/"+pathArg(args, "id"))
 	case "scos_backup_start":
 		return s.forwardLongPOST(ctx, r, s.backupManagerURL+"/v1/backups/start", args)
 	case "scos_backup_complete":
@@ -584,7 +585,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_adapter_list":
 		return s.forwardGET(ctx, r, s.compatGatewayURL+"/v1/adapters")
 	case "scos_adapter_get":
-		return s.forwardGET(ctx, r, s.compatGatewayURL+"/v1/adapters/"+stringArg(args, "boundary"))
+		return s.forwardGET(ctx, r, s.compatGatewayURL+"/v1/adapters/"+pathArg(args, "boundary"))
 	case "scos_compat_status":
 		return s.forwardGET(ctx, r, s.compatGatewayURL+"/v1/compatibility")
 	case "scos_compat_agent_list":
@@ -592,7 +593,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_compat_agent_register":
 		return s.forwardPOST(ctx, r, s.compatGatewayURL+"/v1/agents", args)
 	case "scos_compat_agent_get":
-		return s.forwardGET(ctx, r, s.compatGatewayURL+"/v1/agents/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.compatGatewayURL+"/v1/agents/"+pathArg(args, "id"))
 	case "scos_envelope_get":
 		return s.forwardGET(ctx, r, s.compatGatewayURL+"/v1/envelope?"+queryFromArgs(args, "session_id"))
 	case "scos_envelope_set":
@@ -636,9 +637,9 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_exec_results_list":
 		return s.forwardGET(ctx, r, s.executionProxyURL+"/v1/results")
 	case "scos_exec_result_get":
-		return s.forwardGET(ctx, r, s.executionProxyURL+"/v1/results/"+stringArg(args, "operation_id"))
+		return s.forwardGET(ctx, r, s.executionProxyURL+"/v1/results/"+pathArg(args, "operation_id"))
 	case "scos_exec_restore":
-		return s.forwardGET(ctx, r, s.executionProxyURL+"/v1/proxy/restore/"+stringArg(args, "handle"))
+		return s.forwardGET(ctx, r, s.executionProxyURL+"/v1/proxy/restore/"+pathArg(args, "handle"))
 	case "scos_exec_explain":
 		return s.forwardPOST(ctx, r, s.executionProxyURL+"/v1/proxy/explain", args)
 	case "scos_exec_rules_list":
@@ -650,19 +651,19 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_extension_list":
 		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/extensions")
 	case "scos_extension_get":
-		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/extensions/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/extensions/"+pathArg(args, "id"))
 	case "scos_skill_list":
 		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/skills")
 	case "scos_skill_create":
 		return s.forwardPOST(ctx, r, s.extensionManagerURL+"/v1/skills", args)
 	case "scos_skill_get":
-		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/skills/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/skills/"+pathArg(args, "id"))
 	case "scos_hook_list":
 		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/hooks")
 	case "scos_hook_dispatch":
 		return s.forwardPOST(ctx, r, s.extensionManagerURL+"/v1/hooks/dispatch", args)
 	case "scos_hook_get":
-		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/hooks/"+stringArg(args, "event"))
+		return s.forwardGET(ctx, r, s.extensionManagerURL+"/v1/hooks/"+pathArg(args, "event"))
 	case "scos_extension_install":
 		return s.forwardPOST(ctx, r, s.extensionManagerURL+"/v1/install", args)
 	case "scos_extension_install_dryrun":
@@ -676,15 +677,15 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_mg_session_create":
 		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/sessions", args)
 	case "scos_mg_message_append":
-		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/sessions/"+stringArg(args, "session_id")+"/messages", args)
+		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/sessions/"+pathArg(args, "session_id")+"/messages", args)
 	case "scos_mg_chunk_append":
-		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/turns/"+stringArg(args, "turn_id")+"/chunks", args)
+		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/turns/"+pathArg(args, "turn_id")+"/chunks", args)
 	case "scos_mg_response_start":
-		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/turns/"+stringArg(args, "turn_id")+"/response", args)
+		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/turns/"+pathArg(args, "turn_id")+"/response", args)
 	case "scos_mg_turns_list":
 		return s.forwardGET(ctx, r, s.memoryGatewayURL+"/v1/turns")
 	case "scos_mg_turn_complete":
-		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/turns/"+stringArg(args, "turn_id")+"/complete", args)
+		return s.forwardPOST(ctx, r, s.memoryGatewayURL+"/v1/turns/"+pathArg(args, "turn_id")+"/complete", args)
 	case "scos_mg_outbox_status":
 		return s.forwardGET(ctx, r, s.memoryGatewayURL+"/v1/outbox/status")
 	case "scos_mg_outbox_dead_letters":
@@ -696,7 +697,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_okf_document_list":
 		return s.forwardGET(ctx, r, s.okfSynchroniserURL+"/v1/documents")
 	case "scos_okf_document_get":
-		return s.forwardGET(ctx, r, s.okfSynchroniserURL+"/v1/documents/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.okfSynchroniserURL+"/v1/documents/"+pathArg(args, "id"))
 	case "scos_okf_projections":
 		return s.forwardGET(ctx, r, s.okfSynchroniserURL+"/v1/projections")
 	case "scos_okf_divergence":
@@ -706,7 +707,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_okf_proposal_create":
 		return s.forwardPOST(ctx, r, s.okfSynchroniserURL+"/v1/proposals", args)
 	case "scos_okf_proposal_action":
-		return s.forwardPOST(ctx, r, s.okfSynchroniserURL+"/v1/proposals/"+stringArg(args, "id")+"/"+stringArg(args, "action"), args)
+		return s.forwardPOST(ctx, r, s.okfSynchroniserURL+"/v1/proposals/"+pathArg(args, "id")+"/"+pathArg(args, "action"), args)
 
 	// ── recovery-orchestrator ────────────────────────────────────────────
 	case "scos_recovery_start":
@@ -718,7 +719,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_recovery_status_list":
 		return s.forwardGET(ctx, r, s.recoveryOrchestratorURL+"/v1/recovery/status")
 	case "scos_recovery_status_get":
-		return s.forwardGET(ctx, r, s.recoveryOrchestratorURL+"/v1/recovery/status/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.recoveryOrchestratorURL+"/v1/recovery/status/"+pathArg(args, "id"))
 	case "scos_recovery_interrupted_turns":
 		return s.forwardGET(ctx, r, s.recoveryOrchestratorURL+"/v1/recovery/interrupted-turns")
 
@@ -738,7 +739,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_audit_list":
 		return s.forwardGET(ctx, r, s.securityGateURL+"/v1/audit")
 	case "scos_audit_get":
-		return s.forwardGET(ctx, r, s.securityGateURL+"/v1/audit/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.securityGateURL+"/v1/audit/"+pathArg(args, "id"))
 	case "scos_audit_record":
 		return s.forwardPOST(ctx, r, s.securityGateURL+"/v1/audit/record", args)
 	case "scos_secret_list":
@@ -746,13 +747,13 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_secret_create":
 		return s.forwardPOST(ctx, r, s.securityGateURL+"/v1/secrets", args)
 	case "scos_secret_get":
-		return s.forwardGET(ctx, r, s.securityGateURL+"/v1/secrets/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.securityGateURL+"/v1/secrets/"+pathArg(args, "id"))
 
 	// ── tool-governance ──────────────────────────────────────────────────
 	case "scos_tool_list":
 		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/tools")
 	case "scos_tool_get":
-		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/tools/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/tools/"+pathArg(args, "id"))
 	case "scos_tool_register":
 		return s.forwardPOST(ctx, r, s.toolGovernanceURL+"/v1/tools/register", args)
 	case "scos_tool_transition":
@@ -760,7 +761,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_operation_list":
 		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/operations")
 	case "scos_operation_get":
-		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/operations/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.toolGovernanceURL+"/v1/operations/"+pathArg(args, "id"))
 	case "scos_operation_start", "scos_operation_prepare":
 		// Governance acts on the confirmation recorded with the operation,
 		// and every service reaches it with the same control-plane
@@ -785,15 +786,15 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_credential_create":
 		return s.forwardPOST(ctx, r, s.credentialVaultURL+"/v1/credentials", args)
 	case "scos_credential_get":
-		return s.forwardGET(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.credentialVaultURL+"/v1/credentials/"+pathArg(args, "id"))
 	case "scos_credential_update":
-		return s.forwardWithBody(ctx, r, http.MethodPut, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"), args)
+		return s.forwardWithBody(ctx, r, http.MethodPut, s.credentialVaultURL+"/v1/credentials/"+pathArg(args, "id"), args)
 	case "scos_credential_delete":
-		return s.forwardDELETE(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id"))
+		return s.forwardDELETE(ctx, r, s.credentialVaultURL+"/v1/credentials/"+pathArg(args, "id"))
 	case "scos_credential_acl_grant":
-		return s.forwardPOST(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id")+"/acl", args)
+		return s.forwardPOST(ctx, r, s.credentialVaultURL+"/v1/credentials/"+pathArg(args, "id")+"/acl", args)
 	case "scos_credential_acl_revoke":
-		return s.forwardDELETE(ctx, r, s.credentialVaultURL+"/v1/credentials/"+stringArg(args, "id")+"/acl/"+stringArg(args, "principal_id")+"?permission="+url.QueryEscape(stringArg(args, "permission")))
+		return s.forwardDELETE(ctx, r, s.credentialVaultURL+"/v1/credentials/"+pathArg(args, "id")+"/acl/"+pathArg(args, "principal_id")+"?permission="+url.QueryEscape(stringArg(args, "permission")))
 
 	// ── transparency-projection ──────────────────────────────────────────
 	case "scos_transparency_snapshot":
@@ -811,7 +812,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_trace_ingest":
 		return s.forwardPOST(ctx, r, s.observabilityURL+"/v1/traces/ingest", args["spans"])
 	case "scos_trace_get":
-		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/traces/"+stringArg(args, "id"))
+		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/traces/"+pathArg(args, "id"))
 	case "scos_logs_list":
 		return s.forwardGET(ctx, r, s.observabilityURL+"/v1/logs")
 	case "scos_log_ingest":
@@ -924,6 +925,21 @@ func (s *gatewayServer) forwardLongPOST(ctx context.Context, r *http.Request, ur
 }
 
 func (s *gatewayServer) forwardPOSTWith(client *http.Client, ctx context.Context, r *http.Request, url string, args any) (any, error) {
+	// A caller makes a retry safe by passing the same idempotency_key
+	// argument; it selects the Idempotency-Key and is not forwarded.
+	callerKey := ""
+	if m, ok := args.(map[string]any); ok {
+		if k, ok := m["idempotency_key"].(string); ok && strings.TrimSpace(k) != "" {
+			callerKey = strings.TrimSpace(k)
+			stripped := make(map[string]any, len(m))
+			for key, v := range m {
+				if key != "idempotency_key" {
+					stripped[key] = v
+				}
+			}
+			args = stripped
+		}
+	}
 	encoded, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
@@ -935,13 +951,18 @@ func (s *gatewayServer) forwardPOSTWith(client *http.Client, ctx context.Context
 	req.Header.Set("Content-Type", "application/json")
 	s.copyIdentityHeaders(r, req)
 	if req.Header.Get("Idempotency-Key") == "" {
-		// MCP tool calls carry no per-call header channel the caller can set,
-		// so a caller can never supply Idempotency-Key even though several
-		// governed endpoints (memory-gateway, tool-governance) require it.
-		// Derive one deterministically from identity+url+body: identical
-		// retries of the same logical call collapse to the same key, while
-		// distinct calls (different args) still get distinct keys.
-		req.Header.Set("Idempotency-Key", deriveIdempotencyKey(req.Header.Get("Authorization"), url, encoded))
+		// MCP tool calls carry no header channel the caller can set, yet
+		// several governed endpoints (memory-gateway, tool-governance)
+		// require an Idempotency-Key. Each call is its own action -- two
+		// identical "append yes" or "create session" calls are two actions,
+		// not a retry -- so each gets a fresh key, unless the caller names
+		// the call with idempotency_key, in which case calls naming the same
+		// key (from the same identity, to the same endpoint) are one.
+		if callerKey != "" {
+			req.Header.Set("Idempotency-Key", deriveIdempotencyKey(req.Header.Get("Authorization"), url, []byte(callerKey)))
+		} else {
+			req.Header.Set("Idempotency-Key", freshIdempotencyKey())
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1075,6 +1096,12 @@ func isUUID(v string) bool {
 	return true
 }
 
+// pathArg is a string argument escaped for use as one URL path segment, so
+// an id like "x/acl/y" cannot reach a different route of the service.
+func pathArg(args map[string]any, key string) string {
+	return url.PathEscape(stringArg(args, key))
+}
+
 func stringArg(args map[string]any, key string) string {
 	value, _ := args[key].(string)
 	return value
@@ -1102,6 +1129,15 @@ func upstreamName(target string) string {
 type errUnreachable string
 
 func (e errUnreachable) Error() string { return string(e) }
+
+// freshIdempotencyKey is a random key for a call that names none.
+func freshIdempotencyKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("mcp-gateway:%d", time.Now().UnixNano())
+	}
+	return "mcp-gateway:" + hex.EncodeToString(b)
+}
 
 func deriveIdempotencyKey(authHeader, url string, body []byte) string {
 	h := sha256.New()
@@ -1540,6 +1576,7 @@ func governedTools() []map[string]any {
 					"content":      map[string]any{"type": "string", "description": "The fact, stated as a standalone sentence"},
 					"network":      map[string]any{"type": "string", "enum": []string{"world", "experience", "entity", "belief", "procedure", "negative"}, "description": "Kind of memory; defaults to world (facts about the world/project)"},
 					"namespace_id": map[string]any{"type": "string", "description": "Namespace to store in; defaults to the caller's own namespace"},
+					"scope":        map[string]any{"type": "string", "description": "Scope the fact holds in (e.g. global, project, session); defaults to global"},
 					"valid_until":  map[string]any{"type": "string", "description": "RFC 3339 time after which the fact no longer holds"},
 				},
 				"required": []string{"content"},
@@ -1578,6 +1615,7 @@ func governedTools() []map[string]any {
 				"properties": map[string]any{
 					"memory_id": map[string]any{"type": "string", "description": "Memory ID to correct"},
 					"value":     map[string]any{"type": "string", "description": "Corrected value"},
+					"reason":    map[string]any{"type": "string", "description": "Why the memory is being corrected; kept in its history"},
 				},
 				"required": []string{"memory_id", "value"},
 			},
@@ -1890,7 +1928,6 @@ func governedTools() []map[string]any {
 			"mode":              strField("bypass, observe, safe, adaptive, or forensic"),
 			"dry_run":           boolField("Dry run"),
 			"explain":           boolField("Include rule explanations"),
-			"confirmed":         boolField("Caller has confirmed execution"),
 		}, "command"),
 		tool("scos_exec_execute", "Execute a governed command through the execution proxy. Commands that need confirmation (destructive commands) are refused here: route them with scos_control_route and answer with scos_control_confirm", map[string]any{
 			"tenant_id":         strField("Tenant ID"),
@@ -2082,8 +2119,8 @@ func governedTools() []map[string]any {
 	// ── retrieval-orchestrator ───────────────────────────────────────────
 	tools = append(tools,
 		tool("scos_retrieve", "Retrieve and assemble relevant context for a query", map[string]any{
-			"tenant_id":       strField("Tenant ID"),
-			"principal_id":    strField("Principal ID"),
+			"tenant_id":       strField("Optional; taken from your credentials, and must match them if given"),
+			"principal_id":    strField("Optional; taken from your credentials, and must match them if given"),
 			"query":           strField("Retrieval query"),
 			"agent_id":        strField("Agent ID"),
 			"session_id":      strField("Session ID"),
@@ -2098,7 +2135,7 @@ func governedTools() []map[string]any {
 			"include_state":   boolField("Also include active working memories (task state)"),
 			"repository_id":   strField("Durable code repository UUID; with branch, enables P4 code retrieval alongside memory"),
 			"branch":          strField("Branch for durable code retrieval"),
-		}, "tenant_id", "principal_id", "query"),
+		}, "query"),
 	)
 
 	// ── security-gate ────────────────────────────────────────────────────
@@ -2115,11 +2152,11 @@ func governedTools() []map[string]any {
 			"action":              strField("Action"),
 			"resource":            strField("Resource"),
 			"data_class":          strField("Data classification: public, internal, confidential, restricted or secret"),
-			"tenant":              strField("Tenant"),
+			"tenant":              strField("Optional; taken from your credentials, and must match them if given"),
 			"delegated_authority": strField("Delegation UUID issued to the principal; the check is then decided against that delegation and its delegator's grants"),
 			"expires_at":          strField("RFC3339 time until which the permission is needed; the covering grant must remain valid that long"),
 			"trace_id":            strField("Trace ID"),
-		}, "principal", "action", "resource", "tenant"),
+		}, "principal", "action", "resource"),
 		tool("scos_permission_classify", "Classify content's data sensitivity", map[string]any{
 			"content": strField("Content to classify"),
 		}, "content"),
