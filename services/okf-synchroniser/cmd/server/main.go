@@ -9,6 +9,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -266,7 +267,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 		existing, exists := s.projections[file]
 		if !exists {
 			// New document
-			id := fmt.Sprintf("okf-%d", len(s.documents)+1)
+			id := newDocumentID()
 			doc := &OKFDocument{
 				ID:          id,
 				Path:        file,
@@ -297,7 +298,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 			// Changed - update
 			doc := s.documentForPath(file)
 			if doc == nil {
-				id := fmt.Sprintf("okf-%d", len(s.documents)+1)
+				id := newDocumentID()
 				doc = &OKFDocument{ID: id, Path: file, Category: category, ImportedAt: time.Now().UTC().Format(time.RFC3339)}
 				s.documents[id] = doc
 			}
@@ -316,7 +317,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 			existing.ImportStatus = "synced"
 			doc := s.documentForPath(file)
 			if doc == nil {
-				id := fmt.Sprintf("okf-%d", len(s.documents)+1)
+				id := newDocumentID()
 				doc = &OKFDocument{ID: id, Path: file, Category: category, Title: extractTitle(content), ContentHash: contentHash, CommitID: commitHash, Status: "current", ImportedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339), Content: string(content)}
 				s.documents[id] = doc
 			} else {
@@ -450,6 +451,15 @@ func (s *okfServer) documentForPath(path string) *OKFDocument {
 		}
 	}
 	return nil
+}
+
+// newDocumentID allocates an indexed document's id. It is random rather than
+// a count of the documents in memory, which can collide with rows already in
+// okf_concepts (the table's primary key).
+func newDocumentID() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return "okf-" + hex.EncodeToString(b)
 }
 
 // refreshIndexedContent reloads each indexed document's content from
