@@ -130,12 +130,14 @@ func takeBackup(t *testing.T, s *backupServer) backupStartResponse {
 	}
 	var resp struct {
 		BackupRecord
-		Retention *RetentionResult `json:"retention"`
+		Retention        *RetentionResult  `json:"retention"`
+		ObjectStore      *objectSyncResult `json:"object_store"`
+		ObjectStoreError string            `json:"object_store_error"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	return backupStartResponse{BackupRecord: &resp.BackupRecord, Retention: resp.Retention}
+	return backupStartResponse{BackupRecord: &resp.BackupRecord, Retention: resp.Retention, ObjectStore: resp.ObjectStore, ObjectStoreError: resp.ObjectStoreError}
 }
 
 // ── routes and scopes ────────────────────────────────────────────────────

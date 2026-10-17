@@ -230,12 +230,20 @@ func TestObjectStoreConfigurationIsChecked(t *testing.T) {
 func TestObjectStoreSyncCopiesVerifiesAndKeepsVersions(t *testing.T) {
 	s, fake, dest := objectStoreTestServer(t, "Enabled")
 	ctx := context.Background()
+	// Every backup is copied as soon as it is stored.
 	first := takeBackup(t, s)
+	if first.ObjectStoreError != "" || first.ObjectStore == nil || len(first.ObjectStore.Copied) != 1 || first.ObjectStore.Copied[0] != first.ID {
+		t.Fatalf("backup response object store = %+v, %q", first.ObjectStore, first.ObjectStoreError)
+	}
+	// A backup taken while the store was unreachable is copied by the next
+	// pass.
+	o := s.objectStore
+	s.objectStore = nil
 	second := takeBackup(t, s)
-
+	s.objectStore = o
 	res, err := s.syncObjectStore(ctx)
-	if err != nil || len(res.Copied) != 2 || len(res.Errors) != 0 {
-		t.Fatalf("first sync = %+v, %v", res, err)
+	if err != nil || len(res.Copied) != 1 || res.Copied[0] != second.ID || len(res.Errors) != 0 {
+		t.Fatalf("catch-up sync = %+v, %v", res, err)
 	}
 	if raw := fake.objects["backups/"+first.ID+".backup"][0].data; bytes.Contains(raw, []byte("PGDMP")) {
 		t.Fatal("the object-store copy must be the encrypted archive")
@@ -296,9 +304,6 @@ func TestObjectStoreCoverageIsEvidenceBased(t *testing.T) {
 
 	s, _, _ = objectStoreTestServer(t, "Suspended")
 	takeBackup(t, s)
-	if _, err := s.syncObjectStore(ctx); err != nil {
-		t.Fatal(err)
-	}
 	if c := s.objectStoreCoverage(ctx, base); c.Covered || !strings.Contains(c.Reason, "versioning") {
 		t.Fatalf("unversioned = %+v", c)
 	}
@@ -323,7 +328,10 @@ func TestObjectStoreCoverageIsEvidenceBased(t *testing.T) {
 func TestObjectStoreCoverageCoveredWithVerifiedCopy(t *testing.T) {
 	ctx := context.Background()
 	s, fake, _ := objectStoreTestServer(t, "Enabled")
+	o := s.objectStore
+	s.objectStore = nil
 	b := takeBackup(t, s)
+	s.objectStore = o
 	base := Coverage{Covered: true}
 
 	// The client still dials the loopback fake; the off-host check reads

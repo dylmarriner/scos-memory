@@ -431,6 +431,33 @@ type backupStartResponse struct {
 	// MigrationExport is the migration_export taken with a base backup.
 	MigrationExport      string `json:"migration_export,omitempty"`
 	MigrationExportError string `json:"migration_export_error,omitempty"`
+	// ObjectStore is the copy pass run once the backup is stored and
+	// retention applied, when an object store is configured.
+	ObjectStore      *objectSyncResult `json:"object_store,omitempty"`
+	ObjectStoreError string            `json:"object_store_error,omitempty"`
+}
+
+// finishBackup applies retention and copies the stored set to the object
+// store, recording both outcomes on the response.
+func (s *backupServer) finishBackup(ctx context.Context, actor string, resp *backupStartResponse) {
+	ret, err := s.applyRetention(ctx, actor, time.Now())
+	if err != nil {
+		resp.RetentionError = err.Error()
+	} else {
+		resp.Retention = &ret
+	}
+	if s.objectStore == nil {
+		return
+	}
+	res, err := s.syncObjectStore(ctx)
+	switch {
+	case err != nil:
+		resp.ObjectStoreError = err.Error()
+	case len(res.Errors) > 0:
+		resp.ObjectStore, resp.ObjectStoreError = &res, strings.Join(res.Errors, "; ")
+	default:
+		resp.ObjectStore = &res
+	}
 }
 
 // createBackup takes a base backup with its data fingerprint, stores it,
@@ -462,12 +489,7 @@ func (s *backupServer) createBackup(ctx context.Context, actor string) (backupSt
 			resp.MigrationExportError = err.Error()
 		}
 	}
-	ret, err := s.applyRetention(ctx, actor, time.Now())
-	if err != nil {
-		resp.RetentionError = err.Error()
-	} else {
-		resp.Retention = &ret
-	}
+	s.finishBackup(ctx, actor, &resp)
 	return resp, nil
 }
 

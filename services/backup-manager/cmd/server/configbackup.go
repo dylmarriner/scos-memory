@@ -192,12 +192,7 @@ func (s *backupServer) createConfigBackup(ctx context.Context, actor string) (ba
 		return backupStartResponse{}, fmt.Errorf("stored configuration backup %s does not unpack: %w", m.ID, err)
 	}
 	resp := backupStartResponse{BackupRecord: recordFromManifest(stored, location, time.Now())}
-	ret, err := s.applyRetention(ctx, actor, time.Now())
-	if err != nil {
-		resp.RetentionError = err.Error()
-	} else {
-		resp.Retention = &ret
-	}
+	s.finishBackup(ctx, actor, &resp)
 	return resp, nil
 }
 
