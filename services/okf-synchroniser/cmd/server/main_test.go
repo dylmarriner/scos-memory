@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewOKFServer(t *testing.T) {
@@ -332,4 +333,30 @@ func runGit(t *testing.T, root string, args ...string) []byte {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
 	return output
+}
+
+func TestSyncIntervalParsing(t *testing.T) {
+	for raw, want := range map[string]time.Duration{"": defaultSyncInterval, "0": 0, "90s": 90 * time.Second} {
+		if got, err := syncInterval(raw); err != nil || got != want {
+			t.Errorf("syncInterval(%q) = %v, %v; want %v", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"soon", "10ms", "-5m"} {
+		if _, err := syncInterval(raw); err == nil {
+			t.Errorf("syncInterval(%q) accepted", raw)
+		}
+	}
+}
+
+// The loop indexes a seeded store at startup without any request.
+func TestSyncLoopIndexesAtStartup(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "seed.md"), []byte("# Seed\\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &okfServer{documents: map[string]*OKFDocument{}, projections: map[string]*IndexProjection{}, okfRoot: root, statePath: filepath.Join(t.TempDir(), "p.json")}
+	s.runSyncLoop(context.Background(), 0)
+	if s.documentForPath(filepath.Join(root, "seed.md")) == nil {
+		t.Fatal("seeded document not indexed at startup")
+	}
 }

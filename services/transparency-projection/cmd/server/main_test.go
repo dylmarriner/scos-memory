@@ -269,3 +269,16 @@ func TestAccountsDisabledDeploymentAnswersPlainly(t *testing.T) {
 		t.Fatalf("deployment info with accounts = %s", res.Body.String())
 	}
 }
+
+func TestAnEmptyListViewIsAnEmptyList(t *testing.T) {
+	if got := string(normaliseListView("agents", json.RawMessage(" null\n"))); got != "[]" {
+		t.Fatalf("agents null = %s, want []", got)
+	}
+	if got := string(normaliseListView("agents", json.RawMessage(`[{"id":"a"}]`))); got != `[{"id":"a"}]` {
+		t.Fatalf("a populated list changed: %s", got)
+	}
+	// An object view keeps its null: only list views are normalised.
+	if got := string(normaliseListView("user_model", json.RawMessage("null"))); got != "null" {
+		t.Fatalf("object view null = %s", got)
+	}
+}

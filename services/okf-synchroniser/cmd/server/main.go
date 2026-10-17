@@ -117,6 +117,52 @@ func findOKFRoot() string {
 	return "okf"
 }
 
+// ── scheduled sync ───────────────────────────────────────────────────────
+
+// defaultSyncInterval is how often the store is re-synchronised into the
+// index when SCOS_OKF_SYNC_INTERVAL is not set.
+const defaultSyncInterval = 5 * time.Minute
+
+// syncInterval parses SCOS_OKF_SYNC_INTERVAL: a Go duration of at least a
+// second, or "0" to synchronise only at startup and on request.
+func syncInterval(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultSyncInterval, nil
+	}
+	if raw == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < time.Second {
+		return 0, fmt.Errorf("SCOS_OKF_SYNC_INTERVAL must be a duration of at least 1s, or 0: %q", raw)
+	}
+	return d, nil
+}
+
+// runSyncLoop synchronises the store into the index at startup -- a fresh
+// deployment's seeded documents are indexed without anyone calling
+// /v1/sync -- and then every interval, so commits made to the store
+// outside a merged proposal (a restored backup, a pulled mirror) reach the
+// index and divergence is detected without waiting for a request.
+func (s *okfServer) runSyncLoop(ctx context.Context, interval time.Duration) {
+	for {
+		result := s.synchronise(ctx)
+		if n := len(result.Added) + len(result.Updated) + len(result.Removed) + len(result.Diverged); n > 0 || len(result.Errors) > 0 {
+			log.Printf("okf sync: %d added, %d updated, %d removed, %d diverged, errors %v",
+				len(result.Added), len(result.Updated), len(result.Removed), len(result.Diverged), result.Errors)
+		}
+		if interval <= 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+	}
+}
+
 // ── main ─────────────────────────────────────────────────────────────────
 
 func main() {
@@ -157,6 +203,11 @@ func main() {
 	if err := srv.loadProposalsFromDB(context.Background()); err != nil {
 		log.Fatalf("load okf proposals: %v", err)
 	}
+	interval, err := syncInterval(os.Getenv("SCOS_OKF_SYNC_INTERVAL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	go srv.runSyncLoop(context.Background(), interval)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/version", release.Handler("okf-synchroniser"))

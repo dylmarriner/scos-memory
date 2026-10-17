@@ -5,6 +5,7 @@ import "github.com/dylmarriner/scos-memory/packages/release"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -129,7 +130,7 @@ func main() {
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
-			w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com")
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com")
 			http.ServeFile(w, r, dashboardPath)
 			return
 		}
@@ -268,7 +269,7 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 				errored[name] = fmt.Sprintf("upstream returned status %d", status)
 				return
 			}
-			result[name] = body
+			result[name] = normaliseListView(name, body)
 		}(name, view)
 	}
 	wg.Wait()
@@ -290,6 +291,24 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		"views":       result,
 		"unavailable": errored,
 	})
+}
+
+// listViews are the snapshot views whose upstream answers with a JSON list.
+var listViews = map[string]bool{
+	"agents": true, "tool_operations": true, "plugins": true, "skills": true, "hooks": true,
+	"code_intelligence": true, "routing": true, "recovery": true, "security": true,
+	"token_flow": true, "costs": true, "code_repos": true, "credentials": true, "okf_documents": true,
+}
+
+// normaliseListView turns a list view's JSON null -- how a Go service
+// encodes an empty, never-allocated slice -- into []. A dashboard reads null
+// as "not loaded yet" and would wait forever for a list that is simply
+// empty; an upstream that failed is reported in "unavailable", never here.
+func normaliseListView(name string, body json.RawMessage) json.RawMessage {
+	if listViews[name] && bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
+		return json.RawMessage("[]")
+	}
+	return body
 }
 
 func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
