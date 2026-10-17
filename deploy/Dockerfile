@@ -22,7 +22,7 @@
 # `toolchain go1.26.6`, and the build should always reproduce with the same
 # toolchain rather than whatever patch Docker Hub resolves the tag to on a
 # given day.
-FROM golang:1.27.1-alpine AS build
+FROM golang:1.27.2-alpine AS build
 # CGO_ENABLED=1: code-intelligence's Tree-sitter parsers (tree-sitter-go,
 # -javascript, -python, -rust, -typescript) are cgo bindings around the C
 # tree-sitter runtime -- built with CGO disabled their Go files are excluded
@@ -73,6 +73,23 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       go build -trimpath -ldflags="$ldflags" -o "/out/$svc" "./services/$svc/cmd/server"; \
     done
 
+# bws, the Bitwarden Secrets Manager CLI: backup-manager's secret-manager
+# recovery drill reads the backup key back from Bitwarden with it. Pinned to
+# a release, and checked against that release's published SHA-256 digests.
+FROM alpine:3.24 AS bws
+ARG TARGETARCH
+ARG BWS_VERSION=2.1.0
+RUN apk add --no-cache curl unzip \
+    && case "$TARGETARCH" in \
+        amd64) arch=x86_64; sum=f59ee150e42b82128d437087e9bac920053c6bfddcb960d20ce9386e5ac9bba6 ;; \
+        arm64) arch=aarch64; sum=eb0f1ae61d1c3b74244d2841233276e05c77e8be4da197ed90fc6248387005e1 ;; \
+        *) echo "no bws build for $TARGETARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSLo /tmp/bws.zip "https://github.com/bitwarden/sdk-sm/releases/download/bws-v${BWS_VERSION}/bws-${arch}-unknown-linux-musl-${BWS_VERSION}.zip" \
+    && echo "$sum  /tmp/bws.zip" | sha256sum -c - \
+    && unzip -o /tmp/bws.zip -d /tmp/bws \
+    && install -m 0755 /tmp/bws/bws /usr/local/bin/bws
+
 FROM alpine:3.24
 # graphify-provider execs the `graphify` CLI (PyPI `graphifyy`) as a
 # subprocess -- python3/pipx are added here, once, for the whole shared
@@ -83,9 +100,19 @@ FROM alpine:3.24
 ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
 # backup-manager execs pg_dump, pg_restore, createdb and dropdb; the client
 # major version matches the pgvector/pgvector:pg17 server so dumps load.
-# git is what backup-manager mirrors the OKF repository with.
-RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client git \
+# git is what backup-manager mirrors the OKF repository with. The postgresql17
+# server runs only inside backup-manager's point-in-time recovery drill, as a
+# scratch cluster on a private socket that replays archived WAL.
+RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client postgresql17 git \
     && pipx install graphifyy \
+    # pip is only needed to install graphify. Every pip release vendors its
+    # own urllib3/msgpack/setuptools copies, which carry HIGH CVEs, so pip
+    # and pipx leave the runtime image once graphify is in place; nothing
+    # in the services runs pip.
+    && rm -rf /opt/pipx/shared \
+    && apk del --no-cache pipx py3-pip \
+    && rm -rf /usr/lib/python3*/site-packages/pip /usr/lib/python3*/ensurepip/_bundled \
+    && test -x /usr/local/bin/graphify \
     && addgroup -S scos && adduser -S -G scos scos \
     # State directories for the services that keep local state. compose mounts
     # a named volume over each of these; Docker seeds a fresh named volume from
@@ -109,6 +136,7 @@ RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client 
     && chown -R scos:scos /var/lib/scos /var/lib/graphify-cache
 
 COPY --from=build /out/ /usr/local/bin/
+COPY --from=bws /usr/local/bin/bws /usr/local/bin/bws
 
 # transparency-projection serves this dashboard from disk.
 COPY dashboard/index.html /usr/local/share/scos/dashboard/index.html

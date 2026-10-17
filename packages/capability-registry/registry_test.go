@@ -246,6 +246,9 @@ func TestRecordOutcomeFeedsRanking(t *testing.T) {
 	if got.HistoricalSuccessRate >= 1.0 {
 		t.Fatalf("expected failures to lower success rate, got %v", got.HistoricalSuccessRate)
 	}
+	if err := reg.RecordOutcome("cap-a", true, 1.5); err == nil {
+		t.Fatal("out-of-range quality accepted")
+	}
 	if err := reg.RecordOutcome("missing", true, 1); err == nil {
 		t.Fatal("expected error recording outcome for unknown capability")
 	}

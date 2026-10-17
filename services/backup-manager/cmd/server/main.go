@@ -51,6 +51,7 @@ type backupConfig struct {
 	walMaxSegmentLag      uint64
 	mirrorMaxAge          time.Duration
 	mirrorInterval        time.Duration
+	backupInterval        time.Duration
 }
 
 type BackupRecord struct {
@@ -95,7 +96,22 @@ type backupManifest struct {
 	Production   bool             `json:"production"`
 	CreatedAt    string           `json:"created_at"`
 	Fingerprint  *dataFingerprint `json:"fingerprint,omitempty"`
-	ManifestMAC  string           `json:"manifest_mac"`
+	// WAL range of a physical_base_backup: replay starts at WALStart and the
+	// backup is consistent once WALEnd has been replayed.
+	WALTimeline int    `json:"wal_timeline,omitempty"`
+	WALStartLSN string `json:"wal_start_lsn,omitempty"`
+	WALEndLSN   string `json:"wal_end_lsn,omitempty"`
+	WALStart    string `json:"wal_start,omitempty"`
+	WALEnd      string `json:"wal_end,omitempty"`
+	// Files and Sources of a configuration_backup: every file with its
+	// digest, and the configured paths they were read from.
+	Files   []fileDigest `json:"files,omitempty"`
+	Sources []string     `json:"sources,omitempty"`
+	// ExportOf and AppliedMigrations of a migration_export: the base backup
+	// it accompanies and the versions applied when that was taken.
+	ExportOf          string   `json:"export_of,omitempty"`
+	AppliedMigrations []string `json:"applied_migrations,omitempty"`
+	ManifestMAC       string   `json:"manifest_mac"`
 }
 
 // backupArtifact is the manifest file of a local development backup; the
@@ -115,11 +131,19 @@ type backupServer struct {
 	// opMu serialises the operations that read or change the stored
 	// backups: taking one, expiring them, drilling them, mirroring.
 	opMu sync.Mutex
+	// walShipMu serialises shipping archived WAL to the provider.
+	walShipMu sync.Mutex
 	// dump, fingerprintTarget and walState reach PostgreSQL; tests replace
 	// them.
 	dump              func(ctx context.Context, databaseURL string) ([]byte, dataFingerprint, error)
 	fingerprintTarget func(ctx context.Context, databaseURL string, tables []string, withCatalog bool) (dataFingerprint, error)
 	walState          func(ctx context.Context) (walArchiverState, error)
+	applied           func(ctx context.Context, databaseURL string) ([]string, error)
+	// objectStore is the versioned bucket every encrypted backup is copied
+	// to; nil, with objectStoreErr saying why when it is misconfigured,
+	// when there is none.
+	objectStore    *objectStore
+	objectStoreErr error
 }
 
 var (
@@ -142,10 +166,12 @@ func newBackupServerWithDir(dir string) *backupServer {
 		backupDir:    dir, config: cfg,
 		retention:         RetentionPolicy{WALAndDaily: 35, Weekly: 12, Monthly: 12, OKFIndefinite: true},
 		dump:              snapshotDump,
+		applied:           appliedMigrations,
 		fingerprintTarget: fingerprintURL,
 	}
 	s.walState = func(ctx context.Context) (walArchiverState, error) { return readWALArchiver(ctx, s.config.databaseURL) }
 	s.provider, s.providerErr = newProvider(cfg, dir)
+	s.objectStore, s.objectStoreErr = objectStoreFromEnv()
 	// Restore test results must survive process restarts: the §31 monthly and
 	// quarterly cadence is only meaningful if "when did this last pass" is
 	// durable, not reset every time the service redeploys.
@@ -162,6 +188,17 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// backupIntervalFromEnv reads SCOS_BACKUP_INTERVAL: how long after the
+// newest verified backup the scheduler takes the next one. "0" turns
+// scheduled base backups off (operators can still POST /v1/backups/start);
+// unset or unparsable means daily.
+func backupIntervalFromEnv() time.Duration {
+	if strings.TrimSpace(os.Getenv("SCOS_BACKUP_INTERVAL")) == "0" {
+		return 0
+	}
+	return envDuration("SCOS_BACKUP_INTERVAL", 24*time.Hour)
 }
 
 func loadBackupConfig() backupConfig {
@@ -198,10 +235,14 @@ func loadBackupConfig() backupConfig {
 		walMaxSegmentLag:      lag,
 		mirrorMaxAge:          envDuration("SCOS_OKF_GIT_MIRROR_MAX_AGE", 48*time.Hour),
 		mirrorInterval:        envDuration("SCOS_OKF_GIT_MIRROR_INTERVAL", time.Hour),
+		backupInterval:        backupIntervalFromEnv(),
 	}
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		os.Exit(runCommand(os.Args[1:]))
+	}
 	s := newBackupServer()
 	mux := newBackupMux(s)
 	addr := os.Getenv("SCOS_BACKUP_MANAGER_HTTP_ADDR")
@@ -210,6 +251,11 @@ func main() {
 	}
 	if s.providerErr != nil {
 		log.Printf("backup manager: no backup provider: %v", s.providerErr)
+	}
+	if _, _, ok := s.walShipDir(); ok && s.config.walArchiveDestination != "" {
+		interval := envDuration("SCOS_WAL_SHIP_INTERVAL", 30*time.Second)
+		go s.runWALShipper(context.Background(), interval)
+		log.Printf("WAL shipper enabled: archived WAL is encrypted to the provider every %s", interval)
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED")), "true") {
 		interval := restoreSchedulerInterval()
@@ -382,6 +428,36 @@ type backupStartResponse struct {
 	*BackupRecord
 	Retention      *RetentionResult `json:"retention,omitempty"`
 	RetentionError string           `json:"retention_error,omitempty"`
+	// MigrationExport is the migration_export taken with a base backup.
+	MigrationExport      string `json:"migration_export,omitempty"`
+	MigrationExportError string `json:"migration_export_error,omitempty"`
+	// ObjectStore is the copy pass run once the backup is stored and
+	// retention applied, when an object store is configured.
+	ObjectStore      *objectSyncResult `json:"object_store,omitempty"`
+	ObjectStoreError string            `json:"object_store_error,omitempty"`
+}
+
+// finishBackup applies retention and copies the stored set to the object
+// store, recording both outcomes on the response.
+func (s *backupServer) finishBackup(ctx context.Context, actor string, resp *backupStartResponse) {
+	ret, err := s.applyRetention(ctx, actor, time.Now())
+	if err != nil {
+		resp.RetentionError = err.Error()
+	} else {
+		resp.Retention = &ret
+	}
+	if s.objectStore == nil {
+		return
+	}
+	res, err := s.syncObjectStore(ctx)
+	switch {
+	case err != nil:
+		resp.ObjectStoreError = err.Error()
+	case len(res.Errors) > 0:
+		resp.ObjectStore, resp.ObjectStoreError = &res, strings.Join(res.Errors, "; ")
+	default:
+		resp.ObjectStore = &res
+	}
 }
 
 // createBackup takes a base backup with its data fingerprint, stores it,
@@ -392,12 +468,20 @@ func (s *backupServer) createBackup(ctx context.Context, actor string) (backupSt
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
+	// The migration export records the versions applied when the dump was
+	// taken: they are read before the dump and checked unchanged after it.
+	exporting := len(migrationExportPaths()) > 0
+	var appliedBefore []string
+	var appliedErr error
+	if exporting {
+		appliedBefore, appliedErr = s.applied(ctx, s.config.databaseURL)
+	}
 	archive, fp, err := s.dump(ctx, s.config.databaseURL)
 	if err != nil {
 		return backupStartResponse{}, err
 	}
 	now := time.Now().UTC()
-	m := backupManifest{ID: s.nextID(), Type: "base_backup", Format: "postgresql-custom-v1", ContentHash: hashBytes(archive), SizeBytes: int64(len(archive)),
+	m := backupManifest{ID: s.nextID(), Type: backupTypeLogical, Format: "postgresql-custom-v1", ContentHash: hashBytes(archive), SizeBytes: int64(len(archive)),
 		Production: s.provider.Encrypted(), CreatedAt: now.Format(time.RFC3339), Fingerprint: &fp}
 	if _, err := s.provider.Store(ctx, m, archive); err != nil {
 		return backupStartResponse{}, fmt.Errorf("backup upload failed: %w", err)
@@ -407,12 +491,14 @@ func (s *backupServer) createBackup(ctx context.Context, actor string) (backupSt
 		return backupStartResponse{}, fmt.Errorf("stored backup %s does not verify: %w", m.ID, err)
 	}
 	resp := backupStartResponse{BackupRecord: recordFromManifest(stored, location, time.Now())}
-	ret, err := s.applyRetention(ctx, actor, time.Now())
-	if err != nil {
-		resp.RetentionError = err.Error()
-	} else {
-		resp.Retention = &ret
+	if exporting {
+		if appliedErr != nil {
+			resp.MigrationExportError = "read applied migrations: " + appliedErr.Error()
+		} else if resp.MigrationExport, err = s.exportMigrations(ctx, m.ID, appliedBefore); err != nil {
+			resp.MigrationExportError = err.Error()
+		}
 	}
+	s.finishBackup(ctx, actor, &resp)
 	return resp, nil
 }
 
@@ -432,16 +518,23 @@ func (s *backupServer) handleBackupStart(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Type != "" && req.Type != "base_backup" {
-		http.Error(w, "only base_backup is implemented; daily, weekly and monthly retention is derived from when each base backup was taken", http.StatusBadRequest)
+	if req.Type != "" && req.Type != backupTypeLogical && req.Type != backupTypePhysical && req.Type != backupTypeConfig {
+		http.Error(w, "type must be base_backup (pg_dump archive), physical_base_backup (pg_basebackup for point-in-time recovery) or configuration_backup (SCOS_CONFIG_BACKUP_PATHS); daily, weekly and monthly retention is derived from when each backup was taken", http.StatusBadRequest)
 		return
 	}
 	if s.provider == nil {
 		s.unavailable(w)
 		return
 	}
+	take := s.createBackup
+	switch req.Type {
+	case backupTypePhysical:
+		take = s.createPhysicalBackup
+	case backupTypeConfig:
+		take = s.createConfigBackup
+	}
 	s.opMu.Lock()
-	resp, err := s.createBackup(r.Context(), actorOf(r))
+	resp, err := take(context.WithoutCancel(r.Context()), actorOf(r))
 	s.opMu.Unlock()
 	if err != nil {
 		var ue *unavailableError
@@ -495,7 +588,7 @@ func (s *backupServer) handleRestoreRoute(w http.ResponseWriter, r *http.Request
 		s.unavailable(w)
 		return
 	}
-	t := s.executeRestoreTest(r.Context(), restoreTestTypeMonthly, id, actorOf(r))
+	t := s.executeRestoreTest(context.WithoutCancel(r.Context()), restoreTestTypeMonthly, id, actorOf(r))
 	if t.Status != "passed" {
 		writeJSONStatus(w, http.StatusUnprocessableEntity, t)
 		return
@@ -529,7 +622,7 @@ func (s *backupServer) executeRestoreTest(ctx context.Context, testType, backupI
 			return s.providerErr
 		}
 		if t.BackupID == "" {
-			m, err := s.newestVerified(ctx)
+			m, err := s.newestVerifiedOfType(ctx, drillBackupType(testType))
 			if err != nil {
 				return err
 			}
@@ -580,10 +673,10 @@ func (s *backupServer) handleRestoreTestStart(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if !drillTypes[req.TestType] {
-		http.Error(w, "test_type must be automated_integrity, monthly_restore or quarterly_full_recovery", http.StatusBadRequest)
+		http.Error(w, "test_type must be automated_integrity, monthly_restore, quarterly_full_recovery or pitr_recovery", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, s.executeRestoreTest(r.Context(), req.TestType, req.BackupID, actorOf(r)))
+	writeJSON(w, s.executeRestoreTest(context.WithoutCancel(r.Context()), req.TestType, req.BackupID, actorOf(r)))
 }
 
 // handleRestoreTestComplete returns a recorded drill result. Drills run to
@@ -636,6 +729,7 @@ func restoreCadenceStatus(tests map[string]*RestoreTestResult, now time.Time) []
 		{restoreTestTypeIntegrity, integrityCadenceInterval},
 		{restoreTestTypeMonthly, monthlyCadenceInterval},
 		{restoreTestTypeQuarterly, quarterlyCadenceInterval},
+		{restoreTestTypePITR, pitrCadenceInterval},
 	}
 	result := make([]CadenceStatus, 0, len(cadences))
 	for _, c := range cadences {
@@ -742,10 +836,39 @@ const schedulerActor = "backup-manager-scheduler"
 func (s *backupServer) runScheduledWork(ctx context.Context) {
 	s.runDueRestoreTests(ctx)
 	s.opMu.Lock()
+	if s.backupDue(ctx, time.Now()) {
+		if resp, err := s.createBackup(ctx, schedulerActor); err != nil {
+			log.Printf("backup scheduler: base backup failed: %v", err)
+		} else {
+			log.Printf("backup scheduler: base backup %s %s", resp.ID, resp.Status)
+		}
+	}
+	if s.configBackupDue(ctx, time.Now()) {
+		if resp, err := s.createConfigBackup(ctx, schedulerActor); err != nil {
+			log.Printf("backup scheduler: configuration backup failed: %v", err)
+		} else {
+			log.Printf("backup scheduler: configuration backup %s %s", resp.ID, resp.Status)
+		}
+	}
+	if s.physicalBackupDue(ctx, time.Now()) {
+		if resp, err := s.createPhysicalBackup(ctx, schedulerActor); err != nil {
+			log.Printf("backup scheduler: physical base backup failed: %v", err)
+		} else {
+			log.Printf("backup scheduler: physical base backup %s %s", resp.ID, resp.Status)
+		}
+	}
 	if res, err := s.applyRetention(ctx, schedulerActor, time.Now()); err != nil {
 		log.Printf("backup scheduler: retention not applied: %v", err)
 	} else if len(res.Deleted) > 0 || res.WALDeleted > 0 || len(res.Errors) > 0 {
 		log.Printf("backup scheduler: retention deleted %d backups and %d WAL segments (%d errors)", len(res.Deleted), res.WALDeleted, len(res.Errors))
+	}
+	s.logObjectSync(ctx)
+	if s.secretDrillDue(time.Now()) {
+		if d, err := s.secretRecoveryDrill(ctx); err != nil {
+			log.Printf("backup scheduler: secret-recovery drill not recorded: %v", err)
+		} else {
+			log.Printf("backup scheduler: secret-recovery drill %s: %s", d.Status, d.Detail)
+		}
 	}
 	if s.config.gitRepo != "" && s.config.gitMirrorRemote != "" && s.mirrorDue(time.Now()) {
 		if run, err := s.runGitMirror(ctx, schedulerActor); err != nil {
@@ -755,6 +878,51 @@ func (s *backupServer) runScheduledWork(ctx context.Context) {
 		}
 	}
 	s.opMu.Unlock()
+}
+
+// backupDue reports whether a scheduled base backup should be taken: a
+// provider is configured, scheduling is on, and the newest verified backup
+// is older than the interval (or there is none).
+func (s *backupServer) backupDue(ctx context.Context, now time.Time) bool {
+	if s.provider == nil || s.config.backupInterval <= 0 {
+		return false
+	}
+	backups, err := s.listBackups(ctx)
+	if err != nil {
+		log.Printf("backup scheduler: cannot list backups: %v", err)
+		return false
+	}
+	age, ok := newestVerifiedBackupAge(backupsOfType(backups, backupTypeLogical), now)
+	return !ok || age >= s.config.backupInterval
+}
+
+// physicalBackupDue reports whether a scheduled physical base backup should
+// be taken: scheduling is on, WAL archiving works (without it a physical
+// backup cannot be recovered), and the newest one is older than the interval.
+func (s *backupServer) physicalBackupDue(ctx context.Context, now time.Time) bool {
+	if s.provider == nil || s.config.backupInterval <= 0 {
+		return false
+	}
+	if _, _, err := s.walArchivingReady(ctx); err != nil {
+		return false
+	}
+	backups, err := s.listBackups(ctx)
+	if err != nil {
+		log.Printf("backup scheduler: cannot list backups: %v", err)
+		return false
+	}
+	age, ok := newestVerifiedBackupAge(backupsOfType(backups, backupTypePhysical), now)
+	return !ok || age >= s.config.backupInterval
+}
+
+func backupsOfType(backups []*BackupRecord, typ string) []*BackupRecord {
+	out := make([]*BackupRecord, 0, len(backups))
+	for _, b := range backups {
+		if b != nil && b.Type == typ {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func (s *backupServer) mirrorDue(now time.Time) bool {
@@ -770,6 +938,17 @@ func (s *backupServer) runDueRestoreTests(ctx context.Context) {
 	for _, c := range restoreCadenceStatus(s.restoreTestSnapshot(), time.Now().UTC()) {
 		if !c.Overdue {
 			continue
+		}
+		if c.TestType == restoreTestTypePITR {
+			// A deployment without WAL archiving or a physical base backup
+			// cannot run this drill; recording a failure every tick would
+			// only bury the plan's reason (pitr_configured) in noise.
+			if _, _, err := s.walArchivingReady(ctx); err != nil {
+				continue
+			}
+			if _, err := s.newestVerifiedOfType(ctx, backupTypePhysical); err != nil {
+				continue
+			}
 		}
 		result := s.executeRestoreTest(ctx, c.TestType, "", schedulerActor)
 		log.Printf("restore-test scheduler: ran overdue %s on %s -> %s", c.TestType, result.BackupID, result.Status)
@@ -878,6 +1057,12 @@ func backupKey() ([]byte, error) {
 	if v == "" {
 		return nil, fmt.Errorf("SCOS_BACKUP_ENCRYPTION_KEY is required for encrypted backups")
 	}
+	return parseBackupKey(v)
+}
+
+// parseBackupKey reads a 32-byte key written as hex, base64 or raw text.
+func parseBackupKey(v string) ([]byte, error) {
+	v = strings.TrimSpace(v)
 	if b, err := hex.DecodeString(v); err == nil && len(b) == 32 {
 		return b, nil
 	}

@@ -6,10 +6,12 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,9 +92,35 @@ func TestAccountFlowsThroughRestrictedRole(t *testing.T) {
 	if res.Code != http.StatusCreated {
 		t.Fatalf("create team: %d %s", res.Code, res.Body.String())
 	}
+	var team map[string]any
+	_ = json.Unmarshal(res.Body.Bytes(), &team)
+	teamID, _ := team["id"].(string)
 	res = call(s.teams, http.MethodGet, "/api/teams", "", cookie)
 	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "IT Team") {
 		t.Fatalf("list teams: %d %s", res.Code, res.Body.String())
+	}
+
+	// Concurrent invitations cannot over-allocate the team: with the owner
+	// holding one of its 50 places, exactly 49 of 60 simultaneous invitations
+	// are created and the rest are refused.
+	var wg sync.WaitGroup
+	codes := make(chan int, 60)
+	for i := 0; i < 60; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"team_id":%q,"email":"invitee-%d-%s","role":"member"}`, teamID, i, email)
+			codes <- call(s.inviteTeam, http.MethodPost, "/api/teams/invite", body, cookie).Code
+		}(i)
+	}
+	wg.Wait()
+	close(codes)
+	byCode := map[int]int{}
+	for code := range codes {
+		byCode[code]++
+	}
+	if byCode[http.StatusCreated] != 49 || byCode[http.StatusConflict] != 11 {
+		t.Fatalf("concurrent invitations to a 50-place team with one member: %v", byCode)
 	}
 
 	// The personal workspace stays the session identity after joining a team.

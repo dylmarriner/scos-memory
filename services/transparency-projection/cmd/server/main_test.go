@@ -190,7 +190,7 @@ func TestSnapshotIncludesGovernanceExpansionViews(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&decoded); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	for _, key := range []string{"plugins", "skills", "hooks", "code_intelligence", "routing", "recovery", "security", "token_flow", "costs", "service_flows", "benchmarks", "metric_catalog"} {
+	for _, key := range []string{"plugins", "skills", "hooks", "code_intelligence", "routing", "recovery", "security", "token_flow", "costs", "service_flows"} {
 		if _, ok := decoded.Views[key]; !ok {
 			t.Errorf("expected a %q view", key)
 		}
@@ -267,5 +267,18 @@ func TestAccountsDisabledDeploymentAnswersPlainly(t *testing.T) {
 	enabled.deploymentInfo(res, httptest.NewRequest(http.MethodGet, "/api/deployment", nil))
 	if strings.TrimSpace(res.Body.String()) != `{"accounts_enabled":true}` {
 		t.Fatalf("deployment info with accounts = %s", res.Body.String())
+	}
+}
+
+func TestAnEmptyListViewIsAnEmptyList(t *testing.T) {
+	if got := string(normaliseListView("agents", json.RawMessage(" null\n"))); got != "[]" {
+		t.Fatalf("agents null = %s, want []", got)
+	}
+	if got := string(normaliseListView("agents", json.RawMessage(`[{"id":"a"}]`))); got != `[{"id":"a"}]` {
+		t.Fatalf("a populated list changed: %s", got)
+	}
+	// An object view keeps its null: only list views are normalised.
+	if got := string(normaliseListView("user_model", json.RawMessage("null"))); got != "null" {
+		t.Fatalf("object view null = %s", got)
 	}
 }

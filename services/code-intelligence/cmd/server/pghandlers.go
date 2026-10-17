@@ -238,9 +238,13 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if req.ExtractorVersion == "" {
-		req.ExtractorVersion = "heuristic-v1"
+	// The snapshot is labelled with the extractor that actually parses it;
+	// a caller cannot name another.
+	if req.ExtractorVersion != "" && req.ExtractorVersion != extractorVersion {
+		http.Error(w, "extractor_version is set by the server ("+extractorVersion+"); omit it", http.StatusBadRequest)
+		return
 	}
+	req.ExtractorVersion = extractorVersion
 
 	// Ownership check: the repository must belong to the authenticated
 	// tenant. EnsureRepository is keyed on (tenant_id,

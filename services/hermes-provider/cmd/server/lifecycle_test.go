@@ -140,11 +140,16 @@ func TestPrefetchQueueIsConsumedInOrder(t *testing.T) {
 		t.Fatal("consumer was not woken by new work")
 	}
 
-	q.record(nil)
-	q.record(errors.New("retrieval down"))
-	stats := q.stats()
-	if stats["prefetch_warmed"].(int64) != 1 || stats["prefetch_failed"].(int64) != 1 || stats["prefetch_last_error"] != "retrieval down" {
+	q.record("tenant-a", nil)
+	q.record("tenant-a", errors.New("retrieval down for tenant-a session 42"))
+	stats := q.stats("tenant-a")
+	if stats["prefetch_warmed"].(int64) != 1 || stats["prefetch_failed"].(int64) != 1 || stats["prefetch_last_error"] != "retrieval down for tenant-a session 42" {
 		t.Fatalf("stats = %v", stats)
+	}
+	// Another tenant sees none of tenant-a's activity or error text.
+	other := q.stats("tenant-b")
+	if other["prefetch_warmed"].(int64) != 0 || other["prefetch_failed"].(int64) != 0 || other["prefetch_last_error"] != nil || other["queue_depth"] != 0 {
+		t.Fatalf("tenant-b sees tenant-a's prefetch status: %v", other)
 	}
 }
 

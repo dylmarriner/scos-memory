@@ -218,18 +218,16 @@ class RunCycleTests(unittest.TestCase):
         def rollback(self):
             self.rollbacks += 1
 
-    def test_cycle_resolves_space_once_and_does_not_globally_purge_history(self):
+    def test_cycle_resolves_space_once(self):
         conn = self.FakeConn()
         with patch.object(worker, "_ensure_embedding_space", return_value="space-1") as ensure:
             with patch.object(worker, "_activate_embedding_space", return_value=False) as activate:
                 with patch.object(worker, "_unembedded_batch", return_value=[]) as batch:
-                    with patch.object(worker, "_purge_stale_spaces", return_value=99) as purge:
-                        written = worker.run_cycle(conn)
+                    written = worker.run_cycle(conn)
         self.assertEqual(written, 0)
         ensure.assert_called_once()
         activate.assert_called_once_with(conn, "space-1")
         batch.assert_called_once_with(conn, worker.BATCH_SIZE, "space-1")
-        purge.assert_not_called()
         # The activation is committed on its own, then the empty batch.
         self.assertEqual(conn.commits, 2)
 
@@ -242,8 +240,22 @@ class RunCycleTests(unittest.TestCase):
             with patch.object(worker, "_activate_embedding_space", side_effect=lambda *_: order.append("activate")):
                 with patch.object(worker, "_unembedded_batch", return_value=[{"id": "v1", "content": "x"}]):
                     with patch.object(worker, "embed_texts", return_value=None):
-                        self.assertEqual(worker.run_cycle(conn), 0)
+                        with self.assertRaises(worker.EmbeddingUnavailable):
+                            worker.run_cycle(conn)
         self.assertEqual(order, ["activate", "commit", "rollback"])
+
+    def test_a_vector_of_the_wrong_dimension_fails_the_cycle(self):
+        conn = self.FakeConn()
+        stored = []
+        with patch.object(worker, "_ensure_embedding_space", return_value="space-1"):
+            with patch.object(worker, "_activate_embedding_space"):
+                with patch.object(worker, "_unembedded_batch", return_value=[{"id": "v1", "content": "x"}, {"id": "v2", "content": "y"}]):
+                    with patch.object(worker, "embed_texts", return_value=[[0.0] * worker.MODEL_DIMENSIONS, [0.0] * 3]):
+                        with patch.object(worker, "_replace_embedding", side_effect=lambda *a, **k: stored.append(k)):
+                            with self.assertRaises(worker.EmbeddingUnavailable):
+                                worker.run_cycle(conn)
+        self.assertEqual(stored, [])
+        self.assertEqual(conn.rollbacks, 1)
 
 
 class ActivationTests(unittest.TestCase):

@@ -319,7 +319,7 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Tool {
 	case "scos_status":
-		status := s.prefetchQueue.stats()
+		status := s.prefetchQueue.stats(identity.TenantID)
 		status["tool"] = req.Tool
 		status["provider"] = providerName
 		writeJSON(w, status)

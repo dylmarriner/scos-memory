@@ -314,8 +314,8 @@ func TestDeclaredPropertiesAreEnforced(t *testing.T) {
 	if status, body := f.serviceCall("/v1/operations/complete", map[string]any{"operation_id": settleID, "result": "unknown"}); status != http.StatusOK {
 		t.Fatalf("complete settler: %d %s", status, body)
 	}
-	if status, body := f.serviceCall("/v1/operations/reconcile", map[string]any{"operation_id": settleID, "result": "succeeded"}); status != http.StatusOK {
-		t.Fatalf("reconcilable tool: expected reconcile to succeed, got %d %s", status, body)
+	if status, body := f.serviceCall("/v1/operations/reconcile", map[string]any{"operation_id": settleID, "result": "succeeded"}); status != http.StatusOK || !bytes.Contains(body, []byte(`"state":"reconciled"`)) {
+		t.Fatalf("reconcilable tool: expected reconcile to reach reconciled, got %d %s", status, body)
 	}
 }
 

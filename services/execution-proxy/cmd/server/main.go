@@ -261,7 +261,10 @@ type CommandPlan struct {
 }
 
 type ExecutionResult struct {
-	OperationID           string        `json:"operation_id"`
+	OperationID string `json:"operation_id"`
+	// TenantID is the tenant that ran the command: only that tenant can
+	// list, read or restore the result.
+	TenantID              string        `json:"tenant_id,omitempty"`
 	OriginalRequest       string        `json:"original_request"`
 	ExecutedRequest       string        `json:"executed_request"`
 	WorkingDirectory      string        `json:"working_directory"`
@@ -323,6 +326,7 @@ type rawArtifact struct {
 type rawRestorationMetadata struct {
 	Handle string `json:"handle"`
 	Path   string `json:"path"`
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // RewriteRule rewrites a command before it runs (§20.3).
@@ -338,6 +342,9 @@ type rawRestorationMetadata struct {
 // original's did (colour codes removed, columns untruncated, nothing cut or
 // limited); safe mode applies only lossless rules.
 type RewriteRule struct {
+	// TenantID scopes a rule a tenant added to that tenant's commands; the
+	// built-in rules have none and apply to everyone.
+	TenantID    string `json:"tenant_id,omitempty"`
 	Pattern     string `json:"pattern"`
 	Replacement string `json:"replacement"`
 	Unless      string `json:"unless,omitempty"`
@@ -436,6 +443,9 @@ type persistedProxyState struct {
 	Results     map[string]*ExecutionResult       `json:"results"`
 	History     []*ExecutionResult                `json:"history"`
 	RawMetadata map[string]rawRestorationMetadata `json:"raw_metadata"`
+	// Rules are the rewrite rules tenants added; the built-in rules are
+	// registered at start-up and not stored.
+	Rules []RewriteRule `json:"rules,omitempty"`
 }
 
 func newProxyServerAt(storePath string) *proxyServer {
@@ -497,11 +507,35 @@ func (s *proxyServer) load() error {
 		return fmt.Errorf("decode execution proxy store: %w", err)
 	}
 	s.results, s.history, s.nextOp, s.rawMetadata = state.Results, state.History, state.NextOp, state.RawMetadata
+	return s.restoreRules(state.Rules)
+}
+
+// restoreRules recompiles the tenant rules a stored state holds.
+func (s *proxyServer) restoreRules(stored []RewriteRule) error {
+	for _, rule := range stored {
+		compiled, err := compileRewriteRule(rule)
+		if err != nil {
+			return fmt.Errorf("stored rewrite rule %q: %w", rule.Pattern, err)
+		}
+		compiled.TenantID = rule.TenantID
+		s.rewriteRules = append(s.rewriteRules, compiled)
+	}
 	return nil
 }
 
+// tenantRulesLocked returns the rules tenants added.
+func (s *proxyServer) tenantRulesLocked() []RewriteRule {
+	var out []RewriteRule
+	for _, rule := range s.rewriteRules {
+		if rule.TenantID != "" {
+			out = append(out, rule)
+		}
+	}
+	return out
+}
+
 func (s *proxyServer) snapshotLocked() persistedProxyState {
-	b, _ := json.Marshal(persistedProxyState{Version: 1, NextOp: s.nextOp, Results: s.results, History: s.history, RawMetadata: s.rawMetadata})
+	b, _ := json.Marshal(persistedProxyState{Version: 1, NextOp: s.nextOp, Results: s.results, History: s.history, RawMetadata: s.rawMetadata, Rules: s.tenantRulesLocked()})
 	var state persistedProxyState
 	_ = json.Unmarshal(b, &state)
 	return state
@@ -682,6 +716,9 @@ func main() {
 	}
 	if state.Results != nil {
 		srv.results, srv.history, srv.nextOp, srv.rawMetadata = state.Results, state.History, state.NextOp, state.RawMetadata
+		if err := srv.restoreRules(state.Rules); err != nil {
+			log.Fatal(err)
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -725,7 +762,7 @@ func validateExecutionRequest(r *http.Request, req ExecuteRequest) error {
 	if req.TenantID == "" || req.PrincipalID == "" {
 		return fmt.Errorf("tenant_id and principal_id are required")
 	}
-	tenant, principal := r.Header.Get("X-SCOS-Tenant-ID"), r.Header.Get("X-SCOS-Principal-ID")
+	tenant, principal := callerIdentity(r)
 	if tenant == "" || principal == "" {
 		return fmt.Errorf("authenticated tenant and principal headers are required")
 	}
@@ -783,8 +820,8 @@ func (s *proxyServer) handlePlan(w http.ResponseWriter, r *http.Request) {
 			Explanations []string      `json:"explanations"`
 		}{
 			Plan:         plan,
-			Rules:        s.applicableRules(req.Command),
-			Explanations: s.explainRules(req.Command),
+			Rules:        s.applicableRules(req.Command, req.TenantID),
+			Explanations: s.explainRules(req.Command, req.TenantID),
 		})
 		return
 	}
@@ -855,6 +892,7 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Build the result
 	result := &ExecutionResult{
 		OperationID:        opID,
+		TenantID:           req.TenantID,
 		OriginalRequest:    req.Command,
 		ExecutedRequest:    plan.ExecutedRequest,
 		WorkingDirectory:   req.WorkingDir,
@@ -869,7 +907,9 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		result.EndTime = time.Now().UTC().Format(time.RFC3339)
 		result.TransformationSummary = "dry-run: command was planned but not executed"
 		result.RestorationHandle = ""
-		if err := s.governance.Reconcile(r.Context(), governed, "succeeded", result); err != nil {
+		// Nothing ran, so governance records the operation as cancelled,
+		// not succeeded.
+		if err := s.governance.Reconcile(r.Context(), governed, "cancelled", result); err != nil {
 			http.Error(w, "governance reconciliation failed: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
@@ -912,7 +952,9 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		result.TransformationSummary = plan.RewriteSummary
 	}
 	result.RawContentHash = sha256Hex([]byte(stdout + "\x00" + stderr))
-	result.RestorationHandle = result.RawContentHash
+	// The handle names this tenant's copy: two tenants with the same output
+	// get different handles, so neither can restore the other's.
+	result.RestorationHandle = sha256Hex([]byte(req.TenantID + "\x00" + stdout + "\x00" + stderr))
 
 	// §32 proxy measures. Bypass rate is counted per execution so the share of
 	// unreduced passthroughs is visible; critical-diagnostic retention reports
@@ -932,7 +974,7 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	previous := s.snapshotLocked()
 	s.results[opID] = result
 	s.history = append(s.history, result)
-	s.rawMetadata[result.RestorationHandle] = rawRestorationMetadata{Handle: result.RestorationHandle, Path: filepath.Join(s.rawDir, result.RestorationHandle+".json")}
+	s.rawMetadata[result.RestorationHandle] = rawRestorationMetadata{Handle: result.RestorationHandle, Path: filepath.Join(s.rawDir, result.RestorationHandle+".json"), Tenant: req.TenantID}
 	if len(s.history) > 1000 {
 		s.history = s.history[len(s.history)-1000:]
 	}
@@ -986,10 +1028,11 @@ func (s *proxyServer) handleResult(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "operation_id required", http.StatusBadRequest)
 		return
 	}
+	tenant, _ := callerIdentity(r)
 	s.mu.RLock()
 	result, ok := s.results[opID]
 	s.mu.RUnlock()
-	if !ok {
+	if !ok || tenant == "" || result.TenantID != tenant {
 		http.Error(w, "result not found", http.StatusNotFound)
 		return
 	}
@@ -1010,6 +1053,14 @@ func (s *proxyServer) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(handle) != 64 || strings.Trim(handle, "0123456789abcdef") != "" {
 		http.Error(w, "invalid restoration handle", http.StatusBadRequest)
+		return
+	}
+	tenant, _ := callerIdentity(r)
+	s.mu.RLock()
+	meta, ok := s.rawMetadata[handle]
+	s.mu.RUnlock()
+	if !ok || tenant == "" || meta.Tenant != tenant {
+		http.Error(w, "raw result not found", http.StatusNotFound)
 		return
 	}
 	data, err := os.ReadFile(filepath.Join(s.rawDir, handle+".json"))
@@ -1053,36 +1104,49 @@ func (s *proxyServer) handleExplain(w http.ResponseWriter, r *http.Request) {
 		Explanations []string      `json:"explanations"`
 	}{
 		Plan:         plan,
-		Rules:        s.applicableRules(req.Command),
-		Explanations: s.explainRules(req.Command),
+		Rules:        s.applicableRules(req.Command, req.TenantID),
+		Explanations: s.explainRules(req.Command, req.TenantID),
 	})
 }
 
+// handleResults returns the caller's tenant's 50 most recent results.
 func (s *proxyServer) handleResults(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	// Return last 50 results
-	start := 0
-	if len(s.history) > 50 {
-		start = len(s.history) - 50
+	tenant, _ := callerIdentity(r)
+	if tenant == "" {
+		http.Error(w, "an authenticated tenant is required", http.StatusUnauthorized)
+		return
 	}
-	results := s.history[start:]
+	results := []*ExecutionResult{}
+	s.mu.RLock()
+	for i := len(s.history) - 1; i >= 0 && len(results) < 50; i-- {
+		if s.history[i].TenantID == tenant {
+			results = append(results, s.history[i])
+		}
+	}
 	s.mu.RUnlock()
+	for i, j := 0, len(results)-1; i < j; i, j = i+1, j-1 {
+		results[i], results[j] = results[j], results[i]
+	}
 	writeJSON(w, results)
 }
 
 // ── rules endpoint ───────────────────────────────────────────────────────
 
 func (s *proxyServer) handleRules(w http.ResponseWriter, r *http.Request) {
+	tenant, _ := callerIdentity(r)
+	if tenant == "" {
+		http.Error(w, "an authenticated tenant is required", http.StatusUnauthorized)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
-		rules := s.rewriteRules
-		s.mu.RUnlock()
-		writeJSON(w, rules)
+		writeJSON(w, s.rulesFor(tenant))
 
 	case http.MethodPost:
 		var rule RewriteRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&rule); err != nil {
 			http.Error(w, "invalid rule: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -1091,8 +1155,17 @@ func (s *proxyServer) handleRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid rule: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// A rule rewrites only the commands of the tenant that added it.
+		rule.TenantID = tenant
 		s.mu.Lock()
-		s.rewriteRules = append(s.rewriteRules, rule)
+		previous := s.rewriteRules
+		s.rewriteRules = append(append([]RewriteRule(nil), s.rewriteRules...), rule)
+		if err := s.persistLocked(); err != nil {
+			s.rewriteRules = previous
+			s.mu.Unlock()
+			http.Error(w, "persist rewrite rule: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		s.mu.Unlock()
 		writeJSON(w, rule)
 
@@ -1139,8 +1212,14 @@ func (s *proxyServer) planCommand(req ExecuteRequest) CommandPlan {
 
 	// 4. Apply rewrites if allowed by both the caller and the safety mode
 	if allowRewrite && modeAllowsRewrite && riskLevel != "destructive" {
-		rewritten, summary := s.applyRewritesForMode(req.Command, riskLevel, losslessOnly)
-		if rewritten != req.Command {
+		rewritten, summary := s.applyRewritesForMode(req.Command, req.TenantID, riskLevel, losslessOnly)
+		switch {
+		case rewritten == req.Command:
+		case riskRank(classifyRisk(rewritten)) > riskRank(riskLevel):
+			// A rewrite never makes a command more dangerous than the one
+			// governance graded: such a rewrite is dropped.
+			plan.RewriteSummary = "rewrite dropped: the rewritten command would be graded " + classifyRisk(rewritten) + ", above the requested " + riskLevel
+		default:
 			plan.ExecutedRequest = rewritten
 			plan.RewriteSummary = summary
 			plan.PassThrough = false
@@ -1157,23 +1236,58 @@ func (s *proxyServer) planCommand(req ExecuteRequest) CommandPlan {
 	return plan
 }
 
+// rulesFor returns the built-in rules and the rules tenant added, in the
+// order they were registered.
+func (s *proxyServer) rulesFor(tenant string) []RewriteRule {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []RewriteRule{}
+	for _, rule := range s.rewriteRules {
+		if rule.TenantID == "" || rule.TenantID == tenant {
+			out = append(out, rule)
+		}
+	}
+	return out
+}
+
+// callerIdentity is the authenticated tenant and principal: the verified
+// token's claims, or, for a service authenticated with the shared static
+// token (no claims), the identity headers the calling service sets.
+func callerIdentity(r *http.Request) (tenant, principal string) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		return claims.TenantID, claims.PrincipalID
+	}
+	return strings.TrimSpace(r.Header.Get("X-SCOS-Tenant-ID")), strings.TrimSpace(r.Header.Get("X-SCOS-Principal-ID"))
+}
+
+func riskRank(level string) int {
+	switch level {
+	case executionadapters.RiskRead:
+		return 0
+	case executionadapters.RiskTest:
+		return 1
+	case executionadapters.RiskWrite:
+		return 2
+	}
+	return 3
+}
+
 // classifyRisk is the shared command risk classifier (see
 // packages/execution-adapters), so the proxy and every client-side wrapper
 // grade a command identically.
 func classifyRisk(command string) string { return executionadapters.ClassifyRisk(command) }
 
+// applyRewrites applies the built-in rules, those every tenant shares.
 func (s *proxyServer) applyRewrites(command string, riskLevel string) (string, string) {
-	return s.applyRewritesForMode(command, riskLevel, false)
+	return s.applyRewritesForMode(command, "", riskLevel, false)
 }
 
 // applyRewritesForMode applies, in order, every registered rule that
 // applies to the command, each to the command as the rules before it left
 // it. losslessOnly restricts the rules to lossless ones: `safe` mode
 // (§20.9) SHALL apply only lossless and proven low-risk transforms.
-func (s *proxyServer) applyRewritesForMode(command string, riskLevel string, losslessOnly bool) (string, string) {
-	s.mu.RLock()
-	rules := s.rewriteRules
-	s.mu.RUnlock()
+func (s *proxyServer) applyRewritesForMode(command, tenant, riskLevel string, losslessOnly bool) (string, string) {
+	rules := s.rulesFor(tenant)
 
 	rewritten := command
 	var descriptions []string
@@ -1196,12 +1310,10 @@ func (s *proxyServer) applyRewritesForMode(command string, riskLevel string, los
 	return command, ""
 }
 
-func (s *proxyServer) applicableRules(command string) []RewriteRule {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *proxyServer) applicableRules(command, tenant string) []RewriteRule {
 	riskLevel := classifyRisk(command)
 	var matches []RewriteRule
-	for _, rule := range s.rewriteRules {
+	for _, rule := range s.rulesFor(tenant) {
 		if rule.appliesTo(command, riskLevel) {
 			matches = append(matches, rule)
 		}
@@ -1209,9 +1321,9 @@ func (s *proxyServer) applicableRules(command string) []RewriteRule {
 	return matches
 }
 
-func (s *proxyServer) explainRules(command string) []string {
+func (s *proxyServer) explainRules(command, tenant string) []string {
 	var explanations []string
-	for _, rule := range s.applicableRules(command) {
+	for _, rule := range s.applicableRules(command, tenant) {
 		kind := "lossy"
 		if rule.Lossless {
 			kind = "lossless"

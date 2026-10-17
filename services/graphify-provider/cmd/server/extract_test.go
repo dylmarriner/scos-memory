@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -125,4 +126,71 @@ func TestExtractIngestsTheGraphAsTheCallingPrincipal(t *testing.T) {
 	if w := call(http.MethodGet, "/v1/graphify/extract/"+job.ID, token("tenant-2"), ""); w.Code != http.StatusNotFound {
 		t.Fatalf("another tenant must not see the job, got %d", w.Code)
 	}
+}
+
+// A job outlives the caller's short-lived token: with the issuer secret it
+// signs fresh tokens carrying the caller's claims, never past its deadline;
+// without the secret it stops once the caller's token has expired.
+func TestJobCredentialRenewsWithinTheJobDeadline(t *testing.T) {
+	const secret = "issuer-secret"
+	start := time.Now()
+	clock := start
+	caller := auth.Claims{TenantID: "tenant-1", PrincipalID: "user-1", AgentID: "agent-1",
+		Scopes: []string{"memory:write"}, ExpiresAt: start.Add(2 * time.Minute)}
+	cred := newJobCredential(caller, "caller-token", secret, start.Add(12*time.Minute))
+	cred.now = func() time.Time { return clock }
+
+	// Within the caller token's life but inside the renew margin: renewed.
+	clock = start.Add(90 * time.Second)
+	renewed, err := cred.bearer()
+	if err != nil || renewed == "caller-token" {
+		t.Fatalf("expected a renewed token, got %q, %v", renewed, err)
+	}
+	if again, _ := cred.bearer(); again != renewed {
+		t.Fatal("a token far from expiry must be reused")
+	}
+	payload := decodeTokenClaims(t, renewed)
+	if payload["tenant_id"] != "tenant-1" || payload["principal_id"] != "user-1" || payload["agent_id"] != "agent-1" {
+		t.Fatalf("renewed token changed the caller's identity: %v", payload)
+	}
+	if scopes, _ := payload["scopes"].([]any); len(scopes) != 1 || scopes[0] != "memory:write" {
+		t.Fatalf("renewed token changed the caller's scopes: %v", payload["scopes"])
+	}
+
+	// Near the deadline the token expires at the deadline, not later.
+	clock = start.Add(10*time.Minute + 30*time.Second)
+	last, err := cred.bearer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp := int64(decodeTokenClaims(t, last)["exp"].(float64)); exp != start.Add(12*time.Minute).Unix() {
+		t.Fatalf("token outlives the job deadline: exp %d", exp)
+	}
+	clock = start.Add(12 * time.Minute)
+	if _, err := cred.bearer(); err == nil {
+		t.Fatal("a job past its deadline must not get a token")
+	}
+
+	unsigned := newJobCredential(caller, "caller-token", "", start.Add(12*time.Minute))
+	unsigned.now = func() time.Time { return clock }
+	if _, err := unsigned.bearer(); err != errCallerTokenExpired {
+		t.Fatalf("without a secret an expired caller token must stop the job, got %v", err)
+	}
+}
+
+func decodeTokenClaims(t *testing.T, token string) map[string]any {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("not a signed token: %q", token)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }

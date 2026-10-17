@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -398,6 +399,46 @@ func TestFlowsCountStreamsWithoutCountingTheirLifetimeAsLatency(t *testing.T) {
 	for _, n := range resp.Nodes {
 		if n.ID == "transparency-projection" && (n.Inbound != 3 || n.P95Ms == nil || *n.P95Ms > 30) {
 			t.Fatalf("node = %+v", n)
+		}
+	}
+}
+
+// Every list endpoint returns at most defaultListLimit entries unless asked
+// for more, never more than maxListLimit, and refuses a limit outside that.
+func TestListsAreBounded(t *testing.T) {
+	s := newTestServer(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	points := make([]MetricPoint, defaultListLimit+5)
+	for i := range points {
+		points[i] = MetricPoint{Name: "scos.test.value", Value: float64(i), Timestamp: now}
+	}
+	ingest(t, s, points)
+	s.mu.Lock()
+	for i := 0; i < defaultListLimit+5; i++ {
+		s.traces = append(s.traces, &TraceSpan{TraceID: "t", SpanID: strconv.Itoa(i), Service: "svc"})
+		s.logs = append(s.logs, &LogEntry{Service: "svc", Level: "info", Message: strconv.Itoa(i)})
+	}
+	s.mu.Unlock()
+	handlers := map[string]http.HandlerFunc{"/v1/metrics": s.handleMetrics, "/v1/traces": s.handleTraces, "/v1/logs": s.handleLogs}
+	for path, handler := range handlers {
+		w := httptest.NewRecorder()
+		handler(w, httptest.NewRequest(http.MethodGet, path, nil))
+		var got []json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got) != defaultListLimit {
+			t.Fatalf("%s returned %d entries (%v), want %d", path, len(got), err, defaultListLimit)
+		}
+		w = httptest.NewRecorder()
+		handler(w, httptest.NewRequest(http.MethodGet, path+"?limit=3", nil))
+		_ = json.Unmarshal(w.Body.Bytes(), &got)
+		if len(got) != 3 {
+			t.Fatalf("%s?limit=3 returned %d entries", path, len(got))
+		}
+		for _, bad := range []string{"0", "1001", "x"} {
+			w = httptest.NewRecorder()
+			handler(w, httptest.NewRequest(http.MethodGet, path+"?limit="+bad, nil))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%s?limit=%s answered %d, want 400", path, bad, w.Code)
+			}
 		}
 	}
 }

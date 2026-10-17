@@ -41,7 +41,16 @@ var serviceMetrics = telemetry.FromEnvironment("memory-intelligence")
 // fallbacks when it is nil rather than requiring it at startup.
 var llmClient = llmclient.FromEnvironment(nil)
 
-const version = "0.1.0"
+// buildVersion is the build this process runs, as every service reports it
+// at /health/version: the commit it was built from, shortened like the
+// peers' entries in the system map ("unknown" for a local build).
+func buildVersion() string {
+	v := release.SourceSHA
+	if len(v) > 12 {
+		v = v[:12]
+	}
+	return v
+}
 
 // ── Memory network types (§25.2) ────────────────────────────────────────
 
@@ -88,6 +97,9 @@ type Fact struct {
 	Inferred             bool     `json:"inferred"`
 	Derivation           string   `json:"derivation,omitempty"`
 	Revision             int      `json:"revision"`
+	// Sensitivity is the class to store the fact at (default internal);
+	// content the secret scanner flags is stored secret whatever it says.
+	Sensitivity string `json:"sensitivity,omitempty"`
 
 	// Identity/placement fields. These carry no meaning in the historical
 	// in-memory shape but are required to satisfy the relational schema's
@@ -214,10 +226,6 @@ type engineServer struct {
 	okfAuthorityThresh   int
 	okfConfidenceThresh  float64
 	internalServiceToken string
-	// controlPlaneToken is presented, with internalServiceToken, when this
-	// service probes its peers for the system map: several peers sit behind
-	// auth.ControlPlaneHandler and refuse a bearer token alone.
-	controlPlaneToken string
 }
 
 // peerDefault names an environment variable and its fallback base URL for a
@@ -229,13 +237,27 @@ type peerDefault struct {
 }
 
 var peerDefaults = []peerDefault{
+	{"cloud-control-plane", "SCOS_CLOUD_CONTROL_PLANE_URL", "https://cloud-control-plane:8079"},
 	{"memory-gateway", "SCOS_MEMORY_GATEWAY_URL", "https://memory-gateway:8080"},
+	{"autonomous-control-plane", "SCOS_AUTONOMOUS_CONTROL_PLANE_URL", "https://autonomous-control-plane:8081"},
 	{"retrieval-orchestrator", "SCOS_RETRIEVAL_ORCHESTRATOR_URL", "https://retrieval-orchestrator:8082"},
 	{"context-optimisation", "SCOS_CONTEXT_OPTIMISATION_URL", "https://context-optimisation:8083"},
 	{"code-intelligence", "SCOS_CODE_INTELLIGENCE_URL", "https://code-intelligence:8084"},
 	{"execution-proxy", "SCOS_EXECUTION_PROXY_URL", "https://execution-proxy:8085"},
 	{"extension-manager", "SCOS_EXTENSION_MANAGER_URL", "https://extension-manager:8086"},
 	{"compatibility-gateway", "SCOS_COMPATIBILITY_GATEWAY_URL", "https://compatibility-gateway:8087"},
+	{"hermes-provider", "SCOS_HERMES_PROVIDER_URL", "https://hermes-provider:8088"},
+	{"okf-synchroniser", "SCOS_OKF_SYNCHRONISER_URL", "https://okf-synchroniser:8090"},
+	{"security-gate", "SCOS_SECURITY_GATE_URL", "https://security-gate:8091"},
+	{"tool-governance", "SCOS_TOOL_GOVERNANCE_URL", "https://tool-governance:8092"},
+	{"agent-registry", "SCOS_AGENT_REGISTRY_URL", "https://agent-registry:8093"},
+	{"recovery-orchestrator", "SCOS_RECOVERY_ORCHESTRATOR_URL", "https://recovery-orchestrator:8094"},
+	{"backup-manager", "SCOS_BACKUP_MANAGER_URL", "https://backup-manager:8095"},
+	{"observability", "SCOS_OBSERVABILITY_URL", "https://observability:8096"},
+	{"transparency-projection", "SCOS_TRANSPARENCY_URL", "https://transparency-projection:8097"},
+	{"mcp-gateway", "SCOS_MCP_GATEWAY_URL", "https://mcp-gateway:8098"},
+	{"graphify-provider", "SCOS_GRAPHIFY_PROVIDER_URL", "https://graphify-provider:8099"},
+	{"credential-vault", "SCOS_CREDENTIAL_VAULT_URL", "https://credential-vault:8100"},
 }
 
 func resolveUpstream(envVar, fallback string) string {
@@ -287,7 +309,7 @@ func (s *engineServer) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(versionInfo{
 		Status:        "ok",
-		Version:       version,
+		Version:       buildVersion(),
 		UptimeSeconds: int(uptime.Seconds()),
 	})
 }
@@ -376,7 +398,6 @@ func main() {
 	srv.okfAuthorityThresh = envInt("SCOS_OKF_PROMOTION_AUTHORITY_THRESHOLD", 90)
 	srv.okfConfidenceThresh = envFloat("SCOS_OKF_PROMOTION_CONFIDENCE_THRESHOLD", 0.85)
 	srv.internalServiceToken = strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN"))
-	srv.controlPlaneToken = strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
@@ -1728,42 +1749,12 @@ type versionInfo struct {
 	UptimeSeconds int    `json:"uptime_seconds"`
 }
 
-// probePeer reports a real, freshly-measured status for one peer service: it
-// calls /health/ready to determine liveness and /v1/version for version and
-// uptime. A peer that cannot be reached is truthfully reported as
-// unreachable rather than defaulting to a fabricated healthy/unknown value
-// (ss42 prohibits fabricated operational state).
-//
-// /v1/version sits behind each peer's authentication, and several peers
-// (auth.ControlPlaneHandler) also require the control-plane token, so the
-// probe presents this service's own credentials -- its internal service
-// token and control-plane token, as transparency-projection does for the
-// dashboard's upstream calls. Without a configured service token the
-// caller's verified bearer token is forwarded instead. A peer that still
-// refuses is reported as such in Detail, never as an unknown version
-// without a reason.
-func (s *engineServer) peerProbeHeaders(ctx context.Context) http.Header {
-	h := http.Header{}
-	bearer := s.internalServiceToken
-	if bearer == "" {
-		bearer = auth.BearerToken(ctx)
-	}
-	if bearer != "" {
-		h.Set("Authorization", "Bearer "+bearer)
-	}
-	if s.controlPlaneToken != "" {
-		h.Set("X-SCOS-Control-Plane-Token", s.controlPlaneToken)
-	}
-	return h
-}
-
 func (s *engineServer) probePeer(ctx context.Context, name, base string) SystemMapEntry {
 	entry := SystemMapEntry{Service: name, Status: "unreachable", Version: "unknown", Uptime: "unknown"}
 	client := s.httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Second, Transport: telemetry.ProcessTransport(nil)}
 	}
-	headers := s.peerProbeHeaders(ctx)
 
 	readyReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health/ready", nil)
 	if err != nil {
@@ -1780,32 +1771,37 @@ func (s *engineServer) probePeer(ctx context.Context, name, base string) SystemM
 		entry.Status = "degraded"
 	}
 
-	versionReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/version", nil)
+	// /health/version is served by every service (packages/release), without
+	// credentials: the build it runs and how long the process has been up.
+	versionReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health/version", nil)
 	if err != nil {
 		return entry
 	}
-	versionReq.Header = headers.Clone()
 	versionResp, err := client.Do(versionReq)
 	if err != nil {
 		entry.Detail = "version probe failed: " + err.Error()
 		return entry
 	}
 	defer versionResp.Body.Close()
-	switch versionResp.StatusCode {
-	case http.StatusOK:
-		var info versionInfo
-		if err := json.NewDecoder(versionResp.Body).Decode(&info); err != nil {
-			entry.Detail = "version response unreadable: " + err.Error()
-			break
-		}
-		if info.Version != "" {
-			entry.Version = info.Version
-		}
-		entry.Uptime = (time.Duration(info.UptimeSeconds) * time.Second).String()
-	case http.StatusUnauthorized, http.StatusForbidden:
-		entry.Detail = fmt.Sprintf("version probe refused this service's credentials (%d)", versionResp.StatusCode)
-	default:
+	if versionResp.StatusCode != http.StatusOK {
 		entry.Detail = fmt.Sprintf("version probe answered %d", versionResp.StatusCode)
+		return entry
+	}
+	var info release.Info
+	if err := json.NewDecoder(versionResp.Body).Decode(&info); err != nil {
+		entry.Detail = "version response unreadable: " + err.Error()
+		return entry
+	}
+	if info.SourceSHA != "" && info.SourceSHA != "unknown" {
+		entry.Version = info.SourceSHA
+		if len(entry.Version) > 12 {
+			entry.Version = entry.Version[:12]
+		}
+	}
+	// A build that predates uptime reporting sends no started_at; its
+	// uptime stays unknown rather than reading as zero.
+	if info.StartedAt != "" {
+		entry.Uptime = (time.Duration(info.UptimeSeconds) * time.Second).String()
 	}
 	return entry
 }
@@ -1824,8 +1820,8 @@ func (s *engineServer) handleDashboardSystem(w http.ResponseWriter, r *http.Requ
 	entries = append(entries, SystemMapEntry{
 		Service: "memory-intelligence",
 		Status:  selfStatus,
-		Version: version,
-		Uptime:  selfUptime.String(),
+		Version: buildVersion(),
+		Uptime:  selfUptime.Round(time.Second).String(),
 	})
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -2256,7 +2252,7 @@ func (s *engineServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	writeTransparencySSE(w, "connected", transparencyStreamFrame{
 		EventID: "0", Sequence: lastSequence, Timestamp: time.Now().UTC(),
 		Source: "scos.memory-intelligence", TenantID: identity.TenantID,
-		Scope: "tenant", ProjectionVersion: "events-v1", Data: map[string]any{"status": "live", "version": version},
+		Scope: "tenant", ProjectionVersion: "events-v1", Data: map[string]any{"status": "live", "version": buildVersion()},
 	})
 	flusher.Flush()
 
@@ -2364,57 +2360,6 @@ func loadTransparencyEvents(ctx context.Context, db *sql.DB, tenantID string, af
 }
 
 // ── contradiction detection ──────────────────────────────────────────────
-
-func isContradictory(a, b *Fact) bool {
-	if a.Network != b.Network || a.Scope != b.Scope {
-		return false
-	}
-
-	// Same-key-different-value check (P0-C): catches same-polarity
-	// conflicts the negation-word path below cannot ("ships on tuesdays"
-	// vs "ships on thursdays" -- neither negates the other).
-	aKey, aVal := keyValueNorm(a.Content)
-	bKey, bVal := keyValueNorm(b.Content)
-	if aKey != "" && aKey == bKey && aVal != bVal {
-		return true
-	}
-
-	aWords := strings.Fields(strings.ToLower(a.Content))
-	bWords := strings.Fields(strings.ToLower(b.Content))
-
-	negationWords := map[string]bool{"not": true, "never": true, "no": true, "isn't": true, "doesn't": true, "don't": true, "won't": true, "can't": true, "without": true}
-
-	aHasNegation := false
-	bHasNegation := false
-	for _, w := range aWords {
-		if negationWords[w] {
-			aHasNegation = true
-			break
-		}
-	}
-	for _, w := range bWords {
-		if negationWords[w] {
-			bHasNegation = true
-			break
-		}
-	}
-
-	// One has negation, the other doesn't, and they share significant terms
-	if !(aHasNegation != bHasNegation) {
-		return false
-	}
-
-	sharedTerms := 0
-	for _, w := range aWords {
-		for _, w2 := range bWords {
-			if w == w2 && len(w) > 3 && !negationWords[w] {
-				sharedTerms++
-			}
-		}
-	}
-
-	return sharedTerms >= 1
-}
 
 // ── Dream-style Merge (§16/§25) ─────────────────────────────────────────
 

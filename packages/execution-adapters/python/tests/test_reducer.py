@@ -1,4 +1,6 @@
+import json
 import unittest
+from pathlib import Path
 
 from scos_execution.reducer import (RISK_DESTRUCTIVE, RISK_READ, RISK_TEST, RISK_WRITE, OutputReducer,
                                     classify_risk)
@@ -20,14 +22,12 @@ class OutputReducerTests(unittest.TestCase):
         out = OutputReducer().reduce_output("x" * 5000, 100)
         self.assertIn("reduced", out)
 
-    def test_classify_matches_shared_policy(self):
-        # Same cases as packages/execution-adapters/adapters_test.go.
-        cases = {"ls -la": RISK_READ, "mkdir build": RISK_WRITE, "go test ./...": RISK_TEST,
-                 "rm -rf /tmp/x": RISK_DESTRUCTIVE, "cat a | rm b": RISK_DESTRUCTIVE,
-                 "kubectl delete pod": RISK_DESTRUCTIVE}
+    def test_classify_matches_shared_cases(self):
+        # The same cases packages/execution-adapters/risk_test.go checks.
+        cases = json.loads((Path(__file__).resolve().parents[2] / "risk_cases.json").read_text(encoding="utf-8"))["cases"]
+        self.assertGreaterEqual(len(cases), 50)
         for command, want in cases.items():
             self.assertEqual(classify_risk(command), want, command)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -194,9 +194,9 @@ def _runtime_embed_text(text: str) -> list[float]:
         raise RuntimeError(
             "model runtime revision does not match active embedding revision"
         )
-    if int(body.get("dimensions") or 0) != MODEL_DIMENSIONS:
+    if int(body.get("dimensions") or 0) != MODEL_DIMENSIONS or len(embedding) != MODEL_DIMENSIONS:
         raise RuntimeError(
-            "model runtime dimensions do not match active embedding space"
+            f"model runtime returned {len(embedding)} dimensions, the active embedding space has {MODEL_DIMENSIONS}"
         )
     return [float(value) for value in embedding]
 
@@ -224,11 +224,6 @@ def embed_texts(texts: list[str]) -> list[list[float]] | None:
             return None
         out.append(values)
     return out
-
-
-def _purge_stale_spaces(*_args, **_kwargs) -> int:
-    """Compatibility guard: explicit spaces make global purges unnecessary."""
-    return 0
 
 
 def _embedding_provider() -> str:
@@ -377,12 +372,20 @@ def run_cycle(conn: psycopg.Connection) -> int:
     embeddings = embed_texts([row["content"] for row in batch])
     if embeddings is None:
         conn.rollback()
-        return 0
+        # A batch that could not be embedded is a failed cycle, not an idle
+        # one: it is raised so the loop logs it and readiness reports it.
+        raise EmbeddingUnavailable(f"embedding {len(batch)} memory version(s) failed; see the warning above")
+    if len(embeddings) != len(batch) or any(len(vec) != MODEL_DIMENSIONS for vec in embeddings):
+        conn.rollback()
+        # Never skip a row silently: a skipped row would be retried forever
+        # without anything reporting why it never gets an embedding.
+        raise EmbeddingUnavailable(
+            f"embedder returned {len(embeddings)} vector(s) for {len(batch)} version(s) or a vector "
+            f"not of the active space's {MODEL_DIMENSIONS} dimensions"
+        )
 
     written = 0
     for row, vec in zip(batch, embeddings):
-        if len(vec) != MODEL_DIMENSIONS:
-            continue
         _replace_embedding(
             conn,
             version_id=row["id"],
@@ -396,6 +399,15 @@ def run_cycle(conn: psycopg.Connection) -> int:
         written += 1
     conn.commit()
     return written
+
+
+class EmbeddingUnavailable(RuntimeError):
+    """A batch of memory versions could not be embedded this cycle."""
+
+
+# The outcome of the most recent cycle, for /health/ready: a worker whose
+# cycles fail is not ready even when its model answers a probe.
+_last_cycle_error: str | None = None
 
 
 def _serve_http() -> None:
@@ -507,7 +519,10 @@ def _serve_http() -> None:
                             ok = False
                     else:
                         ok = get_embedder() is not None
-                    self._write(200 if ok else 503, {"ready": ok})
+                    payload: dict[str, Any] = {"ready": ok and _last_cycle_error is None}
+                    if _last_cycle_error is not None:
+                        payload["last_cycle_error"] = _last_cycle_error
+                    self._write(200 if payload["ready"] else 503, payload)
                 else:
                     self._write(404, {"error": "not found"})
 
@@ -545,14 +560,17 @@ def main() -> None:
 
     threading.Thread(target=_serve_http, daemon=True).start()
 
+    global _last_cycle_error
     with psycopg.connect(DATABASE_URL) as conn:
         while True:
             try:
                 written = run_cycle(conn)
+                _last_cycle_error = None
                 if written:
                     logger.info("embedded %d memory version(s)", written)
             except Exception as exc:  # pragma: no cover
                 conn.rollback()
+                _last_cycle_error = str(exc)
                 logger.warning("cycle failed: %s", exc)
             time.sleep(POLL_SECONDS)
 

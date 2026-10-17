@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -438,5 +439,29 @@ func TestAgentByIDMissingRequiresIdentity(t *testing.T) {
 	srv.handleAgentByID(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without tenant/principal identity, got %d", w.Code)
+	}
+}
+
+// An active agent is reported stale once it has not been seen within the
+// health window; inactive is reported as stored.
+func TestAgentStatusDerivesFromLastSeen(t *testing.T) {
+	cases := []struct {
+		stored string
+		seen   sql.NullTime
+		want   string
+	}{
+		{agentActive, sql.NullTime{Time: time.Now().Add(-time.Hour), Valid: true}, agentActive},
+		{agentActive, sql.NullTime{Time: time.Now().Add(-adapterHealthWindow - time.Minute), Valid: true}, agentStale},
+		{agentActive, sql.NullTime{}, agentStale},
+		{agentInactive, sql.NullTime{Time: time.Now(), Valid: true}, agentInactive},
+	}
+	for _, c := range cases {
+		reg, err := scanAgentRegistration(agentInstanceRow{InstanceKey: "a", Boundary: "mcp", Status: c.stored, LastSeen: c.seen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reg.Status != c.want {
+			t.Errorf("stored %s seen %v: got %s, want %s", c.stored, c.seen, reg.Status, c.want)
+		}
 	}
 }

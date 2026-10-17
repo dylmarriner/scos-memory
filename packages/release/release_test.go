@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestHandlerServesCurrentInfo(t *testing.T) {
@@ -19,9 +20,15 @@ func TestHandlerServesCurrentInfo(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	want := Info{Service: "agent-registry", SourceSHA: "abc123", BuildTime: "2026-09-01T00:00:00Z"}
+	want := Info{Service: "agent-registry", SourceSHA: "abc123", BuildTime: "2026-09-01T00:00:00Z", StartedAt: startedAt.Format(time.RFC3339)}
+	got.UptimeSeconds = 0 // measured, not fixed
 	if got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	startedAt = startedAt.Add(-90 * time.Second)
+	defer func() { startedAt = startedAt.Add(90 * time.Second) }()
+	if up := Current("agent-registry").UptimeSeconds; up < 90 {
+		t.Fatalf("uptime = %d, want at least 90", up)
 	}
 }
 

@@ -175,6 +175,35 @@ func TestHandoffLifecycleThroughRestrictedRole(t *testing.T) {
 		t.Fatalf("agent accept = %d %+v", code, answered)
 	}
 
+	// Completion: only an accepted handoff, only by the side that may answer
+	// it, only with a summary, and only once.
+	complete := func(claims auth.Claims, id, summary string) (int, map[string]any) {
+		return call(s.handleHandoffComplete, http.MethodPost, "/v1/handoffs/complete", claims, map[string]any{
+			"handoff_id": id, "summary": summary,
+		})
+	}
+	if code, out := complete(as(operator, ""), firstID, "done"); code != http.StatusConflict || out["status"] != handoffRejected {
+		t.Fatalf("complete a rejected handoff = %d %+v", code, out)
+	}
+	if code, _ := complete(as(initiator, sender), secondID, "done"); code != http.StatusForbidden {
+		t.Fatalf("complete by the initiator = %d", code)
+	}
+	if code, _ := complete(as(operator, ""), secondID, "  "); code != http.StatusBadRequest {
+		t.Fatalf("complete without a summary = %d", code)
+	}
+	code, done := complete(as(bystander, receiver), secondID, "migration finished; 3 tables moved")
+	if code != http.StatusOK || done["status"] != handoffCompleted || done["completed_by_agent"] != receiver ||
+		done["completed_by_principal"] != bystander || done["completion_summary"] != "migration finished; 3 tables moved" ||
+		done["completed_at"] == nil || done["responded_by_agent"] != receiver {
+		t.Fatalf("complete = %d %+v", code, done)
+	}
+	if got := dbStatus(secondID); got != handoffCompleted {
+		t.Fatalf("completed handoff stored as %s", got)
+	}
+	if code, out := complete(as(operator, ""), secondID, "again"); code != http.StatusConflict || out["status"] != handoffCompleted {
+		t.Fatalf("second completion = %d %+v", code, out)
+	}
+
 	// Acceptance re-checks the receiver's current declarations.
 	_, third := initiate(nil)
 	thirdID := third["id"].(string)
@@ -211,7 +240,7 @@ func TestHandoffLifecycleThroughRestrictedRole(t *testing.T) {
 	}
 
 	// Answering requires an authenticated token: headers cannot nominate a responder.
-	req := httptest.NewRequest(http.MethodPost, "/v1/handoffs/respond", bytes.NewReader([]byte(`{"handoff_id":"`+secondID+`","response":"rejected"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/handoffs/respond", bytes.NewReader([]byte(`{"handoff_id":"`+thirdID+`","response":"rejected"}`)))
 	req.Header.Set("X-SCOS-Tenant-ID", tenant)
 	req.Header.Set("X-SCOS-Principal-ID", operator)
 	rec := httptest.NewRecorder()

@@ -61,14 +61,18 @@ function parseSse(body) {
   return messages;
 }
 
-async function relay(line) {
-  let request;
-  try {
-    request = JSON.parse(line);
-  } catch {
-    return; // not a JSON-RPC line, ignore
-  }
+function rpcError(id, code, message) {
+  return { jsonrpc: "2.0", id, error: { code, message } };
+}
 
+// relayOne sends one JSON-RPC message to mcp-gateway and returns the
+// messages owed back for it: none for a notification, otherwise its
+// response (an SSE response may carry several).
+async function relayOne(request) {
+  if (request === null || typeof request !== "object" || Array.isArray(request)) {
+    return [rpcError(null, -32600, "invalid request: a JSON-RPC message must be an object")];
+  }
+  const owed = request.id !== undefined;
   let response;
   try {
     response = await fetch(GATEWAY_URL, {
@@ -78,49 +82,59 @@ async function relay(line) {
     });
   } catch (err) {
     log(`transport error calling mcp-gateway: ${err.message}`);
-    if (request.id !== undefined) {
-      writeMessage({
-        jsonrpc: "2.0",
-        id: request.id,
-        error: { code: -32001, message: `mcp-gateway unreachable: ${err.message}` },
-      });
-    }
-    return;
+    return owed ? [rpcError(request.id, -32001, `mcp-gateway unreachable: ${err.message}`)] : [];
   }
 
   const newSessionId = response.headers.get("mcp-session-id");
   if (newSessionId) sessionId = newSessionId;
 
   if (response.status === 202) {
-    return; // notification acknowledged, no body expected
+    return []; // notification acknowledged, no body expected
   }
 
   const contentType = response.headers.get("content-type") || "";
   const body = await response.text();
-  if (!body) return;
+  if (!body) return [];
 
   if (!response.ok) {
     log(`mcp-gateway HTTP ${response.status}: ${body.slice(0, 300)}`);
-    if (request.id !== undefined) {
-      writeMessage({
-        jsonrpc: "2.0",
-        id: request.id,
-        error: { code: -32000, message: `mcp-gateway HTTP ${response.status}: ${body.slice(0, 500)}` },
-      });
-    }
-    return;
+    return owed ? [rpcError(request.id, -32000, `mcp-gateway HTTP ${response.status}: ${body.slice(0, 500)}`)] : [];
   }
 
   if (contentType.includes("text/event-stream")) {
-    for (const message of parseSse(body)) writeMessage(message);
-    return;
+    return parseSse(body);
   }
 
   try {
-    writeMessage(JSON.parse(body));
+    return [JSON.parse(body)];
   } catch (err) {
     log(`failed to parse JSON response: ${err.message}`);
+    return owed ? [rpcError(request.id, -32603, `mcp-gateway returned invalid JSON: ${err.message}`)] : [];
   }
+}
+
+// relay answers one input line: a single message, or a JSON-RPC batch whose
+// members are relayed one at a time (mcp-gateway takes single messages) and
+// answered together as one array, notifications omitted.
+async function relay(line) {
+  let request;
+  try {
+    request = JSON.parse(line);
+  } catch (err) {
+    writeMessage(rpcError(null, -32700, `parse error: ${err.message}`));
+    return;
+  }
+  if (!Array.isArray(request)) {
+    for (const message of await relayOne(request)) writeMessage(message);
+    return;
+  }
+  if (request.length === 0) {
+    writeMessage(rpcError(null, -32600, "invalid request: empty batch"));
+    return;
+  }
+  const responses = [];
+  for (const member of request) responses.push(...(await relayOne(member)));
+  if (responses.length > 0) writeMessage(responses);
 }
 
 function writeMessage(message) {

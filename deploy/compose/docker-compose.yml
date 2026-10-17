@@ -128,21 +128,36 @@ services:
     command:
       - |
         set -eu
-        if [ -f /etc/scos/tls/tls.crt ] && [ -f /etc/scos/tls/tls.key ]; then
-          echo "tls-certs: existing certificate found, leaving it in place"
-          exit 0
-        fi
         apk add --no-cache openssl >/dev/null
-        SAN="DNS:localhost,IP:127.0.0.1"
+        # Every https://<service> hostname in this file, plus the host IP the
+        # ports are published on, so agents on the tailnet can verify the
+        # gateway against this certificate instead of skipping verification.
+        SAN="DNS:localhost,IP:127.0.0.1,IP:${SCOS_TAILSCALE_IP:-100.93.75.87}"
         for svc in memory-gateway autonomous-control-plane retrieval-orchestrator \
                    context-optimisation code-intelligence execution-proxy \
                    extension-manager compatibility-gateway hermes-provider \
                    memory-intelligence okf-synchroniser security-gate \
                    tool-governance agent-registry recovery-orchestrator \
                    backup-manager observability transparency-projection \
-                   graphify-provider; do
+                   graphify-provider credential-vault mcp-gateway \
+                   cloud-control-plane; do
           SAN="$$SAN,DNS:$$svc"
         done
+        if [ -f /etc/scos/tls/tls.crt ] && [ -f /etc/scos/tls/tls.key ]; then
+          # Keep an existing certificate only while it still covers every
+          # name above; one issued before a service was added would fail
+          # verification for that service.
+          HAVE=$$(openssl x509 -in /etc/scos/tls/tls.crt -noout -ext subjectAltName 2>/dev/null | tail -n 1 | sed 's/IP Address:/IP:/g; s/ //g')
+          MISSING=""
+          for want in $$(echo "$$SAN" | tr ',' ' '); do
+            case ",$$HAVE," in *",$$want,"*) ;; *) MISSING="$$MISSING $$want" ;; esac
+          done
+          if [ -z "$$MISSING" ]; then
+            echo "tls-certs: existing certificate covers every service, leaving it in place"
+            exit 0
+          fi
+          echo "tls-certs: existing certificate lacks$$MISSING; reissuing"
+        fi
         openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
           -keyout /etc/scos/tls/tls.key -out /etc/scos/tls/tls.crt \
           -subj "/O=scos-internal-dev" -addext "subjectAltName=$$SAN"
@@ -187,6 +202,25 @@ services:
         chmod 644 /etc/postgresql-tls/server.crt
         echo "postgres-tls-certs: generated a self-signed development server certificate"
 
+  # A fresh postgres-wal-archive volume is owned by root, so archive_command
+  # (running as postgres) could not write a single segment, and
+  # backup-manager (uid 100) could not read them to ship or expire them.
+  # The archive belongs to postgres (999:999); the setgid group bit makes
+  # every segment group-owned by 999, which backup-manager joins (group_add)
+  # to read segments and remove expired ones.
+  wal-archive-permissions:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - postgres-wal-archive:/var/lib/scos/wal-archive
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        chown 999:999 /var/lib/scos/wal-archive
+        chmod 2770 /var/lib/scos/wal-archive
+        find /var/lib/scos/wal-archive -type f -exec chown 999:999 {} + -exec chmod 640 {} +
+
   postgres:
     image: pgvector/pgvector:pg17
     restart: unless-stopped
@@ -195,7 +229,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-scos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be provided by the deployment secret manager}
       SCOS_WAL_ARCHIVE_ENABLED: ${SCOS_WAL_ARCHIVE_ENABLED:-false}
-      SCOS_WAL_ARCHIVE_DESTINATION: ${SCOS_WAL_ARCHIVE_DESTINATION:-}
+      # The postgres-wal-archive volume mounted below; backup-manager reads the
+      # same path with the same default, so turning archiving on needs only
+      # SCOS_WAL_ARCHIVE_ENABLED=true.
+      SCOS_WAL_ARCHIVE_DESTINATION: "${SCOS_WAL_ARCHIVE_DESTINATION:-file:///var/lib/scos/wal-archive}"
     # Sized for the 4 GB budget described at the top of this file. Postgres
     # ships defaults for a 1990s workstation (shared_buffers=128MB) and then
     # sizes several structures off max_connections, so both matter here:
@@ -244,6 +281,8 @@ services:
       - 'archive_command=if [ "$$SCOS_WAL_ARCHIVE_ENABLED" = "true" ]; then sh /usr/local/bin/scos-wal-archive %p %f; else exit 0; fi'
       - -c
       - wal_compression=on
+      - -c
+      - hba_file=/etc/scos/postgres/pg_hba.conf
       - -c
       - ssl=on
       - -c
@@ -296,10 +335,13 @@ services:
       - ../../database/migrations:/scos-database/migrations:ro
       - ../../database/policies:/scos-database/policies:ro
       - ../../scripts/scos-wal-archive:/usr/local/bin/scos-wal-archive:ro
+      - ./postgres/pg_hba.conf:/etc/scos/postgres/pg_hba.conf:ro
       - postgres-wal-archive:/var/lib/scos/wal-archive
       - postgres-tls-certs:/etc/postgresql-tls:ro
     depends_on:
       postgres-tls-certs:
+        condition: service_completed_successfully
+      wal-archive-permissions:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -944,6 +986,10 @@ services:
     # without exposing the gateway publicly beyond the existing nginx TLS
     # front. Uses the narrow runtime image (no adminui) built from the
     # vendored upstream clone (integrations/tunnel-client).
+    # Started only with the "tunnel" profile (COMPOSE_PROFILES=tunnel), once
+    # real control-plane credentials are set: without them it can only
+    # crash-loop, and a host may run the tunnel as a systemd unit instead.
+    profiles: ["tunnel"]
     image: ${SCOS_TUNNEL_CLIENT_IMAGE:-scos-tunnel-client:local}
     build:
       context: ../../integrations/tunnel-client
@@ -989,6 +1035,9 @@ services:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_OKF_SYNCHRONISER_HTTP_ADDR: ${SCOS_OKF_SYNCHRONISER_HTTP_ADDR:-:8090}
       SCOS_OKF_SYNCHRONISER_STATE_PATH: ${SCOS_OKF_SYNCHRONISER_STATE_PATH:-/var/lib/scos/okf/projections.json}
+      # The Git-tracked OKF store on the okf-data volume, seeded from the
+      # image's /okf on first start (services/okf-synchroniser store.go).
+      SCOS_OKF_ROOT: ${SCOS_OKF_ROOT:-/var/lib/scos/okf/repo}
       DATABASE_URL: ${SCOS_APP_DATABASE_URL:?SCOS_APP_DATABASE_URL must be provided with sslmode=require or stronger}
     volumes:
       - tls-certs:/etc/scos/tls:ro
@@ -1127,28 +1176,63 @@ services:
     <<: [*service-limits, *fabric-image]
     command: ["backup-manager"]
     restart: unless-stopped
+    # Reads archived WAL (group 999, see wal-archive-permissions) to ship
+    # encrypted copies and expire old segments.
+    group_add:
+      - "999"
     environment:
       <<: [*service-auth-environment, *service-tls-environment, *service-runtime-environment]
       SCOS_BACKUP_MANAGER_HTTP_ADDR: ${SCOS_BACKUP_MANAGER_HTTP_ADDR:-:8095}
       SCOS_BACKUP_PROVIDER: ${SCOS_BACKUP_PROVIDER:-disabled}
       SCOS_BACKUP_DESTINATION: ${SCOS_BACKUP_DESTINATION:-}
       # Coverage is derived from evidence (docs/runbooks/backup-recovery.md);
-      # there are no "verified" flags to set. The secret-manager settings
-      # only label where the encryption key is kept.
+      # there are no "verified" flags to set. SCOS_SECRET_MANAGER and
+      # SCOS_BACKUP_ENCRYPTION_KEY_REF only label where the key is kept;
+      # secret_manager_recovery is covered by the drill that reads the key
+      # back from Bitwarden Secrets Manager (SCOS_BACKUP_KEY_SECRET_ID, with
+      # the machine-account token mounted at SCOS_BWS_ACCESS_TOKEN_FILE).
       SCOS_SECRET_MANAGER: ${SCOS_SECRET_MANAGER:-}
       SCOS_BACKUP_ENCRYPTION_KEY_REF: ${SCOS_BACKUP_ENCRYPTION_KEY_REF:-}
+      SCOS_BACKUP_KEY_SECRET_ID: ${SCOS_BACKUP_KEY_SECRET_ID:-}
+      SCOS_BWS_ACCESS_TOKEN_FILE: ${SCOS_BWS_ACCESS_TOKEN_FILE:-}
+      SCOS_BWS_SERVER_URL: ${SCOS_BWS_SERVER_URL:-}
+      # A versioned S3 bucket every encrypted backup is copied to; the
+      # secret key is mounted at SCOS_OBJECT_STORE_SECRET_KEY_FILE.
+      SCOS_OBJECT_STORE_ENDPOINT: ${SCOS_OBJECT_STORE_ENDPOINT:-}
+      SCOS_OBJECT_STORE_BUCKET: ${SCOS_OBJECT_STORE_BUCKET:-}
+      SCOS_OBJECT_STORE_ACCESS_KEY: ${SCOS_OBJECT_STORE_ACCESS_KEY:-}
+      SCOS_OBJECT_STORE_SECRET_KEY_FILE: ${SCOS_OBJECT_STORE_SECRET_KEY_FILE:-}
+      SCOS_OBJECT_STORE_PREFIX: ${SCOS_OBJECT_STORE_PREFIX:-backups/}
+      # The Docker host's own addresses: an object store at one of them is
+      # on this host, though the container does not see them as its own.
+      SCOS_HOST_ADDRESSES: ${SCOS_TAILSCALE_IP:-100.93.75.87}
       SCOS_BACKUP_DATABASE_URL: ${SCOS_BACKUP_DATABASE_URL:-}
       SCOS_BACKUP_RESTORE_DATABASE_URL: ${SCOS_BACKUP_RESTORE_DATABASE_URL:-}
       SCOS_BACKUP_DIR: ${SCOS_BACKUP_DIR:-/var/lib/scos/backups}
       SCOS_WAL_ARCHIVE_DESTINATION: "${SCOS_WAL_ARCHIVE_DESTINATION:-file:///var/lib/scos/wal-archive}"
-      SCOS_OKF_GIT_REPO: ${SCOS_OKF_GIT_REPO:-}
+      SCOS_OKF_GIT_REPO: ${SCOS_OKF_GIT_REPO:-/var/lib/scos/okf/repo}
       SCOS_OKF_GIT_MIRROR_REMOTE: ${SCOS_OKF_GIT_MIRROR_REMOTE:-}
+      # The scheduler takes a base backup once SCOS_BACKUP_INTERVAL has
+      # passed since the newest verified one (0 = only on request), then runs
+      # overdue restore drills, retention and the OKF mirror.
       SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED: ${SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED:-false}
+      SCOS_BACKUP_INTERVAL: ${SCOS_BACKUP_INTERVAL:-24h}
+      # Files and directories (as mounted into this container, read only)
+      # taken as configuration backups; empty means none are taken.
+      SCOS_CONFIG_BACKUP_PATHS: ${SCOS_CONFIG_BACKUP_PATHS:-}
+      SCOS_MIGRATION_EXPORT_PATHS: ${SCOS_MIGRATION_EXPORT_PATHS:-/scos-database/migrations,/scos-database/policies}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - backup-data:/var/lib/scos/backups
       # Read-write: WAL retention removes segments older than 35 days.
       - postgres-wal-archive:/var/lib/scos/wal-archive
+      # The OKF store, read only: the mirror pushes it to
+      # SCOS_OKF_GIT_MIRROR_REMOTE and never writes to it.
+      - okf-data:/var/lib/scos/okf:ro
+      # The migration and policy files scos-migrate applies, exported with
+      # every base backup (SCOS_MIGRATION_EXPORT_PATHS).
+      - ../../database/migrations:/scos-database/migrations:ro
+      - ../../database/policies:/scos-database/policies:ro
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8095:8095"
     depends_on:

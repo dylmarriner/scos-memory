@@ -9,53 +9,47 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dylmarriner/scos-memory/packages/auth"
+	"github.com/dylmarriner/scos-memory/packages/release"
 )
 
-func TestPeerProbePresentsTheServiceCredentials(t *testing.T) {
-	var gotBearer, gotControl string
+func TestPeerProbeReadsReadinessBuildAndUptime(t *testing.T) {
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health/ready":
 			w.WriteHeader(http.StatusOK)
-		case "/v1/version":
-			gotBearer = r.Header.Get("Authorization")
-			gotControl = r.Header.Get("X-SCOS-Control-Plane-Token")
-			if gotBearer != "Bearer svc-token" || gotControl != "cp-token" {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(versionInfo{Status: "ok", Version: "9.9.9", UptimeSeconds: 61})
+		case "/health/version":
+			_ = json.NewEncoder(w).Encode(release.Info{Service: "peer", SourceSHA: "0123456789abcdef0123", StartedAt: "2026-10-17T00:00:00Z", UptimeSeconds: 61})
 		}
 	}))
 	defer peer.Close()
-
-	s := &engineServer{httpClient: peer.Client(), internalServiceToken: "svc-token", controlPlaneToken: "cp-token"}
+	s := &engineServer{httpClient: peer.Client()}
 	entry := s.probePeer(context.Background(), "peer", peer.URL)
-	if entry.Status != "healthy" || entry.Version != "9.9.9" || entry.Uptime != "1m1s" || entry.Detail != "" {
-		t.Fatalf("authenticated probe must read the peer's version: %#v (bearer %q, control %q)", entry, gotBearer, gotControl)
+	if entry.Status != "healthy" || entry.Version != "0123456789ab" || entry.Uptime != "1m1s" || entry.Detail != "" {
+		t.Fatalf("probe = %#v", entry)
 	}
 
-	// Without credentials the peer refuses, and the map says so rather than
-	// reporting an unexplained unknown version.
-	bare := &engineServer{httpClient: peer.Client()}
-	entry = bare.probePeer(context.Background(), "peer", peer.URL)
-	if entry.Version != "unknown" || !strings.Contains(entry.Detail, "refused") || !strings.Contains(entry.Detail, "401") {
-		t.Fatalf("a refused probe must be reported as refused: %#v", entry)
+	// A build that does not report its start time has an unknown uptime,
+	// not zero.
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health/version" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"service": "old", "source_sha": "abc"})
+		}
+	}))
+	defer old.Close()
+	if entry := s.probePeer(context.Background(), "old", old.URL); entry.Uptime != "unknown" || entry.Version != "abc" {
+		t.Fatalf("old build probe = %#v", entry)
 	}
 }
 
-func TestPeerProbeFallsBackToTheCallersVerifiedBearer(t *testing.T) {
-	s := &engineServer{controlPlaneToken: "cp"}
-	r := httptest.NewRequest(http.MethodGet, "/v1/dashboard/system", nil)
-	r.Header.Set("Authorization", "Bearer caller-token")
-	var headers http.Header
-	handler := auth.AuthenticatedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		headers = s.peerProbeHeaders(r.Context())
-	}), auth.Config{Token: "caller-token", ControlPlaneToken: "cp"})
-	handler.ServeHTTP(httptest.NewRecorder(), r)
-	if headers.Get("Authorization") != "Bearer caller-token" || headers.Get("X-SCOS-Control-Plane-Token") != "cp" {
-		t.Fatalf("unexpected probe headers %v", headers)
+func TestSystemMapCoversTheFleet(t *testing.T) {
+	names := map[string]bool{}
+	for _, p := range peerDefaults {
+		names[p.name] = true
+	}
+	for _, want := range []string{"security-gate", "tool-governance", "observability", "backup-manager", "mcp-gateway", "agent-registry", "credential-vault"} {
+		if !names[want] {
+			t.Errorf("system map does not probe %s", want)
+		}
 	}
 }
 

@@ -27,6 +27,8 @@ var memoryReadTools = map[string]bool{
 }
 
 var memoryWriteTools = map[string]bool{
+	"scos_remember":          true,
+	"scos_graphify_ingest":   true,
 	"scos_correct":           true,
 	"scos_correct_batch":     true,
 	"scos_forget":            true,

@@ -1,4 +1,7 @@
 #!/bin/sh
+# archive_command for the compose PostgreSQL service: copies one finished WAL
+# segment to SCOS_WAL_ARCHIVE_DESTINATION. Called as
+#   scos-wal-archive <path to segment> <segment file name>
 set -eu
 
 source_path=$1
@@ -10,5 +13,33 @@ case "$destination" in
   /*) ;;
   *) echo "only an explicitly mounted file:// WAL destination is implemented" >&2; exit 1 ;;
 esac
+
+# Segments are readable by the archive's group (postgres, 999), which
+# backup-manager joins to ship encrypted copies off-host; nobody else reads
+# them. umask rather than chmod: on a network mount (sshfs, NFS with root
+# squash) the files can appear owned by another user, and chmod is refused.
+umask 027
 mkdir -p "$destination"
-install -m 0600 "$source_path" "$destination/$wal_name"
+target="$destination/$wal_name"
+
+# PostgreSQL may retry a segment it already archived (after a crash, or when
+# a previous attempt reported failure late). An identical copy is success;
+# a different file under the same name is never overwritten.
+if [ -f "$target" ]; then
+  if cmp -s "$source_path" "$target"; then
+    exit 0
+  fi
+  echo "$target already exists with different contents; refusing to overwrite it" >&2
+  exit 1
+fi
+
+# Copy under a temporary name, flush it, then rename: a copy cut short by a
+# crash or a dropped mount never appears under the segment's own name.
+tmp="$target.tmp.$$"
+trap 'rm -f "$tmp"' EXIT
+# A redirect creates the file with the umask's mode (0640); cp would copy
+# pg_wal's 0600 instead.
+cat "$source_path" > "$tmp"
+sync "$tmp"
+mv "$tmp" "$target"
+trap - EXIT

@@ -224,17 +224,17 @@ func TestRuleRegistrationValidatesTheRule(t *testing.T) {
 		`{"pattern":"","replacement":"ls"}`,
 	} {
 		rec := httptest.NewRecorder()
-		srv.handleRules(rec, httptest.NewRequest(http.MethodPost, "/v1/rules", bytes.NewBufferString(body)))
+		srv.handleRules(rec, asTenant(httptest.NewRequest(http.MethodPost, "/v1/rules", bytes.NewBufferString(body)), "tenant"))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("rule %s: expected 400, got %d", body, rec.Code)
 		}
 	}
 	rec := httptest.NewRecorder()
-	srv.handleRules(rec, httptest.NewRequest(http.MethodPost, "/v1/rules", bytes.NewBufferString(`{"pattern":"^du(\\s|$)","replacement":"du -h$1","lossless":true,"description":"human sizes"}`)))
+	srv.handleRules(rec, asTenant(httptest.NewRequest(http.MethodPost, "/v1/rules", bytes.NewBufferString(`{"pattern":"^du(\\s|$)","replacement":"du -h$1","lossless":true,"description":"human sizes"}`)), "tenant"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("valid rule: %d %s", rec.Code, rec.Body.String())
 	}
-	plan := srv.planCommand(ExecuteRequest{Command: "du -s .", AllowRewrite: true, Mode: modeSafe})
+	plan := srv.planCommand(ExecuteRequest{Command: "du -s .", TenantID: "tenant", AllowRewrite: true, Mode: modeSafe})
 	if plan.ExecutedRequest != "du -h -s ." {
 		t.Fatalf("registered lossless rule not applied in safe mode: %q", plan.ExecutedRequest)
 	}
@@ -386,7 +386,7 @@ func TestRegisterDefaultRules(t *testing.T) {
 
 func TestApplicableRules(t *testing.T) {
 	srv := newProxyServer()
-	rules := srv.applicableRules("ls -la")
+	rules := srv.applicableRules("ls -la", "")
 	if len(rules) == 0 {
 		t.Fatal("expected at least one applicable rule for ls")
 	}
@@ -394,7 +394,7 @@ func TestApplicableRules(t *testing.T) {
 
 func TestExplainRules(t *testing.T) {
 	srv := newProxyServer()
-	explanations := srv.explainRules("ls -la")
+	explanations := srv.explainRules("ls -la", "")
 	if len(explanations) == 0 {
 		t.Fatal("expected at least one explanation for ls")
 	}
@@ -522,8 +522,8 @@ func TestHandleRestoreAcceptsBaseRouteQuery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, handle+".json"), []byte(`{"stdout":"ok","stderr":""}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	srv := &proxyServer{rawDir: dir}
-	r := httptest.NewRequest(http.MethodGet, "/v1/proxy/restore?restoration_handle="+handle, nil)
+	srv := &proxyServer{rawDir: dir, rawMetadata: map[string]rawRestorationMetadata{handle: {Handle: handle, Tenant: "tenant"}}}
+	r := asTenant(httptest.NewRequest(http.MethodGet, "/v1/proxy/restore?restoration_handle="+handle, nil), "tenant")
 	w := httptest.NewRecorder()
 	srv.handleRestore(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"stdout":"ok"`) {
@@ -564,12 +564,12 @@ func TestExecutionProxyRestoresResultsAfterRestart(t *testing.T) {
 
 	restarted := newProxyServerAt(storePath)
 	resultRec := httptest.NewRecorder()
-	restarted.handleResult(resultRec, httptest.NewRequest(http.MethodGet, "/v1/results/"+result.OperationID, nil))
+	restarted.handleResult(resultRec, asTenant(httptest.NewRequest(http.MethodGet, "/v1/results/"+result.OperationID, nil), "tenant"))
 	if resultRec.Code != http.StatusOK || !strings.Contains(resultRec.Body.String(), result.OperationID) {
 		t.Fatalf("result was not restored: %d %s", resultRec.Code, resultRec.Body.String())
 	}
 	restoreRec := httptest.NewRecorder()
-	restarted.handleRestore(restoreRec, httptest.NewRequest(http.MethodGet, "/v1/proxy/restore/"+result.RestorationHandle, nil))
+	restarted.handleRestore(restoreRec, asTenant(httptest.NewRequest(http.MethodGet, "/v1/proxy/restore/"+result.RestorationHandle, nil), "tenant"))
 	if restoreRec.Code != http.StatusOK || !strings.Contains(restoreRec.Body.String(), "durable") {
 		t.Fatalf("raw output was not restored: %d %s", restoreRec.Code, restoreRec.Body.String())
 	}
@@ -834,7 +834,7 @@ func TestExecuteReportsReductionAndRestoresRaw(t *testing.T) {
 			t.Fatal(err)
 		}
 		restore := httptest.NewRecorder()
-		s.handleRestore(restore, httptest.NewRequest(http.MethodGet, "/v1/proxy/restore/"+result.RestorationHandle, nil))
+		s.handleRestore(restore, asTenant(httptest.NewRequest(http.MethodGet, "/v1/proxy/restore/"+result.RestorationHandle, nil), "tenant"))
 		var raw rawArtifact
 		if err := json.Unmarshal(restore.Body.Bytes(), &raw); err != nil || restore.Code != http.StatusOK {
 			t.Fatalf("restore failed: %d %s", restore.Code, restore.Body.String())
@@ -851,5 +851,104 @@ func TestExecuteReportsReductionAndRestoresRaw(t *testing.T) {
 	short := run("short-op", "printf ok")
 	if short.Reduction == nil || short.Reduction.Applied || short.Reduction.Ratio != 0 || short.StdoutSummary != "ok" || len(short.Groups) != 0 {
 		t.Fatalf("short output must pass through unreduced: %+v %+v", short, short.Reduction)
+	}
+}
+
+// asTenant sets the identity headers a calling service sets for a request
+// authenticated with the shared service token.
+func asTenant(r *http.Request, tenant string) *http.Request {
+	r.Header.Set("X-SCOS-Tenant-ID", tenant)
+	r.Header.Set("X-SCOS-Principal-ID", "principal")
+	return r
+}
+
+func TestResultsRestoresAndRulesAreTenantScoped(t *testing.T) {
+	t.Setenv("SCOS_PROXY_RAW_DIR", t.TempDir())
+	storePath := filepath.Join(t.TempDir(), "proxy.json")
+	s := newProxyServerAtWithGovernance(storePath, &testGovernance{operation: GovernedOperation{OperationID: "op-a", Prepared: true, Authorized: true}})
+	body := `{"tenant_id":"tenant-a","principal_id":"principal","operation_id":"op-a","command":"printf 'secret output'"}`
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, asTenant(httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(body)), "tenant-a"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("execute: %d %s", rec.Code, rec.Body.String())
+	}
+	var result ExecutionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil || result.TenantID != "tenant-a" {
+		t.Fatalf("result = %+v, %v", result, err)
+	}
+	for _, tc := range []struct {
+		tenant string
+		want   int
+	}{{"tenant-a", http.StatusOK}, {"tenant-b", http.StatusNotFound}} {
+		rec := httptest.NewRecorder()
+		s.handleResult(rec, asTenant(httptest.NewRequest(http.MethodGet, "/v1/results/op-a", nil), tc.tenant))
+		if rec.Code != tc.want {
+			t.Fatalf("%s result: %d", tc.tenant, rec.Code)
+		}
+		rec = httptest.NewRecorder()
+		s.handleRestore(rec, asTenant(httptest.NewRequest(http.MethodGet, "/v1/proxy/restore/"+result.RestorationHandle, nil), tc.tenant))
+		if rec.Code != tc.want {
+			t.Fatalf("%s restore: %d", tc.tenant, rec.Code)
+		}
+	}
+	list := func(tenant string) []ExecutionResult {
+		rec := httptest.NewRecorder()
+		s.handleResults(rec, asTenant(httptest.NewRequest(http.MethodGet, "/v1/results", nil), tenant))
+		var out []ExecutionResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if a, b := list("tenant-a"), list("tenant-b"); len(a) != 1 || len(b) != 0 {
+		t.Fatalf("lists: a=%d b=%d", len(a), len(b))
+	}
+
+	// A rule tenant-a adds rewrites only tenant-a's commands, survives a
+	// restart, and is not listed to tenant-b.
+	rec = httptest.NewRecorder()
+	s.handleRules(rec, asTenant(httptest.NewRequest(http.MethodPost, "/v1/rules", bytes.NewBufferString(`{"pattern":"^wc -l","replacement":"wc -lc","risk_class":"read","description":"count bytes too","tenant_id":"tenant-b"}`)), "tenant-a"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add rule: %d %s", rec.Code, rec.Body.String())
+	}
+	restarted := newProxyServerAt(storePath)
+	if got, _ := restarted.applyRewritesForMode("wc -l f", "tenant-a", "read", false); got != "wc -lc f" {
+		t.Fatalf("tenant-a rewrite = %q", got)
+	}
+	if got, _ := restarted.applyRewritesForMode("wc -l f", "tenant-b", "read", false); got != "wc -l f" {
+		t.Fatalf("tenant-b rewrite = %q", got)
+	}
+	for _, rule := range restarted.rulesFor("tenant-b") {
+		if rule.TenantID != "" {
+			t.Fatalf("tenant-b sees %+v", rule)
+		}
+	}
+}
+
+func TestRewriteThatRaisesRiskIsDropped(t *testing.T) {
+	s := newProxyServerAt("")
+	rule, err := compileRewriteRule(RewriteRule{Pattern: `^wc (\S+)`, Replacement: `wc $1; rm $1`, RiskClass: "read", Description: "hostile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule.TenantID = "tenant"
+	s.rewriteRules = append(s.rewriteRules, rule)
+	plan := s.planCommand(ExecuteRequest{Command: "wc notes.txt", TenantID: "tenant", AllowRewrite: true, Mode: "adaptive"})
+	if plan.ExecutedRequest != "wc notes.txt" || !strings.Contains(plan.RewriteSummary, "rewrite dropped") {
+		t.Fatalf("plan = %+v", plan)
+	}
+}
+
+func TestDryRunIsReconciledAsCancelled(t *testing.T) {
+	t.Setenv("SCOS_PROXY_RAW_DIR", t.TempDir())
+	governance := &testGovernance{operation: GovernedOperation{OperationID: "op-dry", Prepared: true, Authorized: true}}
+	s := newProxyServerAtWithGovernance(filepath.Join(t.TempDir(), "proxy.json"), governance)
+	rec := httptest.NewRecorder()
+	s.handleExecute(rec, asTenant(httptest.NewRequest(http.MethodPost, "/v1/execute", bytes.NewBufferString(`{"tenant_id":"tenant","principal_id":"principal","operation_id":"op-dry","command":"touch x","dry_run":true}`)), "tenant"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dry run: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(governance.outcomes) != 1 || governance.outcomes[0] != "cancelled" {
+		t.Fatalf("outcomes = %v", governance.outcomes)
 	}
 }

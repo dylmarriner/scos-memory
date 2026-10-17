@@ -67,6 +67,30 @@ class WorkerHelpersTests(unittest.TestCase):
             )
             self.assertEqual(review_call.args[1][3], "approved")
 
+    def test_a_job_without_a_turn_is_dead_lettered_with_its_reason(self):
+        with patch.dict("sys.modules", {"psycopg": MagicMock(), "psycopg.rows": MagicMock(), "psycopg.sql": MagicMock()}):
+            import scos_consolidation.worker as w
+            importlib.reload(w)
+            conn = MagicMock()
+            job = {"id": uuid4(), "tenant_id": uuid4(), "job_type": "turn.completed", "payload": {"session_id": "s"}, "attempts": 1}
+            w._process_job(conn, job)
+            calls = conn.cursor.return_value.__enter__.return_value.execute.call_args_list
+            update = next(c for c in calls if "UPDATE outbox_jobs" in c.args[0])
+            self.assertEqual(update.args[1][0], "dead_letter")
+            dead = next(c for c in calls if "INSERT INTO outbox_dead_letters" in c.args[0])
+            self.assertEqual(dead.args[1][4], "job payload has no turn_id")
+
+    def test_a_failure_is_retried_until_attempts_run_out(self):
+        with patch.dict("sys.modules", {"psycopg": MagicMock(), "psycopg.rows": MagicMock(), "psycopg.sql": MagicMock()}):
+            import scos_consolidation.worker as w
+            importlib.reload(w)
+            for attempts, status, dead_letters in ((2, "retryable", 0), (w.MAX_ATTEMPTS, "dead_letter", 1)):
+                conn = MagicMock()
+                w._mark_failed(conn, {"id": uuid4(), "tenant_id": uuid4(), "payload": {"turn_id": "t"}, "attempts": attempts}, "boom")
+                calls = conn.cursor.return_value.__enter__.return_value.execute.call_args_list
+                self.assertEqual(calls[0].args[1][0], status)
+                self.assertEqual(sum("outbox_dead_letters" in c.args[0] for c in calls), dead_letters)
+
 
 if __name__ == "__main__":
     unittest.main()

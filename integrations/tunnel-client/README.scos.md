@@ -55,6 +55,16 @@ tenant/principal = Dylan's Linode workspace).
    cat ~/.local/state/tunnel-client/health/scos-memory.url   # /healthz /readyz /ui
    ```
 
+## Running it under Docker Compose instead
+
+`deploy/compose/docker-compose.yml` also defines a `tunnel-client` service. It
+sits behind the `tunnel` profile, so a plain `docker compose up` does not start
+it (without real credentials it can only crash-loop). Set
+`CONTROL_PLANE_API_KEY`, `CONTROL_PLANE_TUNNEL_ID` and
+`SCOS_GATEWAY_AUTHORIZATION` in the compose `.env`, then start it with
+`COMPOSE_PROFILES=tunnel docker compose ... up -d tunnel-client`. Run either
+the compose service or the systemd unit, not both.
+
 ## Related
 
 - `~/.config/tunnel-client/hermes-tools.yaml` — the older multi-channel tunnel

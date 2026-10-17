@@ -388,6 +388,15 @@ func healthOK(w http.ResponseWriter, _ *http.Request) {
 // unconditionally "healthy".
 const adapterHealthWindow = 24 * time.Hour
 
+// Agent instance statuses. An agent registers as active (or deregisters by
+// re-registering as inactive); stale is never stored but reported for an
+// active agent that has not been seen within adapterHealthWindow.
+const (
+	agentActive   = "active"
+	agentInactive = "inactive"
+	agentStale    = "stale"
+)
+
 func (s *compatServer) adapterHealthStatus(ctx context.Context, tenantID string, a *Adapter) string {
 	if a.Support == supportUnsupported {
 		return "unsupported"
@@ -574,8 +583,13 @@ func (s *compatServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "boundary "+adapter.Boundary+" has no implementation in this gateway", http.StatusBadRequest)
 			return
 		}
-		if reg.Status == "" {
-			reg.Status = "active"
+		switch reg.Status {
+		case "":
+			reg.Status = agentActive
+		case agentActive, agentInactive:
+		default:
+			http.Error(w, "status must be "+agentActive+" or "+agentInactive, http.StatusBadRequest)
+			return
 		}
 		reg.LastSeen = time.Now().UTC().Format(time.RFC3339)
 
@@ -668,6 +682,10 @@ func (s *compatServer) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := upsertEnvelope(ctx, tx, identity.TenantID, env); err != nil {
+			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := touchAgentInstance(ctx, tx, identity.TenantID, env.AgentID); err != nil {
 			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
 		}

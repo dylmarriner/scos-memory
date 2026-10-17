@@ -270,22 +270,31 @@ func (p *filesystemProvider) Load(_ context.Context, id string) (backupManifest,
 	if err != nil {
 		return backupManifest{}, nil, path, err
 	}
+	m, plain, err := verifyEncrypted(p.key, id, data, artifact)
+	return m, plain, path, err
+}
+
+// verifyEncrypted checks an encrypted archive against its HMAC-authenticated
+// manifest, decrypts it, and checks the plain content against the manifest.
+// Every copy of a filesystem-provider backup, wherever it was read from,
+// goes through it.
+func verifyEncrypted(key []byte, id string, manifest, artifact []byte) (backupManifest, []byte, error) {
 	var m backupManifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return m, nil, path, err
+	if err := json.Unmarshal(manifest, &m); err != nil {
+		return m, nil, err
 	}
-	expectedMAC, err := manifestMAC(m, p.key)
+	expectedMAC, err := manifestMAC(m, key)
 	if err != nil || !hmac.Equal([]byte(expectedMAC), []byte(m.ManifestMAC)) || !m.Encrypted || m.ID != id || m.ArtifactHash != hashBytes(artifact) || m.ArtifactSize != int64(len(artifact)) {
-		return m, nil, path, fmt.Errorf("manifest/artifact verification failed")
+		return m, nil, fmt.Errorf("manifest/artifact verification failed")
 	}
-	plain, err := decryptBackup(p.key, artifact)
+	plain, err := decryptBackup(key, artifact)
 	if err != nil {
-		return m, nil, path, fmt.Errorf("backup decryption failed: %w", err)
+		return m, nil, fmt.Errorf("backup decryption failed: %w", err)
 	}
 	if m.ContentHash != hashBytes(plain) || m.SizeBytes != int64(len(plain)) {
-		return m, nil, path, fmt.Errorf("decrypted content hash mismatch")
+		return m, nil, fmt.Errorf("decrypted content hash mismatch")
 	}
-	return m, plain, path, nil
+	return m, plain, nil
 }
 
 func (p *filesystemProvider) List(context.Context) ([]string, error) {

@@ -130,12 +130,14 @@ func takeBackup(t *testing.T, s *backupServer) backupStartResponse {
 	}
 	var resp struct {
 		BackupRecord
-		Retention *RetentionResult `json:"retention"`
+		Retention        *RetentionResult  `json:"retention"`
+		ObjectStore      *objectSyncResult `json:"object_store"`
+		ObjectStoreError string            `json:"object_store_error"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	return backupStartResponse{BackupRecord: &resp.BackupRecord, Retention: resp.Retention}
+	return backupStartResponse{BackupRecord: &resp.BackupRecord, Retention: resp.Retention, ObjectStore: resp.ObjectStore, ObjectStoreError: resp.ObjectStoreError}
 }
 
 // ── routes and scopes ────────────────────────────────────────────────────
@@ -601,7 +603,7 @@ func TestWALRetentionExpiresOldSegmentsOnly(t *testing.T) {
 		}
 	}
 	res := RetentionResult{}
-	n, _ := s.applyWALRetention("t", time.Now(), &res)
+	n, _ := s.applyWALRetention("t", time.Now(), &res, "")
 	if n != 1 {
 		t.Fatalf("deleted %d WAL files", n)
 	}
@@ -867,8 +869,13 @@ func TestGitMirrorPushesAndVerifiesEveryRef(t *testing.T) {
 		t.Fatalf("local-path mirror covered: %+v", plan.Items["remote_git_mirrors"])
 	}
 
-	// A broken remote is recorded as a failed run.
-	s.config.gitMirrorRemote = filepath.Join(t.TempDir(), "missing.git")
+	// A broken remote (here a plain file where the repository should be)
+	// is recorded as a failed run.
+	broken := filepath.Join(t.TempDir(), "not-a-repo.git")
+	if err := os.WriteFile(broken, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.config.gitMirrorRemote = broken
 	if run, err := s.runGitMirror(context.Background(), "t"); err != nil || run.Status != "failed" || !strings.Contains(run.Detail, "push --mirror failed") {
 		t.Fatalf("broken remote run = %+v %v", run, err)
 	}
@@ -922,5 +929,93 @@ func TestBackupIDsCannotEscapeTheDestination(t *testing.T) {
 		if err := validBackupID(id); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%q accepted", id)
 		}
+	}
+}
+
+func TestBackupDueFollowsIntervalAndNewestVerifiedBackup(t *testing.T) {
+	ctx := context.Background()
+	p := &localProvider{dir: t.TempDir()}
+	s := &backupServer{provider: p, config: backupConfig{backupInterval: 24 * time.Hour}}
+	now := time.Now()
+
+	if !s.backupDue(ctx, now) {
+		t.Fatal("no backups yet: a scheduled backup should be due")
+	}
+	archive := []byte("dump")
+	store := func(id string, at time.Time) {
+		m := backupManifest{ID: id, Type: "base_backup", ContentHash: hashBytes(archive), SizeBytes: int64(len(archive)), CreatedAt: at.UTC().Format(time.RFC3339)}
+		if _, err := p.Store(ctx, m, archive); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store("backup-old", now.Add(-30*time.Hour))
+	if !s.backupDue(ctx, now) {
+		t.Fatal("newest backup is 30h old against a 24h interval: a backup should be due")
+	}
+	store("backup-new", now.Add(-time.Hour))
+	if s.backupDue(ctx, now) {
+		t.Fatal("a 1h-old verified backup is within the interval: no backup should be due")
+	}
+	s.config.backupInterval = 0
+	if s.backupDue(ctx, now.Add(48*time.Hour)) {
+		t.Fatal("interval 0 disables scheduled backups")
+	}
+	if (&backupServer{config: backupConfig{backupInterval: time.Hour}}).backupDue(ctx, now) {
+		t.Fatal("no provider: nothing can be backed up")
+	}
+}
+
+func TestBackupIntervalFromEnv(t *testing.T) {
+	for raw, want := range map[string]time.Duration{"": 24 * time.Hour, "6h": 6 * time.Hour, "0": 0, "nonsense": 24 * time.Hour} {
+		t.Setenv("SCOS_BACKUP_INTERVAL", raw)
+		if got := backupIntervalFromEnv(); got != want {
+			t.Errorf("SCOS_BACKUP_INTERVAL=%q: got %v, want %v", raw, got, want)
+		}
+	}
+}
+
+func TestGitMirrorToANetworkMountedPathIsOffHost(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	repo, mount := t.TempDir(), t.TempDir()
+	runGit(t, repo, "init", "-q", "-b", "trunk")
+	if err := os.WriteFile(filepath.Join(repo, "policy.md"), []byte("# policy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "policy.md")
+	runGit(t, repo, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-qm", "initial")
+	mountinfo := filepath.Join(t.TempDir(), "mountinfo")
+	lines := "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n" +
+		fmt.Sprintf("40 22 0:50 / %s rw,relatime shared:9 - fuse.sshfs root@backup-host:/srv/scos rw\n", mount)
+	if err := os.WriteFile(mountinfo, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := mountInfoPath
+	mountInfoPath = mountinfo
+	t.Cleanup(func() { mountInfoPath = prev })
+
+	remote := filepath.Join(mount, "okf.git")
+	t.Setenv("SCOS_OKF_GIT_REPO", repo)
+	t.Setenv("SCOS_OKF_GIT_MIRROR_REMOTE", remote)
+	s := newBackupServerWithDir(t.TempDir())
+	run, err := s.runGitMirror(context.Background(), "t")
+	if err != nil || run.Status != "verified" {
+		t.Fatalf("first mirror run must create the bare repository and verify: %+v %v", run, err)
+	}
+	if _, err := os.Stat(filepath.Join(remote, "HEAD")); err != nil {
+		t.Fatal("the bare mirror repository was not created")
+	}
+	src, _ := exec.Command("git", "-C", repo, "symbolic-ref", "HEAD").Output()
+	dst, _ := exec.Command("git", "--git-dir="+remote, "symbolic-ref", "HEAD").Output()
+	if string(src) != string(dst) {
+		t.Fatalf("mirror HEAD %q, source HEAD %q", dst, src)
+	}
+	item := s.evaluatePlan(context.Background(), time.Now()).Items["remote_git_mirrors"]
+	if !item.Covered {
+		t.Fatalf("a verified mirror on an sshfs mount is off-host: %+v", item)
+	}
+	if off, why := remoteIsOffHost(filepath.Join(t.TempDir(), "x.git")); off || !strings.Contains(why, "path on this host") {
+		t.Fatalf("a local path is not off-host: %v %q", off, why)
 	}
 }

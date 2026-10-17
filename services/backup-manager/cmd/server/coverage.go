@@ -33,7 +33,8 @@ type ProviderReport struct {
 	Detail      string `json:"detail"`
 	// KeySource names where the deployment says the encryption key is
 	// kept (SCOS_SECRET_MANAGER, SCOS_BACKUP_ENCRYPTION_KEY_REF). It is a
-	// label, not evidence: secret_manager_recovery stays not covered.
+	// label, not evidence: secret_manager_recovery is covered only by a
+	// drill that recovers the key from Bitwarden (secretrecovery.go).
 	KeySource string `json:"key_source,omitempty"`
 }
 
@@ -55,8 +56,15 @@ type BackupPlan struct {
 	EvaluatedAt      string              `json:"evaluated_at"`
 }
 
-// newestVerified returns the manifest of the newest backup that verifies.
+// newestVerified returns the manifest of the newest pg_dump backup that
+// verifies.
 func (s *backupServer) newestVerified(ctx context.Context) (backupManifest, error) {
+	return s.newestVerifiedOfType(ctx, backupTypeLogical)
+}
+
+// newestVerifiedOfType returns the manifest of the newest backup of typ that
+// verifies.
+func (s *backupServer) newestVerifiedOfType(ctx context.Context, typ string) (backupManifest, error) {
 	if s.provider == nil {
 		return backupManifest{}, s.providerErr
 	}
@@ -68,14 +76,16 @@ func (s *backupServer) newestVerified(ctx context.Context) (backupManifest, erro
 	var newestAt time.Time
 	for _, id := range ids {
 		m, _, _, err := s.provider.Load(ctx, id)
-		if err != nil {
+		if err != nil || m.Type != typ {
 			continue
 		}
 		at, err := time.Parse(time.RFC3339, m.CreatedAt)
 		if err != nil {
 			continue
 		}
-		if at.After(newestAt) {
+		// CreatedAt has one-second resolution; IDs grow with time, so they
+		// order backups taken within the same second.
+		if at.After(newestAt) || at.Equal(newestAt) && m.ID > newest.ID {
 			newest, newestAt = m, at
 		}
 	}
@@ -141,7 +151,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 		schema.Reason = "no recent verified base backup carries the schema: " + base.Reason
 	}
 	plan.Items["schema_exports"] = schema
-	plan.Items["schema_and_migration_exports"] = Coverage{Reason: "migration exports are not provided: the schema alone is exported, inside every base backup (see schema_exports)"}
+	plan.Items["schema_and_migration_exports"] = s.migrationCoverage(ctx, schema)
 
 	// Encrypted off-host copies and a verified remote provider.
 	offHost := Coverage{}
@@ -167,7 +177,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 	plan.Items["encrypted_off_host_copies"] = offHost
 	plan.Items["remote_provider_verified"] = remote
 
-	plan.Items["object_store_snapshots"] = Coverage{Reason: "no object-store provider is implemented; object-store versioning and snapshots are not taken"}
+	plan.Items["object_store_snapshots"] = s.objectStoreCoverage(ctx, base)
 
 	// Continuous WAL archiving.
 	wal := Coverage{}
@@ -179,10 +189,9 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 		wal = walCoverage(st, s.config.walArchiveDestination, s.config.walMaxSegmentLag)
 	}
 	plan.Items["postgresql_wal_archiving"] = wal
+	plan.Items["encrypted_off_host_wal"] = s.walShipCoverage(ctx, wal, plan.Provider)
 
-	// Point-in-time recovery needs a physical base backup to replay WAL
-	// onto; this service takes logical ones.
-	plan.Items["pitr_configured"] = Coverage{Reason: "base backups are logical pg_dump archives, onto which WAL cannot be replayed; point-in-time recovery needs a physical base backup (pg_basebackup), which this service does not take"}
+	plan.Items["pitr_configured"] = s.pitrCoverage(ctx, wal, now)
 
 	// Remote Git mirror.
 	mirror := Coverage{}
@@ -203,8 +212,8 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 	}
 	plan.Items["remote_git_mirrors"] = mirror
 
-	plan.Items["secret_manager_recovery"] = Coverage{Reason: "secret-manager recovery procedures are not provided or exercised by this service"}
-	plan.Items["configuration_backups"] = Coverage{Reason: "configuration backups are not provided by this service"}
+	plan.Items["secret_manager_recovery"] = s.secretRecoveryCoverage(now)
+	plan.Items["configuration_backups"] = s.configCoverage(ctx, plan.Provider.Working, now)
 
 	plan.BaseBackups = plan.Items["base_backups"].Covered
 	plan.SchemaExports = plan.Items["schema_and_migration_exports"].Covered

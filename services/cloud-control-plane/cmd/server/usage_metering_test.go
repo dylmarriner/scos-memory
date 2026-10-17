@@ -50,3 +50,11 @@ func TestLimitedBufferBoundsCopy(t *testing.T) {
 		t.Fatalf("buffer grew past limit: %q", buf.String())
 	}
 }
+
+func TestRememberIsAMemoryWrite(t *testing.T) {
+	req := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"scos_remember","arguments":{"content":"x"}}}`)
+	resp := []byte(`{"jsonrpc":"2.0","id":7,"result":{"content":[]}}`)
+	if reads, writes := countMemoryOps(req, resp, "application/json"); reads != 0 || writes != 1 {
+		t.Fatalf("reads=%d writes=%d, want 0/1", reads, writes)
+	}
+}

@@ -313,7 +313,7 @@ func (s *server) requireFeature(w http.ResponseWriter, r *http.Request, feature 
 // when, and only when, the API key belongs to an account holding the
 // creator platform role: the backup-manager and recovery-orchestrator
 // admin routes demand them, and no customer account may hold them.
-var operatorScopes = []string{"backups:admin", "recovery:admin"}
+var operatorScopes = []string{"backups:admin", "recovery:admin", "extensions:admin"}
 
 func hostedScopes(platformRole string) []string {
 	scopes := []string{"memory:read", "memory:write"}

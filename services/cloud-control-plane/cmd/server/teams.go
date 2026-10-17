@@ -125,28 +125,41 @@ func (s *server) inviteTeam(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "valid email and role are required", 400)
 		return
 	}
-	var max, members int
-	// Lock the team while checking capacity. Without this lock two valid
-	// invitations can both observe room and over-allocate the team.
-	if e = s.db.QueryRowContext(r.Context(), `SELECT max_members FROM cloud_teams WHERE id=$1 FOR UPDATE`, in.TeamID).Scan(&max); e != nil {
-		http.Error(w, "team not found", 404)
-		return
-	}
-	if e = s.db.QueryRowContext(r.Context(), `SELECT count(*) FROM cloud_team_members WHERE team_id=$1`, in.TeamID).Scan(&members); e != nil {
-		http.Error(w, "database unavailable", 503)
-		return
-	}
-	if members >= max {
-		http.Error(w, "team member limit reached", 409)
-		return
-	}
 	token, e := randomToken("invite_")
 	if e != nil {
 		http.Error(w, "invite unavailable", 500)
 		return
 	}
+	// Capacity is checked and the invitation created in one transaction
+	// holding the team row, so two concurrent invitations cannot both see
+	// the last free place. Unexpired, unaccepted invitations hold a place
+	// as members do; acceptance re-checks under the same lock.
+	tx, e := s.db.BeginTx(r.Context(), nil)
+	if e != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
+	defer tx.Rollback()
+	var max, taken int
+	if e = tx.QueryRowContext(r.Context(), `SELECT max_members FROM cloud_teams WHERE id=$1 FOR UPDATE`, in.TeamID).Scan(&max); e != nil {
+		http.Error(w, "team not found", 404)
+		return
+	}
+	if e = tx.QueryRowContext(r.Context(), `SELECT
+			(SELECT count(*) FROM cloud_team_members WHERE team_id=$1) +
+			(SELECT count(*) FROM cloud_team_invitations WHERE team_id=$1 AND accepted_at IS NULL AND expires_at>now())`, in.TeamID).Scan(&taken); e != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
+	if taken >= max {
+		http.Error(w, "team member limit reached (members and outstanding invitations)", 409)
+		return
+	}
 	var invite string
-	e = s.db.QueryRowContext(r.Context(), `INSERT INTO cloud_team_invitations(team_id,email,role,token_hash,invited_by) VALUES($1,$2,$3,$4,$5) RETURNING id`, in.TeamID, in.Email, in.Role, hash(token), id.UserID).Scan(&invite)
+	e = tx.QueryRowContext(r.Context(), `INSERT INTO cloud_team_invitations(team_id,email,role,token_hash,invited_by) VALUES($1,$2,$3,$4,$5) RETURNING id`, in.TeamID, in.Email, in.Role, hash(token), id.UserID).Scan(&invite)
+	if e == nil {
+		e = tx.Commit()
+	}
 	if e != nil {
 		http.Error(w, "invite creation failed", 500)
 		return

@@ -229,3 +229,16 @@ func TestDestructiveRequestsRequireConfirmation(t *testing.T) {
 		t.Fatalf("destructive request must require confirmation: %+v", decision)
 	}
 }
+
+func TestARequestToRunANamedProgramIsCommandExecution(t *testing.T) {
+	for _, input := range []string{"execute git status and show me the output", "run npm install", "please run pytest -q"} {
+		if !requestsProgram(input) {
+			t.Errorf("%q not recognised as a program run", input)
+		}
+	}
+	for _, input := range []string{"run time analysis on the results", "execute the plan we agreed", "run a quick review of the doc", "running notes from the meeting"} {
+		if requestsProgram(input) {
+			t.Errorf("%q wrongly recognised as a program run", input)
+		}
+	}
+}

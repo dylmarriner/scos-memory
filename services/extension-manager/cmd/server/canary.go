@@ -167,6 +167,10 @@ func (s *extServer) handleCanary(w http.ResponseWriter, r *http.Request) {
 		action = parts[2]
 	}
 
+	// resolve only answers which version a caller would get.
+	if r.Method != http.MethodGet && action != "resolve" && !operatorOnly(w, r) {
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && action == "":
 		s.canaryStatus(w, packageID)

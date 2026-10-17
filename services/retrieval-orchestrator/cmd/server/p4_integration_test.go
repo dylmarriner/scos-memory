@@ -176,3 +176,135 @@ func TestP4RetrieveIncludesCodeAndPersistsSelectedSymbolVersions(t *testing.T) {
 		t.Fatalf("persisted code evidence = %#v", selected)
 	}
 }
+
+func TestSessionStateLaneKeepsToTheSessionAndTheSensitivityCeiling(t *testing.T) {
+	ctx := context.Background()
+	pool := testRetrievalPool(t)
+	var tenantID, principalID, namespaceID string
+	if err := pool.QueryRow(ctx, `INSERT INTO tenants(name) VALUES ($1) RETURNING id`, t.Name()).Scan(&tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO principals(tenant_id, kind, external_id, display_name) VALUES ($1,'human',$2,$2) RETURNING id`, tenantID, t.Name()).Scan(&principalID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO namespaces(tenant_id, owner_principal_id, canonical_name) VALUES ($1,$2,'session-lane') RETURNING id`, tenantID, principalID).Scan(&namespaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO namespace_memberships(namespace_id, principal_id, can_read, can_write_candidates) VALUES ($1,$2,true,true)`, namespaceID, principalID); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(title, sensitivity, metadata string) {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO memory_items(tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary, authority_level, confidence_score, sensitivity, metadata)
+			VALUES ($1,$2,$3,'working','candidate',$4,$4,40,0.6,$5,$6::jsonb)`, tenantID, namespaceID, principalID, title, sensitivity, metadata); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("this session, internal", "internal", `{"session_id":"s-1"}`)
+	insert("this session, secret", "secret", `{"session_id":"s-1"}`)
+	insert("another session", "internal", `{"session_id":"s-2"}`)
+	insert("no session", "internal", `{}`)
+
+	srv := &server{db: pool}
+	got, err := srv.recentSessionState(ctx, RetrieveRequest{TenantID: tenantID, PrincipalID: principalID, SessionID: "s-1"}, []string{"session-lane"}, "internal", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Title != "this session, internal" {
+		t.Fatalf("session lane = %+v", got)
+	}
+}
+
+func TestContradictionsAreReportedOnBothMemories(t *testing.T) {
+	ctx := context.Background()
+	pool := testRetrievalPool(t)
+	var tenantID, principalID, namespaceID string
+	if err := pool.QueryRow(ctx, `INSERT INTO tenants(name) VALUES ($1) RETURNING id`, t.Name()).Scan(&tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO principals(tenant_id, kind, external_id, display_name) VALUES ($1,'human',$2,$2) RETURNING id`, tenantID, t.Name()).Scan(&principalID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO namespaces(tenant_id, owner_principal_id, canonical_name) VALUES ($1,$2,'conflicts') RETURNING id`, tenantID, principalID).Scan(&namespaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO namespace_memberships(namespace_id, principal_id, can_read) VALUES ($1,$2,true)`, namespaceID, principalID); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(title string) string {
+		var id string
+		if err := pool.QueryRow(ctx, `INSERT INTO memory_items(tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary, authority_level, confidence_score, sensitivity)
+			VALUES ($1,$2,$3,'semantic','active',$4,$4,70,0.9,'internal') RETURNING id`, tenantID, namespaceID, principalID, title).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	a := insert("deploys happen on fridays")
+	b := insert("deploys never happen on fridays")
+	if _, err := pool.Exec(ctx, `INSERT INTO memory_relations(source_memory_id, target_memory_id, relation_type, confidence_score) VALUES ($1,$2,'contradicts',0.9)`, a, b); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{db: pool}
+	got, err := srv.exactSearch(ctx, RetrieveRequest{TenantID: tenantID, PrincipalID: principalID, Query: "fridays"}, []string{"conflicts"}, "internal", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("results = %+v", got)
+	}
+	for _, r := range got {
+		other := b
+		if r.MemoryID == b {
+			other = a
+		}
+		if len(r.Conflicts) != 1 {
+			t.Fatalf("%s conflicts = %+v", r.Title, r.Conflicts)
+		}
+		if c, _ := r.Conflicts[0].(map[string]any); c["target_memory_id"] != other || c["relation_type"] != "contradicts" {
+			t.Fatalf("%s conflicts = %+v, want contradicts %s", r.Title, r.Conflicts, other)
+		}
+	}
+}
+
+// TestRelationExpansionReachesNeighbours: a memory related to a direct hit is
+// returned by the relation lane, with its content, and the direct hit itself
+// is not returned again.
+func TestRelationExpansionReachesNeighbours(t *testing.T) {
+	ctx := context.Background()
+	pool := testRetrievalPool(t)
+	var tenantID, principalID, namespaceID string
+	if err := pool.QueryRow(ctx, `INSERT INTO tenants(name) VALUES ($1) RETURNING id`, t.Name()).Scan(&tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO principals(tenant_id, kind, external_id, display_name) VALUES ($1,'human',$2,$2) RETURNING id`, tenantID, t.Name()).Scan(&principalID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO namespaces(tenant_id, owner_principal_id, canonical_name) VALUES ($1,$2,'related') RETURNING id`, tenantID, principalID).Scan(&namespaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO namespace_memberships(namespace_id, principal_id, can_read) VALUES ($1,$2,true)`, namespaceID, principalID); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(title string) string {
+		var id string
+		if err := pool.QueryRow(ctx, `INSERT INTO memory_items(tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary, authority_level, confidence_score, sensitivity)
+			VALUES ($1,$2,$3,'semantic','active',$4,$4,70,0.9,'internal') RETURNING id`, tenantID, namespaceID, principalID, title).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	seed := insert("the billing service owns invoices")
+	neighbour := insert("invoices are stored in the ledger database")
+	if _, err := pool.Exec(ctx, `INSERT INTO memory_relations(source_memory_id, target_memory_id, relation_type, confidence_score) VALUES ($1,$2,'related_to',0.8)`, seed, neighbour); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{db: pool}
+	got, err := srv.relationExpansion(ctx, RetrieveRequest{TenantID: tenantID, PrincipalID: principalID}, []string{"related"}, "internal",
+		[]RetrievalResult{{MemoryID: seed}}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].MemoryID != neighbour || got[0].Content != "invoices are stored in the ledger database" || got[0].Provenance != "relation" {
+		t.Fatalf("relation expansion = %+v", got)
+	}
+}

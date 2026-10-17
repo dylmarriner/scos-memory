@@ -12,8 +12,6 @@ from scos_consolidation.models import MemoryClass
 from scos_consolidation.extractor import (
     extract_candidates,
     _classify,
-    _has_code_output,
-    _has_factual_claim,
     _infer_authority,
     _infer_confidence,
     _infer_expiry,
@@ -72,7 +70,7 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(_infer_expiry(event, MemoryClass.EPISODIC), datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc))
         self.assertIsNone(_infer_expiry(event, MemoryClass.SEMANTIC))
 
-    def test_extract_semantic_from_turn_completed(self):
+    def test_an_ordinary_turn_is_an_episodic_record(self):
         event = self._event(event_type="turn.completed")
         messages = [
             self._message(role="user", content="What database does this project use?"),
@@ -80,8 +78,26 @@ class ExtractorTests(unittest.TestCase):
         ]
         candidates = extract_candidates(event, messages)
         self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0].memory_class, MemoryClass.SEMANTIC)
-        self.assertEqual(candidates[0].tenant_id, self.tenant_id)
+        c = candidates[0]
+        self.assertEqual(c.memory_class, MemoryClass.EPISODIC)
+        self.assertEqual(c.confidence_score, 0.80)
+        self.assertIsNotNone(c.valid_until)
+        self.assertEqual(c.tenant_id, self.tenant_id)
+
+    def test_keywords_alone_never_make_durable_knowledge(self):
+        # A question mentioning "import", or a code block, is not a
+        # procedure; "is a" or "uses" is not a fact.
+        for user, assistant in [
+            ("how do I import pandas in a notebook here", "Use import pandas as pd at the top of the notebook."),
+            ("Show me the users table definition please", "```sql\nCREATE TABLE users (id int);\n```"),
+            ("Tell me about the timezone in New Zealand today", "NZ uses NZST, which is a UTC+12 zone."),
+        ]:
+            candidates = extract_candidates(self._event(), [self._message("user", user), self._message("assistant", assistant)])
+            self.assertTrue(all(c.memory_class == MemoryClass.EPISODIC for c in candidates), (user, candidates))
+
+    def test_chit_chat_is_not_remembered(self):
+        for user, assistant in [("thanks!", "You are welcome."), ("hi", "Hello there!")]:
+            self.assertEqual(extract_candidates(self._event(), [self._message("user", user), self._message("assistant", assistant)]), [])
 
     def test_explicit_memory_request_stores_the_statement_not_the_transcript(self):
         messages = [
@@ -105,18 +121,8 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(candidates[0].title, "How do we roll back a failed deploy?")
         self.assertFalse(candidates[0].title.startswith("turn/"))
 
-    def test_extract_procedural_from_code_output(self):
-        event = self._event(event_type="turn.completed")
-        messages = [
-            self._message(role="user", content="Show me the DB schema"),
-            self._message(role="assistant", content="```sql\nCREATE TABLE users (id int);\n```"),
-        ]
-        candidates = extract_candidates(event, messages)
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0].memory_class, MemoryClass.PROCEDURAL)
-
-    def test_extract_governing_from_policy_content(self):
-        event = self._event(event_type="decision.recorded", data={"title": "New access policy"})
+    def test_a_declared_class_is_used(self):
+        event = self._event(event_type="decision.recorded", data={"title": "New access policy", "memory_class": "governing"})
         messages = [
             self._message(role="user", content="Set a new permission policy"),
             self._message(role="assistant", content="The access policy is now restricted."),
@@ -125,12 +131,11 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].memory_class, MemoryClass.GOVERNING)
 
-    def test_discard_journal_only_return_empty(self):
-        event = self._event(event_type="turn.completed")
-        messages = [self._message(role="user", content="hi")]
-        # No factual/code signals → episodic
-        candidates = extract_candidates(event, messages)
-        self.assertGreaterEqual(len(candidates), 0)
+    def test_declared_knowledge_event_types(self):
+        messages = [self._message("user", "We settled the rollback procedure for failed deploys today."),
+                    self._message("assistant", "Recorded: revert the release tag, then redeploy the previous image.")]
+        self.assertEqual(extract_candidates(self._event(event_type="task.resolved"), messages)[0].memory_class, MemoryClass.PROCEDURAL)
+        self.assertEqual(extract_candidates(self._event(event_type="decision.recorded"), messages)[0].memory_class, MemoryClass.SEMANTIC)
 
     def test_untracked_event_type_returns_empty(self):
         event = self._event(event_type="heartbeat")
@@ -153,25 +158,30 @@ class ExtractorTests(unittest.TestCase):
         authority = _infer_authority(event, MemoryClass.GOVERNING)
         self.assertEqual(authority, 95)
 
-    def test_confidence_boost_with_evidence(self):
-        event = self._event(event_type="turn.completed")
-        msg = self._message(role="assistant", content="The sky is blue.")
-        candidates = extract_candidates(event, [msg])
-        if candidates:
-            self.assertGreater(candidates[0].confidence_score, 0)
+    def test_confidence_does_not_grow_with_evidence(self):
+        few = [self._message("user", "Remember that the staging cluster runs in Sydney.")]
+        many = few + [self._message("assistant", "Noted, staging is in Sydney.") for _ in range(6)]
+        self.assertEqual(_infer_confidence(self._event(), MemoryClass.SEMANTIC, few), 0.90)
+        self.assertEqual(_infer_confidence(self._event(), MemoryClass.SEMANTIC, many), 0.90)
+        self.assertEqual(_infer_confidence(self._event(data={"confidence": 0.42}), MemoryClass.SEMANTIC, few), 0.42)
 
     def test_sensitivity_inference(self):
         msg = self._message(role="assistant", content="This is confidential information.")
         sensitivity = _infer_sensitivity({}, [msg])
         self.assertEqual(sensitivity.value, "confidential")
 
-    def test_factual_claim_detection(self):
-        msg = self._message(role="assistant", content="The system is a distributed platform.")
-        self.assertTrue(_has_factual_claim([msg]))
+    def test_sensitivity_takes_the_most_sensitive_message(self):
+        public_first = [self._message("user", "Our SDK is open source and public."),
+                        self._message("assistant", "The signing details are confidential.")]
+        self.assertEqual(_infer_sensitivity({}, public_first).value, "confidential")
+        self.assertEqual(_infer_sensitivity({}, [self._message("user", "It is public on GitHub.")]).value, "internal")
+        self.assertEqual(_infer_sensitivity({"data": {"sensitivity": "public"}}, [self._message("user", "Release notes for v2.")]).value, "public")
 
-    def test_code_output_detection(self):
-        msg = self._message(role="tool", content="function hello() { return 1; }")
-        self.assertTrue(_has_code_output([msg]))
+    def test_credentials_are_never_consolidated(self):
+        messages = [self._message("user", "The database password is hunter2-prod please keep it handy for later"),
+                    self._message("assistant", "Understood, I will keep the production password handy.")]
+        self.assertEqual(extract_candidates(self._event(), messages), [])
+
 
 
 if __name__ == "__main__":
