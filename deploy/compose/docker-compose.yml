@@ -1200,6 +1200,7 @@ services:
       # Files and directories (as mounted into this container, read only)
       # taken as configuration backups; empty means none are taken.
       SCOS_CONFIG_BACKUP_PATHS: ${SCOS_CONFIG_BACKUP_PATHS:-}
+      SCOS_MIGRATION_EXPORT_PATHS: ${SCOS_MIGRATION_EXPORT_PATHS:-/scos-database/migrations,/scos-database/policies}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - backup-data:/var/lib/scos/backups
@@ -1208,6 +1209,10 @@ services:
       # The OKF store, read only: the mirror pushes it to
       # SCOS_OKF_GIT_MIRROR_REMOTE and never writes to it.
       - okf-data:/var/lib/scos/okf:ro
+      # The migration and policy files scos-migrate applies, exported with
+      # every base backup (SCOS_MIGRATION_EXPORT_PATHS).
+      - ../../database/migrations:/scos-database/migrations:ro
+      - ../../database/policies:/scos-database/policies:ro
     ports:
       - "${SCOS_TAILSCALE_IP:-100.93.75.87}:8095:8095"
     depends_on:

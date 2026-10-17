@@ -279,8 +279,8 @@ func (s *backupServer) restoreConfig(ctx context.Context, id, target string) (in
 	if err != nil {
 		return 0, fmt.Errorf("backup %s does not verify: %w", id, err)
 	}
-	if m.Type != backupTypeConfig {
-		return 0, fmt.Errorf("backup %s is a %s, not a %s", id, m.Type, backupTypeConfig)
+	if m.Type != backupTypeConfig && m.Type != backupTypeMigrations {
+		return 0, fmt.Errorf("backup %s is a %s; restore-config writes back a %s or %s", id, m.Type, backupTypeConfig, backupTypeMigrations)
 	}
 	files, err := unpackConfig(plain, m.Files)
 	if err != nil {

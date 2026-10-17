@@ -82,7 +82,9 @@ func (s *backupServer) newestVerifiedOfType(ctx context.Context, typ string) (ba
 		if err != nil {
 			continue
 		}
-		if at.After(newestAt) {
+		// CreatedAt has one-second resolution; IDs grow with time, so they
+		// order backups taken within the same second.
+		if at.After(newestAt) || at.Equal(newestAt) && m.ID > newest.ID {
 			newest, newestAt = m, at
 		}
 	}
@@ -148,7 +150,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 		schema.Reason = "no recent verified base backup carries the schema: " + base.Reason
 	}
 	plan.Items["schema_exports"] = schema
-	plan.Items["schema_and_migration_exports"] = Coverage{Reason: "migration exports are not provided: the schema alone is exported, inside every base backup (see schema_exports)"}
+	plan.Items["schema_and_migration_exports"] = s.migrationCoverage(ctx, schema)
 
 	// Encrypted off-host copies and a verified remote provider.
 	offHost := Coverage{}

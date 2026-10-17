@@ -105,9 +105,13 @@ type backupManifest struct {
 	WALEnd      string `json:"wal_end,omitempty"`
 	// Files and Sources of a configuration_backup: every file with its
 	// digest, and the configured paths they were read from.
-	Files       []fileDigest `json:"files,omitempty"`
-	Sources     []string     `json:"sources,omitempty"`
-	ManifestMAC string       `json:"manifest_mac"`
+	Files   []fileDigest `json:"files,omitempty"`
+	Sources []string     `json:"sources,omitempty"`
+	// ExportOf and AppliedMigrations of a migration_export: the base backup
+	// it accompanies and the versions applied when that was taken.
+	ExportOf          string   `json:"export_of,omitempty"`
+	AppliedMigrations []string `json:"applied_migrations,omitempty"`
+	ManifestMAC       string   `json:"manifest_mac"`
 }
 
 // backupArtifact is the manifest file of a local development backup; the
@@ -134,6 +138,7 @@ type backupServer struct {
 	dump              func(ctx context.Context, databaseURL string) ([]byte, dataFingerprint, error)
 	fingerprintTarget func(ctx context.Context, databaseURL string, tables []string, withCatalog bool) (dataFingerprint, error)
 	walState          func(ctx context.Context) (walArchiverState, error)
+	applied           func(ctx context.Context, databaseURL string) ([]string, error)
 }
 
 var (
@@ -156,6 +161,7 @@ func newBackupServerWithDir(dir string) *backupServer {
 		backupDir:    dir, config: cfg,
 		retention:         RetentionPolicy{WALAndDaily: 35, Weekly: 12, Monthly: 12, OKFIndefinite: true},
 		dump:              snapshotDump,
+		applied:           appliedMigrations,
 		fingerprintTarget: fingerprintURL,
 	}
 	s.walState = func(ctx context.Context) (walArchiverState, error) { return readWALArchiver(ctx, s.config.databaseURL) }
@@ -416,6 +422,9 @@ type backupStartResponse struct {
 	*BackupRecord
 	Retention      *RetentionResult `json:"retention,omitempty"`
 	RetentionError string           `json:"retention_error,omitempty"`
+	// MigrationExport is the migration_export taken with a base backup.
+	MigrationExport      string `json:"migration_export,omitempty"`
+	MigrationExportError string `json:"migration_export_error,omitempty"`
 }
 
 // createBackup takes a base backup with its data fingerprint, stores it,
@@ -441,6 +450,12 @@ func (s *backupServer) createBackup(ctx context.Context, actor string) (backupSt
 		return backupStartResponse{}, fmt.Errorf("stored backup %s does not verify: %w", m.ID, err)
 	}
 	resp := backupStartResponse{BackupRecord: recordFromManifest(stored, location, time.Now())}
+	if len(migrationExportPaths()) > 0 {
+		resp.MigrationExport, err = s.exportMigrations(ctx, m.ID)
+		if err != nil {
+			resp.MigrationExportError = err.Error()
+		}
+	}
 	ret, err := s.applyRetention(ctx, actor, time.Now())
 	if err != nil {
 		resp.RetentionError = err.Error()
