@@ -96,3 +96,48 @@ The fabric was redeployed from this branch, and the results below were verified 
 - **Re-embedding:** the embeddings worker activated the 1024-dimension space and re-embedded all 36 memory versions.
 - **Recall:** now returns `fulltext+semantic` hits.
 - **Reranker not run:** bge-reranker is not run on kubuntux, because running it alongside bge-m3 exhausted host memory. Retrieval reports it as degraded. Running it needs more RAM or a remote inference backend set through `SCOS_MODEL_RERANK_URL`.
+
+## Live dashboard audit (kubuntux)
+
+Every tab of the deployed dashboard (overview, memory, facts, agents, connect, system, flow) was opened in headless Chrome over the DevTools protocol, screenshotted, and checked for page errors, failed requests and the data each tab loaded.
+
+**Problems found and fixed (62a2877, 59ea60a):**
+- **Six panels stuck on "waiting for … projection":** their Go upstreams encode an empty list as `null`. The projection now turns a list view's `null` into `[]`, so empty lists render as empty.
+- **Empty OKF panel:** okf-synchroniser only indexed when `/v1/sync` was called. It now syncs at startup and every `SCOS_OKF_SYNC_INTERVAL` (default 5m), and the 10 seeded documents are indexed.
+- **Favicon:** the `favicon.ico` request returned 401. An inline icon replaces it, and the CSP now allows `img-src data:`.
+- **Versions:** memory-intelligence reported a hardcoded `0.1.0`. Images are now built with `SOURCE_SHA` and `BUILD_TIME`, and every service, memory-intelligence included, reports the commit it was built from.
+
+**Re-audit after redeploying aa23e9f:**
+- No page errors and no failed requests.
+- No null views.
+- The agents tab shows its real empty state ("no agents registered yet").
+- The flow tab shows live request-flow data: a 16-node service graph, throughput, 5xx ratio, p95, and history over 5 minutes to 90 days.
+- The facts, memory and system tabs show the live records.
+- The only random values in the dashboard source are the starting coordinates of the force-directed graph layout. No data is mocked.
+
+## Review findings (Codex, PR #45)
+
+Seven of the eight findings were confirmed and fixed. Each fix has a test.
+
+| Finding | Commit |
+|---|---|
+| Shell programs named by expansion (`$x`, `$(…)`) graded only "write" | a9decd5 |
+| Bridge crashed on array `params` | a9decd5 |
+| OKF startup committed unreviewed dirty state | 77ab0a0 |
+| Physical backups silently omitted tablespaces | 3f1eea2 |
+| Migration export could disagree with its dump | 3f1eea2 |
+| Object store never repaired damaged copies, and could not recover a retained version | 0b9b5cd |
+
+The eighth finding, execution-proxy legacy records that have no tenant, is a deliberate fail-closed. It is answered on the PR and left for the owner to decide.
+
+## Acceptance benchmark
+
+Regenerated with every domain measured (aa23e9f), on the service binaries with a disposable PostgreSQL. Every threshold passes:
+
+| Domain | Result |
+|---|---|
+| Context optimisation | 67% token reduction; instruction, value and evidence retention 1.0 |
+| Code intelligence | Exact lookup, recall and precision 1.0 |
+| Execution proxy | 95% token reduction; destructive commands blocked; failures and raw output preserved |
+| Routing, frozen cases | Precision 1.0, recall 1.0 |
+| Routing, held-out cases | Precision 0.98, recall 1.0 |
