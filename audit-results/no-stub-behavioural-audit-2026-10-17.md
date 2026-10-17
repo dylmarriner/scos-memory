@@ -73,3 +73,26 @@ test that fails on the old behaviour.
 - **Go:** `go vet ./...` and `go test ./...` pass.
 - **Go integration:** `go test -tags=integration` passes against Postgres 16 with the migrations and policies applied. The exceptions are suites that require a TLS database URL, which the CI database provides.
 - **Python:** `pytest tests` passes (86 tests). Worker suites for consolidation and embeddings also pass.
+
+## Live deployment (kubuntux, 2026-10-17)
+
+The fabric was redeployed from this branch, and the results below were verified through MCP via the stdio bridge.
+
+**Checks that passed:**
+- **Tools:** 156 tools are listed.
+- **`scos_status`:** scoped to the tenant.
+- **`scos_observability_targets`:** reports the measured p95 retrieval latency, 583 ms against the 750 ms objective, met.
+- **Lists:** `scos_logs_list` honours `limit`.
+- **Memory:** `scos_remember` followed by `scos_recall` returns the stored fact.
+- **Backup coverage:** 11 of 12 covered. The missing one is `secret_manager_recovery`, which needs the Bitwarden token.
+
+**Fixed during the deployment:**
+- **Relation lane:** the deployment showed the relation lane failing with `column "content" does not exist`. Fixed, and covered by an integration test (16c3e30).
+- **`tunnel-client`:** it crash-looped on placeholder credentials. It now starts only with `COMPOSE_PROFILES=tunnel` (16c3e30).
+
+**Retrieval models:**
+- **Before:** they had never been enabled on kubuntux, so recall ran on full-text matching only and reported `text_embedding` and `reranker` as degraded.
+- **Text model enabled:** bge-m3 now runs through `model-runtime` on CPU, using the `text-model` profile. Its caches are on the backup drive. It has `--max-batch-tokens 4096` and a 5 GB memory cap, because TEI's default warm-up crash-looped it on this 15 GB host.
+- **Re-embedding:** the embeddings worker activated the 1024-dimension space and re-embedded all 36 memory versions.
+- **Recall:** now returns `fulltext+semantic` hits.
+- **Reranker not run:** bge-reranker is not run on kubuntux, because running it alongside bge-m3 exhausted host memory. Retrieval reports it as degraded. Running it needs more RAM or a remote inference backend set through `SCOS_MODEL_RERANK_URL`.
