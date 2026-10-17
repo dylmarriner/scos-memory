@@ -61,7 +61,7 @@ func runCommand(args []string) int {
 			fmt.Fprintln(os.Stderr, "object-sync:", err)
 			return 1
 		}
-		fmt.Printf("copied %d (%s), removed %d (%s)\n", len(res.Copied), strings.Join(res.Copied, " "), len(res.Removed), strings.Join(res.Removed, " "))
+		fmt.Printf("copied %d (%s)\n", len(res.Copied), strings.Join(res.Copied, " "))
 		for _, e := range res.Errors {
 			fmt.Fprintln(os.Stderr, "object-sync:", e)
 		}

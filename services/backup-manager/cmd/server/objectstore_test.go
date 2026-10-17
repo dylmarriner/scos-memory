@@ -29,10 +29,9 @@ type fakeS3 struct {
 }
 
 type fakeVersion struct {
-	id     string
-	data   []byte
-	marker bool
-	at     time.Time
+	id   string
+	data []byte
+	at   time.Time
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,12 +62,12 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		v := f.add(key, data, false)
+		v := f.add(key, data)
 		w.Header().Set("x-amz-version-id", v.id)
 		w.Header().Set("ETag", `"`+v.id+`"`)
 	case http.MethodGet, http.MethodHead:
 		vs := f.objects[key]
-		if len(vs) == 0 || vs[len(vs)-1].marker {
+		if len(vs) == 0 {
 			w.Header().Set("Content-Type", "application/xml")
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `<Error><Code>NoSuchKey</Code><Message>no such key</Message></Error>`)
@@ -82,15 +81,12 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			_, _ = w.Write(v.data)
 		}
-	case http.MethodDelete:
-		f.add(key, nil, true)
-		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
 }
 
-func (f *fakeS3) add(key string, data []byte, marker bool) fakeVersion {
+func (f *fakeS3) add(key string, data []byte) fakeVersion {
 	f.seq++
 	id := "null"
 	if f.versioning == "Enabled" {
@@ -98,7 +94,7 @@ func (f *fakeS3) add(key string, data []byte, marker bool) fakeVersion {
 	} else {
 		f.objects[key] = nil
 	}
-	v := fakeVersion{id: id, data: data, marker: marker, at: time.Now()}
+	v := fakeVersion{id: id, data: data, at: time.Now()}
 	f.objects[key] = append(f.objects[key], v)
 	return v
 }
@@ -119,10 +115,9 @@ func (f *fakeS3) list(w io.Writer, prefix string) {
 	n := 0
 	for _, k := range f.keys(prefix) {
 		vs := f.objects[k]
-		if v := vs[len(vs)-1]; !v.marker {
-			n++
-			fmt.Fprintf(&b, `<Contents><Key>%s</Key><Size>%d</Size><ETag>"%s"</ETag><LastModified>%s</LastModified></Contents>`, k, len(v.data), v.id, v.at.UTC().Format(time.RFC3339))
-		}
+		v := vs[len(vs)-1]
+		n++
+		fmt.Fprintf(&b, `<Contents><Key>%s</Key><Size>%d</Size><ETag>"%s"</ETag><LastModified>%s</LastModified></Contents>`, k, len(v.data), v.id, v.at.UTC().Format(time.RFC3339))
 	}
 	fmt.Fprintf(w, `<ListBucketResult><Name>%s</Name><Prefix>%s</Prefix><KeyCount>%d</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>%s</ListBucketResult>`, f.bucket, prefix, n, b.String())
 }
@@ -133,11 +128,7 @@ func (f *fakeS3) listVersions(w io.Writer, prefix string) {
 		vs := f.objects[k]
 		for i := len(vs) - 1; i >= 0; i-- {
 			v := vs[i]
-			tag := "Version"
-			if v.marker {
-				tag = "DeleteMarker"
-			}
-			fmt.Fprintf(&b, `<%s><Key>%s</Key><VersionId>%s</VersionId><IsLatest>%t</IsLatest><Size>%d</Size><LastModified>%s</LastModified></%s>`, tag, k, v.id, i == len(vs)-1, len(v.data), v.at.UTC().Format(time.RFC3339), tag)
+			fmt.Fprintf(&b, `<Version><Key>%s</Key><VersionId>%s</VersionId><IsLatest>%t</IsLatest><Size>%d</Size><LastModified>%s</LastModified></Version>`, k, v.id, i == len(vs)-1, len(v.data), v.at.UTC().Format(time.RFC3339))
 		}
 	}
 	fmt.Fprintf(w, `<ListVersionsResult><Name>%s</Name><Prefix>%s</Prefix><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>%s</ListVersionsResult>`, f.bucket, prefix, b.String())
@@ -249,24 +240,24 @@ func TestObjectStoreSyncCopiesVerifiesAndKeepsVersions(t *testing.T) {
 		t.Fatal("the object-store copy must be the encrypted archive")
 	}
 	// A second pass has nothing to do.
-	if res, err := s.syncObjectStore(ctx); err != nil || len(res.Copied)+len(res.Removed) != 0 {
+	if res, err := s.syncObjectStore(ctx); err != nil || len(res.Copied) != 0 {
 		t.Fatalf("idempotent sync = %+v, %v", res, err)
 	}
 
-	// Retention removing a backup removes the current object; the version
-	// stays.
+	// Retention removing a backup at the provider leaves the bucket alone:
+	// the bucket's lifecycle expires copies, and this service never deletes.
 	if err := s.provider.Remove(ctx, first.ID); err != nil {
 		t.Fatal(err)
 	}
-	res, err = s.syncObjectStore(ctx)
-	if err != nil || len(res.Removed) != 1 || res.Removed[0] != first.ID {
-		t.Fatalf("removal sync = %+v, %v", res, err)
+	if res, err := s.syncObjectStore(ctx); err != nil || len(res.Copied) != 0 {
+		t.Fatalf("sync after removal = %+v, %v", res, err)
 	}
-	vs := fake.objects["backups/"+first.ID+".backup"]
-	if len(vs) != 2 || !vs[1].marker || vs[0].marker {
-		t.Fatalf("versions after removal = %+v", vs)
+	if vs := fake.objects["backups/"+first.ID+".backup"]; len(vs) != 1 {
+		t.Fatalf("versions after provider removal = %+v", vs)
 	}
-	if n, err := s.objectStore.versionCount(ctx); err != nil || n != 2 {
+	// An overwritten copy keeps its earlier version.
+	fake.add("backups/"+first.ID+".backup", []byte("overwritten"))
+	if n, err := s.objectStore.versionCount(ctx); err != nil || n != 3 {
 		t.Fatalf("version count = %d, %v", n, err)
 	}
 
@@ -287,7 +278,7 @@ func TestObjectStoreSyncCopiesVerifiesAndKeepsVersions(t *testing.T) {
 	vsSecond := fake.objects[key]
 	tampered := append([]byte(nil), vsSecond[len(vsSecond)-1].data...)
 	tampered[len(tampered)-1] ^= 0xff
-	fake.add(key, tampered, false)
+	fake.add(key, tampered)
 	if _, err := s.fetchFromObjectStore(ctx, second.ID); err == nil || !strings.Contains(err.Error(), "does not verify") {
 		t.Fatalf("tampered copy = %v", err)
 	}
@@ -350,7 +341,7 @@ func TestObjectStoreCoverageCoveredWithVerifiedCopy(t *testing.T) {
 	}
 	// A copy that no longer verifies withdraws coverage.
 	key := "backups/" + b.ID + ".backup"
-	fake.add(key, []byte("not the archive"), false)
+	fake.add(key, []byte("not the archive"))
 	if c := s.objectStoreCoverage(ctx, base); c.Covered || !strings.Contains(c.Reason, "does not verify") {
 		t.Fatalf("tampered = %+v", c)
 	}

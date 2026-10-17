@@ -24,12 +24,13 @@ import (
 
 // Object-store snapshots (GOVERNANCE.md §31 "object-store versioning and
 // snapshots"): every backup the encrypted provider holds is copied, still
-// encrypted, into an S3 bucket with versioning enabled. A backup removed by
-// retention, or overwritten or deleted by anything holding the write key,
-// stays recoverable as a noncurrent version for as long as the bucket's own
-// lifecycle keeps those -- a second copy on separate storage whose history
-// this service cannot erase, because its credentials are not granted
-// s3:DeleteObjectVersion.
+// encrypted, into an S3 bucket with versioning enabled -- a second copy on
+// separate storage. This service never deletes from the bucket, so its
+// credentials need no delete permission at all (on MinIO s3:DeleteObject
+// also permits deleting a version outright): the bucket's lifecycle expires
+// copies, and an object overwritten by anything holding the write key stays
+// recoverable as a noncurrent version for as long as that lifecycle keeps
+// those.
 //
 //	SCOS_OBJECT_STORE_ENDPOINT        https://host:port of the S3 API
 //	SCOS_OBJECT_STORE_BUCKET          a bucket with versioning enabled
@@ -185,15 +186,14 @@ func (o *objectStore) versionCount(ctx context.Context) (int, error) {
 
 // objectSyncResult is what one replication pass did.
 type objectSyncResult struct {
-	Copied  []string `json:"copied"`
-	Removed []string `json:"removed"`
-	Errors  []string `json:"errors"`
+	Copied []string `json:"copied"`
+	Errors []string `json:"errors"`
 }
 
 // syncObjectStore copies every verified backup the provider holds that the
-// bucket does not, reading each copy back before counting it, and removes
-// the current object of every backup retention has expired (its versions
-// stay, as noncurrent). Callers hold s.opMu.
+// bucket does not, reading each copy back before counting it. It never
+// deletes: expiry is the bucket's own lifecycle, so credentials that can
+// only put, get and list are all it needs. Callers hold s.opMu.
 func (s *backupServer) syncObjectStore(ctx context.Context) (objectSyncResult, error) {
 	var res objectSyncResult
 	if s.objectStore == nil {
@@ -211,9 +211,7 @@ func (s *backupServer) syncObjectStore(ctx context.Context) (objectSyncResult, e
 	if err != nil {
 		return res, err
 	}
-	local := map[string]bool{}
 	for _, id := range ids {
-		local[id] = true
 		if have[id] {
 			continue
 		}
@@ -223,22 +221,7 @@ func (s *backupServer) syncObjectStore(ctx context.Context) (objectSyncResult, e
 		}
 		res.Copied = append(res.Copied, id)
 	}
-	for id := range have {
-		if local[id] || validBackupID(id) != nil {
-			continue
-		}
-		var errs []error
-		for _, key := range []string{s.objectStore.archiveKey(id), s.objectStore.manifestKey(id)} {
-			errs = append(errs, s.objectStore.client.RemoveObject(ctx, s.objectStore.bucket, key, minio.RemoveObjectOptions{}))
-		}
-		if err := errors.Join(errs...); err != nil {
-			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", id, err))
-			continue
-		}
-		res.Removed = append(res.Removed, id)
-	}
 	sort.Strings(res.Copied)
-	sort.Strings(res.Removed)
 	return res, nil
 }
 
@@ -428,7 +411,7 @@ func (s *backupServer) logObjectSync(ctx context.Context) {
 	switch {
 	case err != nil:
 		log.Printf("object store: replication failed: %v", err)
-	case len(res.Copied)+len(res.Removed)+len(res.Errors) > 0:
-		log.Printf("object store: copied %d, removed %d, %d errors in %s %v", len(res.Copied), len(res.Removed), len(res.Errors), time.Since(start).Round(time.Millisecond), res.Errors)
+	case len(res.Copied)+len(res.Errors) > 0:
+		log.Printf("object store: copied %d, %d errors in %s %v", len(res.Copied), len(res.Errors), time.Since(start).Round(time.Millisecond), res.Errors)
 	}
 }
