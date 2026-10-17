@@ -20,7 +20,8 @@ from benchmarks.run_acceptance import (  # noqa: E402
     run_domain,
 )
 
-DOMAINS = {"context_optimization", "code_intelligence", "execution_proxy", "control_plane_routing"}
+DOMAINS = {"context_optimization", "code_intelligence", "execution_proxy", "control_plane_routing",
+           "control_plane_routing_holdout"}
 
 
 def _contains_key(value, key):
