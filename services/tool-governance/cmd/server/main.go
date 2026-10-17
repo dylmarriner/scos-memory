@@ -93,7 +93,9 @@ var validTransitions = map[ToolState][]ToolState{
 	StateProposed:    {StatePrepared, StateCancelled},
 	StatePrepared:    {StateAuthorised, StateCancelled},
 	StateAuthorised:  {StateExecuting, StateCancelled},
-	StateExecuting:   {StateSucceeded, StateFailed, StateUnknown},
+	// Executing -> Cancelled is a dry run: authorised and planned, then
+	// deliberately not run.
+	StateExecuting:   {StateSucceeded, StateFailed, StateUnknown, StateCancelled},
 	StateSucceeded:   {},
 	StateFailed:      {StateReconciling},
 	StateCancelled:   {},
@@ -857,7 +859,7 @@ func (s *toolGovernanceServer) handleOperationComplete(w http.ResponseWriter, r 
 	defer r.Body.Close()
 	var req struct {
 		OperationID string `json:"operation_id"`
-		Result      string `json:"result"` // succeeded, failed, unknown
+		Result      string `json:"result"` // succeeded, failed, unknown, cancelled (dry run)
 		Output      any    `json:"output,omitempty"`
 		Error       string `json:"error,omitempty"`
 		TenantID    string `json:"tenant_id,omitempty"`
@@ -867,8 +869,8 @@ func (s *toolGovernanceServer) handleOperationComplete(w http.ResponseWriter, r 
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Result != "succeeded" && req.Result != "failed" && req.Result != "unknown" {
-		http.Error(w, "result must be succeeded, failed, or unknown", http.StatusBadRequest)
+	if req.Result != "succeeded" && req.Result != "failed" && req.Result != "unknown" && req.Result != "cancelled" {
+		http.Error(w, "result must be succeeded, failed, unknown or cancelled", http.StatusBadRequest)
 		return
 	}
 	identity, status, msg := resolveIdentity(r, req.TenantID, req.PrincipalID)
@@ -925,6 +927,8 @@ func (s *toolGovernanceServer) handleOperationComplete(w http.ResponseWriter, r 
 		newState = StateSucceeded
 	case "failed":
 		newState = StateFailed
+	case "cancelled":
+		newState = StateCancelled
 	default:
 		newState = StateUnknown
 	}

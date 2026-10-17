@@ -1921,10 +1921,12 @@ func governedTools() []map[string]any {
 			"mode":         strField("bypass, observe, safe, adaptive, or forensic"),
 		}, "command"),
 		tool("scos_exec_rules_list", "List command rewrite/redaction rules", map[string]any{}),
-		tool("scos_exec_rule_create", "Add a command rewrite/redaction rule", map[string]any{
-			"pattern":     strField("Match pattern"),
-			"replacement": strField("Replacement text"),
-			"risk_class":  strField("Risk class"),
+		tool("scos_exec_rule_create", "Add a command rewrite rule for your tenant's commands (it rewrites the command before it runs; it never applies to destructive commands and is dropped if the rewrite would raise the command's risk)", map[string]any{
+			"pattern":     strField("Regular expression matched against the command; its first match is replaced"),
+			"replacement": strField("Replacement text; may use capture groups ($1, ${name})"),
+			"unless":      strField("Regular expression; the rule does not apply to a command it matches"),
+			"risk_class":  strField("read, test or write: the rule applies only to commands graded at this risk (default read)"),
+			"lossless":    boolField("The rewritten command does the same work and keeps all of the original's output; safe mode applies only lossless rules"),
 			"description": strField("Rule description"),
 		}, "pattern", "replacement"),
 	)
