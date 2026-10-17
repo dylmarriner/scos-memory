@@ -216,6 +216,26 @@ func insertTurnWithMessages(ctx context.Context, tx *sql.Tx, id requestIdentity,
 	return nil
 }
 
+// enqueueConsolidation records a stored turn's completion the way
+// memory-gateway does -- a turn.completed event on the turn and a
+// turn.completed outbox job -- so the consolidation worker extracts
+// memories from turns synced through Hermes too.
+func enqueueConsolidation(ctx context.Context, tx *sql.Tx, id requestIdentity, sessionID, turnID string) error {
+	if err := appendEvent(ctx, tx, id.TenantID, turnID, "turn.completed", "turn/"+turnID, id.PrincipalID,
+		map[string]string{"session_id": sessionID, "source": "hermes"}); err != nil {
+		return fmt.Errorf("record turn completion: %w", err)
+	}
+	payload, err := json.Marshal(map[string]string{"turn_id": turnID, "session_id": sessionID, "principal_id": id.PrincipalID})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox_jobs (tenant_id, operation_id, job_type, payload) VALUES ($1,$2,'turn.completed',$3)`,
+		id.TenantID, turnID+":completed", payload); err != nil {
+		return fmt.Errorf("enqueue consolidation: %w", err)
+	}
+	return nil
+}
+
 // recentTurns returns the most recent turns (with their messages folded back
 // into the StoredTurn shape the Hermes API has always returned) for a
 // session, newest first, bounded by limit.
