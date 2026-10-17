@@ -267,3 +267,17 @@ func TestRandomTokenHasPrefixAndLength(t *testing.T) {
 		t.Fatalf("expected a long random token, got length %d", len(tok))
 	}
 }
+
+func TestSavingAPlanStoresOnlyItsCustomPerks(t *testing.T) {
+	requests := int64(10000)
+	old := planLimits{MonthlyMCPRequests: &requests, Features: []string{"graphify"}}
+	edited := planLimits{Features: []string{}}
+	shown := append(planLines(old.MonthlyMCPRequests, old.StorageBytes, old.Features), "Priority support", " ", "Priority support")
+	got := customPerks(shown, old, edited)
+	if len(got) != 2 || got[0] != "Priority support" {
+		t.Fatalf("custom perks = %q", got)
+	}
+	if again := customPerks(append(planLines(edited.MonthlyMCPRequests, edited.StorageBytes, edited.Features), got...), edited); len(again) != 2 {
+		t.Fatalf("a second save changed the perks: %q", again)
+	}
+}

@@ -84,6 +84,10 @@ type chatResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -185,6 +189,7 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userPrompt string) (str
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return "", fmt.Errorf("decode deepseek response: %w", err)
 	}
+	c.recordUsage(parsed)
 	if len(parsed.Choices) == 0 {
 		return "", fmt.Errorf("deepseek returned no choices")
 	}
@@ -221,6 +226,7 @@ func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userPrompt string, 
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return fmt.Errorf("decode deepseek response: %w", err)
 	}
+	c.recordUsage(parsed)
 	if len(parsed.Choices) == 0 {
 		return fmt.Errorf("deepseek returned no choices")
 	}

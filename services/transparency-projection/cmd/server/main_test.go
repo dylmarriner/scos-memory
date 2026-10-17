@@ -190,7 +190,7 @@ func TestSnapshotIncludesGovernanceExpansionViews(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&decoded); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	for _, key := range []string{"plugins", "skills", "hooks", "code_intelligence", "routing", "recovery", "security", "token_flow", "costs", "service_flows", "benchmarks", "metric_catalog"} {
+	for _, key := range []string{"plugins", "skills", "hooks", "code_intelligence", "routing", "recovery", "security", "token_flow", "costs", "service_flows"} {
 		if _, ok := decoded.Views[key]; !ok {
 			t.Errorf("expected a %q view", key)
 		}

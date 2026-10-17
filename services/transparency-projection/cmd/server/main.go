@@ -231,13 +231,12 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		"routing":           {s.upstreams["autonomous_control_plane"], "/v1/control/decisions"},
 		"recovery":          {s.upstreams["recovery_orchestrator"], "/v1/recovery/status"},
 		"security":          {s.upstreams["security_gate"], "/v1/audit"},
-		"token_flow":        {s.upstreams["observability"], "/v1/metrics?metric=token&limit=500"},
-		"costs":             {s.upstreams["observability"], "/v1/metrics?metric=cost&limit=500"},
-		"service_flows":     {s.upstreams["observability"], "/v1/flows?range=15m"},
-		"benchmarks":        {s.upstreams["observability"], "/v1/benchmarks?limit=50"},
-		"metric_catalog":    {s.upstreams["observability"], "/v1/metrics/catalog?range=24h"},
-		"memory_summary":    {s.upstream, "/v1/dashboard/summary"},
-		"code_repos":        {s.upstreams["code_intelligence"], "/v1/repos"},
+		// Model usage as each provider call reported it (packages/llmclient).
+		"token_flow":     {s.upstreams["observability"], "/v1/metrics?metric=scos.llm.tokens&limit=1000"},
+		"costs":          {s.upstreams["observability"], "/v1/metrics?metric=scos.llm.cost&limit=1000"},
+		"service_flows":  {s.upstreams["observability"], "/v1/flows?range=15m"},
+		"memory_summary": {s.upstream, "/v1/dashboard/summary"},
+		"code_repos":     {s.upstreams["code_intelligence"], "/v1/repos"},
 		// credential-vault's list route returns metadata only (name,
 		// key_version, created_by, timestamps) -- never a decrypted secret
 		// value -- so it's safe to surface on this otherwise-unauthenticated
