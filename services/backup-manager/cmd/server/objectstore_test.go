@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,7 +66,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		v := f.add(key, data)
 		w.Header().Set("x-amz-version-id", v.id)
-		w.Header().Set("ETag", `"`+v.id+`"`)
+		w.Header().Set("ETag", `"`+v.etag()+`"`)
 	case http.MethodGet, http.MethodHead:
 		vs := f.objects[key]
 		if len(vs) == 0 {
@@ -74,8 +76,22 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v := vs[len(vs)-1]
+		if want := q.Get("versionId"); want != "" {
+			found := false
+			for _, candidate := range vs {
+				if candidate.id == want {
+					v, found = candidate, true
+				}
+			}
+			if !found {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `<Error><Code>NoSuchVersion</Code><Message>no such version</Message></Error>`)
+				return
+			}
+		}
 		w.Header().Set("x-amz-version-id", v.id)
-		w.Header().Set("ETag", `"`+v.id+`"`)
+		w.Header().Set("ETag", `"`+v.etag()+`"`)
 		w.Header().Set("Last-Modified", v.at.UTC().Format(http.TimeFormat))
 		w.Header().Set("Content-Length", strconv.Itoa(len(v.data)))
 		if r.Method == http.MethodGet {
@@ -84,6 +100,12 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
+}
+
+// etag is what S3 reports for a single-part upload: the content's MD5.
+func (v fakeVersion) etag() string {
+	sum := md5.Sum(v.data)
+	return hex.EncodeToString(sum[:])
 }
 
 func (f *fakeS3) add(key string, data []byte) fakeVersion {
@@ -117,7 +139,7 @@ func (f *fakeS3) list(w io.Writer, prefix string) {
 		vs := f.objects[k]
 		v := vs[len(vs)-1]
 		n++
-		fmt.Fprintf(&b, `<Contents><Key>%s</Key><Size>%d</Size><ETag>"%s"</ETag><LastModified>%s</LastModified></Contents>`, k, len(v.data), v.id, v.at.UTC().Format(time.RFC3339))
+		fmt.Fprintf(&b, `<Contents><Key>%s</Key><Size>%d</Size><ETag>"%s"</ETag><LastModified>%s</LastModified></Contents>`, k, len(v.data), v.etag(), v.at.UTC().Format(time.RFC3339))
 	}
 	fmt.Fprintf(w, `<ListBucketResult><Name>%s</Name><Prefix>%s</Prefix><KeyCount>%d</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>%s</ListBucketResult>`, f.bucket, prefix, n, b.String())
 }
@@ -273,12 +295,19 @@ func TestObjectStoreSyncCopiesVerifiesAndKeepsVersions(t *testing.T) {
 		t.Fatalf("restored copy does not verify: %v", err)
 	}
 
-	// A tampered object is refused, not restored.
+	// A tampered current object is never what is restored: the retained
+	// version that verifies is read instead.
 	key := "backups/" + second.ID + ".backup"
 	vsSecond := fake.objects[key]
+	intact := vsSecond[len(vsSecond)-1].id
 	tampered := append([]byte(nil), vsSecond[len(vsSecond)-1].data...)
 	tampered[len(tampered)-1] ^= 0xff
 	fake.add(key, tampered)
+	if c, err := s.fetchFromObjectStore(ctx, second.ID); err != nil || c.ArchiveVersion != intact {
+		t.Fatalf("tampered current version: fetched %q, %v; want retained version %s", c.ArchiveVersion, err, intact)
+	}
+	// With every retained version tampered, the copy is refused.
+	fake.objects[key] = []fakeVersion{{id: "vbad", data: tampered, at: time.Now()}}
 	if _, err := s.fetchFromObjectStore(ctx, second.ID); err == nil || !strings.Contains(err.Error(), "does not verify") {
 		t.Fatalf("tampered copy = %v", err)
 	}
@@ -339,10 +368,25 @@ func TestObjectStoreCoverageCoveredWithVerifiedCopy(t *testing.T) {
 	if !c.Covered || !strings.Contains(c.Evidence, b.ID) || !strings.Contains(c.Evidence, "as version v") || !strings.Contains(c.Evidence, "1 archive versions") {
 		t.Fatalf("after sync = %+v", c)
 	}
-	// A copy that no longer verifies withdraws coverage.
+	// An overwritten current archive: the retained version that verifies is
+	// what recovery reads, so the backup stays covered by that version.
 	key := "backups/" + b.ID + ".backup"
+	good := fake.objects[key][0].id
 	fake.add(key, []byte("not the archive"))
+	if c := s.objectStoreCoverage(ctx, base); !c.Covered || !strings.Contains(c.Evidence, "as version "+good) {
+		t.Fatalf("overwritten current version = %+v", c)
+	}
+	// The next pass sees the current object differs from the provider's and
+	// copies it again.
+	if res, err := s.syncObjectStore(ctx); err != nil || len(res.Copied) != 1 || res.Copied[0] != b.ID {
+		t.Fatalf("repair sync = %+v, %v", res, err)
+	}
+	if c := s.objectStoreCoverage(ctx, base); !c.Covered || strings.Contains(c.Evidence, "as version "+good) {
+		t.Fatalf("after repair the current version verifies: %+v", c)
+	}
+	// With no retained version that verifies, coverage is withdrawn.
+	fake.objects[key] = []fakeVersion{{id: "vbad", data: []byte("not the archive"), at: time.Now()}}
 	if c := s.objectStoreCoverage(ctx, base); c.Covered || !strings.Contains(c.Reason, "does not verify") {
-		t.Fatalf("tampered = %+v", c)
+		t.Fatalf("no verifying version = %+v", c)
 	}
 }

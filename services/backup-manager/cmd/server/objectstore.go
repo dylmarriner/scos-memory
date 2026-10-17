@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -134,9 +136,13 @@ func newObjectStore(endpoint, bucket, accessKey, secretKey, prefix, region strin
 func (o *objectStore) archiveKey(id string) string  { return o.prefix + id + objectArchiveSuffix }
 func (o *objectStore) manifestKey(id string) string { return o.prefix + id + objectManifestSuffix }
 
-// get reads an object's current version.
-func (o *objectStore) get(ctx context.Context, key string) ([]byte, minio.ObjectInfo, error) {
-	obj, err := o.client.GetObject(ctx, o.bucket, key, minio.GetObjectOptions{})
+// get reads an object's current version, or the version named.
+func (o *objectStore) get(ctx context.Context, key string, versionID ...string) ([]byte, minio.ObjectInfo, error) {
+	opts := minio.GetObjectOptions{}
+	if len(versionID) > 0 {
+		opts.VersionID = versionID[0]
+	}
+	obj, err := o.client.GetObject(ctx, o.bucket, key, opts)
 	if err != nil {
 		return nil, minio.ObjectInfo{}, err
 	}
@@ -153,18 +159,70 @@ func (o *objectStore) put(ctx context.Context, key string, data []byte, contentT
 	return o.client.PutObject(ctx, o.bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: contentType})
 }
 
-// currentIDs lists the backup ids whose archive is a current (not deleted)
-// object.
-func (o *objectStore) currentIDs(ctx context.Context) (map[string]bool, error) {
-	ids := map[string]bool{}
+// storedObject is what a listing says about one current object.
+type storedObject struct {
+	size int64
+	etag string
+}
+
+// matches reports whether the object holds exactly data, as far as a
+// listing can tell without downloading it: the size always, and the MD5 a
+// single-part upload's ETag is. A multipart ETag ("<md5>-<parts>") is not a
+// content hash, so only the size is compared for those.
+func (o storedObject) matches(data []byte) bool {
+	if o.size != int64(len(data)) {
+		return false
+	}
+	etag := strings.Trim(o.etag, `"`)
+	if strings.Contains(etag, "-") {
+		return true
+	}
+	sum := md5.Sum(data)
+	return strings.EqualFold(etag, hex.EncodeToString(sum[:]))
+}
+
+// currentObjects lists the current (not deleted) archive and manifest
+// objects by backup id.
+func (o *objectStore) currentObjects(ctx context.Context) (archives, manifests map[string]storedObject, err error) {
+	archives, manifests = map[string]storedObject{}, map[string]storedObject{}
 	for obj := range o.client.ListObjects(ctx, o.bucket, minio.ListObjectsOptions{Prefix: o.prefix, Recursive: true}) {
+		if obj.Err != nil {
+			return nil, nil, obj.Err
+		}
+		name := strings.TrimPrefix(obj.Key, o.prefix)
+		if strings.Contains(name, "/") {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(name, objectArchiveSuffix):
+			archives[strings.TrimSuffix(name, objectArchiveSuffix)] = storedObject{obj.Size, obj.ETag}
+		case strings.HasSuffix(name, objectManifestSuffix):
+			manifests[strings.TrimSuffix(name, objectManifestSuffix)] = storedObject{obj.Size, obj.ETag}
+		}
+	}
+	return archives, manifests, nil
+}
+
+// versions lists a key's retained versions (not delete markers), newest
+// first.
+func (o *objectStore) versions(ctx context.Context, key string) ([]string, error) {
+	type version struct {
+		id   string
+		when time.Time
+	}
+	var vs []version
+	for obj := range o.client.ListObjects(ctx, o.bucket, minio.ListObjectsOptions{Prefix: key, WithVersions: true}) {
 		if obj.Err != nil {
 			return nil, obj.Err
 		}
-		name := strings.TrimPrefix(obj.Key, o.prefix)
-		if strings.HasSuffix(name, objectArchiveSuffix) && !strings.Contains(name, "/") {
-			ids[strings.TrimSuffix(name, objectArchiveSuffix)] = true
+		if obj.Key == key && !obj.IsDeleteMarker {
+			vs = append(vs, version{obj.VersionID, obj.LastModified})
 		}
+	}
+	sort.SliceStable(vs, func(i, j int) bool { return vs[i].when.After(vs[j].when) })
+	ids := make([]string, len(vs))
+	for i, v := range vs {
+		ids[i] = v.id
 	}
 	return ids, nil
 }
@@ -203,7 +261,7 @@ func (s *backupServer) syncObjectStore(ctx context.Context) (objectSyncResult, e
 	if !ok || p == nil {
 		return res, errors.New("only the encrypted filesystem provider's backups are copied to the object store")
 	}
-	have, err := s.objectStore.currentIDs(ctx)
+	archives, manifests, err := s.objectStore.currentObjects(ctx)
 	if err != nil {
 		return res, fmt.Errorf("list %s: %w", s.objectStore.bucket, err)
 	}
@@ -212,8 +270,14 @@ func (s *backupServer) syncObjectStore(ctx context.Context) (objectSyncResult, e
 		return res, err
 	}
 	for _, id := range ids {
-		if have[id] {
-			continue
+		// A backup counts as copied only while the bucket's current objects
+		// are the provider's: a missing manifest, or an archive or manifest
+		// that differs (damaged, or a copy that never verified), is copied
+		// again from the provider's verified copy.
+		if a, ok := archives[id]; ok {
+			if m, ok := manifests[id]; ok && s.copyIsCurrent(p, id, a, m) {
+				continue
+			}
 		}
 		if err := s.copyToObjectStore(ctx, p, id); err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", id, err))
@@ -223,6 +287,20 @@ func (s *backupServer) syncObjectStore(ctx context.Context) (objectSyncResult, e
 	}
 	sort.Strings(res.Copied)
 	return res, nil
+}
+
+// copyIsCurrent reports whether the bucket's current archive and manifest
+// for id hold exactly the provider's files.
+func (s *backupServer) copyIsCurrent(p *filesystemProvider, id string, archive, manifest storedObject) bool {
+	artifact, err := os.ReadFile(p.archivePath(id))
+	if err != nil {
+		return false
+	}
+	manifestJSON, err := os.ReadFile(p.manifestPath(id))
+	if err != nil {
+		return false
+	}
+	return archive.matches(artifact) && manifest.matches(manifestJSON)
 }
 
 // copyToObjectStore uploads one backup's encrypted archive and manifest as
@@ -261,9 +339,10 @@ type objectCopy struct {
 	ManifestVersion string
 }
 
-// fetchFromObjectStore reads a backup's current objects and verifies them:
-// the manifest's MAC under the backup key, the archive's SHA-256, and the
-// decrypted content's hash.
+// fetchFromObjectStore reads a backup's objects and verifies them -- the
+// manifest's MAC under the backup key, the archive's SHA-256, and the
+// decrypted content's hash -- falling back to retained older versions when
+// the current ones do not verify.
 func (s *backupServer) fetchFromObjectStore(ctx context.Context, id string) (objectCopy, error) {
 	var c objectCopy
 	if err := validBackupID(id); err != nil {
@@ -274,13 +353,43 @@ func (s *backupServer) fetchFromObjectStore(ctx context.Context, id string) (obj
 		return c, errors.New("the backup key of the encrypted filesystem provider is needed to verify object-store copies")
 	}
 	o := s.objectStore
+	current, currentErr := s.readObjectCopy(ctx, p, id, "", "")
+	if currentErr == nil {
+		return current, nil
+	}
+	// Versioning exists for the case where the current objects were
+	// overwritten or damaged: every retained version pair is tried, newest
+	// first, until one verifies.
+	manifestVersions, err := o.versions(ctx, o.manifestKey(id))
+	if err != nil {
+		return c, fmt.Errorf("%v; and listing the retained versions failed: %w", currentErr, err)
+	}
+	archiveVersions, err := o.versions(ctx, o.archiveKey(id))
+	if err != nil {
+		return c, fmt.Errorf("%v; and listing the retained versions failed: %w", currentErr, err)
+	}
+	for _, mv := range manifestVersions {
+		for _, av := range archiveVersions {
+			if older, err := s.readObjectCopy(ctx, p, id, mv, av); err == nil {
+				return older, nil
+			}
+		}
+	}
+	return c, fmt.Errorf("%v; none of the %d retained manifest and %d archive versions verify either", currentErr, len(manifestVersions), len(archiveVersions))
+}
+
+// readObjectCopy reads one manifest and archive version (the current ones
+// when the version ids are empty) and verifies them.
+func (s *backupServer) readObjectCopy(ctx context.Context, p *filesystemProvider, id, manifestVersion, archiveVersion string) (objectCopy, error) {
+	var c objectCopy
+	o := s.objectStore
 	var info minio.ObjectInfo
 	var err error
-	if c.ManifestJSON, info, err = o.get(ctx, o.manifestKey(id)); err != nil {
+	if c.ManifestJSON, info, err = o.get(ctx, o.manifestKey(id), manifestVersion); err != nil {
 		return c, fmt.Errorf("read %s: %w", o.manifestKey(id), err)
 	}
 	c.ManifestVersion = info.VersionID
-	if c.Artifact, info, err = o.get(ctx, o.archiveKey(id)); err != nil {
+	if c.Artifact, info, err = o.get(ctx, o.archiveKey(id), archiveVersion); err != nil {
 		return c, fmt.Errorf("read %s: %w", o.archiveKey(id), err)
 	}
 	c.ArchiveVersion = info.VersionID
