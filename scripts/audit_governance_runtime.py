@@ -89,18 +89,36 @@ def unconditional_readiness(root: Path) -> list[str]:
     return sorted(set(findings))
 
 
+# Servers that authenticate every /v1 route themselves rather than through
+# the shared middleware, with the reason. Anything else serving /v1 routes
+# must wrap its handler in one of the AUTH_WRAPPERS.
+SELF_AUTHENTICATING_SERVERS = {
+    "services/cloud-control-plane/cmd/server/main.go":
+        "public customer ingress: account sessions and API keys are checked per route before any fabric call",
+    "integrations/tunnel-client/pkg/localproxy/localproxy.go":
+        "vendored upstream OpenAI tunnel-client: a loopback or unix-socket local proxy between the tunnel daemon "
+        "and the stdio MCP bridge; it holds no fabric credential, and the bridge authenticates to the gateway",
+}
+AUTH_WRAPPERS = r"(?:authMiddleware|authenticationMiddleware|RequireAuth|AuthenticatedHandler|ControlPlaneHandler)\s*\("
+# Any way a Go program starts serving HTTP: net/http, the shared tlsserve
+# package, or an http.Server.
+SERVE_CALL = re.compile(r"\bListenAndServe(?:TLS)?\(|\.Serve(?:TLS)?\(")
+
+
 def missing_auth_middleware(root: Path) -> list[str]:
     findings: list[str] = []
     for path in production_files(root, GO_SUFFIXES):
         text = path.read_text(encoding="utf-8", errors="replace")
-        if "/v1/" not in text or "http.ListenAndServe" not in text:
+        if "/v1/" not in text or not SERVE_CALL.search(text):
+            continue
+        if relative(root, path) in SELF_AUTHENTICATING_SERVERS:
             continue
         # A direct ServeMux is not middleware, even if individual handlers
         # inspect caller-controlled identity headers.
-        if re.search(r"(?:authMiddleware|authenticationMiddleware|RequireAuth|AuthenticatedHandler|ControlPlaneHandler)\s*\(", text):
+        if re.search(AUTH_WRAPPERS, text):
             continue
         for line_number, line in enumerate(text.splitlines(), 1):
-            if "http.ListenAndServe" in line:
+            if SERVE_CALL.search(line):
                 findings.append(
                     f"{relative(root, path)}:{line_number}: HTTP server exposes /v1 routes without authentication middleware"
                 )
