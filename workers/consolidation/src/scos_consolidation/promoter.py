@@ -217,6 +217,7 @@ def build_memory_version(
     """Build the row dict for inserting the first memory_versions row."""
     from uuid import uuid4
     now = datetime.now(timezone.utc)
+    rewritten_by = candidate.metadata.get("rewritten_by")
     return {
         "id": uuid4(),
         "memory_id": memory_item_id,
@@ -228,11 +229,14 @@ def build_memory_version(
             # The fields memory-intelligence reads every fact through: a
             # memory consolidated from a conversation was observed there.
             "network": memory_network(candidate.memory_class),
-            "source": "observed",
+            # A statement a model reworded is inferred from what was
+            # observed, not observed itself; the extracted text is kept.
+            "source": "inferred" if rewritten_by else "observed",
             "scope": "namespace",
             "observed_at": now.isoformat(),
-            "inferred": False,
-            "derivation": "consolidation",
+            "inferred": bool(rewritten_by),
+            "derivation": "consolidation+llm_rewrite" if rewritten_by else "consolidation",
+            **({"rewritten_by": rewritten_by, "extracted_content": candidate.metadata.get("extracted_content")} if rewritten_by else {}),
         }),
         "content_hash": sha256(candidate.content.encode("utf-8")).hexdigest(),
         "change_reason": "initial consolidation",

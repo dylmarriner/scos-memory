@@ -12,6 +12,7 @@ from typing import Any, Sequence
 from uuid import UUID, uuid4
 
 from .models import MemoryCandidate
+from .statements import contradictions
 
 logger = logging.getLogger(__name__)
 
@@ -91,14 +92,15 @@ def detect_conflicts(
 ) -> list[ConflictSet]:
     """Compare candidates against existing memory for contradictions.
 
-    Conflict detection uses three strategies:
+    Conflict detection uses two strategies:
 
-    1. **Direct negation** — one statement explicitly negates another
-       (e.g. "uses PostgreSQL" vs "does NOT use PostgreSQL").
-    2. **Mutually exclusive attributes** — the same subject has
-       incompatible property values.
-    3. **Authority-based contradiction** — a low-authority claim
-       contradicts a high-authority claim on the same subject.
+    1. **Direct negation** — a sentence of the candidate states the same
+       proposition as a sentence of an existing record with the opposite
+       polarity ("uses PostgreSQL" vs "does not use PostgreSQL"), whatever
+       the two records are titled (statements.py).
+    2. **Authority-based contradiction** — a claim on the same subject (the
+       same title) as an existing record whose authority differs by 40 or
+       more.
 
     Parameters
     ----------
@@ -117,24 +119,21 @@ def detect_conflicts(
 
     for c in candidates:
         subject = _extract_subject(c)
-        if not subject:
-            continue
 
         for row in existing:
             existing_subject = _extract_subject_from_row(row)
-            if not existing_subject or _normalise(subject) != _normalise(existing_subject):
-                continue
+            same_subject = bool(subject and existing_subject and _normalise(subject) == _normalise(existing_subject))
 
             existing_content = row.get("content", "")
             conflict_statements: list[str] = []
 
-            # Strategy 1: direct negation
-            negations = _find_negations(c.content, existing_content)
-            conflict_statements.extend(negations)
+            # Strategy 1: direct negation, sentence by sentence.
+            for mine, theirs in contradictions(c.content, existing_content):
+                conflict_statements.append(f"Contradictory statements: '{mine}' vs '{theirs}'")
 
-            # Strategy 3: authority mismatch on same subject
+            # Strategy 2: authority mismatch on the same subject.
             existing_authority = row.get("authority_level", 50)
-            if abs(c.authority_level - existing_authority) >= 40:
+            if same_subject and abs(c.authority_level - existing_authority) >= 40:
                 conflict_statements.append(
                     f"Authority mismatch: candidate={c.authority_level}, "
                     f"existing={existing_authority} for subject '{subject}'"
@@ -195,41 +194,3 @@ def _extract_subject_from_row(row: dict[str, Any]) -> str | None:
 def _normalise(text: str) -> str:
     import re
     return re.sub(r"\s+", " ", text.lower().strip())
-
-
-def _find_negations(content_a: str, content_b: str) -> list[str]:
-    """Detect explicit negation pairs between two content strings."""
-    negations: list[str] = []
-    a_lower = content_a.lower()
-    b_lower = content_b.lower()
-
-    # Look for "X is Y" in one and "X is NOT Y" in the other
-    for extract in (_extract_factual_statements(a_lower), _extract_factual_statements(b_lower)):
-        for stmt in extract:
-            # Check if the other side contradicts this statement
-            if "not " + stmt in a_lower or "not " + stmt in b_lower:
-                negations.append(f"Contradictory statement: '{stmt}'")
-            # Check "does not" pattern
-            words = stmt.split()
-            if len(words) >= 3:
-                verb = words[1] if len(words) > 1 else ""
-                rest = " ".join(words[2:])
-                negation_pattern = f"does not {verb} {rest}" if rest else f"does not {verb}"
-                if negation_pattern in a_lower or negation_pattern in b_lower:
-                    negations.append(f"Contradictory statement: '{stmt}'")
-
-    return negations
-
-
-def _extract_factual_statements(text: str) -> list[str]:
-    """Extract simple 'X is|uses|runs|depends|located Y' statements."""
-    import re
-    patterns = [
-        r"(?:is|are|was|were)\s+a(n)?\s+([^.!?]+)",
-        r"(?:uses|runs|depends|located|built|implemented)\s+(?:on|in|with|at|by|using)\s+([^.!?]+)",
-    ]
-    statements: list[str] = []
-    for pat in patterns:
-        for match in re.finditer(pat, text):
-            statements.append(match.group(0).strip())
-    return statements

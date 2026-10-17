@@ -11,6 +11,7 @@ from hashlib import sha256
 from typing import Sequence
 
 from .models import EvidenceReference, MemoryCandidate
+from .statements import duplicate_score
 
 logger = logging.getLogger(__name__)
 
@@ -95,29 +96,23 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower().strip())
 
 
-# Same duplicate rule as memory-intelligence's deterministic merge
-# (findMergeCandidate): the shorter statement's significant words (longer than
-# three characters) are almost all in the other.
+# Same duplicate threshold as memory-intelligence's deterministic merge
+# (findMergeCandidate): the shorter statement's content words are almost all
+# in the other. The comparison is polarity-aware (statements.py): a
+# statement and its negation are never duplicates.
 DUPLICATE_OVERLAP = 0.85
 
 
-def _significant_words(text: str) -> set[str]:
-    import re
-    return {w for w in re.findall(r"[a-z0-9][a-z0-9:._/-]*[a-z0-9]|[a-z0-9]", text.lower()) if len(w) > 3}
-
-
 def _overlap(a: str, b: str) -> float:
-    aw, bw = _significant_words(a), _significant_words(b)
-    if not aw or not bw:
-        return 0.0
-    return len(aw & bw) / min(len(aw), len(bw))
+    return duplicate_score(a, b)
 
 
 def _find_match(fp: str, existing: Sequence[dict], content: str = "") -> dict | None:
     """The existing record this candidate duplicates, if any.
 
     An identical title and content always matches; otherwise the closest
-    record whose significant-word overlap reaches DUPLICATE_OVERLAP.
+    record whose proposition overlap reaches DUPLICATE_OVERLAP and which
+    does not contradict the candidate.
     """
     best: tuple[float, dict] | None = None
     for row in existing:

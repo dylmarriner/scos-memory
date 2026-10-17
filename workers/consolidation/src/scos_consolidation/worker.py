@@ -106,12 +106,12 @@ def _process_cycle(conn: psycopg.Connection) -> None:
             _act_as(conn, job["tenant_id"], job.get("principal_id"))
             _process_job(conn, job)
             conn.commit()
-        except Exception:
+        except Exception as exc:
             logger.exception("job %s failed", job["id"])
             conn.rollback()
             try:
                 _act_as(conn, job["tenant_id"], job.get("principal_id"))
-                _mark_failed(conn, job)
+                _mark_failed(conn, job, f"{type(exc).__name__}: {exc}")
                 conn.commit()
             except Exception:
                 logger.exception("job %s could not be marked failed", job["id"])
@@ -145,7 +145,10 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
 
     turn_id = payload.get("turn_id")
     if not turn_id:
-        logger.warning("job %s: no turn_id in payload", job_id)
+        # A job with no turn can never succeed: dead-letter it now rather
+        # than leave it claimed and requeued forever.
+        logger.error("job %s: no turn_id in payload", job_id)
+        _mark_failed(conn, job, "job payload has no turn_id", final=True)
         return
 
     if job.get("job_type") == "turn.accepted":
@@ -161,7 +164,7 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
     event = _load_event_for_turn(conn, tenant_id, turn_id)
     if not event:
         logger.error("job %s: no completion event for turn %s", job_id, turn_id)
-        _mark_failed(conn, job)
+        _mark_failed(conn, job, f"no completion event for turn {turn_id}")
         return
 
     # The completion event is keyed by turn; its session and namespace come
@@ -170,7 +173,7 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
     scope = _load_turn_scope(conn, tenant_id, turn_id)
     if not scope:
         logger.error("job %s: turn %s has no session", job_id, turn_id)
-        _mark_failed(conn, job)
+        _mark_failed(conn, job, f"turn {turn_id} has no session")
         return
     event["session_id"], event["namespace_id"] = scope
 
@@ -185,8 +188,10 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
 
     # ── 2.5. Optional LLM rewrite of title/content for clarity ───────
     # No-op (returns candidates unchanged) unless DEEPSEEK_API_KEY is set;
-    # never touches memory_class/authority/confidence/sensitivity -- those
-    # stay governed by the deterministic heuristics above.
+    # never touches memory_class/authority/confidence/sensitivity. The
+    # review gates below also read the content as extracted, so a rewrite
+    # that drops a high-impact word cannot skip human review.
+    extracted = {c.candidate_id: c for c in candidates}
     candidates = enrich_candidates(candidates)
 
     # ── 3. Load existing context for dedup and conflict detection ────
@@ -197,11 +202,11 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
     dedup_results = deduplicate(candidates, existing)
 
     # ── 5. Detect conflicts ──────────────────────────────────────────
-    new_candidates = [r.candidate for r in dedup_results
-                      if r.action == "new" and r.candidate is not None]
-    merged_candidates = [r.candidate for r in dedup_results
-                         if r.action == "merged" and r.candidate is not None]
-    all_candidates = new_candidates + merged_candidates
+    # Every candidate that will be stored is checked, including one that
+    # supersedes an existing memory: outranking a memory is no licence to
+    # contradict another one unseen.
+    all_candidates = [r.candidate for r in dedup_results
+                      if r.action in ("new", "merged", "supersedes") and r.candidate is not None]
 
     conflicts = detect_conflicts(all_candidates, existing)
 
@@ -223,6 +228,11 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
                                if str(candidate.candidate_id) in c.subjects]
 
         promotion = evaluate_promotion(candidate, candidate_conflicts)
+        original = extracted.get(candidate.candidate_id)
+        if original is not None and original is not candidate and promotion.decision == "promote":
+            as_extracted = evaluate_promotion(original, candidate_conflicts)
+            if as_extracted.decision == "review":
+                promotion = as_extracted
 
         if promotion.decision == "reject":
             logger.info("candidate %s: rejected (%s)", candidate.candidate_id, promotion.reason)
@@ -237,6 +247,9 @@ def _process_job(conn: psycopg.Connection, job: dict[str, Any]) -> None:
             "title": candidate.title,
         }
         needs_review, review_reason = requires_human_review(candidate_dict)
+        if original is not None and original is not candidate:
+            original_review, _ = requires_human_review({**candidate_dict, "content": original.content, "title": original.title})
+            needs_review = needs_review or original_review
         needs_review = needs_review or promotion.requires_human
 
         if needs_review:
@@ -608,18 +621,33 @@ def _mark_completed(conn: psycopg.Connection, job_id: UUID) -> None:
         )
 
 
-def _mark_failed(conn: psycopg.Connection, job: dict[str, Any]) -> None:
-    job_id = job["id"]
-    attempts = job.get("attempts", 0)
-    max_attempts = 5
-    new_status = "dead_letter" if attempts >= max_attempts else "retryable"
+MAX_ATTEMPTS = 5
 
+
+def _mark_failed(conn: psycopg.Connection, job: dict[str, Any], reason: str, final: bool = False) -> None:
+    """Mark a job retryable, or dead-lettered once its attempts are spent
+    (or at once when ``final``), recording the dead letter with its reason
+    so it is listed by memory-gateway's /v1/outbox/dead-letters."""
+    job_id = job["id"]
+    attempts = job.get("attempts", 0) or 0
+    dead = final or attempts >= MAX_ATTEMPTS
+    now = datetime.now(timezone.utc)
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE outbox_jobs SET status = %s, updated_at = %s WHERE id = %s",
-            (new_status, datetime.now(timezone.utc), job_id),
+            ("dead_letter" if dead else "retryable", now, job_id),
         )
-
+        if dead:
+            payload = job.get("payload")
+            if not isinstance(payload, str):
+                payload = json.dumps(payload if payload is not None else {})
+            cur.execute(
+                """
+                INSERT INTO outbox_dead_letters (job_id, tenant_id, payload, attempts, failure_reason)
+                VALUES (%s, %s, %s::jsonb, %s, %s)
+                """,
+                (job_id, job["tenant_id"], payload, attempts, reason[:2000]),
+            )
 
 if __name__ == "__main__":
     main()

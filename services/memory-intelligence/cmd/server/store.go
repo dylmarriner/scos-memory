@@ -155,6 +155,10 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 	// match the stored content is the redacted form and sensitivity is
 	// elevated to 'secret'; the original content is never persisted.
 	sensitivity := "internal"
+	switch fact.Sensitivity {
+	case "public", "internal", "confidential", "restricted", "secret":
+		sensitivity = fact.Sensitivity
+	}
 	content := fact.Content
 	if findings := secretscan.Scan(content); len(findings) > 0 {
 		content = secretscan.Redact(content, findings)

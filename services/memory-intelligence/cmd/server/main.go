@@ -88,6 +88,9 @@ type Fact struct {
 	Inferred             bool     `json:"inferred"`
 	Derivation           string   `json:"derivation,omitempty"`
 	Revision             int      `json:"revision"`
+	// Sensitivity is the class to store the fact at (default internal);
+	// content the secret scanner flags is stored secret whatever it says.
+	Sensitivity string `json:"sensitivity,omitempty"`
 
 	// Identity/placement fields. These carry no meaning in the historical
 	// in-memory shape but are required to satisfy the relational schema's

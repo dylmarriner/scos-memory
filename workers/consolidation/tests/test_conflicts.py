@@ -33,6 +33,18 @@ def _candidate(**overrides) -> MemoryCandidate:
 
 
 class ConflictTests(unittest.TestCase):
+    def test_negation_conflicts_whatever_the_titles(self):
+        c = _candidate(title="Architecture note", content="The API is not a monolith. It runs as four services.")
+        existing = [{"id": str(uuid4()), "kind": "memory", "title": "System shape", "content": "The API is a monolith.", "authority_level": 70}]
+        conflicts = detect_conflicts([c], existing)
+        self.assertEqual(len(conflicts), 1)
+        self.assertIn("not a monolith", conflicts[0].statements[0])
+
+    def test_agreeing_statements_do_not_conflict(self):
+        c = _candidate(title="Architecture note", content="The API is a monolith.")
+        existing = [{"id": str(uuid4()), "kind": "memory", "title": "System shape", "content": "The API is a monolith deployed on Fridays.", "authority_level": 70}]
+        self.assertEqual(detect_conflicts([c], existing), [])
+
     def test_no_conflict_on_same_subject_same_claim(self):
         c = _candidate(title="Database engine", content="The project uses PostgreSQL.")
         existing = [

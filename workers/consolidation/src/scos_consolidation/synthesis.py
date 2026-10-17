@@ -3,9 +3,14 @@
 Periodically distills a namespace's accumulated active facts into new
 higher-order "pattern" facts -- insights that only become visible when
 several facts are considered together, not a summary of any single one.
-Patterns are added alongside their source facts, never in place of them,
-and each pattern links back to the specific facts it was distilled from via
-memory_evidence, exactly the way a promoted fact links to its evidence.
+Patterns are added alongside their source facts, never in place of them.
+A pattern is a model's inference, so it is not written as active memory:
+it is proposed for human review (memory_candidates, pending_review, the
+queue memory-intelligence's review endpoints work), carrying the facts it
+cites, its derivation and the highest sensitivity among those facts.
+Approving it stores an inferred fact citing them. Earlier patterns are not
+fed back in as source facts, and a pattern that restates one already
+stored or proposed is not proposed again.
 
 Gated the same way mem0's Synthesis is:
 - a namespace needs a minimum number of active facts before it's eligible
@@ -33,6 +38,9 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 from psycopg.rows import dict_row
+
+from .dedup import DUPLICATE_OVERLAP
+from .statements import duplicate_score
 
 logger = logging.getLogger(__name__)
 
@@ -181,13 +189,15 @@ def _due_for_synthesis(conn: psycopg.Connection, namespace_id) -> bool:
 
 
 def _load_facts_for_synthesis(conn: psycopg.Connection, namespace_id) -> list[dict]:
+    """The namespace's active observed facts (not earlier inferences)."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT mi.id::text AS id, mv.content
+            SELECT mi.id::text AS id, mv.content, mi.sensitivity::text AS sensitivity
             FROM memory_items mi
             JOIN memory_versions mv ON mv.id = mi.current_version_id
             WHERE mi.namespace_id = %s AND mi.status = 'active'
+              AND COALESCE(mv.structured_content->>'inferred', 'false') <> 'true'
             ORDER BY mi.created_at DESC
             LIMIT %s
             """,
@@ -196,52 +206,85 @@ def _load_facts_for_synthesis(conn: psycopg.Connection, namespace_id) -> list[di
         return cur.fetchall()
 
 
-def _insert_pattern_fact(
+def _load_existing_patterns(conn: psycopg.Connection, namespace_id) -> list[str]:
+    """Patterns already stored as inferred facts or awaiting review."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT mv.content
+            FROM memory_items mi
+            JOIN memory_versions mv ON mv.id = mi.current_version_id
+            WHERE mi.namespace_id = %s AND mi.status = 'active'
+              AND mv.structured_content->>'inferred' = 'true'
+            UNION ALL
+            SELECT content FROM memory_candidates
+            WHERE namespace_id = %s AND status = 'pending_review'
+              AND conflict_assessment->>'inferred' = 'true'
+            """,
+            (namespace_id, namespace_id),
+        )
+        return [r["content"] for r in cur.fetchall()]
+
+
+_SENSITIVITY_ORDER = ["public", "internal", "confidential", "restricted", "secret"]
+
+
+def pattern_sensitivity(sources: list[dict]) -> str:
+    """The most sensitive class among a pattern's source facts."""
+    level = "internal"
+    for fact in sources:
+        s = fact.get("sensitivity") or "internal"
+        if s in _SENSITIVITY_ORDER and _SENSITIVITY_ORDER.index(s) > _SENSITIVITY_ORDER.index(level):
+            level = s
+    return level
+
+
+def _propose_pattern(
     conn: psycopg.Connection, tenant_id, namespace_id, owner_principal_id,
-    content: str, source_ids: list[str], confidence: float,
+    content: str, sources: list[dict], confidence: float,
 ) -> str:
-    """Writes a pattern fact directly against the same memory_items /
-    memory_versions / memory_evidence shape memory-intelligence's insertFact
-    uses (see services/memory-intelligence/cmd/server/store.go), so a
-    synthesized pattern reads back identically to any other fact -- it is
-    marked apart only by Inferred=true and its "synthesis: ..." derivation,
-    both carried in structured_content exactly as insertFact writes them.
-    """
-    memory_id = str(uuid.uuid4())
-    version_id = str(uuid.uuid4())
-    structured = json.dumps({
-        "network": "world",
-        "source": "inferred",
-        "scope": "global",
-        "observed_at": "",
-        "valid_from": "",
-        "valid_until": "",
-        "inferred": True,
-        "derivation": f"synthesis: pattern distilled from {len(source_ids)} source facts",
-    })
+    """Records a synthesis event and proposes the pattern for review as a
+    memory_candidates row (pending_review). The candidate's
+    conflict_assessment carries what approval needs to store it as an
+    inferred fact: the cited source facts and the derivation."""
+    candidate_id = str(uuid.uuid4())
+    event_id = str(uuid.uuid4())
+    source_ids = [f["id"] for f in sources]
+    derivation = f"synthesis: pattern distilled from {len(source_ids)} source facts"
     confidence = max(0.0, min(1.0, float(confidence)))
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO memory_items (id, tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary, authority_level, confidence_score, sensitivity, valid_from, valid_until)
-            VALUES (%s,%s,%s,%s,'semantic','active',%s,%s,60,%s,'internal',NULL,NULL)
+            INSERT INTO aggregate_sequences (aggregate_id, last_sequence) VALUES (%s, 1)
+            ON CONFLICT (aggregate_id) DO UPDATE SET last_sequence = aggregate_sequences.last_sequence + 1, updated_at = now()
+            RETURNING last_sequence
             """,
-            (memory_id, tenant_id, namespace_id, owner_principal_id, content[:120], content[:500], confidence),
+            (candidate_id,),
+        )
+        sequence = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO events (id, tenant_id, aggregate_id, aggregate_sequence, source, event_type, subject,
+                                occurred_at, data_schema, correlation_id, actor_id, data)
+            VALUES (%s,%s,%s,%s,'scos.consolidation-worker','memory.synthesized',%s,now(),
+                    'https://schemas.scos.local/events/event-envelope.schema.json',%s,%s,%s::jsonb)
+            """,
+            (event_id, tenant_id, candidate_id, sequence, "candidate/" + candidate_id, candidate_id,
+             owner_principal_id, json.dumps({"namespace_id": str(namespace_id), "source_fact_ids": source_ids})),
         )
         cur.execute(
             """
-            INSERT INTO memory_versions (id, memory_id, version_number, content, structured_content, content_hash, change_reason, created_by)
-            VALUES (%s,%s,1,%s,%s,encode(sha256(%s::bytea),'hex'),'synthesis',%s)
+            INSERT INTO memory_candidates
+                (id, tenant_id, namespace_id, source_event_id, proposed_type, title, content,
+                 authority_level, confidence_score, sensitivity, conflict_assessment, status)
+            VALUES (%s,%s,%s,%s,'semantic',%s,%s,60,%s,%s,%s::jsonb,'pending_review')
             """,
-            (version_id, memory_id, content, structured, content, owner_principal_id),
+            (candidate_id, tenant_id, namespace_id, event_id, content[:120], content, confidence,
+             pattern_sensitivity(sources),
+             json.dumps({"inferred": True, "derivation": derivation, "source_fact_ids": source_ids,
+                         "evidence": [{"kind": "fact_citation", "reference_id": i} for i in source_ids]})),
         )
-        cur.execute("UPDATE memory_items SET current_version_id=%s WHERE id=%s", (version_id, memory_id))
-        for source_id in source_ids:
-            cur.execute(
-                "INSERT INTO memory_evidence (memory_id, evidence_kind, reference_id) VALUES (%s,'fact_citation',%s)",
-                (memory_id, source_id),
-            )
-    return memory_id
+    return candidate_id
 
 
 def _mark_synthesis_run(conn: psycopg.Connection, namespace_id, pattern_count: int) -> None:
@@ -260,7 +303,7 @@ def _mark_synthesis_run(conn: psycopg.Connection, namespace_id, pattern_count: i
 def run_synthesis_cycle(conn: psycopg.Connection) -> int:
     """Runs one pass over every namespace due for synthesis.
 
-    Returns the number of pattern facts written. A no-op (returns 0)
+    Returns the number of patterns proposed for review. A no-op (returns 0)
     without DEEPSEEK_API_KEY configured -- see module docstring.
     """
     config = _deepseek_config()
@@ -278,17 +321,21 @@ def run_synthesis_cycle(conn: psycopg.Connection) -> int:
         facts = _load_facts_for_synthesis(conn, namespace_id)
         pattern_count = 0
         try:
-            result = _call_deepseek(api_key, base_url, model, facts)
-            known_ids = {f["id"] for f in facts}
+            known = _load_existing_patterns(conn, namespace_id)
+            result = _call_deepseek(api_key, base_url, model, [{"id": f["id"], "content": f["content"]} for f in facts])
+            by_id = {f["id"]: f for f in facts}
             for pattern in result.get("patterns", []):
-                source_ids = [s for s in pattern.get("source_fact_ids", []) if s in known_ids]
+                sources = [by_id[s] for s in pattern.get("source_fact_ids", []) if s in by_id]
                 content = str(pattern.get("content", "")).strip()
-                if len(source_ids) < MIN_SOURCE_FACTS_PER_PATTERN or not content:
+                if len(sources) < MIN_SOURCE_FACTS_PER_PATTERN or not content:
                     continue
-                _insert_pattern_fact(
+                if any(duplicate_score(content, k) >= DUPLICATE_OVERLAP for k in known):
+                    continue
+                _propose_pattern(
                     conn, ns["tenant_id"], namespace_id, ns["acting_principal_id"],
-                    content, source_ids, pattern.get("confidence", 0.6),
+                    content, sources, pattern.get("confidence", 0.6),
                 )
+                known.append(content)
                 pattern_count += 1
                 written += 1
             conn.commit()
