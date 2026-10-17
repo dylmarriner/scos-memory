@@ -728,8 +728,11 @@ func mintServiceToken() (string, error) {
 	payload, err := json.Marshal(map[string]any{
 		"tenant_id":    tenantID,
 		"principal_id": principalID,
-		"iat":          time.Now().Unix(),
-		"exp":          time.Now().Add(24 * time.Hour).Unix(),
+		// The dashboard shows the platform's own signals (request flows,
+		// every service's metrics), not only this tenant's.
+		"scopes": []string{"observability:read"},
+		"iat":    time.Now().Unix(),
+		"exp":    time.Now().Add(24 * time.Hour).Unix(),
 	})
 	if err != nil {
 		return "", err

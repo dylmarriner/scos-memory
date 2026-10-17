@@ -686,11 +686,15 @@ func (s *observabilityServer) handleMetrics(w http.ResponseWriter, r *http.Reque
 		}
 		limit = n
 	}
+	scope := scopeOf(r)
 	s.mu.RLock()
 	out := make([]*MetricPoint, 0)
 	for i := len(s.metrics) - 1; i >= 0; i-- {
 		m := s.metrics[i]
 		if fragment != "" && !strings.Contains(strings.ToLower(m.Name), fragment) {
+			continue
+		}
+		if !scope.sees(m.Tenant) {
 			continue
 		}
 		out = append(out, m)
@@ -720,6 +724,19 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 	if !s.storageAvailable(w) {
 		return
 	}
+	scope := scopeOf(r)
+	if !scope.service {
+		now := time.Now()
+		for i := range points {
+			ts, err := clientTimestamp(points[i].Timestamp, time.RFC3339, now)
+			if err != nil {
+				http.Error(w, "invalid metrics: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			points[i].Timestamp, points[i].Tenant = ts, scope.tenant
+			points[i].Labels = scope.stampClient(points[i].Labels)
+		}
+	}
 	s.mu.Lock()
 	for i := range points {
 		if points[i].Timestamp == "" {
@@ -746,7 +763,9 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 			}
 		}
 		s.metrics = append(s.metrics, &points[i])
-		s.rollups.add(&points[i])
+		if scope.service {
+			s.rollups.add(&points[i])
+		}
 	}
 	s.trimRetention()
 	s.mu.Unlock()
@@ -762,10 +781,14 @@ func (s *observabilityServer) handleMetricsQuery(w http.ResponseWriter, r *http.
 	service := r.URL.Query().Get("service")
 	since := r.URL.Query().Get("since")
 
+	scope := scopeOf(r)
 	s.mu.RLock()
 	var results []*MetricPoint
 	for _, m := range s.metrics {
 		if name != "" && m.Name != name {
+			continue
+		}
+		if !scope.sees(m.Tenant) {
 			continue
 		}
 		if service != "" {
@@ -788,8 +811,14 @@ func (s *observabilityServer) handleMetricsQuery(w http.ResponseWriter, r *http.
 // ── traces ───────────────────────────────────────────────────────────────
 
 func (s *observabilityServer) handleTraces(w http.ResponseWriter, r *http.Request) {
+	scope := scopeOf(r)
 	s.mu.RLock()
-	t := s.traces
+	t := make([]*TraceSpan, 0, len(s.traces))
+	for _, sp := range s.traces {
+		if scope.sees(sp.Tenant) {
+			t = append(t, sp)
+		}
+	}
 	s.mu.RUnlock()
 	writeJSON(w, t)
 }
@@ -809,6 +838,22 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 	if !s.storageAvailable(w) {
 		return
 	}
+	scope := scopeOf(r)
+	if !scope.service {
+		now := time.Now()
+		for i := range spans {
+			start, err := clientTimestamp(spans[i].StartTime, time.RFC3339Nano, now)
+			if err == nil && spans[i].EndTime != "" {
+				_, err = clientTimestamp(spans[i].EndTime, time.RFC3339Nano, now)
+			}
+			if err != nil {
+				http.Error(w, "invalid traces: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			spans[i].StartTime, spans[i].Tenant = start, scope.tenant
+			spans[i].Attributes = scope.stampClient(spans[i].Attributes)
+		}
+	}
 	s.mu.Lock()
 	for i := range spans {
 		if spans[i].StartTime == "" {
@@ -818,7 +863,7 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 			spans[i].EndTime = spans[i].StartTime
 		}
 		if spans[i].SpanID == "" {
-			spans[i].SpanID = fmt.Sprintf("span-%d", len(s.traces)+1)
+			spans[i].SpanID = newSpanID()
 		}
 		if traceID, parentID, ok := traceparent(r.Header.Get("traceparent")); ok {
 			if spans[i].TraceID == "" {
@@ -853,10 +898,11 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 
 func (s *observabilityServer) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 	traceID := strings.TrimPrefix(r.URL.Path, "/v1/traces/")
+	scope := scopeOf(r)
 	s.mu.RLock()
 	var spans []*TraceSpan
 	for _, sp := range s.traces {
-		if sp.TraceID == traceID {
+		if sp.TraceID == traceID && scope.sees(sp.Tenant) {
 			spans = append(spans, sp)
 		}
 	}
@@ -875,11 +921,15 @@ func (s *observabilityServer) handleLogs(w http.ResponseWriter, r *http.Request)
 	level := r.URL.Query().Get("level")
 	service := r.URL.Query().Get("service")
 
+	scope := scopeOf(r)
 	s.mu.RLock()
 	var entries []*LogEntry
 	for i := len(s.logs) - 1; i >= 0 && len(entries) < limit; i-- {
 		e := s.logs[i]
 		if level != "" && e.Level != level {
+			continue
+		}
+		if !scope.sees(e.Tenant) {
 			continue
 		}
 		if service != "" && e.Service != service {
@@ -905,6 +955,19 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 	}
 	if !s.storageAvailable(w) {
 		return
+	}
+	scope := scopeOf(r)
+	if !scope.service {
+		now := time.Now()
+		for i := range entries {
+			ts, err := clientTimestamp(entries[i].Timestamp, time.RFC3339, now)
+			if err != nil {
+				http.Error(w, "invalid logs: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			entries[i].Timestamp, entries[i].Tenant = ts, scope.tenant
+			entries[i].Labels = scope.stampClient(entries[i].Labels)
+		}
 	}
 	s.mu.Lock()
 	for i := range entries {
