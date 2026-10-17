@@ -384,35 +384,6 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ── 1.5. Standing-answer cache (P1-B) ────────────────────────────
-	// A normalized-exact-match repeat of a prior question skips the whole
-	// 5-source fan-out below. question_key is a lowercased/trimmed exact
-	// match on query text, not a classifier -- see the migration's comment
-	// for why (a fixed named-question set needs a classification step this
-	// doesn't have yet).
-	if plan.CodeLimit == 0 {
-		if answer, err := s.lookupStandingAnswer(ctx, req.TenantID, req.PrincipalID, namespaces, req.Query); err != nil {
-			log.Printf("standing answer lookup error: %v", err)
-		} else if answer != nil {
-			writeJSON(w, RetrieveResponse{
-				Sections: []ContextSection{{
-					Heading: "Standing Answer",
-					Items: []RetrievalResult{{
-						Summary:     answer.Answer,
-						Content:     answer.Answer,
-						Confidence:  answer.Confidence,
-						Provenance:  "standing_answer",
-						NamespaceID: answer.NamespaceID,
-						Rank:        1,
-					}},
-				}},
-				TotalTokens: estimateTokens(answer.Answer),
-				LatencyMs:   int(time.Since(start).Milliseconds()),
-			})
-			return
-		}
-	}
-
 	// ── 2. Parse query ──────────────────────────────────────────────
 	queryHash := hashQuery(req.Query)
 	tsQuery := toTSQuery(req.Query)
@@ -453,7 +424,11 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "query_embedding dimensions do not match the active text embedding space", http.StatusBadRequest)
 			return
 		}
-	} else if plan.VectorLimit > 0 && s.modelRuntime != nil {
+	} else if plan.VectorLimit > 0 && s.modelRuntime == nil {
+		// No model runtime is configured: the semantic lane cannot run, and
+		// the answer says so rather than quietly ranking without it.
+		meta.DegradedModels = append(meta.DegradedModels, "text_embedding")
+	} else if plan.VectorLimit > 0 {
 		embedded, embedErr := s.modelRuntime.EmbedText(ctx, req.Query, s.textSpace)
 		if embedErr != nil {
 			log.Printf("query embedding unavailable (%v); semantic lane contributes zero candidates", embedErr)
@@ -519,6 +494,9 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 
 	// ── 10.5. Query-aware rerank, then governance weighting ─────────
 	modelRanked := deduped
+	if s.modelRuntime == nil && len(deduped) > 0 {
+		meta.DegradedModels = append(meta.DegradedModels, "reranker")
+	}
 	if s.modelRuntime != nil && len(deduped) > 0 {
 		var rerankErr error
 		modelRanked, meta.RerankerModel, meta.RerankerRevision, rerankErr = s.rerankWithModel(ctx, req.Query, deduped)
@@ -643,7 +621,7 @@ func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespace
 		       mi.namespace_id,
 		       1.0::double precision AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
@@ -670,7 +648,7 @@ func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namesp
 		       mi.namespace_id,
 		       ts_rank(to_tsvector('english', COALESCE(mi.title, '') || ' ' || COALESCE(mv.content, '')), to_tsquery('english', $4)) AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
@@ -739,11 +717,11 @@ func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespac
 				'content_hash', e.content_hash) ORDER BY e.created_at)
 			FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb) AS evidence,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object(
-				'relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id,
+				'relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END,
 				'confidence_score', rel.confidence_score) ORDER BY rel.created_at)
 			FROM memory_relations rel
-			WHERE rel.source_memory_id = mi.id
-			  AND rel.relation_type ILIKE '%conflict%'
+			WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id)
+			  AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%')
 			  AND (rel.valid_from IS NULL OR rel.valid_from <= now())
 			  AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb) AS conflicts
 		FROM memory_items mi
@@ -791,7 +769,7 @@ func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, na
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
@@ -867,7 +845,7 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 			SELECT DISTINCT ON (mi.id) mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary), mi.type,
 			       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
 			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb) AS evidence,
-			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb) AS conflicts,
+			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', CASE WHEN r.source_memory_id = mi.id THEN r.target_memory_id ELSE r.source_memory_id END, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE (r.source_memory_id=mi.id OR r.target_memory_id=mi.id) AND (r.relation_type = 'contradicts' OR r.relation_type ILIKE '%conflict%')),'[]'::jsonb) AS conflicts,
 			       array_position($3::uuid[], rel.source_memory_id) AS seed_pos
 			FROM memory_relations rel
 			JOIN memory_items mi ON mi.id=rel.target_memory_id
@@ -1150,8 +1128,6 @@ func assembleSections(results []RetrievalResult) []ContextSection {
 		{Heading: "Confirmed Facts"},
 		{Heading: "Prior Episodes"},
 		{Heading: "Procedures"},
-		{Heading: "Conflicts"},
-		{Heading: "Source References"},
 	}
 
 	for _, r := range results {
@@ -1272,47 +1248,6 @@ func hashQuery(q string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// standingAnswer is one memory_standing_answers row.
-type standingAnswer struct {
-	Answer      string
-	Confidence  float64
-	NamespaceID string
-}
-
-// lookupStandingAnswer checks the standing-answer cache (P1-B) for query,
-// normalized the same way hashQuery does (lowercased/trimmed exact match),
-// across every namespace the caller is authorised for. Returns nil, nil on
-// a miss -- that is the expected, common outcome, not an error. On
-// multiple matching namespaces (rare -- a caller with more than one
-// authorised namespace that both happen to have cached the same normalized
-// question), the highest-confidence row wins.
-func (s *server) lookupStandingAnswer(ctx context.Context, tenantID, principalID string, namespaces []string, query string) (*standingAnswer, error) {
-	questionKey := hashQuery(query)
-	var answer *standingAnswer
-	err := s.withPrincipalContext(ctx, tenantID, principalID, func(q pgxQuerier) error {
-		rows, err := q.Query(ctx, `
-			SELECT sa.answer, sa.confidence, sa.namespace_id
-			FROM memory_standing_answers sa
-			JOIN namespaces n ON n.id = sa.namespace_id
-			WHERE sa.tenant_id = $1 AND sa.question_key = $2 AND n.canonical_name = ANY($3::text[])
-			ORDER BY sa.confidence DESC
-			LIMIT 1`, tenantID, questionKey, namespaces)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		if rows.Next() {
-			var a standingAnswer
-			if err := rows.Scan(&a.Answer, &a.Confidence, &a.NamespaceID); err != nil {
-				return err
-			}
-			answer = &a
-		}
-		return rows.Err()
-	})
-	return answer, err
-}
-
 // toTSQuery turns a natural-language query into a prefix-matching tsquery
 // that matches any of its terms. Requiring every word ("which database do
 // we use") vetoed relevant memories over filler words; ts_rank still orders
@@ -1405,7 +1340,7 @@ func (s *server) recentMemories(ctx context.Context, req RetrieveRequest, namesp
 		       mi.namespace_id,
 		       0::double precision AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
@@ -1431,7 +1366,7 @@ func (s *server) activeTaskState(ctx context.Context, req RetrieveRequest, names
 		       mi.namespace_id,
 		       0::double precision AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', rel.target_memory_id, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE rel.source_memory_id = mi.id AND rel.relation_type ILIKE '%conflict%' AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= now()) AND (rel.valid_until IS NULL OR rel.valid_until > now())), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1

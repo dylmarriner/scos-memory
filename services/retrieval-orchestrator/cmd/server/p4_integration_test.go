@@ -214,3 +214,54 @@ func TestSessionStateLaneKeepsToTheSessionAndTheSensitivityCeiling(t *testing.T)
 		t.Fatalf("session lane = %+v", got)
 	}
 }
+
+func TestContradictionsAreReportedOnBothMemories(t *testing.T) {
+	ctx := context.Background()
+	pool := testRetrievalPool(t)
+	var tenantID, principalID, namespaceID string
+	if err := pool.QueryRow(ctx, `INSERT INTO tenants(name) VALUES ($1) RETURNING id`, t.Name()).Scan(&tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO principals(tenant_id, kind, external_id, display_name) VALUES ($1,'human',$2,$2) RETURNING id`, tenantID, t.Name()).Scan(&principalID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO namespaces(tenant_id, owner_principal_id, canonical_name) VALUES ($1,$2,'conflicts') RETURNING id`, tenantID, principalID).Scan(&namespaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO namespace_memberships(namespace_id, principal_id, can_read) VALUES ($1,$2,true)`, namespaceID, principalID); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(title string) string {
+		var id string
+		if err := pool.QueryRow(ctx, `INSERT INTO memory_items(tenant_id, namespace_id, owner_principal_id, type, status, title, canonical_summary, authority_level, confidence_score, sensitivity)
+			VALUES ($1,$2,$3,'semantic','active',$4,$4,70,0.9,'internal') RETURNING id`, tenantID, namespaceID, principalID, title).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	a := insert("deploys happen on fridays")
+	b := insert("deploys never happen on fridays")
+	if _, err := pool.Exec(ctx, `INSERT INTO memory_relations(source_memory_id, target_memory_id, relation_type, confidence_score) VALUES ($1,$2,'contradicts',0.9)`, a, b); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{db: pool}
+	got, err := srv.exactSearch(ctx, RetrieveRequest{TenantID: tenantID, PrincipalID: principalID, Query: "fridays"}, []string{"conflicts"}, "internal", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("results = %+v", got)
+	}
+	for _, r := range got {
+		other := b
+		if r.MemoryID == b {
+			other = a
+		}
+		if len(r.Conflicts) != 1 {
+			t.Fatalf("%s conflicts = %+v", r.Title, r.Conflicts)
+		}
+		if c, _ := r.Conflicts[0].(map[string]any); c["target_memory_id"] != other || c["relation_type"] != "contradicts" {
+			t.Fatalf("%s conflicts = %+v, want contradicts %s", r.Title, r.Conflicts, other)
+		}
+	}
+}
