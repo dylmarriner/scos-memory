@@ -14,14 +14,14 @@ import (
 
 // fakeBWS replaces bws with this test binary (TestBWSHelperProcess), which
 // answers `secret get` with value when given token.
-func fakeBWS(t *testing.T, token, secretID, value string) *[]string {
+func fakeBWS(t *testing.T, token, itemID, value string) *[]string {
 	t.Helper()
 	var calls []string
 	prevCmd, prevLook := commandContext, lookPath
 	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		cmd := exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=TestBWSHelperProcess", "--"}, args...)...)
-		cmd.Env = append(os.Environ(), "SCOS_BWS_HELPER_PROCESS=1", "FAKE_BWS_TOKEN="+token, "FAKE_BWS_ID="+secretID, "FAKE_BWS_VALUE="+value)
+		cmd.Env = append(os.Environ(), "SCOS_BWS_HELPER_PROCESS=1", "FAKE_BWS_TOKEN="+token, "FAKE_BWS_ID="+itemID, "FAKE_BWS_VALUE="+value)
 		return cmd
 	}
 	lookPath = func(name string) (string, error) { return "/usr/local/bin/" + name, nil }
@@ -56,7 +56,7 @@ func TestSecretRecoveryDrillRecoversTheKeyAndOpensABackup(t *testing.T) {
 	ctx, now := context.Background(), time.Now()
 	s, _, _ := objectStoreTestServer(t, "Enabled")
 	key := strings.Repeat("k", 32)
-	const secretID = "be8e0ad8-d545-4017-a55a-b02f014d4158"
+	const itemID = "00000000-0000-4000-8000-000000000001" // a made-up Bitwarden item id
 
 	if c := s.secretRecoveryCoverage(now); c.Covered || !strings.Contains(c.Reason, "no secret manager") {
 		t.Fatalf("unconfigured = %+v", c)
@@ -68,7 +68,7 @@ func TestSecretRecoveryDrillRecoversTheKeyAndOpensABackup(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("0.machine.token:secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SCOS_BACKUP_KEY_SECRET_ID", secretID)
+	t.Setenv("SCOS_BACKUP_KEY_SECRET_ID", itemID)
 	t.Setenv("SCOS_BWS_ACCESS_TOKEN_FILE", tokenFile)
 	if !s.secretDrillDue(now) {
 		t.Fatal("a configured drill that never ran is due")
@@ -78,14 +78,14 @@ func TestSecretRecoveryDrillRecoversTheKeyAndOpensABackup(t *testing.T) {
 	}
 
 	// No backup yet: the key is recovered but nothing proves it opens one.
-	fakeBWS(t, "0.machine.token:secret", secretID, key)
+	fakeBWS(t, "0.machine.token:secret", itemID, key)
 	if d, err := s.secretRecoveryDrill(ctx); err != nil || d.Status != "failed" || !strings.Contains(d.Detail, "no encrypted backup") {
 		t.Fatalf("no backup = %+v, %v", d, err)
 	}
 
 	fakePostgresTools(t)
 	b := takeBackup(t, s)
-	calls := fakeBWS(t, "0.machine.token:secret", secretID, key)
+	calls := fakeBWS(t, "0.machine.token:secret", itemID, key)
 	d, err := s.secretRecoveryDrill(ctx)
 	if err != nil || d.Status != "verified" || d.BackupID != b.ID || !strings.Contains(d.Detail, "decrypted backup "+b.ID) {
 		t.Fatalf("drill = %+v, %v", d, err)
@@ -97,12 +97,12 @@ func TestSecretRecoveryDrillRecoversTheKeyAndOpensABackup(t *testing.T) {
 		t.Fatal("a fresh drill satisfies the interval")
 	}
 	c := s.secretRecoveryCoverage(time.Now())
-	if !c.Covered || !strings.Contains(c.Evidence, secretID) {
+	if !c.Covered || !strings.Contains(c.Evidence, itemID) {
 		t.Fatalf("coverage = %+v", c)
 	}
 
 	// A secret holding another key fails, and withdraws coverage.
-	fakeBWS(t, "0.machine.token:secret", secretID, strings.Repeat("x", 32))
+	fakeBWS(t, "0.machine.token:secret", itemID, strings.Repeat("x", 32))
 	if d, _ := s.secretRecoveryDrill(ctx); d.Status != "failed" || !strings.Contains(d.Detail, "different key") {
 		t.Fatalf("wrong key = %+v", d)
 	}
@@ -111,13 +111,13 @@ func TestSecretRecoveryDrillRecoversTheKeyAndOpensABackup(t *testing.T) {
 	}
 
 	// A token Bitwarden refuses fails with bws's own message.
-	fakeBWS(t, "another-token", secretID, key)
+	fakeBWS(t, "another-token", itemID, key)
 	if d, _ := s.secretRecoveryDrill(ctx); d.Status != "failed" || !strings.Contains(d.Detail, "Access token") {
 		t.Fatalf("bad token = %+v", d)
 	}
 
 	// Coverage follows the configured secret, and goes stale.
-	fakeBWS(t, "0.machine.token:secret", secretID, key)
+	fakeBWS(t, "0.machine.token:secret", itemID, key)
 	if d, _ := s.secretRecoveryDrill(ctx); d.Status != "verified" {
 		t.Fatalf("re-drill = %+v", d)
 	}
