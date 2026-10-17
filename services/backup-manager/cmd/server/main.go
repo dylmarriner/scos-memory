@@ -454,7 +454,7 @@ func (s *backupServer) handleBackupStart(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.opMu.Lock()
-	resp, err := s.createBackup(r.Context(), actorOf(r))
+	resp, err := s.createBackup(context.WithoutCancel(r.Context()), actorOf(r))
 	s.opMu.Unlock()
 	if err != nil {
 		var ue *unavailableError
@@ -508,7 +508,7 @@ func (s *backupServer) handleRestoreRoute(w http.ResponseWriter, r *http.Request
 		s.unavailable(w)
 		return
 	}
-	t := s.executeRestoreTest(r.Context(), restoreTestTypeMonthly, id, actorOf(r))
+	t := s.executeRestoreTest(context.WithoutCancel(r.Context()), restoreTestTypeMonthly, id, actorOf(r))
 	if t.Status != "passed" {
 		writeJSONStatus(w, http.StatusUnprocessableEntity, t)
 		return
@@ -596,7 +596,7 @@ func (s *backupServer) handleRestoreTestStart(w http.ResponseWriter, r *http.Req
 		http.Error(w, "test_type must be automated_integrity, monthly_restore or quarterly_full_recovery", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, s.executeRestoreTest(r.Context(), req.TestType, req.BackupID, actorOf(r)))
+	writeJSON(w, s.executeRestoreTest(context.WithoutCancel(r.Context()), req.TestType, req.BackupID, actorOf(r)))
 }
 
 // handleRestoreTestComplete returns a recorded drill result. Drills run to

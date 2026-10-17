@@ -68,7 +68,11 @@ type gatewayServer struct {
 	controlPlaneToken         string
 	localBearer               localIdentityToken
 	client                    *http.Client
-	startTime                 time.Time
+	// longClient carries calls that do bounded but long work upstream --
+	// taking a backup, running a restore drill -- which the 15s client
+	// would abandon part way through.
+	longClient *http.Client
+	startTime  time.Time
 }
 
 func resolveUpstream(envVar, fallback string) string {
@@ -81,6 +85,10 @@ func resolveUpstream(envVar, fallback string) string {
 
 func main() {
 	client, err := tlsserve.TrustedClient(15 * time.Second)
+	if err != nil {
+		log.Fatalf("configure internal TLS client: %v", err)
+	}
+	longClient, err := tlsserve.TrustedClient(30 * time.Minute)
 	if err != nil {
 		log.Fatalf("configure internal TLS client: %v", err)
 	}
@@ -107,6 +115,7 @@ func main() {
 		credentialVaultURL:        resolveUpstream("SCOS_CREDENTIAL_VAULT_URL", "https://credential-vault:8100"),
 		controlPlaneToken:         strings.TrimSpace(os.Getenv("SCOS_CONTROL_PLANE_TOKEN")),
 		client:                    client,
+		longClient:                longClient,
 		startTime:                 time.Now(),
 	}
 
@@ -551,13 +560,13 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_backup_get":
 		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/backups/"+stringArg(args, "id"))
 	case "scos_backup_start":
-		return s.forwardPOST(ctx, r, s.backupManagerURL+"/v1/backups/start", args)
+		return s.forwardLongPOST(ctx, r, s.backupManagerURL+"/v1/backups/start", args)
 	case "scos_backup_complete":
 		return s.forwardPOST(ctx, r, s.backupManagerURL+"/v1/backups/complete", args)
 	case "scos_restore_test_list":
 		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/restore-tests")
 	case "scos_restore_test_start":
-		return s.forwardPOST(ctx, r, s.backupManagerURL+"/v1/restore-tests/start", args)
+		return s.forwardLongPOST(ctx, r, s.backupManagerURL+"/v1/restore-tests/start", args)
 	case "scos_restore_test_complete":
 		return s.forwardPOST(ctx, r, s.backupManagerURL+"/v1/restore-tests/complete", args)
 	case "scos_restore_cadence":
@@ -900,6 +909,19 @@ func (s *gatewayServer) forwardGET(ctx context.Context, r *http.Request, url str
 }
 
 func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url string, args any) (any, error) {
+	return s.forwardPOSTWith(s.client, ctx, r, url, args)
+}
+
+// forwardLongPOST is forwardPOST for upstream work measured in minutes.
+func (s *gatewayServer) forwardLongPOST(ctx context.Context, r *http.Request, url string, args any) (any, error) {
+	client := s.longClient
+	if client == nil {
+		client = s.client
+	}
+	return s.forwardPOSTWith(client, ctx, r, url, args)
+}
+
+func (s *gatewayServer) forwardPOSTWith(client *http.Client, ctx context.Context, r *http.Request, url string, args any) (any, error) {
 	encoded, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
@@ -919,7 +941,7 @@ func (s *gatewayServer) forwardPOST(ctx context.Context, r *http.Request, url st
 		// distinct calls (different args) still get distinct keys.
 		req.Header.Set("Idempotency-Key", deriveIdempotencyKey(req.Header.Get("Authorization"), url, encoded))
 	}
-	resp, err := s.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
