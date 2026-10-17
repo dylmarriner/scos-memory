@@ -138,6 +138,10 @@ func scanAgentRegistration(row agentInstanceRow) (*AgentRegistration, error) {
 	if row.LastSeen.Valid {
 		lastSeen = row.LastSeen.Time.UTC().Format(rfc3339)
 	}
+	status := row.Status
+	if status == agentActive && (!row.LastSeen.Valid || time.Since(row.LastSeen.Time) > adapterHealthWindow) {
+		status = agentStale
+	}
 	return &AgentRegistration{
 		AgentID:      row.InstanceKey,
 		Name:         meta.Name,
@@ -145,7 +149,7 @@ func scanAgentRegistration(row agentInstanceRow) (*AgentRegistration, error) {
 		Tier:         meta.Tier,
 		Adapters:     meta.Adapters,
 		Capabilities: meta.Capabilities,
-		Status:       row.Status,
+		Status:       status,
 		LastSeen:     lastSeen,
 	}, nil
 }
@@ -208,6 +212,18 @@ func getAgentInstance(ctx context.Context, db *sql.DB, tenantID, agentID string)
 		return nil, false, err
 	}
 	return reg, true, nil
+}
+
+// touchAgentInstance records that a registered agent was just seen: every
+// envelope an agent pushes refreshes its last_seen, so an agent that stops
+// sending envelopes is reported stale once adapterHealthWindow passes. An
+// agent that never registered has no instance row and nothing is touched.
+func touchAgentInstance(ctx context.Context, tx *sql.Tx, tenantID, agentID string) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE adapter_instances SET last_seen_at = now()
+		WHERE tenant_id = $1 AND instance_key = $2`, tenantID, agentID); err != nil {
+		return fmt.Errorf("touch agent instance: %w", err)
+	}
+	return nil
 }
 
 // upsertEnvelope persists a context envelope for (tenant_id, session_id),

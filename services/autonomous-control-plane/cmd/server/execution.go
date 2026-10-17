@@ -143,13 +143,19 @@ func (s *executionState) agentContext() string {
 	return strings.Join([]string{string(s.memory), string(s.code)}, "\n\n")
 }
 
+// stageResult is a stage's outcome. quality, in [0,1], is how complete the
+// stage's output was: 1 for a stage that produced everything it is meant to,
+// 0 for one that failed, and in between for a stage whose output is usable
+// but was assembled without some of its inputs (capability learning folds it
+// into the capability's observed quality).
 type stageResult struct {
-	status string
-	detail string
+	status  string
+	detail  string
+	quality float64
 }
 
 func completedStage(detail string) stageResult {
-	return stageResult{status: stageCompleted, detail: detail}
+	return stageResult{status: stageCompleted, detail: detail, quality: 1}
 }
 func degradedStage(detail string) stageResult {
 	return stageResult{status: stageDegraded, detail: detail}
@@ -215,9 +221,9 @@ func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decis
 			lifecycle.Stages[idx] = stage
 			switch result.status {
 			case stageCompleted:
-				c.recordStageOutcome(persistCtx, req, step.System, true)
+				c.recordStageOutcome(persistCtx, req, step.System, true, result.quality)
 			case stageDegraded:
-				c.recordStageOutcome(persistCtx, req, step.System, false)
+				c.recordStageOutcome(persistCtx, req, step.System, false, result.quality)
 				if outcome == runCompleted {
 					outcome = runDegraded
 				}
@@ -294,7 +300,7 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 			return degradedStage(err.Error())
 		}
 		state.memory = memory
-		return completedStage("")
+		return retrievalStageResult(memory)
 	case "code-intelligence":
 		// Code context comes from the durable (v2) index of the named
 		// repository -- the one scos_code_index builds -- resolved by its
@@ -399,6 +405,43 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 	default:
 		return skippedStage("no executor is configured for " + step.System)
 	}
+}
+
+// retrievalStageResult grades a retrieval response by what it was built
+// from. A failed lane leaves the results incomplete, so the stage is
+// degraded (the partial results still reach the agent); an unavailable model
+// leaves every lane answered but ranked or matched without it. quality is
+// the share of the response's inputs -- lanes and models named by the
+// orchestrator: the sections it returned plus the lanes and models it
+// reports missing -- that were available.
+func retrievalStageResult(body []byte) stageResult {
+	var out struct {
+		Sections        []json.RawMessage `json:"sections"`
+		DegradedSources []string          `json:"degraded_sources"`
+		DegradedModels  []string          `json:"degraded_models"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return degradedStage("retrieval response: " + err.Error())
+	}
+	missing := len(out.DegradedSources) + len(out.DegradedModels)
+	if missing == 0 {
+		return completedStage("")
+	}
+	inputs := len(out.Sections) + missing
+	quality := float64(inputs-missing) / float64(inputs)
+	if len(out.DegradedSources) > 0 {
+		return stageResult{status: stageDegraded, quality: quality,
+			detail: "retrieval lanes failed: " + strings.Join(out.DegradedSources, ", ") + degradedModelsSuffix(out.DegradedModels)}
+	}
+	return stageResult{status: stageCompleted, quality: quality,
+		detail: "retrieved" + degradedModelsSuffix(out.DegradedModels)}
+}
+
+func degradedModelsSuffix(models []string) string {
+	if len(models) == 0 {
+		return ""
+	}
+	return "; models unavailable: " + strings.Join(models, ", ")
 }
 
 // verifyIngressStage confirms the ingress was durably committed: the decision

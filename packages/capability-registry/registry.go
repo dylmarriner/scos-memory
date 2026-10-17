@@ -257,7 +257,13 @@ func (r *Registry) UpdateHealth(id string, state string) error {
 
 // RecordOutcome folds verified outcome telemetry back into the record so
 // ranking reflects observed performance rather than declared intent (§21.6).
+// success says whether the capability produced a usable result; quality, in
+// [0,1], is how complete that result was (1 when nothing it depends on was
+// missing). Both are exponential moving averages over observed outcomes.
 func (r *Registry) RecordOutcome(id string, success bool, quality float64) error {
+	if quality < 0 || quality > 1 {
+		return fmt.Errorf("observed quality for %s must be within [0,1]", id)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -273,9 +279,7 @@ func (r *Registry) RecordOutcome(id string, success bool, quality float64) error
 		observed = 1.0
 	}
 	cap.HistoricalSuccessRate = (1-alpha)*cap.HistoricalSuccessRate + alpha*observed
-	if quality > 0 {
-		cap.QualityScore = (1-alpha)*cap.QualityScore + alpha*quality
-	}
+	cap.QualityScore = (1-alpha)*cap.QualityScore + alpha*quality
 	r.generation++
 	return nil
 }

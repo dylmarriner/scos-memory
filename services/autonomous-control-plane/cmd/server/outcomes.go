@@ -24,14 +24,15 @@ func capabilitiesForSystem(system string) []string {
 	return ids
 }
 
-// recordStageOutcome is called once per executed stage.
-func (c *controlPlane) recordStageOutcome(ctx context.Context, req RouteRequest, system string, succeeded bool) {
+// recordStageOutcome is called once per executed stage with the stage's
+// result: whether it succeeded and how complete its output was.
+func (c *controlPlane) recordStageOutcome(ctx context.Context, req RouteRequest, system string, succeeded bool, quality float64) {
 	ids := capabilitiesForSystem(system)
 	if len(ids) == 0 {
 		return
 	}
 	for _, id := range ids {
-		if err := routingRegistry.RecordOutcome(id, succeeded, 0); err != nil {
+		if err := routingRegistry.RecordOutcome(id, succeeded, quality); err != nil {
 			log.Printf("record capability outcome %s: %v", id, err)
 		}
 	}
