@@ -842,7 +842,7 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 		rows, err := q.Query(ctx, `
 			SELECT id, title, canonical_summary, content, type, authority_level, confidence_score, sensitivity, namespace_id, evidence, conflicts
 			FROM (
-			SELECT DISTINCT ON (mi.id) mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary), mi.type,
+			SELECT DISTINCT ON (mi.id) mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary) AS content, mi.type,
 			       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
 			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb) AS evidence,
 			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', CASE WHEN r.source_memory_id = mi.id THEN r.target_memory_id ELSE r.source_memory_id END, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE (r.source_memory_id=mi.id OR r.target_memory_id=mi.id) AND (r.relation_type = 'contradicts' OR r.relation_type ILIKE '%conflict%')),'[]'::jsonb) AS conflicts,

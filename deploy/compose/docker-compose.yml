@@ -986,6 +986,10 @@ services:
     # without exposing the gateway publicly beyond the existing nginx TLS
     # front. Uses the narrow runtime image (no adminui) built from the
     # vendored upstream clone (integrations/tunnel-client).
+    # Started only with the "tunnel" profile (COMPOSE_PROFILES=tunnel), once
+    # real control-plane credentials are set: without them it can only
+    # crash-loop, and a host may run the tunnel as a systemd unit instead.
+    profiles: ["tunnel"]
     image: ${SCOS_TUNNEL_CLIENT_IMAGE:-scos-tunnel-client:local}
     build:
       context: ../../integrations/tunnel-client
