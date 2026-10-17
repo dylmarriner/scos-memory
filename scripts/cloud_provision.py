@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -45,19 +45,36 @@ def exchange(base_url: str, token: str) -> dict:
         raise SystemExit(f"could not reach {base_url}: {e}")
 
 
+def _write_private(path: Path, data: bytes) -> None:
+    """Write data to path readable by its owner only (0600), atomically: a
+    reader sees the old file or the new one, never a partial or wider one."""
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
 def write_scos_env(creds: dict) -> None:
+    # The file holds a bearer token: the directory and every copy of the
+    # file are private to the user.
+    SCOS_ENV.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(SCOS_ENV.parent, 0o700)
     if SCOS_ENV.exists():
         backup = SCOS_ENV.with_name(SCOS_ENV.name + f".bak-{STAMP}")
-        shutil.copy2(SCOS_ENV, backup)
+        _write_private(backup, SCOS_ENV.read_bytes())
         print(f"backed up existing {SCOS_ENV} -> {backup}")
-    SCOS_ENV.parent.mkdir(parents=True, exist_ok=True)
-    SCOS_ENV.write_text(
+    _write_private(SCOS_ENV, (
         "SCOS_GATEWAY_URL={gateway_url}\n"
         "SCOS_BEARER_TOKEN={bearer_token}\n"
         "SCOS_TENANT_ID={tenant_id}\n"
         "SCOS_PRINCIPAL_ID={principal_id}\n".format(**creds)
-    )
-    print(f"wrote {SCOS_ENV}")
+    ).encode())
+    print(f"wrote {SCOS_ENV} (mode 0600)")
 
 
 def main() -> None:
@@ -70,7 +87,8 @@ def main() -> None:
     creds = exchange(args.base_url, args.token)
     for key in ("gateway_url", "bearer_token", "tenant_id", "principal_id"):
         if not creds.get(key):
-            raise SystemExit(f"exchange response missing {key}: {creds}")
+            # Never echo the response: it carries the bearer token.
+            raise SystemExit(f"exchange response missing {key} (received fields: {', '.join(sorted(creds))})")
 
     write_scos_env(creds)
     install_agent_plugins.install(skip_gemini=args.skip_gemini)
