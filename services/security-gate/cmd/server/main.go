@@ -4,6 +4,7 @@ import "github.com/dylmarriner/scos-memory/packages/release"
 
 import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
+import secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 
 import (
 	"context"
@@ -19,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -618,30 +620,64 @@ func (s *securityServer) handleClassifyData(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	classified := classifyContent(req.Content)
+	classified, reasons := classifyContent(req.Content)
+	reason := "no sensitive patterns found"
+	if len(reasons) > 0 {
+		reason = strings.Join(reasons, ", ")
+	}
 	identity := requestIdentity{TenantID: token.Tenant, PrincipalID: token.Principal}
-	if err := s.auditAction(r, identity, AuditRecord{Action: "restricted_retrieval", Principal: token.Principal, AgentID: token.AgentID, Tenant: token.Tenant, SessionID: token.SessionID, Resource: "content-classification", DataClass: classified, Result: "allowed", Reason: "automated classification"}); err != nil {
+	if err := s.auditAction(r, identity, AuditRecord{Action: "classify", Principal: token.Principal, AgentID: token.AgentID, Tenant: token.Tenant, SessionID: token.SessionID, Resource: "content-classification", DataClass: classified, Result: "allowed", Reason: reason}); err != nil {
 		http.Error(w, "unable to persist audit record", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{
 		"data_class": classified,
-		"reason":     "automated classification",
+		"reason":     reason,
+		"findings":   reasons,
 	})
 }
 
-func classifyContent(content string) DataClass {
-	lower := strings.ToLower(content)
-	if strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "key:") {
-		return ClassSecret
+// Classification patterns. A credential is a credential word followed by a
+// value; the bare words are only a marker of sensitive material. Words are
+// matched on word boundaries, so "secretary" or "privately" are not hits.
+var (
+	credentialAssignment = regexp.MustCompile(`(?i)\b(password|passwd|pwd|passphrase|secret|client[ _-]?secret|api[ _-]?key|access[ _-]?key|secret[ _-]?key|private[ _-]?key|token|access[ _-]?token|auth[ _-]?token|bearer)\b\s*(?:is|:|=|=>)\s*["']?[^\s"']{4,}`)
+	confidentialWords    = regexp.MustCompile(`(?i)\b(confidential|credentials?|secrets?|social security|salary|salaries|payroll|medical|diagnosis|passport number|bank account)\b`)
+	internalWords        = regexp.MustCompile(`(?i)\b(internal|private|proprietary|do not distribute|not for distribution|nda)\b`)
+)
+
+// classifyContent grades content by the most sensitive thing it holds:
+// secret for credentials, keys and tokens (found by packages/secret-scan or
+// a credential word followed by a value), restricted for personal
+// identifiers (SSNs, card numbers), confidential and internal for content
+// marked as such, otherwise public. It returns the reasons it found.
+func classifyContent(content string) (DataClass, []string) {
+	class := ClassPublic
+	var reasons []string
+	raise := func(c DataClass, reason string) {
+		if classRank(c) > classRank(class) {
+			class = c
+		}
+		reasons = append(reasons, reason)
 	}
-	if strings.Contains(lower, "confidential") || strings.Contains(lower, "ssn") || strings.Contains(lower, "credential") {
-		return ClassConfidential
+	for _, f := range secretscan.Scan(content) {
+		switch f.Kind {
+		case secretscan.KindSSN, secretscan.KindCreditCard:
+			raise(ClassRestricted, string(f.Kind))
+		default:
+			raise(ClassSecret, string(f.Kind))
+		}
 	}
-	if strings.Contains(lower, "internal") || strings.Contains(lower, "private") {
-		return ClassInternal
+	if credentialAssignment.MatchString(content) {
+		raise(ClassSecret, "credential_value")
 	}
-	return ClassPublic
+	if m := confidentialWords.FindString(content); m != "" {
+		raise(ClassConfidential, "marked:"+strings.ToLower(m))
+	}
+	if m := internalWords.FindString(content); m != "" {
+		raise(ClassInternal, "marked:"+strings.ToLower(m))
+	}
+	return class, reasons
 }
 
 // ── audit ────────────────────────────────────────────────────────────────
