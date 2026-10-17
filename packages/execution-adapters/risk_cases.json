@@ -22,13 +22,11 @@
     "FOO=1 BAR=2 ls": "read",
     "time ls": "read",
     "echo 'a; rm -rf /'": "read",
-
     "go test ./...": "test",
     "npm test": "test",
     "pytest tests/": "test",
     "python -m pytest -q": "test",
     "cargo test": "test",
-
     "mkdir build": "write",
     "touch file": "write",
     "cp a b": "write",
@@ -47,7 +45,6 @@
     "git add .": "write",
     "awk '{print $1}' f": "write",
     "ls | tee out.txt": "write",
-
     "rm -rf /tmp/x": "destructive",
     "cat a | rm b": "destructive",
     "kubectl delete pod x": "destructive",
@@ -94,6 +91,17 @@
     "mkfs.ext4 /dev/sdb1": "destructive",
     ":(){ :|:&};:": "destructive",
     "mv a b": "destructive",
-    "RM -RF /": "destructive"
+    "RM -RF /": "destructive",
+    "x=rm; $x -rf /tmp/x": "destructive",
+    "$(printf rm) -rf /tmp/x": "destructive",
+    "`echo rm` -rf /": "destructive",
+    "${RM:-rm} -rf /": "destructive",
+    "\"$cmd\" --version": "destructive",
+    "FOO=1 $(which rm) -rf /": "destructive",
+    "eval rm -rf /": "destructive",
+    "eval ls -la": "read",
+    "ls $(pwd)": "read",
+    "echo `date`": "read",
+    "ls $HOME": "read"
   }
 }

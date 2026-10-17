@@ -69,6 +69,7 @@ class BridgeTests(unittest.TestCase):
         "{not json",
         "[]",
         json.dumps([{"jsonrpc": "2.0", "method": "notifications/cancelled"}]),
+        json.dumps({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": [1]}),
     ]
 
     def check(self, out):
@@ -76,7 +77,9 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in out[1]], [2, 3])
         self.assertEqual(out[2]["error"]["code"], -32700)
         self.assertEqual(out[3]["error"]["code"], -32600)
-        self.assertEqual(len(out), 4, out)
+        # Array params are relayed, not a crash.
+        self.assertEqual(out[4]["id"], 4)
+        self.assertEqual(len(out), 5, out)
 
     @unittest.skipUnless(shutil.which("node"), "node is not installed")
     def test_desktop_extension_relay(self):
@@ -89,7 +92,7 @@ class BridgeTests(unittest.TestCase):
                                 stderr=subprocess.PIPE, text=True, env=env)
         out = []
         try:
-            for line, answered in zip(self.LINES, [True, True, False, True, True, False]):
+            for line, answered in zip(self.LINES, [True, True, False, True, True, False, True]):
                 proc.stdin.write(line + "\n")
                 proc.stdin.flush()
                 if answered:

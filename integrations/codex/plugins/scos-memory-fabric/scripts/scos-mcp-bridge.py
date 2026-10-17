@@ -102,7 +102,9 @@ LONG_TOOLS = {"scos_backup_start", "scos_restore_test_start", "scos_okf_mirror_p
 
 
 def call_timeout(msg):
-    if msg.get("method") == "tools/call" and (msg.get("params") or {}).get("name") in LONG_TOOLS:
+    # params may legally be an array; only a tools/call object names a tool.
+    params = msg.get("params")
+    if msg.get("method") == "tools/call" and isinstance(params, dict) and params.get("name") in LONG_TOOLS:
         return 1800.0
     return 30.0
 

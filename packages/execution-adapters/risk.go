@@ -148,6 +148,10 @@ func (p riskPolicy) classifySegment(seg shellSegment, depth int) string {
 	return maxRisk(grade, p.classifyWords(seg.words, depth))
 }
 
+// dynamicCommandName stands in for a command name produced by a command
+// substitution.
+const dynamicCommandName = "$(…)"
+
 var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 func (p riskPolicy) classifyWords(words []string, depth int) string {
@@ -160,9 +164,22 @@ func (p riskPolicy) classifyWords(words []string, depth int) string {
 	if len(words) == 0 {
 		return RiskRead
 	}
+	// A program named by expansion ($x, ${RM:-rm}, a command substitution)
+	// is only known when the shell runs it: it could be anything, so it is
+	// graded as the worst it could be.
+	if strings.ContainsAny(words[0], "$`") {
+		return RiskDestructive
+	}
 	prog, args := strings.ToLower(path.Base(words[0])), words[1:]
 	if contains(p.PrivilegedLaunchers, prog) {
 		return RiskDestructive
+	}
+	// eval runs its arguments as a command line.
+	if prog == "eval" {
+		if len(args) == 0 {
+			return RiskRead
+		}
+		return maxRisk(RiskRead, p.classify(strings.Join(args, " "), depth+1))
 	}
 	if spec, ok := p.Launchers[prog]; ok {
 		return p.classifyWords(unwrapLauncher(prog, spec, args), depth+1)
@@ -352,6 +369,9 @@ func lexShell(s string) []shellSegment {
 	type frame struct {
 		backquote bool
 		quote     int
+		// atCommandName: the substitution opened where the enclosing
+		// command's name belongs, so its output is that name.
+		atCommandName bool
 	}
 	var (
 		segs       []shellSegment
@@ -392,6 +412,29 @@ func lexShell(s string) []shellSegment {
 		word.WriteByte(c)
 		inWord = true
 	}
+	// atCommandName reports whether nothing but assignments precedes the
+	// current position in this simple command.
+	atCommandName := func() bool {
+		if inWord {
+			return false
+		}
+		for _, w := range cur.words {
+			if !shellAssignment.MatchString(w) {
+				return false
+			}
+		}
+		return true
+	}
+	// closeSubstitution ends a substitution; one that produced the command
+	// name leaves a placeholder name, so the command is graded as one whose
+	// program is only known at run time.
+	closeSubstitution := func(f frame) {
+		quote = f.quote
+		if f.atCommandName {
+			word.WriteString(dynamicCommandName)
+			inWord = true
+		}
+	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if quote == single {
@@ -408,19 +451,23 @@ func lexShell(s string) []shellSegment {
 			continue
 		}
 		if c == '$' && i+1 < len(s) && s[i+1] == '(' {
+			head := atCommandName()
 			endSeg()
-			stack = append(stack, frame{quote: quote})
+			stack = append(stack, frame{quote: quote, atCommandName: head})
 			quote = unquoted
 			i++
 			continue
 		}
 		if c == '`' {
-			endSeg()
 			if n := len(stack); n > 0 && stack[n-1].backquote {
-				quote = stack[n-1].quote
+				endSeg()
+				f := stack[n-1]
 				stack = stack[:n-1]
+				closeSubstitution(f)
 			} else {
-				stack = append(stack, frame{backquote: true, quote: quote})
+				head := atCommandName()
+				endSeg()
+				stack = append(stack, frame{backquote: true, quote: quote, atCommandName: head})
 				quote = unquoted
 			}
 			continue
@@ -447,8 +494,9 @@ func lexShell(s string) []shellSegment {
 		case ')':
 			endSeg()
 			if n := len(stack); n > 0 && !stack[n-1].backquote {
-				quote = stack[n-1].quote
+				f := stack[n-1]
 				stack = stack[:n-1]
+				closeSubstitution(f)
 			}
 		case '>':
 			// A file-descriptor number before > is not a word.

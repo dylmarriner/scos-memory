@@ -32,6 +32,9 @@ class CommandRewrite:
 _RANK = {RISK_READ: 0, RISK_TEST: 1, RISK_WRITE: 2, RISK_DESTRUCTIVE: 3}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+# Stands in for a command name produced by a command substitution.
+_DYNAMIC_COMMAND_NAME = "$(\u2026)"
+
 
 @lru_cache(maxsize=1)
 def _policy() -> dict:
@@ -84,9 +87,19 @@ def _classify_words(p: dict, words: list[str], depth: int) -> str:
         words = words[1:]
     if not words:
         return RISK_READ
+    # A program named by expansion ($x, ${RM:-rm}, a command substitution) is
+    # only known when the shell runs it, so it is graded as the worst it
+    # could be.
+    if "$" in words[0] or "`" in words[0]:
+        return RISK_DESTRUCTIVE
     prog, args = words[0].rsplit("/", 1)[-1].lower() or words[0], words[1:]
     if prog in p["privileged_launchers"]:
         return RISK_DESTRUCTIVE
+    # eval runs its arguments as a command line.
+    if prog == "eval":
+        if not args:
+            return RISK_READ
+        return _max(RISK_READ, _classify(p, " ".join(args), depth + 1))
     if prog in p["launchers"]:
         return _classify_words(p, _unwrap_launcher(prog, p["launchers"][prog], args), depth + 1)
     if prog in p["shells"]:
@@ -209,7 +222,7 @@ def _lex_shell(s: str) -> list[tuple[list[str], list[str]]]:
     word: list[str] = []
     state = {"in_word": False, "out": False, "in": False}
     quote = UNQUOTED
-    stack: list[tuple[bool, int]] = []
+    stack: list[tuple[bool, int, bool]] = []
 
     def end_word() -> None:
         if not state["in_word"]:
@@ -237,6 +250,19 @@ def _lex_shell(s: str) -> list[tuple[list[str], list[str]]]:
         word.append(c)
         state["in_word"] = True
 
+    def at_command_name() -> bool:
+        # Nothing but assignments precedes this position in the command.
+        return not state["in_word"] and all(_ASSIGNMENT.match(w) for w in words)
+
+    def close_substitution(frame: tuple[bool, int, bool]) -> int:
+        # A substitution that produced the command name leaves a placeholder
+        # name, so the command is graded as one whose program is only known
+        # at run time.
+        if frame[2]:
+            word.append(_DYNAMIC_COMMAND_NAME)
+            state["in_word"] = True
+        return frame[1]
+
     i, n = 0, len(s)
     while i < n:
         c = s[i]
@@ -252,17 +278,20 @@ def _lex_shell(s: str) -> list[tuple[list[str], list[str]]]:
             i += 2
             continue
         if c == "$" and i + 1 < n and s[i + 1] == "(":
+            head = at_command_name()
             end_seg()
-            stack.append((False, quote))
+            stack.append((False, quote, head))
             quote = UNQUOTED
             i += 2
             continue
         if c == "`":
-            end_seg()
             if stack and stack[-1][0]:
-                quote = stack.pop()[1]
+                end_seg()
+                quote = close_substitution(stack.pop())
             else:
-                stack.append((True, quote))
+                head = at_command_name()
+                end_seg()
+                stack.append((True, quote, head))
                 quote = UNQUOTED
             i += 1
             continue
@@ -286,7 +315,7 @@ def _lex_shell(s: str) -> list[tuple[list[str], list[str]]]:
         elif c == ")":
             end_seg()
             if stack and not stack[-1][0]:
-                quote = stack.pop()[1]
+                quote = close_substitution(stack.pop())
         elif c == ">":
             if state["in_word"] and "".join(word).isdigit():
                 word.clear()
