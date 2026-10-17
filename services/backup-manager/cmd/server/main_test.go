@@ -924,3 +924,45 @@ func TestBackupIDsCannotEscapeTheDestination(t *testing.T) {
 		}
 	}
 }
+
+func TestBackupDueFollowsIntervalAndNewestVerifiedBackup(t *testing.T) {
+	ctx := context.Background()
+	p := &localProvider{dir: t.TempDir()}
+	s := &backupServer{provider: p, config: backupConfig{backupInterval: 24 * time.Hour}}
+	now := time.Now()
+
+	if !s.backupDue(ctx, now) {
+		t.Fatal("no backups yet: a scheduled backup should be due")
+	}
+	archive := []byte("dump")
+	store := func(id string, at time.Time) {
+		m := backupManifest{ID: id, Type: "base_backup", ContentHash: hashBytes(archive), SizeBytes: int64(len(archive)), CreatedAt: at.UTC().Format(time.RFC3339)}
+		if _, err := p.Store(ctx, m, archive); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store("backup-old", now.Add(-30*time.Hour))
+	if !s.backupDue(ctx, now) {
+		t.Fatal("newest backup is 30h old against a 24h interval: a backup should be due")
+	}
+	store("backup-new", now.Add(-time.Hour))
+	if s.backupDue(ctx, now) {
+		t.Fatal("a 1h-old verified backup is within the interval: no backup should be due")
+	}
+	s.config.backupInterval = 0
+	if s.backupDue(ctx, now.Add(48*time.Hour)) {
+		t.Fatal("interval 0 disables scheduled backups")
+	}
+	if (&backupServer{config: backupConfig{backupInterval: time.Hour}}).backupDue(ctx, now) {
+		t.Fatal("no provider: nothing can be backed up")
+	}
+}
+
+func TestBackupIntervalFromEnv(t *testing.T) {
+	for raw, want := range map[string]time.Duration{"": 24 * time.Hour, "6h": 6 * time.Hour, "0": 0, "nonsense": 24 * time.Hour} {
+		t.Setenv("SCOS_BACKUP_INTERVAL", raw)
+		if got := backupIntervalFromEnv(); got != want {
+			t.Errorf("SCOS_BACKUP_INTERVAL=%q: got %v, want %v", raw, got, want)
+		}
+	}
+}

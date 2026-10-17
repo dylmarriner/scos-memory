@@ -51,6 +51,7 @@ type backupConfig struct {
 	walMaxSegmentLag      uint64
 	mirrorMaxAge          time.Duration
 	mirrorInterval        time.Duration
+	backupInterval        time.Duration
 }
 
 type BackupRecord struct {
@@ -164,6 +165,17 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
+// backupIntervalFromEnv reads SCOS_BACKUP_INTERVAL: how long after the
+// newest verified backup the scheduler takes the next one. "0" turns
+// scheduled base backups off (operators can still POST /v1/backups/start);
+// unset or unparsable means daily.
+func backupIntervalFromEnv() time.Duration {
+	if strings.TrimSpace(os.Getenv("SCOS_BACKUP_INTERVAL")) == "0" {
+		return 0
+	}
+	return envDuration("SCOS_BACKUP_INTERVAL", 24*time.Hour)
+}
+
 func loadBackupConfig() backupConfig {
 	provider := strings.ToLower(strings.TrimSpace(os.Getenv("SCOS_BACKUP_PROVIDER")))
 	if provider == "" {
@@ -198,6 +210,7 @@ func loadBackupConfig() backupConfig {
 		walMaxSegmentLag:      lag,
 		mirrorMaxAge:          envDuration("SCOS_OKF_GIT_MIRROR_MAX_AGE", 48*time.Hour),
 		mirrorInterval:        envDuration("SCOS_OKF_GIT_MIRROR_INTERVAL", time.Hour),
+		backupInterval:        backupIntervalFromEnv(),
 	}
 }
 
@@ -742,6 +755,13 @@ const schedulerActor = "backup-manager-scheduler"
 func (s *backupServer) runScheduledWork(ctx context.Context) {
 	s.runDueRestoreTests(ctx)
 	s.opMu.Lock()
+	if s.backupDue(ctx, time.Now()) {
+		if resp, err := s.createBackup(ctx, schedulerActor); err != nil {
+			log.Printf("backup scheduler: base backup failed: %v", err)
+		} else {
+			log.Printf("backup scheduler: base backup %s %s", resp.ID, resp.Status)
+		}
+	}
 	if res, err := s.applyRetention(ctx, schedulerActor, time.Now()); err != nil {
 		log.Printf("backup scheduler: retention not applied: %v", err)
 	} else if len(res.Deleted) > 0 || res.WALDeleted > 0 || len(res.Errors) > 0 {
@@ -755,6 +775,22 @@ func (s *backupServer) runScheduledWork(ctx context.Context) {
 		}
 	}
 	s.opMu.Unlock()
+}
+
+// backupDue reports whether a scheduled base backup should be taken: a
+// provider is configured, scheduling is on, and the newest verified backup
+// is older than the interval (or there is none).
+func (s *backupServer) backupDue(ctx context.Context, now time.Time) bool {
+	if s.provider == nil || s.config.backupInterval <= 0 {
+		return false
+	}
+	backups, err := s.listBackups(ctx)
+	if err != nil {
+		log.Printf("backup scheduler: cannot list backups: %v", err)
+		return false
+	}
+	age, ok := newestVerifiedBackupAge(backups, now)
+	return !ok || age >= s.config.backupInterval
 }
 
 func (s *backupServer) mirrorDue(now time.Time) bool {

@@ -1158,7 +1158,11 @@ services:
       SCOS_WAL_ARCHIVE_DESTINATION: "${SCOS_WAL_ARCHIVE_DESTINATION:-file:///var/lib/scos/wal-archive}"
       SCOS_OKF_GIT_REPO: ${SCOS_OKF_GIT_REPO:-}
       SCOS_OKF_GIT_MIRROR_REMOTE: ${SCOS_OKF_GIT_MIRROR_REMOTE:-}
+      # The scheduler takes a base backup once SCOS_BACKUP_INTERVAL has
+      # passed since the newest verified one (0 = only on request), then runs
+      # overdue restore drills, retention and the OKF mirror.
       SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED: ${SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED:-false}
+      SCOS_BACKUP_INTERVAL: ${SCOS_BACKUP_INTERVAL:-24h}
     volumes:
       - tls-certs:/etc/scos/tls:ro
       - backup-data:/var/lib/scos/backups
