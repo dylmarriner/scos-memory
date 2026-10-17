@@ -977,7 +977,7 @@ func TestGitMirrorToANetworkMountedPathIsOffHost(t *testing.T) {
 		t.Skip("git is not installed")
 	}
 	repo, mount := t.TempDir(), t.TempDir()
-	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "init", "-q", "-b", "trunk")
 	if err := os.WriteFile(filepath.Join(repo, "policy.md"), []byte("# policy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1003,6 +1003,11 @@ func TestGitMirrorToANetworkMountedPathIsOffHost(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(remote, "HEAD")); err != nil {
 		t.Fatal("the bare mirror repository was not created")
+	}
+	src, _ := exec.Command("git", "-C", repo, "symbolic-ref", "HEAD").Output()
+	dst, _ := exec.Command("git", "--git-dir="+remote, "symbolic-ref", "HEAD").Output()
+	if string(src) != string(dst) {
+		t.Fatalf("mirror HEAD %q, source HEAD %q", dst, src)
 	}
 	item := s.evaluatePlan(context.Background(), time.Now()).Items["remote_git_mirrors"]
 	if !item.Covered {

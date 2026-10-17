@@ -14,10 +14,11 @@ case "$destination" in
   *) echo "only an explicitly mounted file:// WAL destination is implemented" >&2; exit 1 ;;
 esac
 
-# Files are private to the archive's owner. umask rather than chmod: on a
-# network mount (sshfs, NFS with root squash) the archive files can appear
-# owned by another user, and chmod is refused there.
-umask 077
+# Segments are readable by the archive's group (postgres, 999), which
+# backup-manager joins to ship encrypted copies off-host; nobody else reads
+# them. umask rather than chmod: on a network mount (sshfs, NFS with root
+# squash) the files can appear owned by another user, and chmod is refused.
+umask 027
 mkdir -p "$destination"
 target="$destination/$wal_name"
 

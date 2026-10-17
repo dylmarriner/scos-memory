@@ -150,6 +150,16 @@ func (s *backupServer) runGitMirror(ctx context.Context, actor string) (*GitMirr
 	if head, err := gitCommand(ctx, run.Repository, "rev-parse", "HEAD"); err == nil {
 		run.Head = strings.TrimSpace(string(head))
 	}
+	// A bare repository this service created starts with HEAD at its own
+	// default branch; point it at the source's so a clone of the mirror
+	// checks out the same branch.
+	if r := run.Remote; strings.HasPrefix(r, "/") || strings.HasPrefix(r, "file://") {
+		if branch, err := gitCommand(ctx, run.Repository, "symbolic-ref", "-q", "HEAD"); err == nil {
+			if out, err := commandContext(ctx, "git", "--git-dir="+localRemotePath(r), "symbolic-ref", "HEAD", strings.TrimSpace(string(branch))).CombinedOutput(); err != nil {
+				return finish(fmt.Sprintf("set the mirror's HEAD: %v: %s", err, strings.TrimSpace(string(out))))
+			}
+		}
+	}
 	run.Status, run.Refs = "verified", len(local)
 	return finish(fmt.Sprintf("pushed and verified %d refs on the remote", len(local)))
 }
