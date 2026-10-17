@@ -73,6 +73,23 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       go build -trimpath -ldflags="$ldflags" -o "/out/$svc" "./services/$svc/cmd/server"; \
     done
 
+# bws, the Bitwarden Secrets Manager CLI: backup-manager's secret-manager
+# recovery drill reads the backup key back from Bitwarden with it. Pinned to
+# a release, and checked against that release's published SHA-256 digests.
+FROM alpine:3.24 AS bws
+ARG TARGETARCH
+ARG BWS_VERSION=2.1.0
+RUN apk add --no-cache curl unzip \
+    && case "$TARGETARCH" in \
+        amd64) arch=x86_64; sum=f59ee150e42b82128d437087e9bac920053c6bfddcb960d20ce9386e5ac9bba6 ;; \
+        arm64) arch=aarch64; sum=eb0f1ae61d1c3b74244d2841233276e05c77e8be4da197ed90fc6248387005e1 ;; \
+        *) echo "no bws build for $TARGETARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSLo /tmp/bws.zip "https://github.com/bitwarden/sdk-sm/releases/download/bws-v${BWS_VERSION}/bws-${arch}-unknown-linux-musl-${BWS_VERSION}.zip" \
+    && echo "$sum  /tmp/bws.zip" | sha256sum -c - \
+    && unzip -o /tmp/bws.zip -d /tmp/bws \
+    && install -m 0755 /tmp/bws/bws /usr/local/bin/bws
+
 FROM alpine:3.24
 # graphify-provider execs the `graphify` CLI (PyPI `graphifyy`) as a
 # subprocess -- python3/pipx are added here, once, for the whole shared
@@ -119,6 +136,7 @@ RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client 
     && chown -R scos:scos /var/lib/scos /var/lib/graphify-cache
 
 COPY --from=build /out/ /usr/local/bin/
+COPY --from=bws /usr/local/bin/bws /usr/local/bin/bws
 
 # transparency-projection serves this dashboard from disk.
 COPY dashboard/index.html /usr/local/share/scos/dashboard/index.html

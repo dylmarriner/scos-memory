@@ -23,7 +23,8 @@ Any other name (`s3`, `gcs`, `azure`, ...) has no implementation: the service re
 - `pitr_configured`: WAL archiving is covered, the newest verified `physical_base_backup` is younger than `SCOS_BACKUP_COVERAGE_MAX_AGE` and the WAL segment it starts from is still archived, and a `pitr_recovery` drill passed within its 7-day cadence.
 - `remote_git_mirrors`: the newest recorded mirror run of `SCOS_OKF_GIT_REPO` to `SCOS_OKF_GIT_MIRROR_REMOTE` pushed with `git push --mirror`, read every ref back with `git ls-remote`, is younger than `SCOS_OKF_GIT_MIRROR_MAX_AGE` (default 48h), and the remote is another host: a URL, or a path that the kernel mount table puts on a network filesystem (a path remote is created as a bare repository on the first run). In compose the OKF store is the Git repository at `SCOS_OKF_ROOT` (default `/var/lib/scos/okf/repo` on the `okf-data` volume), seeded once from the image's approved content; backup-manager mounts it read only.
 - `configuration_backups`: `SCOS_CONFIG_BACKUP_PATHS` names files or directories, the newest `configuration_backup` is younger than `SCOS_BACKUP_COVERAGE_MAX_AGE`, holds every configured path, and unpacks with every file matching the SHA-256 in its manifest.
-- `object_store_snapshots`, `secret_manager_recovery`: not implemented, so not covered.
+- `object_store_snapshots`: an S3 bucket is configured (`SCOS_OBJECT_STORE_ENDPOINT`, https only), its versioning status is `Enabled`, its host resolves to no address of this host (loopback, the container's interfaces, or `SCOS_HOST_ADDRESSES`, which compose sets to the Docker host's tailnet address), and the newest covered base backup is held there as a versioned object that verifies on read-back: manifest MAC, archive SHA-256 and decryption with the backup key. See "Object-store copies" below.
+- `secret_manager_recovery`: the newest secret-recovery drill, younger than `SCOS_BACKUP_COVERAGE_MAX_AGE`, read the configured Bitwarden secret (`SCOS_BACKUP_KEY_SECRET_ID`) with `bws`, found the key the backups are encrypted with, and decrypted the newest base backup with the key it read. See "Secret-manager recovery" below.
 
 ## Backups, fingerprints and retention
 
@@ -36,6 +37,22 @@ With `{"type":"configuration_backup"}` it takes a gzip tar of every file under `
 With the scheduler enabled, a `base_backup` is taken once `SCOS_BACKUP_INTERVAL` (default 24h; `0` turns scheduled backups off) has passed since the newest verified one, a `configuration_backup` on the same interval when paths are configured, and a `physical_base_backup` on the same interval whenever WAL archiving is covered.
 
 Retention is applied after every backup, on the scheduler, and by `POST /v1/retention/apply`: every backup within 35 days, the newest of each ISO week within 12 weeks and of each month within 12 months, and always the newest; archived WAL older than 35 days is removed from a `file://` WAL destination. Daily, weekly and monthly are derived from when each backup was taken, separately for `base_backup` and `physical_base_backup`. Archived WAL from the start of the oldest kept physical backup onwards is never removed, whatever its age. Unverifiable archives are never deleted automatically. Each deletion is appended (fsynced) to `retention-audit.jsonl` in `SCOS_BACKUP_DIR` before it happens, naming the actor; `GET /v1/retention/audit` returns the log.
+
+## Object-store copies
+
+With the `filesystem` provider and `SCOS_OBJECT_STORE_ENDPOINT`, `SCOS_OBJECT_STORE_BUCKET`, `SCOS_OBJECT_STORE_ACCESS_KEY` and `SCOS_OBJECT_STORE_SECRET_KEY_FILE` set (`SCOS_OBJECT_STORE_PREFIX` defaults to `backups/`, `SCOS_OBJECT_STORE_REGION` to `us-east-1`, `SCOS_OBJECT_STORE_CA_FILE` adds a private CA), the scheduler copies every backup that verifies at the provider into the bucket as `<prefix><id>.backup` (the encrypted archive, byte for byte) and `<prefix><id>.backup.manifest.json`, reading each copy back and verifying it before counting it. A backup retention removes from the provider has its current objects deleted; the bucket keeps the earlier versions as noncurrent until its own lifecycle expires them. Give backup-manager credentials without `s3:DeleteObjectVersion` or `s3:PutBucketVersioning`, so nothing it holds can erase that history.
+
+`backup-manager object-sync` runs one copy pass by hand. If the provider's copy of a backup is lost or damaged, `backup-manager object-fetch <backup-id>` verifies the object-store copy and writes it back to the provider, after which every restore path works as before.
+
+The kubuntux deployment uses MinIO on rabuntu (`/opt/scos-minio`): built from the `RELEASE.2025-10-15T17-29-55Z` source, serving TLS with the tailnet certificate (renewed weekly by `scos-minio-cert.timer`) at `https://rabuntu.tail2c15c8.ts.net:8446`, bucket `scos-backups` with versioning and a 90-day noncurrent-version expiry, and user `scos-kubuntux` limited to the `scos-backup-writer` policy.
+
+## Secret-manager recovery
+
+Every encrypted backup is unreadable without `SCOS_BACKUP_ENCRYPTION_KEY`, so the key is also kept in Bitwarden Secrets Manager. Create a secret holding the key (the same 64 hex characters), and a machine account with read access to its project; set `SCOS_BACKUP_KEY_SECRET_ID` to the secret's id and mount the machine account's access token at `SCOS_BWS_ACCESS_TOKEN_FILE` (`SCOS_BWS_SERVER_URL` for an EU or self-hosted server). The image carries `bws` 2.1.0, checked against its published SHA-256.
+
+The drill runs on the scheduler every `SCOS_SECRET_DRILL_INTERVAL` (default 24h) and by `backup-manager secret-drill`: it reads the secret with `bws secret get` (the token goes in the environment, never on the command line), checks it is the key the backups are encrypted with, and authenticates and decrypts the newest base backup with the key it read. The result is kept in `secret-recovery-drill.json` in `SCOS_BACKUP_DIR`.
+
+To recover after losing the deployment's copy of the key: `bws secret get <id>` (or the Bitwarden web vault), put the value in `SCOS_BACKUP_ENCRYPTION_KEY`, and restore as usual.
 
 ## Restore drills
 

@@ -1182,10 +1182,26 @@ services:
       SCOS_BACKUP_PROVIDER: ${SCOS_BACKUP_PROVIDER:-disabled}
       SCOS_BACKUP_DESTINATION: ${SCOS_BACKUP_DESTINATION:-}
       # Coverage is derived from evidence (docs/runbooks/backup-recovery.md);
-      # there are no "verified" flags to set. The secret-manager settings
-      # only label where the encryption key is kept.
+      # there are no "verified" flags to set. SCOS_SECRET_MANAGER and
+      # SCOS_BACKUP_ENCRYPTION_KEY_REF only label where the key is kept;
+      # secret_manager_recovery is covered by the drill that reads the key
+      # back from Bitwarden Secrets Manager (SCOS_BACKUP_KEY_SECRET_ID, with
+      # the machine-account token mounted at SCOS_BWS_ACCESS_TOKEN_FILE).
       SCOS_SECRET_MANAGER: ${SCOS_SECRET_MANAGER:-}
       SCOS_BACKUP_ENCRYPTION_KEY_REF: ${SCOS_BACKUP_ENCRYPTION_KEY_REF:-}
+      SCOS_BACKUP_KEY_SECRET_ID: ${SCOS_BACKUP_KEY_SECRET_ID:-}
+      SCOS_BWS_ACCESS_TOKEN_FILE: ${SCOS_BWS_ACCESS_TOKEN_FILE:-}
+      SCOS_BWS_SERVER_URL: ${SCOS_BWS_SERVER_URL:-}
+      # A versioned S3 bucket every encrypted backup is copied to; the
+      # secret key is mounted at SCOS_OBJECT_STORE_SECRET_KEY_FILE.
+      SCOS_OBJECT_STORE_ENDPOINT: ${SCOS_OBJECT_STORE_ENDPOINT:-}
+      SCOS_OBJECT_STORE_BUCKET: ${SCOS_OBJECT_STORE_BUCKET:-}
+      SCOS_OBJECT_STORE_ACCESS_KEY: ${SCOS_OBJECT_STORE_ACCESS_KEY:-}
+      SCOS_OBJECT_STORE_SECRET_KEY_FILE: ${SCOS_OBJECT_STORE_SECRET_KEY_FILE:-}
+      SCOS_OBJECT_STORE_PREFIX: ${SCOS_OBJECT_STORE_PREFIX:-backups/}
+      # The Docker host's own addresses: an object store at one of them is
+      # on this host, though the container does not see them as its own.
+      SCOS_HOST_ADDRESSES: ${SCOS_TAILSCALE_IP:-100.93.75.87}
       SCOS_BACKUP_DATABASE_URL: ${SCOS_BACKUP_DATABASE_URL:-}
       SCOS_BACKUP_RESTORE_DATABASE_URL: ${SCOS_BACKUP_RESTORE_DATABASE_URL:-}
       SCOS_BACKUP_DIR: ${SCOS_BACKUP_DIR:-/var/lib/scos/backups}

@@ -33,7 +33,8 @@ type ProviderReport struct {
 	Detail      string `json:"detail"`
 	// KeySource names where the deployment says the encryption key is
 	// kept (SCOS_SECRET_MANAGER, SCOS_BACKUP_ENCRYPTION_KEY_REF). It is a
-	// label, not evidence: secret_manager_recovery stays not covered.
+	// label, not evidence: secret_manager_recovery is covered only by a
+	// drill that recovers the key from Bitwarden (secretrecovery.go).
 	KeySource string `json:"key_source,omitempty"`
 }
 
@@ -176,7 +177,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 	plan.Items["encrypted_off_host_copies"] = offHost
 	plan.Items["remote_provider_verified"] = remote
 
-	plan.Items["object_store_snapshots"] = Coverage{Reason: "no object-store provider is implemented; object-store versioning and snapshots are not taken"}
+	plan.Items["object_store_snapshots"] = s.objectStoreCoverage(ctx, base)
 
 	// Continuous WAL archiving.
 	wal := Coverage{}
@@ -211,7 +212,7 @@ func (s *backupServer) evaluatePlan(ctx context.Context, now time.Time) BackupPl
 	}
 	plan.Items["remote_git_mirrors"] = mirror
 
-	plan.Items["secret_manager_recovery"] = Coverage{Reason: "secret-manager recovery procedures are not provided or exercised by this service"}
+	plan.Items["secret_manager_recovery"] = s.secretRecoveryCoverage(now)
 	plan.Items["configuration_backups"] = s.configCoverage(ctx, plan.Provider.Working, now)
 
 	plan.BaseBackups = plan.Items["base_backups"].Covered

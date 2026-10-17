@@ -139,6 +139,11 @@ type backupServer struct {
 	fingerprintTarget func(ctx context.Context, databaseURL string, tables []string, withCatalog bool) (dataFingerprint, error)
 	walState          func(ctx context.Context) (walArchiverState, error)
 	applied           func(ctx context.Context, databaseURL string) ([]string, error)
+	// objectStore is the versioned bucket every encrypted backup is copied
+	// to; nil, with objectStoreErr saying why when it is misconfigured,
+	// when there is none.
+	objectStore    *objectStore
+	objectStoreErr error
 }
 
 var (
@@ -166,6 +171,7 @@ func newBackupServerWithDir(dir string) *backupServer {
 	}
 	s.walState = func(ctx context.Context) (walArchiverState, error) { return readWALArchiver(ctx, s.config.databaseURL) }
 	s.provider, s.providerErr = newProvider(cfg, dir)
+	s.objectStore, s.objectStoreErr = objectStoreFromEnv()
 	// Restore test results must survive process restarts: the §31 monthly and
 	// quarterly cadence is only meaningful if "when did this last pass" is
 	// durable, not reset every time the service redeploys.
@@ -825,6 +831,14 @@ func (s *backupServer) runScheduledWork(ctx context.Context) {
 	} else if len(res.Deleted) > 0 || res.WALDeleted > 0 || len(res.Errors) > 0 {
 		log.Printf("backup scheduler: retention deleted %d backups and %d WAL segments (%d errors)", len(res.Deleted), res.WALDeleted, len(res.Errors))
 	}
+	s.logObjectSync(ctx)
+	if s.secretDrillDue(time.Now()) {
+		if d, err := s.secretRecoveryDrill(ctx); err != nil {
+			log.Printf("backup scheduler: secret-recovery drill not recorded: %v", err)
+		} else {
+			log.Printf("backup scheduler: secret-recovery drill %s: %s", d.Status, d.Detail)
+		}
+	}
 	if s.config.gitRepo != "" && s.config.gitMirrorRemote != "" && s.mirrorDue(time.Now()) {
 		if run, err := s.runGitMirror(ctx, schedulerActor); err != nil {
 			log.Printf("backup scheduler: OKF mirror run not recorded: %v", err)
@@ -1012,6 +1026,12 @@ func backupKey() ([]byte, error) {
 	if v == "" {
 		return nil, fmt.Errorf("SCOS_BACKUP_ENCRYPTION_KEY is required for encrypted backups")
 	}
+	return parseBackupKey(v)
+}
+
+// parseBackupKey reads a 32-byte key written as hex, base64 or raw text.
+func parseBackupKey(v string) ([]byte, error) {
+	v = strings.TrimSpace(v)
 	if b, err := hex.DecodeString(v); err == nil && len(b) == 32 {
 		return b, nil
 	}
