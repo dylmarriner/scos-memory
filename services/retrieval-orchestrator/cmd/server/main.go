@@ -486,7 +486,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// ── 8. Recent session state ─────────────────────────────────────
 	var sessionResults []RetrievalResult
 	if plan.SessionLimit > 0 {
-		sessionResults, err = s.recentSessionState(ctx, req, namespaces, plan.SessionLimit)
+		sessionResults, err = s.recentSessionState(ctx, req, namespaces, sensitivityFilter, plan.SessionLimit)
 		if err != nil {
 			log.Printf("session state error: %v", err)
 			meta.DegradedSources = append(meta.DegradedSources, "session_state")
@@ -638,7 +638,7 @@ func containsAllNamespaces(requested, authorized []string) bool {
 
 func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {
 	query := `
-		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
+		SELECT mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary),
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
 		       1.0::double precision AS lexical_score,
@@ -665,7 +665,7 @@ func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namesp
 		return nil, nil
 	}
 	query := `
-		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
+		SELECT mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary),
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
 		       ts_rank(to_tsvector('english', COALESCE(mi.title, '') || ' ' || COALESCE(mv.content, '')), to_tsquery('english', $4)) AS lexical_score,
@@ -730,7 +730,7 @@ func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespac
 	}
 
 	query := `
-		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
+		SELECT mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary),
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
 		       1 - (embedding.embedding <=> $4::vector) AS semantic_score,
@@ -778,12 +778,16 @@ func vectorLiteral(values []float64) string {
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, namespaces []string, limit int) ([]RetrievalResult, error) {
+// recentSessionState returns this session's working and episodic memories,
+// including its own not-yet-reviewed candidates, within the caller's
+// sensitivity ceiling. Memories recorded without a session are not part of
+// any session's state.
+func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityFilter string, limit int) ([]RetrievalResult, error) {
 	if req.SessionID == "" {
 		return nil, nil
 	}
 	query := `
-		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
+		SELECT mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary),
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
@@ -808,13 +812,14 @@ func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, na
 		  AND (mi.valid_until IS NULL OR mi.valid_until > now())
 		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
 		  AND mi.type IN ('working', 'episodic')
-		  AND (mi.metadata->>'session_id' = $4 OR mi.metadata->>'session_id' IS NULL)
+		  AND mi.metadata->>'session_id' = $4
+		  AND mi.sensitivity <= $6
 		ORDER BY mi.created_at DESC
 		LIMIT $5
 	`
 	var results []RetrievalResult
 	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
-		rows, err := q.Query(ctx, query, req.TenantID, req.PrincipalID, namespaces, req.SessionID, limit)
+		rows, err := q.Query(ctx, query, req.TenantID, req.PrincipalID, namespaces, req.SessionID, limit, sensitivityFilter)
 		if err != nil {
 			return err
 		}
@@ -859,7 +864,7 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 		rows, err := q.Query(ctx, `
 			SELECT id, title, canonical_summary, content, type, authority_level, confidence_score, sensitivity, namespace_id, evidence, conflicts
 			FROM (
-			SELECT DISTINCT ON (mi.id) mi.id, mi.title, mi.canonical_summary, mv.content, mi.type,
+			SELECT DISTINCT ON (mi.id) mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary), mi.type,
 			       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
 			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb) AS evidence,
 			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', r.target_memory_id, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE r.source_memory_id=mi.id AND r.relation_type ILIKE '%conflict%'),'[]'::jsonb) AS conflicts,
@@ -1395,7 +1400,7 @@ func (p retrievalPlan) recentLimit(maxResults int) int {
 // recorded in the last window, newest first, whatever the query says.
 func (s *server) recentMemories(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax, window string, limit int) ([]RetrievalResult, error) {
 	query := `
-		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
+		SELECT mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary),
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
 		       0::double precision AS lexical_score,
@@ -1421,7 +1426,7 @@ func (s *server) recentMemories(ctx context.Context, req RetrieveRequest, namesp
 // memories -- the state of tasks in progress -- most recent first.
 func (s *server) activeTaskState(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {
 	query := `
-		SELECT mi.id, mi.title, mi.canonical_summary, mv.content,
+		SELECT mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary),
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
 		       0::double precision AS lexical_score,
