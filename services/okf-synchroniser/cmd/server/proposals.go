@@ -613,6 +613,7 @@ func newProposalID() string {
 	_, _ = rand.Read(b)
 	return "okf-proposal-" + hex.EncodeToString(b)
 }
+
 // defaultProtectedBranch is the branch the OKF store is initialised on and
 // the only branch approved proposals are merged into, unless
 // SCOS_OKF_PROTECTED_BRANCH names another.
