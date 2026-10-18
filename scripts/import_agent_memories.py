@@ -46,6 +46,10 @@ DAILY = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
 HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n?", re.S)
+COMMENT = re.compile(r"<!--.*?-->", re.S)
+INCLUDE = re.compile(r"^@\S+$")
+INDEX_LINK = re.compile(r"^\[[^\]]+\]\([^)\s]+\.md\)")
+EMPHASIS = re.compile(r"(\*\*|__)(.+?)\1")
 
 
 def iso(ts: float) -> str:
@@ -95,10 +99,11 @@ def units(markdown: str):
 
     Each bullet is one memory; so is each paragraph. A bullet's nearest
     heading is kept as context when the bullet does not already say it.
-    Fenced code, tables, link-only index lines and the Hermes entry
-    separator (a line holding only §) are not memories.
+    Fenced code, tables, HTML comments, @file include lines, index lines
+    that point at another memory file and the Hermes entry separator (a
+    line holding only §) are not memories.
     """
-    text = FRONTMATTER.sub("", markdown)
+    text = COMMENT.sub("", FRONTMATTER.sub("", markdown))
     heading, para, fenced, found = "", [], False, []
 
     def flush():
@@ -121,24 +126,27 @@ def units(markdown: str):
             heading = h.group(2).strip()
             continue
         stripped = line.strip()
-        if not stripped or stripped == "§" or stripped.startswith("|") or set(stripped) <= set("-=*_ "):
+        if not stripped or stripped == "§" or stripped.startswith("|") or set(stripped) <= set("-=*_ ") or INCLUDE.match(stripped):
             flush()
             continue
         b = BULLET.match(line)
         if b:
             flush()
             item = b.group(1).strip()
-            if re.fullmatch(r"\[[^\]]*\]\([^)]*\)(\s*[—–-].*)?", item) and "—" not in item and " - " not in item:
-                continue  # a bare index link
+            if INDEX_LINK.match(item):
+                continue  # points at another memory file, imported on its own
             if heading and len(item) < 160 and heading.lower() not in item.lower():
                 item = f"{heading}: {item}"
             found.append(item)
+            continue
+        if INDEX_LINK.match(stripped):
+            flush()
             continue
         para.append(stripped)
     flush()
     result = []
     for u in found:
-        u = re.sub(r"\s+", " ", u).strip()
+        u = re.sub(r"\s+", " ", EMPHASIS.sub(r"\2", u)).strip()
         if len(u) >= MIN_UNIT:
             result.extend(split_sentences(u))
     return result

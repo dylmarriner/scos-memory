@@ -29,12 +29,17 @@ code is not memory
 | table | row |
 §
 - [Index link](other.md)
+[Dispatchline typography](rule_type.md) — Type uses the brand fonts.
+@/home/kubuntux/.codex/RTK.md
+<!-- skill-router:managed:start -->
+**Status:** the deploy is **green**.
 """
         got = mod.units(md)
         self.assertEqual(got, [
             "Deploys: runs from kubuntux backup drive",
             "Deploys never touch the DEVELOPMENT drive.",
             "A paragraph that spans two lines.",
+            "Status: the deploy is green.",
         ])
 
     def test_long_unit_is_split_at_sentences(self):
