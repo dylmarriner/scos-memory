@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -70,23 +71,31 @@ const (
 const (
 	explicitFactAuthority  = 70
 	explicitFactConfidence = 0.75
+	// A fact imported from another agent's memory store was curated by that
+	// agent, not stated to this fabric by the user, so it ranks below an
+	// explicit fact and below the OKF promotion threshold until confirmed.
+	externalFactAuthority  = 50
+	externalFactConfidence = 0.6
 )
 
 type Fact struct {
-	ID           string        `json:"id"`
-	Network      MemoryNetwork `json:"network"`
-	Content      string        `json:"content"`
-	Source       string        `json:"source"` // explicit, observed, inferred, external
-	Authority    int           `json:"authority_level"`
-	Confidence   float64       `json:"confidence"`
-	Scope        string        `json:"scope"`
-	ObservedAt   string        `json:"observed_at"`
-	ValidFrom    string        `json:"valid_from,omitempty"`
-	ValidUntil   string        `json:"valid_until,omitempty"`
-	RecordedAt   string        `json:"recorded_at"`
-	SupersededBy string        `json:"superseded_by,omitempty"`
-	Status       string        `json:"status,omitempty"` // active, merged -- see loadFactsIncludingMerged
-	Evidence     []string      `json:"evidence,omitempty"`
+	ID      string        `json:"id"`
+	Network MemoryNetwork `json:"network"`
+	Content string        `json:"content"`
+	Source  string        `json:"source"` // explicit, observed, inferred, external
+	// Origin names where an external fact came from (the agent and the
+	// store it was read from); empty for facts first recorded here.
+	Origin       string   `json:"origin,omitempty"`
+	Authority    int      `json:"authority_level"`
+	Confidence   float64  `json:"confidence"`
+	Scope        string   `json:"scope"`
+	ObservedAt   string   `json:"observed_at"`
+	ValidFrom    string   `json:"valid_from,omitempty"`
+	ValidUntil   string   `json:"valid_until,omitempty"`
+	RecordedAt   string   `json:"recorded_at"`
+	SupersededBy string   `json:"superseded_by,omitempty"`
+	Status       string   `json:"status,omitempty"` // active, merged -- see loadFactsIncludingMerged
+	Evidence     []string `json:"evidence,omitempty"`
 	// CodeSymbolVersionIDs are code_symbol_versions.id values the caller
 	// already knows this fact cites (e.g. an agent recording a decision
 	// right after scos_code_impact/scos_code_query returned a result). P1-C
@@ -590,6 +599,34 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			}
 			fact.NamespaceID = ns
 		}
+		if fact.Sensitivity != "" {
+			// A memory above its namespace's sensitivity ceiling would be
+			// written and then hidden from everyone, its writer included
+			// (memory_items_namespace_access), so the write is refused.
+			ceiling, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) (string, error) {
+				var ceiling string
+				var allowed bool
+				err := q.QueryRowContext(r.Context(),
+					`SELECT sensitivity_ceiling::text, $2::sensitivity_class <= sensitivity_ceiling FROM namespaces WHERE id = $1`,
+					fact.NamespaceID, fact.Sensitivity).Scan(&ceiling, &allowed)
+				if err == nil && allowed {
+					ceiling = ""
+				}
+				return ceiling, err
+			})
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "namespace "+fact.NamespaceID+" is not visible to the caller", http.StatusBadRequest)
+				return
+			}
+			if err != nil {
+				http.Error(w, "invalid sensitivity "+fact.Sensitivity+": "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if ceiling != "" {
+				http.Error(w, fmt.Sprintf("namespace %s holds memories up to %s; a %s memory would be hidden from every reader", fact.NamespaceID, ceiling, fact.Sensitivity), http.StatusBadRequest)
+				return
+			}
+		}
 		if fact.Network == "" {
 			fact.Network = NetworkWorld
 		}
@@ -603,6 +640,18 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			}
 			if fact.Confidence == 0 {
 				fact.Confidence = explicitFactConfidence
+			}
+		}
+		if fact.Source == "external" {
+			if fact.Origin == "" {
+				http.Error(w, "an external fact must name its origin", http.StatusBadRequest)
+				return
+			}
+			if fact.Authority == 0 {
+				fact.Authority = externalFactAuthority
+			}
+			if fact.Confidence == 0 {
+				fact.Confidence = externalFactConfidence
 			}
 		}
 		if fact.Scope == "" {

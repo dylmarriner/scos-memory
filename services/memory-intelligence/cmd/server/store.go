@@ -169,6 +169,7 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 	structured, err := json.Marshal(map[string]any{
 		"network":     fact.Network,
 		"source":      fact.Source,
+		"origin":      fact.Origin,
 		"scope":       fact.Scope,
 		"observed_at": fact.ObservedAt,
 		"valid_from":  fact.ValidFrom,
@@ -301,6 +302,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		var structured struct {
 			Network    MemoryNetwork `json:"network"`
 			Source     string        `json:"source"`
+			Origin     string        `json:"origin"`
 			Scope      string        `json:"scope"`
 			ObservedAt string        `json:"observed_at"`
 			ValidFrom  string        `json:"valid_from"`
@@ -314,6 +316,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		}
 		f.Network = structured.Network
 		f.Source = structured.Source
+		f.Origin = structured.Origin
 		// Memories promoted by the consolidation worker before it recorded
 		// these fields carry only a title and evidence: their network
 		// follows from the memory type, and they were observed in the

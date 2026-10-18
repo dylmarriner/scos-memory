@@ -561,3 +561,16 @@ func TestAuthenticatedIdentityIgnoresSpoofedHeaderWhenClaimsPresent(t *testing.T
 		t.Fatalf("expected the authenticated identity to win over the spoofed header, got tenant=%q actor=%q", tenantID, actorID)
 	}
 }
+
+// Asking for a status without naming the interaction is a bad request, not
+// an unavailable service.
+func TestStatusWithoutInteractionIDIsABadRequest(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/control/status/", nil)
+	req.Header.Set("X-SCOS-Tenant-ID", "t")
+	req.Header.Set("X-SCOS-Principal-ID", "p")
+	response := httptest.NewRecorder()
+	(&controlPlane{}).handleStatus(response, req)
+	if response.Code != http.StatusBadRequest || !bytes.Contains(response.Body.Bytes(), []byte("interaction_id is required")) {
+		t.Fatalf("status = %d %s", response.Code, response.Body.String())
+	}
+}

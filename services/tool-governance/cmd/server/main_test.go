@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
@@ -177,6 +178,27 @@ func TestReconcileFollowsTheTransitionTable(t *testing.T) {
 		}
 		if err != nil || got != c.want {
 			t.Errorf("%s + %q = %s, %v; want %s", c.from, c.result, got, err, c.want)
+		}
+	}
+}
+
+// A missing or malformed id is the caller's mistake, answered 400 before any
+// query runs, not a 500 from Postgres rejecting the uuid.
+func TestGetByIDRejectsANonUUIDID(t *testing.T) {
+	s := &toolGovernanceServer{}
+	for path, handler := range map[string]http.HandlerFunc{
+		"/v1/tools/":                s.handleToolByID,
+		"/v1/tools/not-a-uuid":      s.handleToolByID,
+		"/v1/operations/":           s.handleOperationByID,
+		"/v1/operations/not-a-uuid": s.handleOperationByID,
+	} {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("X-SCOS-Tenant-ID", "00000000-0000-4000-8000-000000000001")
+		r.Header.Set("X-SCOS-Principal-ID", "00000000-0000-4000-8000-000000000002")
+		w := httptest.NewRecorder()
+		handler(w, r)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "must be a UUID") {
+			t.Fatalf("%s = %d %s", path, w.Code, w.Body.String())
 		}
 	}
 }

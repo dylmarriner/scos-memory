@@ -442,6 +442,8 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			}
 		}
 		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts", fact)
+	case "scos_memory_import":
+		return s.importMemories(ctx, r, args)
 	case "scos_memory_review_list":
 		status := stringArg(args, "status")
 		if status == "" {
@@ -1603,6 +1605,33 @@ func governedTools() []map[string]any {
 					"valid_until":  map[string]any{"type": "string", "description": "RFC 3339 time after which the fact no longer holds"},
 				},
 				"required": []string{"content"},
+			},
+		},
+		{
+			"name":        "scos_memory_import",
+			"description": "Import memories another agent kept (Claude Code, Codex, Hermes, OpenClaw and the like) as external facts. Each item records where it came from; duplicates merge into existing memories, contradictions are flagged, and secrets are redacted. Imported facts rank below facts stated here until confirmed",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"items": map[string]any{
+						"type":     "array",
+						"maxItems": maxImportItems,
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"content":      map[string]any{"type": "string", "description": "The memory, stated as a standalone sentence"},
+								"origin":       map[string]any{"type": "string", "description": "Where it came from: agent, host and store, e.g. claude-code@kubuntux:~/.claude/projects/x/memory/user.md"},
+								"network":      map[string]any{"type": "string", "enum": []string{"world", "experience", "entity", "belief", "procedure", "negative"}, "description": "Kind of memory; defaults to world"},
+								"scope":        map[string]any{"type": "string", "description": "Scope the memory holds in (e.g. global, or a project name); defaults to global"},
+								"sensitivity":  map[string]any{"type": "string", "enum": []string{"public", "internal", "confidential", "restricted"}, "description": "Defaults to internal; content the secret scanner flags is stored secret"},
+								"observed_at":  map[string]any{"type": "string", "description": "RFC 3339 time the source agent recorded it"},
+								"namespace_id": map[string]any{"type": "string", "description": "Namespace to store in; defaults to the caller's own namespace"},
+							},
+							"required": []string{"content", "origin"},
+						},
+					},
+				},
+				"required": []string{"items"},
 			},
 		},
 		{
