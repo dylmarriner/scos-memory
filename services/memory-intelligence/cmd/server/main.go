@@ -2423,6 +2423,12 @@ func loadTransparencyEvents(ctx context.Context, db *sql.DB, tenantID string, af
 const keyNormWords = 3
 
 func keyValueNorm(content string) (keyNorm, valueNorm string) {
+	// A memory that names its key outright ("Email: ...", "Phase 3 Task 7
+	// done: ...") is split there, so two different labels never read as one
+	// key; anything else keeps the leading-words heuristic.
+	if key, value, ok := explicitKey(content); ok {
+		return strings.Join(key, " "), strings.Join(value, " ")
+	}
 	words := significantWords(content)
 	if len(words) == 0 {
 		return "", ""
@@ -2436,13 +2442,48 @@ func keyValueNorm(content string) (keyNorm, valueNorm string) {
 	return keyNorm, valueNorm
 }
 
+// explicitKey splits "label: value" content at its first colon when the
+// label is short (at most maxExplicitKeyWords words) and the colon is not
+// part of a URL scheme or a clock time.
+func explicitKey(content string) (key, value []string, ok bool) {
+	text := redactionMarker.ReplaceAllString(content, " ")
+	for i := 0; i < len(text); i++ {
+		if text[i] != ':' {
+			continue
+		}
+		if strings.HasPrefix(text[i:], "://") || (i > 0 && i+1 < len(text) && isASCIIDigit(text[i-1]) && isASCIIDigit(text[i+1])) {
+			continue
+		}
+		label := strings.Fields(text[:i])
+		if len(label) == 0 || len(label) > maxExplicitKeyWords {
+			return nil, nil, false
+		}
+		key, value = significantWords(text[:i]), significantWords(text[i+1:])
+		return key, value, len(key) > 0
+	}
+	return nil, nil, false
+}
+
+const maxExplicitKeyWords = 8
+
+func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
+
+// redactionMarker is what the secret scanner leaves where it removed a
+// secret. It says nothing about what the memory is about, so it never forms
+// part of a key: two memories that each had a different token redacted are
+// not two values for one key.
+var redactionMarker = regexp.MustCompile(`\[REDACTED:[a-z0-9_]+\]`)
+
 func significantWords(content string) []string {
-	words := strings.Fields(strings.ToLower(content))
+	words := strings.Fields(strings.ToLower(redactionMarker.ReplaceAllString(content, " ")))
 	out := make([]string, 0, len(words))
 	for _, w := range words {
 		// Edge punctuation is not part of the word: "scos." restates "scos".
 		w = strings.TrimFunc(w, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
-		if len(w) > 3 {
+		// Short words are mostly filler, but a short token with a digit
+		// identifies something ("task 7", "v2", "p95"): dropping it made
+		// "Phase 3 Task 7 done" and "Phase 3 Task 5 done" share a key.
+		if len(w) > 3 || (w != "" && strings.ContainsAny(w, "0123456789")) {
 			out = append(out, w)
 		}
 	}

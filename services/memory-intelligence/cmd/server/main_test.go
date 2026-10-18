@@ -148,3 +148,25 @@ func TestContradictionIgnoresRefinementsAndUnrelatedNegations(t *testing.T) {
 		}
 	}
 }
+
+// Numbers identify things, and a redacted secret says nothing about a
+// memory's subject: neither may be lost from the key.
+func TestContradictionKeysKeepNumbersAndIgnoreRedactions(t *testing.T) {
+	f := func(s string) *Fact { return &Fact{Content: s, Network: NetworkWorld, Scope: "global"} }
+	task7 := f("Phase 3 Task 7 done: local_vegetation.rs seeds local vegetation patches.")
+	task5 := f("Phase 3 Task 5 done: estate_layout.rs lays out the estate.")
+	if isContradictory(task7, task5) {
+		t.Fatal("two different tasks are not one key with two values")
+	}
+	if !isContradictory(task7, f("Phase 3 Task 7 done: humans/observation.rs extracted the observer.")) {
+		t.Fatal("one task with two different results still conflicts")
+	}
+	a := f("[REDACTED:high_entropy_token].md (cwd=/run/media/kubuntux/DEVELOPMENT/MUTS, rollout_path=/a)")
+	b := f("[REDACTED:high_entropy_token].md (cwd=/run/media/kubuntux/DEVELOPMENT/RuView, rollout_path=/b)")
+	if ka, _ := keyValueNorm(a.Content); strings.Contains(ka, "redacted") {
+		t.Fatalf("redaction marker formed the key %q", ka)
+	}
+	if isContradictory(a, b) {
+		t.Fatal("rollouts in different projects do not contradict each other")
+	}
+}
