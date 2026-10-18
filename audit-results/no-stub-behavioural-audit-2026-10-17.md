@@ -171,3 +171,19 @@ The owner chose a self-hosted Bitwarden. Vaultwarden 1.37.4 was already running 
 - PostgreSQL WAL archiving, PITR;
 - object-store snapshots, remote Git mirrors, the remote provider;
 - secret-manager recovery.
+
+## Integration suites on a fresh database (2026-10-18)
+
+The full runtime-role suites (`make rls-integration-test`) were run against a fresh PostgreSQL 17 with pgvector and TLS, with every migration and policy applied by `scripts/scos-migrate`.
+
+**One real bug was found.** On a fresh database the runtime role could not run `scos_recovery_checkpoints()`, so recovery-orchestrator failed with "permission denied":
+- Migration 000057 grants that function to `scos_app` only when the role already exists.
+- `scos_app` is created by `policies/000011`, which runs after every migration, so on a fresh database the grant was skipped.
+- `policies/000018` now grants it.
+- A check of `has_function_privilege` confirmed it was the only revoked function the runtime role lacked.
+- Existing deployments were unaffected, because the role already existed when 000057 ran.
+
+**Results:**
+- Every Go integration package passes.
+- backup-manager's suite passes. It was run with the PostgreSQL 17 client tools, because `pg_dump` refuses a server newer than itself.
+- `pytest tests` passes 86 of 86, including the six worker RLS tests that need a database.
