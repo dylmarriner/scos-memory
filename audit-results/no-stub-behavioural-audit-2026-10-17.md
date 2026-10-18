@@ -65,7 +65,7 @@ test that fails on the old behaviour.
 
 - **`packages/hermes-memory-provider`:** an unused file-backed duplicate of the `hermes-provider` service. Deleted with the owner's approval (2026-10-18). The code index and acceptance results were regenerated afterwards.
 - **Other packages nothing imports:** `agent-adapter-sdk`, `hook-sdk`, `skill-sdk`, `context-contracts`, `extension-contracts`, `routing-contracts`, `language-adapters` and `benchmark-harness`. Nothing in the repository imports them, but they are tested public SDK and contract packages, and the code-intelligence acceptance corpus looks some of them up. They are kept.
-- **Bitwarden drill (`secret_manager_recovery`):** the code is complete. Running it needs a Bitwarden Secrets Manager machine-account token from the owner.
+- **Bitwarden drill (`secret_manager_recovery`):** done (2026-10-18). See "Key recovery from the self-hosted vault" below.
 - **execution-proxy legacy records with no tenant:** these are left unreadable on purpose, so that access fails closed. The owner decided (2026-10-18) to keep them fail-closed.
 
 ## Verification
@@ -84,7 +84,7 @@ The fabric was redeployed from this branch, and the results below were verified 
 - **`scos_observability_targets`:** reports the measured p95 retrieval latency, 583 ms against the 750 ms objective, met.
 - **Lists:** `scos_logs_list` honours `limit`.
 - **Memory:** `scos_remember` followed by `scos_recall` returns the stored fact.
-- **Backup coverage:** 11 of 12 covered. The missing one is `secret_manager_recovery`, which needs the Bitwarden token.
+- **Backup coverage:** 11 of 12 covered at the time. The twelfth, `secret_manager_recovery`, was covered on 2026-10-18 (below).
 
 **Fixed during the deployment:**
 - **Relation lane:** the deployment showed the relation lane failing with `column "content" does not exist`. Fixed, and covered by an integration test (16c3e30).
@@ -147,3 +147,27 @@ Regenerated with every domain measured (aa23e9f), on the service binaries with a
 The reranker now runs too. cross-encoder/ms-marco-MiniLM-L-6-v2 (22M parameters) uses 276 MiB under a 768 MB cap, with no restarts and about 4.6 GB of host memory left. bge-reranker-v2-m3 and bge-reranker-base were both tried first and did not fit beside bge-m3 on this 15 GB host. model-runtime and retrieval record the model name, so results carry the reranker that ranked them.
 
 `scos_recall` through MCP now reports `degraded_models: []` and `degraded_sources: []`. Hits come from the full-text and semantic lanes and are reranked by the model.
+
+## Key recovery from the self-hosted vault (kubuntux, 2026-10-18)
+
+The owner chose a self-hosted Bitwarden. Vaultwarden 1.37.4 was already running on rabuntu, but Vaultwarden has no Secrets Manager, so `bws` cannot read from it. Self-hosted Secrets Manager needs a Bitwarden Enterprise licence.
+
+**The drill now reads a vault item (f3c90a8).**
+- It signs in with the account's API key.
+- It derives the master key on the host with PBKDF2 or Argon2id, checked against Bitwarden SDK known answers.
+- It unwraps the account key and decrypts the one item, checking every MAC.
+
+**A dedicated vault account holds only the backup key.**
+- The drill runs every day.
+- The live drill recovered the key and used it to authenticate and decrypt backup `backup-1792290515881991323`.
+
+**The plan needed a longer timeout (c894119).**
+- `scos_backup_plan` re-verifies the newest backup and its object-store copy on every call, and that had outgrown the gateway's 15-second client.
+- The plan now goes through the long-call client, and the call completed in 16 seconds.
+
+**Backup coverage through MCP is now 12 of 12:**
+- base backups, schema exports, schema and migration exports, configuration backups;
+- encrypted off-host copies and encrypted off-host WAL;
+- PostgreSQL WAL archiving, PITR;
+- object-store snapshots, remote Git mirrors, the remote provider;
+- secret-manager recovery.
