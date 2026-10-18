@@ -169,4 +169,14 @@ func TestContradictionKeysKeepNumbersAndIgnoreRedactions(t *testing.T) {
 	if isContradictory(a, b) {
 		t.Fatal("rollouts in different projects do not contradict each other")
 	}
+	// Field names shared by unrelated notes are not keys.
+	for _, pair := range [][2]string{
+		{"scope: trace actual hook providers and dispatch the Workboard worker", "scope: continue the island roadmap with owner gates"},
+		{"desc: Recipe discovery work and Play audit boundaries", "desc: Count-change notifier, payload configuration and tests"},
+		{"How to apply: verify the desktop app with the self test", "How to apply: never claim a merged checkpoint exists"},
+	} {
+		if isContradictory(f(pair[0]), f(pair[1])) {
+			t.Fatalf("%q and %q only share a field name", pair[0], pair[1])
+		}
+	}
 }

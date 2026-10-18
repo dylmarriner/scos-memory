@@ -2443,8 +2443,9 @@ func keyValueNorm(content string) (keyNorm, valueNorm string) {
 }
 
 // explicitKey splits "label: value" content at its first colon when the
-// label is short (at most maxExplicitKeyWords words) and the colon is not
-// part of a URL scheme or a clock time.
+// label is specific (at least minExplicitKeyWords significant words) but
+// short (at most maxExplicitKeyWords words), and the colon is not part of a
+// URL scheme or a clock time.
 func explicitKey(content string) (key, value []string, ok bool) {
 	text := redactionMarker.ReplaceAllString(content, " ")
 	for i := 0; i < len(text); i++ {
@@ -2458,13 +2459,19 @@ func explicitKey(content string) (key, value []string, ok bool) {
 		if len(label) == 0 || len(label) > maxExplicitKeyWords {
 			return nil, nil, false
 		}
+		// A one-word label ("scope:", "desc:", "user:", "How to apply:")
+		// is a field name shared by unrelated notes, not one attribute
+		// with one value; only a specific label is a key.
 		key, value = significantWords(text[:i]), significantWords(text[i+1:])
-		return key, value, len(key) > 0
+		return key, value, len(key) >= minExplicitKeyWords
 	}
 	return nil, nil, false
 }
 
-const maxExplicitKeyWords = 8
+const (
+	minExplicitKeyWords = 2
+	maxExplicitKeyWords = 8
+)
 
 func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 
