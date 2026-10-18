@@ -1189,13 +1189,20 @@ services:
       # there are no "verified" flags to set. SCOS_SECRET_MANAGER and
       # SCOS_BACKUP_ENCRYPTION_KEY_REF only label where the key is kept;
       # secret_manager_recovery is covered by the drill that reads the key
-      # back from Bitwarden Secrets Manager (SCOS_BACKUP_KEY_SECRET_ID, with
-      # the machine-account token mounted at SCOS_BWS_ACCESS_TOKEN_FILE).
+      # back from Bitwarden (SCOS_BACKUP_KEY_SECRET_ID): from Secrets Manager
+      # with the machine-account token mounted at SCOS_BWS_ACCESS_TOKEN_FILE,
+      # or from an item in a self-hosted vault (Vaultwarden) at
+      # SCOS_BW_SERVER_URL, with the account's API key secret and master
+      # password mounted at the two SCOS_BW_*_FILE paths.
       SCOS_SECRET_MANAGER: ${SCOS_SECRET_MANAGER:-}
       SCOS_BACKUP_ENCRYPTION_KEY_REF: ${SCOS_BACKUP_ENCRYPTION_KEY_REF:-}
       SCOS_BACKUP_KEY_SECRET_ID: ${SCOS_BACKUP_KEY_SECRET_ID:-}
       SCOS_BWS_ACCESS_TOKEN_FILE: ${SCOS_BWS_ACCESS_TOKEN_FILE:-}
       SCOS_BWS_SERVER_URL: ${SCOS_BWS_SERVER_URL:-}
+      SCOS_BW_SERVER_URL: ${SCOS_BW_SERVER_URL:-}
+      SCOS_BW_CLIENT_ID: ${SCOS_BW_CLIENT_ID:-}
+      SCOS_BW_CLIENT_SECRET_FILE: ${SCOS_BW_CLIENT_SECRET_FILE:-}
+      SCOS_BW_PASSWORD_FILE: ${SCOS_BW_PASSWORD_FILE:-}
       # A versioned S3 bucket every encrypted backup is copied to; the
       # secret key is mounted at SCOS_OBJECT_STORE_SECRET_KEY_FILE.
       SCOS_OBJECT_STORE_ENDPOINT: ${SCOS_OBJECT_STORE_ENDPOINT:-}

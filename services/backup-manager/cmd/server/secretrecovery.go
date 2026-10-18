@@ -14,16 +14,22 @@ import (
 
 // Secret-manager recovery (GOVERNANCE.md §31 "secret-manager recovery
 // procedures"): every encrypted backup is worthless without the backup key,
-// so the key is kept in Bitwarden Secrets Manager as well as in this
-// deployment's environment, and a drill proves it can be recovered from
-// there alone: it reads the secret back with bws, the Bitwarden Secrets
-// Manager CLI, and decrypts the newest encrypted backup with the key it
-// read -- not with the key the service is running with.
+// so the key is kept in Bitwarden as well as in this deployment's
+// environment, and a drill proves it can be recovered from there alone: it
+// reads the secret back and decrypts the newest encrypted backup with the
+// key it read -- not with the key the service is running with.
 //
-//	SCOS_BWS_ACCESS_TOKEN_FILE   file holding a machine-account access token
-//	                             (or SCOS_BWS_ACCESS_TOKEN)
-//	SCOS_BACKUP_KEY_SECRET_ID    the secret's id in Bitwarden
-//	SCOS_BWS_SERVER_URL          a self-hosted or EU server; default US cloud
+// The secret is read from one of two places:
+//
+//   - Bitwarden Secrets Manager, with bws:
+//     SCOS_BWS_ACCESS_TOKEN_FILE  file holding a machine-account access token
+//     (or SCOS_BWS_ACCESS_TOKEN)
+//     SCOS_BWS_SERVER_URL         a self-hosted or EU server; default US cloud
+//   - a vault item on a self-hosted Bitwarden-compatible server such as
+//     Vaultwarden, which has no Secrets Manager: see bitwardenvault.go
+//     (SCOS_BW_SERVER_URL and the API key and master password files).
+//
+//	SCOS_BACKUP_KEY_SECRET_ID    the secret's or item's id
 //	SCOS_SECRET_DRILL_INTERVAL   how often the scheduler drills, default 24h
 
 // SecretRecoveryDrill is the record of one drill.
@@ -37,33 +43,51 @@ type SecretRecoveryDrill struct {
 	Detail      string `json:"detail"`
 }
 
-// bwsSecret is the part of `bws secret get --output json` the drill reads.
-type bwsSecret struct {
+// keySecret is the secret the drill recovered: for bws, the part of
+// `bws secret get --output json` it reads; for a vault item, its id, name,
+// password (or notes) and revision date.
+type keySecret struct {
 	ID           string `json:"id"`
 	Key          string `json:"key"`
 	Value        string `json:"value"`
 	RevisionDate string `json:"revisionDate"`
 }
 
-func secretDrillConfig() (secretID, token string, err error) {
+// secretSource resolves where the backup key is kept, and returns the
+// configured secret id and a function that reads it.
+func (s *backupServer) secretSource() (secretID string, fetch func(context.Context) (keySecret, error), err error) {
 	secretID = strings.TrimSpace(os.Getenv("SCOS_BACKUP_KEY_SECRET_ID"))
-	token = strings.TrimSpace(os.Getenv("SCOS_BWS_ACCESS_TOKEN"))
+	vault, verr := vaultDrillConfig()
+	if verr != nil {
+		return secretID, nil, verr
+	}
+	if vault != nil {
+		if secretID == "" {
+			return "", nil, errors.New("SCOS_BACKUP_KEY_SECRET_ID names no vault item")
+		}
+		return secretID, func(ctx context.Context) (keySecret, error) {
+			return s.fetchVaultSecret(ctx, vault, secretID)
+		}, nil
+	}
+	token := strings.TrimSpace(os.Getenv("SCOS_BWS_ACCESS_TOKEN"))
 	if f := strings.TrimSpace(os.Getenv("SCOS_BWS_ACCESS_TOKEN_FILE")); f != "" {
 		b, rerr := os.ReadFile(f)
 		if rerr != nil {
-			return secretID, "", fmt.Errorf("SCOS_BWS_ACCESS_TOKEN_FILE: %w", rerr)
+			return secretID, nil, fmt.Errorf("SCOS_BWS_ACCESS_TOKEN_FILE: %w", rerr)
 		}
 		token = strings.TrimSpace(string(b))
 	}
 	switch {
 	case secretID == "" && token == "":
-		return "", "", errors.New("no secret manager is configured (SCOS_BACKUP_KEY_SECRET_ID and SCOS_BWS_ACCESS_TOKEN_FILE)")
+		return "", nil, errors.New("no secret manager is configured (SCOS_BACKUP_KEY_SECRET_ID with SCOS_BWS_ACCESS_TOKEN_FILE for Secrets Manager, or SCOS_BW_SERVER_URL for a self-hosted vault)")
 	case secretID == "":
-		return "", "", errors.New("SCOS_BACKUP_KEY_SECRET_ID names no Bitwarden secret")
+		return "", nil, errors.New("SCOS_BACKUP_KEY_SECRET_ID names no Bitwarden secret")
 	case token == "":
-		return secretID, "", errors.New("no Bitwarden Secrets Manager access token (SCOS_BWS_ACCESS_TOKEN_FILE)")
+		return secretID, nil, errors.New("no Bitwarden Secrets Manager access token (SCOS_BWS_ACCESS_TOKEN_FILE)")
 	}
-	return secretID, token, nil
+	return secretID, func(ctx context.Context) (keySecret, error) {
+		return fetchBitwardenSecret(ctx, secretID, token)
+	}, nil
 }
 
 func (s *backupServer) secretDrillStatePath() string {
@@ -87,8 +111,8 @@ func (s *backupServer) lastSecretDrill() (*SecretRecoveryDrill, error) {
 
 // fetchBitwardenSecret reads one secret with bws. The token goes to bws in
 // its environment, never on its command line.
-func fetchBitwardenSecret(ctx context.Context, secretID, token string) (bwsSecret, error) {
-	var sec bwsSecret
+func fetchBitwardenSecret(ctx context.Context, secretID, token string) (keySecret, error) {
+	var sec keySecret
 	bin, err := lookPath("bws")
 	if err != nil {
 		return sec, fmt.Errorf("bws is not installed: %w", err)
@@ -139,7 +163,7 @@ func (s *backupServer) secretRecoveryDrill(ctx context.Context) (SecretRecoveryD
 		}
 		return d, writeAtomic(s.secretDrillStatePath(), data, 0o600)
 	}
-	secretID, token, err := secretDrillConfig()
+	secretID, fetch, err := s.secretSource()
 	d.SecretID = secretID
 	if err != nil {
 		return d, err
@@ -148,7 +172,7 @@ func (s *backupServer) secretRecoveryDrill(ctx context.Context) (SecretRecoveryD
 	if !ok || p == nil {
 		return finish("the backup provider does not encrypt, so there is no backup key to recover")
 	}
-	sec, err := fetchBitwardenSecret(ctx, secretID, token)
+	sec, err := fetch(ctx)
 	if err != nil {
 		return finish(err.Error())
 	}
@@ -181,7 +205,7 @@ func (s *backupServer) secretRecoveryDrill(ctx context.Context) (SecretRecoveryD
 
 // secretDrillDue reports whether the scheduler should drill.
 func (s *backupServer) secretDrillDue(now time.Time) bool {
-	if _, _, err := secretDrillConfig(); err != nil {
+	if _, _, err := s.secretSource(); err != nil {
 		return false
 	}
 	last, err := s.lastSecretDrill()
@@ -197,7 +221,7 @@ func (s *backupServer) secretDrillDue(now time.Time) bool {
 // secret and decrypted a backup with it.
 func (s *backupServer) secretRecoveryCoverage(now time.Time) Coverage {
 	c := Coverage{}
-	secretID, _, err := secretDrillConfig()
+	secretID, _, err := s.secretSource()
 	if err != nil {
 		c.Reason = err.Error()
 		return c

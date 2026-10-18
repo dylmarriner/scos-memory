@@ -24,7 +24,7 @@ Any other name (`s3`, `gcs`, `azure`, ...) has no implementation: the service re
 - `remote_git_mirrors`: the newest recorded mirror run of `SCOS_OKF_GIT_REPO` to `SCOS_OKF_GIT_MIRROR_REMOTE` pushed with `git push --mirror`, read every ref back with `git ls-remote`, is younger than `SCOS_OKF_GIT_MIRROR_MAX_AGE` (default 48h), and the remote is another host: a URL, or a path that the kernel mount table puts on a network filesystem (a path remote is created as a bare repository on the first run). In compose the OKF store is the Git repository at `SCOS_OKF_ROOT` (default `/var/lib/scos/okf/repo` on the `okf-data` volume), seeded once from the image's approved content; backup-manager mounts it read only.
 - `configuration_backups`: `SCOS_CONFIG_BACKUP_PATHS` names files or directories, the newest `configuration_backup` is younger than `SCOS_BACKUP_COVERAGE_MAX_AGE`, holds every configured path, and unpacks with every file matching the SHA-256 in its manifest.
 - `object_store_snapshots`: an S3 bucket is configured (`SCOS_OBJECT_STORE_ENDPOINT`, https only), its versioning status is `Enabled`, its host resolves to no address of this host (loopback, the container's interfaces, or `SCOS_HOST_ADDRESSES`, which compose sets to the Docker host's tailnet address), and the newest covered base backup is held there as a versioned object that verifies on read-back: manifest MAC, archive SHA-256 and decryption with the backup key. See "Object-store copies" below.
-- `secret_manager_recovery`: the newest secret-recovery drill, younger than `SCOS_BACKUP_COVERAGE_MAX_AGE`, read the configured Bitwarden secret (`SCOS_BACKUP_KEY_SECRET_ID`) with `bws`, found the key the backups are encrypted with, and decrypted the newest base backup with the key it read. See "Secret-manager recovery" below.
+- `secret_manager_recovery`: the newest secret-recovery drill, younger than `SCOS_BACKUP_COVERAGE_MAX_AGE`, read the configured Bitwarden secret or vault item (`SCOS_BACKUP_KEY_SECRET_ID`), found the key the backups are encrypted with, and decrypted the newest base backup with the key it read. See "Secret-manager recovery" below.
 
 ## Backups, fingerprints and retention
 
@@ -48,11 +48,31 @@ The kubuntux deployment uses MinIO on rabuntu (`/opt/scos-minio`): built from th
 
 ## Secret-manager recovery
 
-Every encrypted backup is unreadable without `SCOS_BACKUP_ENCRYPTION_KEY`, so the key is also kept in Bitwarden Secrets Manager. Create a secret holding the key (the same 64 hex characters), and a machine account with read access to its project; set `SCOS_BACKUP_KEY_SECRET_ID` to the secret's id and mount the machine account's access token at `SCOS_BWS_ACCESS_TOKEN_FILE` (`SCOS_BWS_SERVER_URL` for an EU or self-hosted server). The image carries `bws` 2.1.0, checked against its published SHA-256.
+Every encrypted backup is unreadable without `SCOS_BACKUP_ENCRYPTION_KEY`, so the key is also kept in Bitwarden, and `SCOS_BACKUP_KEY_SECRET_ID` names where. The drill reads it from one of two places.
 
-The drill runs on the scheduler every `SCOS_SECRET_DRILL_INTERVAL` (default 24h) and by `backup-manager secret-drill`: it reads the secret with `bws secret get` (the token goes in the environment, never on the command line), checks it is the key the backups are encrypted with, and authenticates and decrypts the newest base backup with the key it read. The result is kept in `secret-recovery-drill.json` in `SCOS_BACKUP_DIR`.
+**Bitwarden Secrets Manager.** Create a secret holding the key (the same 64 hex characters) and a machine account with read access to its project. Set `SCOS_BACKUP_KEY_SECRET_ID` to the secret's id and mount the machine account's access token at `SCOS_BWS_ACCESS_TOKEN_FILE` (`SCOS_BWS_SERVER_URL` for an EU server). The image carries `bws` 2.1.0, checked against its published SHA-256. Self-hosted Secrets Manager needs a Bitwarden Enterprise licence.
 
-To recover after losing the deployment's copy of the key: `bws secret get <id>` (or the Bitwarden web vault), put the value in `SCOS_BACKUP_ENCRYPTION_KEY`, and restore as usual.
+**A self-hosted vault (Vaultwarden).** Vaultwarden has no Secrets Manager, so the key is kept in a vault item instead: a login whose password is the key, or a secure note whose notes are the key. The item can be personal or in an organisation the account belongs to. Use an account that holds only what SCOS needs, because the drill can read everything that account can see.
+
+- `SCOS_BW_SERVER_URL`: the vault, for example `https://rabuntu.tail2c15c8.ts.net:8445`. It must be https, or http only to localhost.
+- `SCOS_BW_CLIENT_ID`: the account's personal API key `client_id` (`user.…`). In the web vault this is under Account settings → Security → Keys → View API key.
+- `SCOS_BW_CLIENT_SECRET_FILE`: a file holding that API key's `client_secret`.
+- `SCOS_BW_PASSWORD_FILE`: a file holding the account's master password.
+- `SCOS_BACKUP_KEY_SECRET_ID`: the item's id (the `itemId` in the web vault's URL for it).
+
+How the drill reads a vault item:
+- It signs in with the API key as one device, whose id is kept in `secret-drill-device-id` in `SCOS_BACKUP_DIR`.
+- It derives the master key on this host with the account's KDF (PBKDF2 or Argon2id) and unwraps the account key. The master password is never sent anywhere.
+- It decrypts only the item it was given and checks every encrypted value's MAC. It never writes to the vault.
+
+**Running the drill.** The drill runs on the scheduler every `SCOS_SECRET_DRILL_INTERVAL` (default 24h), and on demand with `backup-manager secret-drill`. Each run:
+- reads the secret, with the token, API key and password passed in the environment or in files, never on a command line;
+- checks that it is the key the backups are encrypted with;
+- authenticates and decrypts the newest base backup with the key it read.
+
+The result is kept in `secret-recovery-drill.json` in `SCOS_BACKUP_DIR`.
+
+**Recovering the key.** If the deployment's own copy of the key is lost, read the key from Bitwarden (`bws secret get <id>`, or the vault item in the web vault), put the value in `SCOS_BACKUP_ENCRYPTION_KEY`, and restore as usual.
 
 ## Restore drills
 
