@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewOKFServer(t *testing.T) {
@@ -205,7 +206,7 @@ func TestOKFDocumentJSON(t *testing.T) {
 
 func TestGitCommitReadsRepositoryHead(t *testing.T) {
 	root := t.TempDir()
-	runGit(t, root, "init")
+	runGit(t, root, "init", "-b", "main")
 	if err := os.WriteFile(filepath.Join(root, "doc.md"), []byte("# Document\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +259,7 @@ func TestOKFProposalRejectsPathEscape(t *testing.T) {
 func TestSynchronisePersistsProjectionCommit(t *testing.T) {
 	root := t.TempDir()
 	statePath := filepath.Join(t.TempDir(), "projections.json")
-	runGit(t, root, "init")
+	runGit(t, root, "init", "-b", "main")
 	if err := os.WriteFile(filepath.Join(root, "doc.md"), []byte("# Document\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -291,14 +292,35 @@ func TestSynchroniseRejectsDocumentOverwrite(t *testing.T) {
 	}
 }
 
-func TestSynchroniseRejectsDocumentDeletion(t *testing.T) {
+// A file deleted from the repository whose indexed copy is what was last
+// imported is reported removed, once; its record is kept and marked removed.
+func TestSynchroniseReportsARemovedDocument(t *testing.T) {
 	root := t.TempDir()
 	statePath := filepath.Join(t.TempDir(), "projections.json")
 	path := filepath.Join(root, "deleted.md")
 	hash := sha256Hex([]byte("indexed"))
 	s := &okfServer{documents: map[string]*OKFDocument{"id": {ID: "id", Path: path, ContentHash: hash, Content: "indexed"}}, projections: map[string]*IndexProjection{path: {Path: path, ContentHash: hash, ImportStatus: "synced"}}, okfRoot: root, statePath: statePath}
 	result := s.synchronise(context.Background())
-	if len(result.Diverged) != 1 || s.documents["id"] == nil || s.documents["id"].Status != "diverged" {
+	if len(result.Removed) != 1 || result.Removed[0] != path || len(result.Diverged) != 0 {
+		t.Fatalf("expected one removal, result=%#v", result)
+	}
+	if doc := s.documents["id"]; doc == nil || doc.Status != "removed" || s.projections[path].ImportStatus != "removed" {
+		t.Fatalf("removed document not kept and marked removed: %#v", doc)
+	}
+	if again := s.synchronise(context.Background()); len(again.Removed) != 0 || len(again.Diverged) != 0 {
+		t.Fatalf("a removal is reported once, got %#v", again)
+	}
+}
+
+// A deletion of a document whose indexed copy was edited since its last
+// import conflicts with that edit, so it is diverged, not removed.
+func TestSynchroniseRejectsDeletionOfAnEditedDocument(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "projections.json")
+	path := filepath.Join(root, "deleted.md")
+	s := &okfServer{documents: map[string]*OKFDocument{"id": {ID: "id", Path: path, ContentHash: sha256Hex([]byte("imported")), Content: "edited in the index"}}, projections: map[string]*IndexProjection{path: {Path: path, ContentHash: sha256Hex([]byte("imported")), ImportStatus: "synced"}}, okfRoot: root, statePath: statePath}
+	result := s.synchronise(context.Background())
+	if len(result.Diverged) != 1 || len(result.Removed) != 0 || s.documents["id"].Status != "diverged" {
 		t.Fatalf("expected deletion rejection, result=%#v doc=%#v", result, s.documents["id"])
 	}
 }
@@ -311,4 +333,30 @@ func runGit(t *testing.T, root string, args ...string) []byte {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
 	return output
+}
+
+func TestSyncIntervalParsing(t *testing.T) {
+	for raw, want := range map[string]time.Duration{"": defaultSyncInterval, "0": 0, "90s": 90 * time.Second} {
+		if got, err := syncInterval(raw); err != nil || got != want {
+			t.Errorf("syncInterval(%q) = %v, %v; want %v", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"soon", "10ms", "-5m"} {
+		if _, err := syncInterval(raw); err == nil {
+			t.Errorf("syncInterval(%q) accepted", raw)
+		}
+	}
+}
+
+// The loop indexes a seeded store at startup without any request.
+func TestSyncLoopIndexesAtStartup(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "seed.md"), []byte("# Seed\\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &okfServer{documents: map[string]*OKFDocument{}, projections: map[string]*IndexProjection{}, okfRoot: root, statePath: filepath.Join(t.TempDir(), "p.json")}
+	s.runSyncLoop(context.Background(), 0)
+	if s.documentForPath(filepath.Join(root, "seed.md")) == nil {
+		t.Fatal("seeded document not indexed at startup")
+	}
 }

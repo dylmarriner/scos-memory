@@ -672,20 +672,39 @@ func (s *observabilityServer) storageAvailable(w http.ResponseWriter) bool {
 
 // ── metrics ──────────────────────────────────────────────────────────────
 
-// handleMetrics returns retained raw points. ?metric= keeps only points
-// whose name contains that fragment (case-insensitive), e.g. "token" or
-// "cost"; ?limit= returns the newest N matches.
+// List endpoints return the newest matches, defaultListLimit of them unless
+// ?limit= asks for up to maxListLimit, so a list never returns everything
+// retained.
+const (
+	defaultListLimit = 100
+	maxListLimit     = 1000
+)
+
+// listLimit reads ?limit=; ok is false (and the response written) when it
+// is not an integer in [1, maxListLimit].
+func listLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return defaultListLimit, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > maxListLimit {
+		http.Error(w, fmt.Sprintf("limit must be an integer from 1 to %d", maxListLimit), http.StatusBadRequest)
+		return 0, false
+	}
+	return n, true
+}
+
+// handleMetrics returns the newest retained raw points. ?metric= keeps only
+// points whose name contains that fragment (case-insensitive), e.g. "token"
+// or "cost"; ?limit= bounds the count (see listLimit).
 func (s *observabilityServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fragment := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("metric")))
-	limit := 0
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 {
-			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
-			return
-		}
-		limit = n
+	limit, ok := listLimit(w, r)
+	if !ok {
+		return
 	}
+	scope := scopeOf(r)
 	s.mu.RLock()
 	out := make([]*MetricPoint, 0)
 	for i := len(s.metrics) - 1; i >= 0; i-- {
@@ -693,8 +712,11 @@ func (s *observabilityServer) handleMetrics(w http.ResponseWriter, r *http.Reque
 		if fragment != "" && !strings.Contains(strings.ToLower(m.Name), fragment) {
 			continue
 		}
+		if !scope.sees(m.Tenant) {
+			continue
+		}
 		out = append(out, m)
-		if limit > 0 && len(out) >= limit {
+		if len(out) >= limit {
 			break
 		}
 	}
@@ -719,6 +741,19 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 	}
 	if !s.storageAvailable(w) {
 		return
+	}
+	scope := scopeOf(r)
+	if !scope.service {
+		now := time.Now()
+		for i := range points {
+			ts, err := clientTimestamp(points[i].Timestamp, time.RFC3339, now)
+			if err != nil {
+				http.Error(w, "invalid metrics: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			points[i].Timestamp, points[i].Tenant = ts, scope.tenant
+			points[i].Labels = scope.stampClient(points[i].Labels)
+		}
 	}
 	s.mu.Lock()
 	for i := range points {
@@ -746,7 +781,9 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 			}
 		}
 		s.metrics = append(s.metrics, &points[i])
-		s.rollups.add(&points[i])
+		if scope.service {
+			s.rollups.add(&points[i])
+		}
 	}
 	s.trimRetention()
 	s.mu.Unlock()
@@ -762,10 +799,14 @@ func (s *observabilityServer) handleMetricsQuery(w http.ResponseWriter, r *http.
 	service := r.URL.Query().Get("service")
 	since := r.URL.Query().Get("since")
 
+	scope := scopeOf(r)
 	s.mu.RLock()
 	var results []*MetricPoint
 	for _, m := range s.metrics {
 		if name != "" && m.Name != name {
+			continue
+		}
+		if !scope.sees(m.Tenant) {
 			continue
 		}
 		if service != "" {
@@ -787,10 +828,28 @@ func (s *observabilityServer) handleMetricsQuery(w http.ResponseWriter, r *http.
 
 // ── traces ───────────────────────────────────────────────────────────────
 
+// handleTraces returns the newest retained spans, oldest first. ?service=
+// keeps one service's spans; ?limit= bounds the count (see listLimit).
 func (s *observabilityServer) handleTraces(w http.ResponseWriter, r *http.Request) {
+	limit, ok := listLimit(w, r)
+	if !ok {
+		return
+	}
+	service := r.URL.Query().Get("service")
+	scope := scopeOf(r)
 	s.mu.RLock()
-	t := s.traces
+	t := make([]*TraceSpan, 0)
+	for i := len(s.traces) - 1; i >= 0 && len(t) < limit; i-- {
+		sp := s.traces[i]
+		if !scope.sees(sp.Tenant) || (service != "" && sp.Service != service) {
+			continue
+		}
+		t = append(t, sp)
+	}
 	s.mu.RUnlock()
+	for i, j := 0, len(t)-1; i < j; i, j = i+1, j-1 {
+		t[i], t[j] = t[j], t[i]
+	}
 	writeJSON(w, t)
 }
 
@@ -809,6 +868,22 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 	if !s.storageAvailable(w) {
 		return
 	}
+	scope := scopeOf(r)
+	if !scope.service {
+		now := time.Now()
+		for i := range spans {
+			start, err := clientTimestamp(spans[i].StartTime, time.RFC3339Nano, now)
+			if err == nil && spans[i].EndTime != "" {
+				_, err = clientTimestamp(spans[i].EndTime, time.RFC3339Nano, now)
+			}
+			if err != nil {
+				http.Error(w, "invalid traces: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			spans[i].StartTime, spans[i].Tenant = start, scope.tenant
+			spans[i].Attributes = scope.stampClient(spans[i].Attributes)
+		}
+	}
 	s.mu.Lock()
 	for i := range spans {
 		if spans[i].StartTime == "" {
@@ -818,7 +893,7 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 			spans[i].EndTime = spans[i].StartTime
 		}
 		if spans[i].SpanID == "" {
-			spans[i].SpanID = fmt.Sprintf("span-%d", len(s.traces)+1)
+			spans[i].SpanID = newSpanID()
 		}
 		if traceID, parentID, ok := traceparent(r.Header.Get("traceparent")); ok {
 			if spans[i].TraceID == "" {
@@ -853,10 +928,11 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 
 func (s *observabilityServer) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 	traceID := strings.TrimPrefix(r.URL.Path, "/v1/traces/")
+	scope := scopeOf(r)
 	s.mu.RLock()
 	var spans []*TraceSpan
 	for _, sp := range s.traces {
-		if sp.TraceID == traceID {
+		if sp.TraceID == traceID && scope.sees(sp.Tenant) {
 			spans = append(spans, sp)
 		}
 	}
@@ -870,16 +946,25 @@ func (s *observabilityServer) handleTraceByID(w http.ResponseWriter, r *http.Req
 
 // ── logs ─────────────────────────────────────────────────────────────────
 
+// handleLogs returns the newest matching entries, newest first. ?level= and
+// ?service= filter; ?limit= bounds the count (see listLimit).
 func (s *observabilityServer) handleLogs(w http.ResponseWriter, r *http.Request) {
-	limit := 100
+	limit, ok := listLimit(w, r)
+	if !ok {
+		return
+	}
 	level := r.URL.Query().Get("level")
 	service := r.URL.Query().Get("service")
 
+	scope := scopeOf(r)
 	s.mu.RLock()
-	var entries []*LogEntry
+	entries := make([]*LogEntry, 0)
 	for i := len(s.logs) - 1; i >= 0 && len(entries) < limit; i-- {
 		e := s.logs[i]
 		if level != "" && e.Level != level {
+			continue
+		}
+		if !scope.sees(e.Tenant) {
 			continue
 		}
 		if service != "" && e.Service != service {
@@ -905,6 +990,19 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 	}
 	if !s.storageAvailable(w) {
 		return
+	}
+	scope := scopeOf(r)
+	if !scope.service {
+		now := time.Now()
+		for i := range entries {
+			ts, err := clientTimestamp(entries[i].Timestamp, time.RFC3339, now)
+			if err != nil {
+				http.Error(w, "invalid logs: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			entries[i].Timestamp, entries[i].Tenant = ts, scope.tenant
+			entries[i].Labels = scope.stampClient(entries[i].Labels)
+		}
 	}
 	s.mu.Lock()
 	for i := range entries {
@@ -940,10 +1038,6 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, map[string]any{"ingested": len(entries)})
-}
-
-func (s *observabilityServer) handleTargets(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.targets)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

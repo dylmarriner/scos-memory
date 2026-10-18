@@ -31,6 +31,9 @@ const (
 	handoffAccepted = "accepted"
 	handoffRejected = "rejected"
 	handoffExpired  = "expired"
+	// handoffCompleted is reached only from accepted, when the receiving
+	// side reports the handed-over work done.
+	handoffCompleted = "completed"
 )
 
 // receivingAgent is what the registry knows about the agent a handoff is
@@ -387,6 +390,109 @@ func (s *agentRegistryServer) handleHandoffRespond(w http.ResponseWriter, r *htt
 	writeJSON(w, packets[0])
 }
 
+type handoffCompletion struct {
+	HandoffID   string `json:"handoff_id"`
+	Summary     string `json:"summary"`
+	TenantID    string `json:"tenant_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
+}
+
+// handleHandoffComplete records that the work a handoff handed over is done.
+// Only an accepted handoff can be completed, exactly once, and only by the
+// side that may answer it (the addressed agent or the principal that
+// registered it), identified from the verified token alone. The summary of
+// what was delivered is required.
+func (s *agentRegistryServer) handleHandoffComplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req handoffCompletion
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !isUUID(req.HandoffID) {
+		http.Error(w, "handoff_id must be a UUID", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Summary) == "" {
+		http.Error(w, "summary of the delivered work is required", http.StatusBadRequest)
+		return
+	}
+	claims, ok := auth.CanonicalClaims(r.Context())
+	if !ok {
+		http.Error(w, "completing a handoff requires an authenticated agent or principal token", http.StatusUnauthorized)
+		return
+	}
+	if (req.TenantID != "" && req.TenantID != claims.TenantID) || (req.PrincipalID != "" && req.PrincipalID != claims.PrincipalID) {
+		http.Error(w, "request identity does not match authenticated identity", http.StatusForbidden)
+		return
+	}
+
+	ctx := r.Context()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if err := setTenantContext(ctx, tx, claims.TenantID); err != nil {
+		http.Error(w, "set tenant context: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var current, toAgent string
+	err = tx.QueryRowContext(ctx, `SELECT status, to_agent FROM agent_handoffs WHERE id=$1 AND tenant_id=$2 FOR UPDATE`,
+		req.HandoffID, claims.TenantID).Scan(&current, &toAgent)
+	if err == sql.ErrNoRows {
+		http.Error(w, "handoff not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "load handoff: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if !isUUID(toAgent) {
+		http.Error(w, "handoff is not addressed to a registered agent and cannot be completed", http.StatusConflict)
+		return
+	}
+	agent, found, err := loadReceivingAgent(ctx, tx, claims.TenantID, toAgent)
+	if err != nil {
+		http.Error(w, "look up receiving agent: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if !found || !mayAnswer(claims, agent) {
+		http.Error(w, "only the addressed agent or the principal that registered it may complete this handoff", http.StatusForbidden)
+		return
+	}
+	if current != handoffAccepted {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{
+			"error": "only an accepted handoff can be completed", "id": req.HandoffID, "status": current,
+		})
+		return
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_handoffs
+		SET status=$1, completed_by_principal=$2, completed_by_agent=$3, completed_at=now(),
+		    completion_summary=$4, updated_at=now()
+		WHERE id=$5 AND tenant_id=$6
+	`, handoffCompleted, claims.PrincipalID, nullableText(claims.AgentID), strings.TrimSpace(req.Summary),
+		req.HandoffID, claims.TenantID); err != nil {
+		http.Error(w, "persist handoff completion: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	packets, err := queryHandoffs(ctx, tx, "tenant_id=$1 AND id=$2", claims.TenantID, req.HandoffID)
+	if err != nil || len(packets) != 1 {
+		http.Error(w, "reload handoff: "+errorText(err), http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, packets[0])
+}
+
 // queryHandoffs runs a SELECT over agent_handoffs with the given WHERE
 // clause (always tenant-scoped by the caller) and decodes each row back into
 // the public HandoffPacket shape. A pending handoff whose expires_at has
@@ -399,7 +505,9 @@ func queryHandoffs(ctx context.Context, tx *sql.Tx, where string, args ...any) (
 		       CASE WHEN status='pending' AND expires_at IS NOT NULL AND expires_at <= now()
 		            THEN 'expired' ELSE status END,
 		       created_at, COALESCE(initiated_by_principal,''), COALESCE(responded_by_principal,''),
-		       COALESCE(responded_by_agent,''), responded_at, COALESCE(response_reason,'')
+		       COALESCE(responded_by_agent,''), responded_at, COALESCE(response_reason,''),
+		       COALESCE(completed_by_principal,''), COALESCE(completed_by_agent,''), completed_at,
+		       COALESCE(completion_summary,'')
 		FROM agent_handoffs WHERE `+where+` ORDER BY created_at`, args...)
 	if err != nil {
 		return nil, err
@@ -410,12 +518,13 @@ func queryHandoffs(ctx context.Context, tx *sql.Tx, where string, args ...any) (
 	for rows.Next() {
 		var p HandoffPacket
 		var constraints, namespaces, memRefs, artRefs, completed, open, failures, tools []byte
-		var expiresAt, respondedAt sql.NullTime
+		var expiresAt, respondedAt, completedAt sql.NullTime
 		var createdAt time.Time
 		if err := rows.Scan(&p.ID, &p.TenantID, &p.FromAgent, &p.ToAgent, &p.Objective,
 			&constraints, &namespaces, &memRefs, &artRefs, &completed, &open, &failures,
 			&p.Acceptance, &expiresAt, &tools, &p.Status, &createdAt, &p.InitiatedBy,
-			&p.RespondedByPrincipal, &p.RespondedByAgent, &respondedAt, &p.ResponseReason); err != nil {
+			&p.RespondedByPrincipal, &p.RespondedByAgent, &respondedAt, &p.ResponseReason,
+			&p.CompletedByPrincipal, &p.CompletedByAgent, &completedAt, &p.CompletionSummary); err != nil {
 			return nil, err
 		}
 		for _, field := range []struct {
@@ -435,6 +544,9 @@ func queryHandoffs(ctx context.Context, tx *sql.Tx, where string, args ...any) (
 		}
 		if respondedAt.Valid {
 			p.RespondedAt = respondedAt.Time.UTC().Format(time.RFC3339Nano)
+		}
+		if completedAt.Valid {
+			p.CompletedAt = completedAt.Time.UTC().Format(time.RFC3339Nano)
 		}
 		p.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
 		packets = append(packets, &p)

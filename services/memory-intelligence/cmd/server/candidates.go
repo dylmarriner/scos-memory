@@ -301,17 +301,30 @@ func approvedFact(c ReviewCandidate, req reviewDecisionRequest, candidateID stri
 	if network == "" {
 		network = memoryTypeToNetwork(c.ProposedType)
 	}
-	return &Fact{
-		Network:    network,
-		Content:    content,
-		Source:     "reviewed",
-		Authority:  c.AuthorityLevel,
-		Confidence: c.ConfidenceScore,
-		Scope:      "global",
-		ObservedAt: c.CreatedAt,
-		RecordedAt: time.Now().UTC().Format(time.RFC3339),
-		Evidence:   []string{"memory_candidate:" + candidateID},
+	fact := &Fact{
+		Network:     network,
+		Content:     content,
+		Source:      "reviewed",
+		Authority:   c.AuthorityLevel,
+		Confidence:  c.ConfidenceScore,
+		Scope:       "global",
+		ObservedAt:  c.CreatedAt,
+		RecordedAt:  time.Now().UTC().Format(time.RFC3339),
+		Evidence:    []string{"memory_candidate:" + candidateID},
+		Sensitivity: c.Sensitivity,
 	}
+	// A candidate the synthesis pass proposed is an inference from the
+	// facts it cites; approving it keeps both.
+	var assessment struct {
+		Inferred      bool     `json:"inferred"`
+		Derivation    string   `json:"derivation"`
+		SourceFactIDs []string `json:"source_fact_ids"`
+	}
+	if json.Unmarshal(c.Assessment, &assessment) == nil && assessment.Inferred {
+		fact.Inferred, fact.Derivation, fact.Source = true, assessment.Derivation, "inferred"
+		fact.Evidence = append(fact.Evidence, assessment.SourceFactIDs...)
+	}
+	return fact
 }
 
 func readCandidate(ctx context.Context, q querier, id requestIdentity, candidateID string, forUpdate bool) (ReviewCandidate, error) {

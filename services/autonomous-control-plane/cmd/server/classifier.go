@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	executionadapters "github.com/dylmarriner/scos-memory/packages/execution-adapters"
 )
 
 // Multi-label intent classification (GOVERNANCE.md §21.5).
@@ -123,6 +125,33 @@ var commandRequest = regexp.MustCompile(`\b(run|execute|exec|issue|invoke)\b[^.;
 // ("through the safe execution proxy", "a destructive proxy command").
 var proxyExecution = regexp.MustCompile(`\b(proxy|shell|terminal)\s+commands?\b|\bthrough\b[^.;:!?]{0,30}\bproxy\b`)
 
+// programRequest captures the word right after a run verb ("run git status",
+// "execute npm install"); it is a command request when that word is a
+// program the shared risk policy names.
+var programRequest = regexp.MustCompile(`\b(?:run|execute|exec|invoke)\s+([a-z0-9][a-z0-9._+-]*)`)
+
+// programWordsInProse are program names that are also everyday words ("run
+// time analysis", "execute a batch of reviews"); after a run verb they say
+// nothing about a command.
+var programWordsInProse = map[string]bool{
+	"at": true, "batch": true, "column": true, "comm": true, "cut": true, "date": true, "dir": true,
+	"env": true, "false": true, "file": true, "fold": true, "format": true, "free": true, "groups": true,
+	"halt": true, "help": true, "host": true, "http": true, "https": true, "id": true, "init": true,
+	"ip": true, "join": true, "less": true, "man": true, "more": true, "nice": true, "paste": true,
+	"patch": true, "seq": true, "skill": true, "sleep": true, "sort": true, "test": true, "time": true,
+	"top": true, "tree": true, "true": true, "type": true, "watch": true,
+}
+
+// requestsProgram reports whether input asks to run a named program.
+func requestsProgram(input string) bool {
+	for _, m := range programRequest.FindAllStringSubmatch(input, -1) {
+		if !programWordsInProse[m[1]] && executionadapters.IsKnownProgram(m[1]) {
+			return true
+		}
+	}
+	return false
+}
+
 // classifyIntent produces the multi-label classification for a request.
 func classifyIntent(req RouteRequest) classification {
 	board := newScoreboard()
@@ -194,6 +223,9 @@ func classifyIntent(req RouteRequest) classification {
 	}
 	if proxyExecution.MatchString(input) {
 		board.observe("command_execution", confidencePhrase, "phrase:proxy_execution")
+	}
+	if requestsProgram(input) {
+		board.observe("command_execution", confidencePhrase, "phrase:program_request")
 	}
 
 	// A code change implies the repository must be analysed and read first.

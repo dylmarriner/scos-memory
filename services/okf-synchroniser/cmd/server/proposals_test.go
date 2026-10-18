@@ -336,7 +336,7 @@ func TestSynchroniseDetectsIndexedContentDivergence(t *testing.T) {
 func TestMergeMarksRootedDocumentDiverged(t *testing.T) {
 	t.Setenv("SCOS_OKF_PROTECTED_BRANCH", "main")
 	root := t.TempDir()
-	runGit(t, root, "init")
+	runGit(t, root, "init", "-b", "main")
 	path := filepath.Join(root, "policy.md")
 	if err := os.WriteFile(path, []byte("# old\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ func approvedOverHTTP(t *testing.T, roles map[string][]string) (*proposalHarness
 	t.Setenv("SCOS_OKF_PROTECTED_BRANCH", "main")
 	h := newProposalHarness(t, roles)
 	root := h.server.okfRoot
-	runGit(t, root, "init")
+	runGit(t, root, "init", "-b", "main")
 	runGit(t, root, "add", "policy.md")
 	runGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
 	id := h.createDiffed("alice")
@@ -426,5 +426,66 @@ func TestMergeIsAttributedToTheMerger(t *testing.T) {
 	}
 	if p.MergedCommit == "" || p.MergedCommit != gitCommit(h.server.okfRoot) {
 		t.Fatalf("merge did not commit: %#v", p)
+	}
+}
+
+// TestProtectedMergeCommitsOnlyTheProposalOntoTheProtectedBranch: the merge
+// refuses a store checked out on another branch or carrying other staged
+// changes, and a merge that succeeds is one commit on the protected branch
+// whose parent is the reviewed base and which changes only the proposal's
+// path.
+func TestProtectedMergeCommitsOnlyTheProposalOntoTheProtectedBranch(t *testing.T) {
+	h, id := approvedOverHTTP(t, map[string][]string{
+		"bob":   {"knowledge_curator"},
+		"olive": {"system_owner"},
+	})
+	root := h.server.okfRoot
+	base := gitCommit(root)
+
+	runGit(t, root, "checkout", "-q", "-b", "side")
+	h.expect(h.post("olive", "/v1/proposals/"+id+"/merge", nil), http.StatusUnprocessableEntity, "merge off the protected branch")
+	runGit(t, root, "checkout", "-q", "main")
+
+	if err := os.WriteFile(filepath.Join(root, "other.md"), []byte("# unreviewed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "other.md")
+	h.expect(h.post("olive", "/v1/proposals/"+id+"/merge", nil), http.StatusUnprocessableEntity, "merge with other staged changes")
+	runGit(t, root, "reset", "-q", "--", "other.md")
+	if gitCommit(root) != base {
+		t.Fatal("a refused merge moved the protected branch")
+	}
+
+	h.expect(h.post("olive", "/v1/proposals/"+id+"/merge", nil), http.StatusOK, "merge")
+	parent, err := gitIn(root, "rev-parse", "HEAD^")
+	if err != nil || parent != base {
+		t.Fatalf("merge commit parent = %q (%v), want the reviewed base %s", parent, err, base)
+	}
+	changed, err := gitIn(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+	if err != nil || changed != "policy.md" {
+		t.Fatalf("merge commit changed %q (%v), want only policy.md", changed, err)
+	}
+	if branch, _ := gitIn(root, "symbolic-ref", "--short", "HEAD"); branch != "main" {
+		t.Fatalf("store left on %q", branch)
+	}
+}
+
+func TestProposalDiffIsAUnifiedDiff(t *testing.T) {
+	old := "# Policy\n\none\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+	updated := "# Policy\n\none\ntwo\nthree\nFOUR\nfive\nsix\nseven\n"
+	diff, err := makeProposalDiff("policy.md", old, updated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--- a/policy.md\n+++ b/policy.md\n@@ -3,7 +3,7 @@\n one\n two\n three\n-four\n+FOUR\n five\n six\n seven\n"
+	if diff != want {
+		t.Fatalf("diff =\n%s\nwant\n%s", diff, want)
+	}
+	if d, err := makeProposalDiff("policy.md", old, old); err != nil || d != "" {
+		t.Fatalf("equal content diff = %q, %v", d, err)
+	}
+	created, err := makeProposalDiff("new.md", "", "# New\n")
+	if err != nil || !strings.Contains(created, "@@ -0,0 +1 @@\n+# New\n") {
+		t.Fatalf("new document diff = %q, %v", created, err)
 	}
 }

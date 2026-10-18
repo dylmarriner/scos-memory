@@ -2510,7 +2510,6 @@ scos-memory-fabric/
 │   ├── hook-sdk/
 │   ├── skill-sdk/
 │   ├── agent-adapter-sdk/
-│   ├── hermes-memory-provider/
 │   ├── language-adapters/
 │   ├── execution-adapters/
 │   └── benchmark-harness/

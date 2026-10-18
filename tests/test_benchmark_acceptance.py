@@ -20,7 +20,8 @@ from benchmarks.run_acceptance import (  # noqa: E402
     run_domain,
 )
 
-DOMAINS = {"context_optimization", "code_intelligence", "execution_proxy", "control_plane_routing"}
+DOMAINS = {"context_optimization", "code_intelligence", "execution_proxy", "control_plane_routing",
+           "control_plane_routing_holdout"}
 
 
 def _contains_key(value, key):
@@ -79,7 +80,7 @@ class CommittedArtifactTests(unittest.TestCase):
 class FrozenCaseTests(unittest.TestCase):
     def test_frozen_cases_are_explicit(self):
         cases = frozen_acceptance_cases()
-        self.assertEqual(sum(len(domain_cases) for domain_cases in cases.values()), 87)
+        self.assertEqual(sum(len(domain_cases) for domain_cases in cases.values()), 123)
         for case in cases["context_optimization"]:
             self.assertIn(case["expected"]["instruction"], case["input"])
         for case in cases["execution_proxy"]:

@@ -353,3 +353,29 @@ func TestCodeLinksNotRecordedAreReportedDropped(t *testing.T) {
 		t.Fatalf("no link row exists, got %s", n)
 	}
 }
+
+func TestMergedFactsNameTheirCanonicalFact(t *testing.T) {
+	f := newBehaviourFixture(t)
+	bare := f.remember("The journal database is PostgreSQL", 0.8)
+	richer := f.remember("The journal database is PostgreSQL 17 with pgvector", 0.9)
+	if f.scalar(`SELECT status FROM memory_items WHERE id=$1`, bare) != "merged" {
+		t.Skip("the restatement was stored as a separate fact; merge behaviour is covered elsewhere")
+	}
+	code, _, facts := f.call(f.srv.handleFacts, http.MethodGet, "/v1/facts?include_merged=true", "")
+	if code != http.StatusOK {
+		t.Fatalf("list facts = %d", code)
+	}
+	found := false
+	for _, raw := range facts {
+		fact := raw.(map[string]any)
+		if fact["id"] == bare {
+			found = true
+			if fact["superseded_by"] != richer {
+				t.Fatalf("merged fact superseded_by = %v, want %s", fact["superseded_by"], richer)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("merged fact %s not listed with include_merged", bare)
+	}
+}

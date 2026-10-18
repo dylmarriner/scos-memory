@@ -30,6 +30,21 @@ def _candidate(**overrides) -> MemoryCandidate:
 
 
 class DedupTests(unittest.TestCase):
+    def test_a_negation_is_never_merged_as_a_duplicate(self):
+        for mine, theirs in [
+            ("The API is not a monolith.", "The API is a monolith."),
+            ("We do not use PostgreSQL.", "We use PostgreSQL."),
+            ("We never deploy on Fridays.", "We deploy on Fridays."),
+        ]:
+            existing = [{"id": str(uuid4()), "kind": "memory", "title": "Something else", "content": theirs, "authority_level": 70}]
+            results = deduplicate([_candidate(title="A statement", content=mine)], existing)
+            self.assertEqual(results[0].action, "new", mine)
+
+    def test_a_restatement_is_merged(self):
+        existing = [{"id": str(uuid4()), "kind": "memory", "title": "Cache", "content": "The service uses Redis for caching.", "authority_level": 70}]
+        results = deduplicate([_candidate(title="Redis", content="Service uses Redis for caching")], existing)
+        self.assertEqual(results[0].action, "merged")
+
     def test_new_candidate_no_match(self):
         c = _candidate()
         results = deduplicate([c], [])

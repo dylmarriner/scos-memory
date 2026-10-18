@@ -99,8 +99,13 @@ def extract_candidates(
 
         evidence = _build_evidence(event, session_messages)
         authority = _infer_authority(event, memory_class)
-        confidence = _infer_confidence(event, memory_class, evidence)
+        confidence = _infer_confidence(event, memory_class, session_messages)
         sensitivity = _infer_sensitivity(event, session_messages)
+        if sensitivity is SensitivityClass.SECRET:
+            # Credentials never enter ordinary memory (models.py refuses
+            # them); the turn itself stays in the journal.
+            logger.warning("event %s: turn holds credential-shaped content; not consolidated", event.get("id"))
+            return []
         valid_from = occurred
         valid_until = _infer_expiry(event, memory_class)
 
@@ -133,57 +138,69 @@ def extract_candidates(
 # ── internal helpers ──────────────────────────────────────────────────────
 
 
+def _event_data(event: dict[str, Any]) -> dict[str, Any]:
+    data = event.get("data", {})
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+    return data if isinstance(data, dict) else {}
+
+
+# Event types whose subject is knowledge by declaration, not by guesswork.
+_DECLARED_KNOWLEDGE = {
+    "task.resolved": MemoryClass.PROCEDURAL,
+    "decision.recorded": MemoryClass.SEMANTIC,
+    "correction.applied": MemoryClass.SEMANTIC,
+    "handoff.completed": MemoryClass.SEMANTIC,
+    "import.completed": MemoryClass.SEMANTIC,
+}
+
+# A turn with fewer content words than this ("thanks!" / "you're welcome")
+# says nothing worth remembering.
+MIN_EPISODE_WORDS = 6
+
+_CONTENT_WORD = re.compile(r"[a-z0-9][a-z0-9'._/-]*[a-z0-9]")
+_FILLER = frozenset({
+    "thanks", "thank", "please", "okay", "sure", "great", "welcome", "hello",
+    "there", "that", "this", "with", "what", "your", "have", "will", "would",
+    "could", "should", "just", "from", "they", "them", "then", "than", "been",
+})
+
+
 def _classify(
     event: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> MemoryClass:
-    """Heuristic classification based on event type and content signals."""
-    et = event.get("event_type", "")
+    """The class of memory a turn or event yields.
 
-    # Governing signals
-    if "policy" in str(event.get("data", {})).lower() or "permission" in str(event.get("data", {})).lower():
-        return MemoryClass.GOVERNING
-    if "revoke" in str(event.get("data", {})).lower():
-        return MemoryClass.REVOCATION
+    Durable knowledge comes only from what says so: a class the event
+    declares (``data.memory_class``), an event type that records knowledge,
+    or the user stating something to be remembered. Any other turn is an
+    episodic record of the exchange, unless it carries too little to be
+    worth one.
+    """
+    declared = _event_data(event).get("memory_class")
+    if declared in {c.value for c in MemoryClass}:
+        return MemoryClass(declared)
     if _explicit_statements(messages):
         return MemoryClass.SEMANTIC
-    if _has_code_output(messages):
-        return MemoryClass.PROCEDURAL
-    if _has_factual_claim(messages):
-        return MemoryClass.SEMANTIC
-    if et == "task.resolved":
-        return MemoryClass.PROCEDURAL
-    if et == "decision.recorded":
-        return MemoryClass.SEMANTIC
-    if et in ("handoff.completed", "import.completed"):
-        return MemoryClass.SEMANTIC
-    return MemoryClass.EPISODIC  # default
+    et = event.get("event_type", "")
+    if et in _DECLARED_KNOWLEDGE:
+        return _DECLARED_KNOWLEDGE[et]
+    if _content_words(messages) < MIN_EPISODE_WORDS:
+        return MemoryClass.DISCARD
+    return MemoryClass.EPISODIC
 
 
-def _has_code_output(messages: list[dict[str, Any]]) -> bool:
-    code_signals = (
-        "```", "function ", "class ", "def ", "import ", "#include",
-        "package ", "SELECT ", "CREATE TABLE", "docker run",
-    )
+def _content_words(messages: list[dict[str, Any]]) -> int:
+    words = set()
     for m in messages:
-        content = m.get("content", "")
-        for signal in code_signals:
-            if signal in content:
-                return True
-    return False
-
-
-def _has_factual_claim(messages: list[dict[str, Any]]) -> bool:
-    fact_signals = (
-        "is a ", "uses ", "runs on ", "depends on ", "located at ",
-        "was built with ", "implements ", "inherits from ",
-    )
-    for m in messages:
-        content = m.get("content", "")
-        for signal in fact_signals:
-            if signal in content:
-                return True
-    return False
+        for w in _CONTENT_WORD.findall((m.get("content") or "").lower()):
+            if len(w) > 3 and w not in _FILLER:
+                words.add(w)
+    return len(words)
 
 
 def _extract_content(
@@ -192,12 +209,7 @@ def _extract_content(
     memory_class: MemoryClass,
 ) -> tuple[str, str]:
     """Return (title, content) for the candidate."""
-    data = event.get("data", {})
-    if isinstance(data, str):
-        try:
-            data = json.loads(data)
-        except (json.JSONDecodeError, TypeError):
-            data = {}
+    data = _event_data(event)
 
     statements = _explicit_statements(messages)
     if statements:
@@ -320,37 +332,73 @@ def _infer_authority(event: dict[str, Any], memory_class: MemoryClass) -> int:
 def _infer_confidence(
     event: dict[str, Any],
     memory_class: MemoryClass,
-    evidence: list[EvidenceReference],
+    messages: list[dict[str, Any]],
 ) -> float:
-    """Confidence: more evidence → higher confidence."""
-    base = {
+    """How sure the memory is of what it states.
+
+    A confidence the event declares is used as given. The user's own
+    explicit statement is 0.9. An episodic memory is a verbatim record of
+    the exchange, 0.8. Knowledge an event type records but does not score
+    takes its class's default. More evidence rows do not make a statement
+    truer, so they add nothing.
+    """
+    declared = _event_data(event).get("confidence")
+    if isinstance(declared, (int, float)) and 0 <= declared <= 1:
+        return float(declared)
+    if memory_class == MemoryClass.SEMANTIC and _explicit_statements(messages):
+        return 0.90
+    return {
         MemoryClass.GOVERNING: 0.95,
-        MemoryClass.PROCEDURAL: 0.85,
-        MemoryClass.SEMANTIC: 0.75,
         MemoryClass.REVOCATION: 0.90,
-        MemoryClass.EPISODIC: 0.50,
-        MemoryClass.WORKING: 0.40,
+        MemoryClass.PROCEDURAL: 0.80,
+        MemoryClass.SEMANTIC: 0.75,
         MemoryClass.ARTIFACT_REFERENCE: 0.80,
+        MemoryClass.EPISODIC: 0.80,
+        MemoryClass.WORKING: 0.60,
     }.get(memory_class, 0.60)
 
-    evidence_boost = min(len(evidence) * 0.05, 0.20)
-    return min(base + evidence_boost, 1.0)
+
+# Sensitivity signals, most sensitive first. Credentials make content
+# secret, which ordinary consolidation refuses to store at all.
+_SECRET_SIGNALS = (
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    re.compile(r"(?i)\b(?:password|passwd|passphrase|api[ _-]?key|secret[ _-]?key|access[ _-]?token|client[ _-]?secret)\b\s*(?:is|:|=)\s*\S{4,}"),
+)
+_RESTRICTED_WORDS = re.compile(r"(?i)\b(?:restricted|need-to-know|clearance|\d{3}-\d{2}-\d{4})\b")
+_CONFIDENTIAL_WORDS = re.compile(r"(?i)\b(?:secret|secrets|confidential|classified|credentials?)\b")
 
 
 def _infer_sensitivity(
     event: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> SensitivityClass:
-    """Default 'internal', escalate if signals present."""
+    """The most sensitive class any message signals; internal by default.
+
+    Every message is considered and the highest class wins, so a mention of
+    "open source" in one message never lowers what another reveals. Only an
+    event that declares its sensitivity can make a memory public.
+    """
+    declared = _event_data(event).get("sensitivity")
+    order = [SensitivityClass.PUBLIC, SensitivityClass.INTERNAL, SensitivityClass.CONFIDENTIAL,
+             SensitivityClass.RESTRICTED, SensitivityClass.SECRET]
+    level = SensitivityClass.INTERNAL
+    if declared in {c.value for c in SensitivityClass}:
+        level = SensitivityClass(declared)
     for m in messages:
-        content = m.get("content", "")
-        if any(w in content.lower() for w in ("secret", "confidential", "classified")):
-            return SensitivityClass.CONFIDENTIAL
-        if any(w in content.lower() for w in ("restricted", "need-to-know", "clearance")):
-            return SensitivityClass.RESTRICTED
-        if any(w in content.lower() for w in ("public", "open-source", "open source")):
-            return SensitivityClass.PUBLIC
-    return SensitivityClass.INTERNAL
+        content = m.get("content") or ""
+        if any(p.search(content) for p in _SECRET_SIGNALS):
+            found = SensitivityClass.SECRET
+        elif _RESTRICTED_WORDS.search(content):
+            found = SensitivityClass.RESTRICTED
+        elif _CONFIDENTIAL_WORDS.search(content):
+            found = SensitivityClass.CONFIDENTIAL
+        else:
+            continue
+        if order.index(found) > order.index(level):
+            level = found
+    return level
 
 
 class UnresolvedNamespaceError(ValueError):

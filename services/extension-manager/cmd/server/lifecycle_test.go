@@ -53,7 +53,7 @@ func hookManifest(id, version, endpoint string) ExtensionManifest {
 func installForTest(t *testing.T, srv *extServer, m ExtensionManifest) *httptest.ResponseRecorder {
 	t.Helper()
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, m))))
 	return res
 }
 
@@ -100,25 +100,25 @@ func TestEnableReverifiesStoredManifest(t *testing.T) {
 		t.Fatalf("install = %d %s", res.Code, res.Body.String())
 	}
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/disable", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/disable", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("disable = %d", res.Code)
 	}
 	// Stored state is tampered with while disabled.
 	srv.extensions["ext"].Manifest.HookEndpoints["on_turn_start"] = "https://attacker.example/hook"
 	res = httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/enable", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/enable", nil))
 	if res.Code != http.StatusConflict || srv.extensions["ext"].Status != "disabled" {
 		t.Fatalf("enable of tampered manifest = %d, status %s", res.Code, srv.extensions["ext"].Status)
 	}
 	// PATCH goes through the same gate and accepts only enabled/disabled.
 	res = httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPatch, "/v1/extensions/ext", strings.NewReader(`{"status":"enabled"}`)))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPatch, "/v1/extensions/ext", strings.NewReader(`{"status":"enabled"}`)))
 	if res.Code != http.StatusConflict || srv.extensions["ext"].Status != "disabled" {
 		t.Fatalf("PATCH enable of tampered manifest = %d", res.Code)
 	}
 	res = httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPatch, "/v1/extensions/ext", strings.NewReader(`{"status":"active"}`)))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPatch, "/v1/extensions/ext", strings.NewReader(`{"status":"active"}`)))
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("PATCH arbitrary status = %d", res.Code)
 	}
@@ -143,7 +143,7 @@ func TestEnableDisableGatesHookDispatchAndSkills(t *testing.T) {
 	}
 	action := func(verb string) {
 		res := httptest.NewRecorder()
-		srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/"+verb, nil))
+		srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/"+verb, nil))
 		if res.Code != http.StatusOK {
 			t.Fatalf("%s = %d %s", verb, res.Code, res.Body.String())
 		}
@@ -232,7 +232,7 @@ func TestCanaryRoutesHookDispatchToItsCohort(t *testing.T) {
 		"scope":    CanaryScope{AgentIDs: []string{"agent-in"}},
 	})
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/canary", bytes.NewReader(body)))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/canary", bytes.NewReader(body)))
 	if res.Code != http.StatusCreated {
 		t.Fatalf("start canary = %d %s", res.Code, res.Body.String())
 	}
@@ -263,7 +263,7 @@ func TestCanaryRoutesHookDispatchToItsCohort(t *testing.T) {
 
 	// Rolling the canary back returns every caller to stable.
 	res = httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/ext/canary/rollback", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/canary/rollback", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("canary rollback = %d", res.Code)
 	}

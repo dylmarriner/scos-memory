@@ -226,38 +226,25 @@ func TestClassRankOrdering(t *testing.T) {
 	}
 }
 
-func TestClassifyPublicContent(t *testing.T) {
-	cls := classifyContent("hello world public information")
-	if cls != ClassPublic {
-		t.Fatal("expected public classification")
-	}
-}
-
-func TestClassifySecretContent(t *testing.T) {
-	cls := classifyContent("the secret key is abc123")
-	if cls != ClassSecret {
-		t.Fatal("expected secret classification")
-	}
-}
-
-func TestClassifyConfidentialContent(t *testing.T) {
-	cls := classifyContent("this is confidential data")
-	if cls != ClassConfidential {
-		t.Fatal("expected confidential classification")
-	}
-}
-
-func TestClassifyInternalContent(t *testing.T) {
-	cls := classifyContent("internal memo for staff only")
-	if cls != ClassInternal {
-		t.Fatal("expected internal classification")
-	}
-}
-
-func TestClassifyPasswordContent(t *testing.T) {
-	cls := classifyContent("password = hunter2")
-	if cls != ClassSecret {
-		t.Fatal("expected secret classification for password")
+func TestClassifyContent(t *testing.T) {
+	for content, want := range map[string]DataClass{
+		"hello world public information":               ClassPublic,
+		"our secretary booked the room":                ClassPublic,
+		"the secret key is abc123":                     ClassSecret,
+		"password = hunter2":                           ClassSecret,
+		"API_KEY: sk_live_51Hx9QaZpL":                  ClassSecret,
+		"aws creds AKIAIOSFODNN7EXAMPLE in the config": ClassSecret,
+		"-----BEGIN RSA PRIVATE KEY-----\nMIIEow":      ClassSecret,
+		"token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U": ClassSecret,
+		"customer SSN 123-45-6789":           ClassRestricted,
+		"this is confidential data":          ClassConfidential,
+		"store the credentials in the vault": ClassConfidential,
+		"internal memo for staff only":       ClassInternal,
+	} {
+		got, reasons := classifyContent(content)
+		if got != want {
+			t.Errorf("classifyContent(%q) = %s %v, want %s", content, got, reasons, want)
+		}
 	}
 }
 

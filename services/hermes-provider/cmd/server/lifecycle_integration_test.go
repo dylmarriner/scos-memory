@@ -98,7 +98,7 @@ func (f *hermesFixture) warmNext() error {
 		f.t.Fatal("no queued pre-warm to consume")
 	}
 	err := f.srv.warmPrefetch(ctx, item)
-	f.srv.prefetchQueue.record(err)
+	f.srv.prefetchQueue.record(item.TenantID, err)
 	return err
 }
 
@@ -274,5 +274,49 @@ func TestSessionIDHeldByAnotherTenantIsAConflict(t *testing.T) {
 	}
 	if code, out := second.call(second.srv.handleSyncTurn, second.owner, "/v1/provider/sync_turn", turn(second)); code != http.StatusConflict {
 		t.Fatalf("second tenant reusing the session id = %d %v, want 409", code, out)
+	}
+}
+
+func TestSyncedAndPreCompressedTurnsAreQueuedForConsolidation(t *testing.T) {
+	f := newHermesFixture(t)
+	session := f.newSession()
+	turn := map[string]any{
+		"namespace_id": f.namespace, "session_id": session, "turn_id": "hermes-turn:consolidate",
+		"messages": []any{map[string]any{"role": "user", "content": "we deploy on Fridays"}},
+	}
+	code, synced := f.call(f.srv.handleSyncTurn, f.owner, "/v1/provider/sync_turn", turn)
+	if code != http.StatusOK {
+		t.Fatalf("sync_turn = %d %v", code, synced)
+	}
+	// The same turn id with different content is refused, not a duplicate.
+	changed := map[string]any{"namespace_id": f.namespace, "session_id": session, "turn_id": "hermes-turn:consolidate",
+		"messages": []any{map[string]any{"role": "user", "content": "we deploy on Mondays"}}}
+	if code, out := f.call(f.srv.handleSyncTurn, f.owner, "/v1/provider/sync_turn", changed); code != http.StatusConflict {
+		t.Fatalf("changed retry = %d %v, want 409", code, out)
+	}
+	code, pre := f.call(f.srv.handlePreCompress, f.owner, "/v1/provider/pre_compress", map[string]any{
+		"namespace_id": f.namespace, "session_id": session,
+		"messages": []any{map[string]any{"role": "assistant", "content": "noted: deploys are on Fridays"}},
+	})
+	if code != http.StatusOK || pre["consolidation"] != "queued" {
+		t.Fatalf("pre_compress = %d %v", code, pre)
+	}
+
+	admin, err := sql.Open("pgx", os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	for _, turnID := range []string{synced["turn_id"].(string), pre["turn_id"].(string)} {
+		var jobs, events int
+		if err := admin.QueryRow(`SELECT count(*) FROM outbox_jobs WHERE tenant_id=$1 AND operation_id=$2 AND job_type='turn.completed' AND payload->>'turn_id'=$3`, f.tenant, turnID+":completed", turnID).Scan(&jobs); err != nil {
+			t.Fatal(err)
+		}
+		if err := admin.QueryRow(`SELECT count(*) FROM events WHERE tenant_id=$1 AND aggregate_id::text=$2 AND event_type='turn.completed'`, f.tenant, turnID).Scan(&events); err != nil {
+			t.Fatal(err)
+		}
+		if jobs != 1 || events != 1 {
+			t.Fatalf("turn %s: %d outbox jobs, %d completion events; want 1 and 1", turnID, jobs, events)
+		}
 	}
 }

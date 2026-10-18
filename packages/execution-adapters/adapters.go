@@ -1,8 +1,6 @@
 package executionadapters
 
 import (
-	_ "embed"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -65,71 +63,4 @@ func (d *DefaultAdapter) ReduceOutput(output string, maxBytes int) string {
 	}
 	half := maxBytes / 2
 	return output[:half] + "\n... [output reduced by execution-proxy] ...\n" + output[len(output)-half:]
-}
-
-// Risk levels returned by ClassifyRisk.
-const (
-	RiskRead        = "read"
-	RiskWrite       = "write"
-	RiskTest        = "test"
-	RiskDestructive = "destructive"
-)
-
-// riskPolicyJSON is the shared policy, also loaded by the Python package, so
-// both languages classify every command identically.
-//
-//go:embed risk_policy.json
-var riskPolicyJSON []byte
-
-type riskPolicy struct {
-	CompositionCharacters string   `json:"composition_characters"`
-	DestructivePrefixes   []string `json:"destructive_prefixes"`
-	WritePrefixes         []string `json:"write_prefixes"`
-	TestPrefixes          []string `json:"test_prefixes"`
-}
-
-var sharedRiskPolicy = mustLoadRiskPolicy()
-
-func mustLoadRiskPolicy() riskPolicy {
-	var p riskPolicy
-	if err := json.Unmarshal(riskPolicyJSON, &p); err != nil {
-		panic("execution-adapters: invalid embedded risk_policy.json: " + err.Error())
-	}
-	if len(p.DestructivePrefixes) == 0 || p.CompositionCharacters == "" {
-		panic("execution-adapters: risk_policy.json is missing destructive prefixes or composition characters")
-	}
-	return p
-}
-
-// ClassifyRisk grades a shell command as read, write, test or destructive
-// (§20.3). It is the single classifier shared by the execution-proxy service
-// and client-side wrappers. Composed commands (pipes, separators, command
-// substitution) are graded by their most dangerous component.
-func ClassifyRisk(command string) string {
-	lower := strings.ToLower(strings.TrimSpace(command))
-	p := sharedRiskPolicy
-	for _, kw := range p.DestructivePrefixes {
-		if strings.HasPrefix(lower, kw) {
-			return RiskDestructive
-		}
-	}
-	// A composed shell command can hide a side effect after a read command.
-	if strings.ContainsAny(lower, p.CompositionCharacters) {
-		for _, kw := range p.DestructivePrefixes {
-			if strings.Contains(lower, strings.TrimSpace(kw)) {
-				return RiskDestructive
-			}
-		}
-	}
-	for _, kw := range p.WritePrefixes {
-		if strings.HasPrefix(lower, kw) {
-			return RiskWrite
-		}
-	}
-	for _, kw := range p.TestPrefixes {
-		if strings.HasPrefix(lower, kw) {
-			return RiskTest
-		}
-	}
-	return RiskRead
 }

@@ -71,6 +71,26 @@ class RuntimeGovernanceAuditTests(unittest.TestCase):
             findings = audit_runtime.audit(root)
             self.assertFalse(any("without authentication middleware" in finding for finding in findings))
 
+    def test_an_unwrapped_tlsserve_server_is_reported(self):
+        # Every fabric service starts through tlsserve.ListenAndServe; a check
+        # that only matched http.ListenAndServe could never fire.
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "services/open/cmd/server/main.go"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "package main\n"
+                "func main() {\n"
+                "\tmux.HandleFunc(\"/v1/things\", handle)\n"
+                "\ttlsserve.ListenAndServe(addr, telemetry.Instrument(\"open\", mux))\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "services/open/cmd/server/main.go:4: HTTP server exposes /v1 routes without authentication middleware",
+                audit_runtime.audit(root),
+            )
+
     def test_fixture_finds_exact_501_and_readiness_lines(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

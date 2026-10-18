@@ -57,7 +57,7 @@ from benchmarks.publish import publish, run_from_cases  # noqa: E402
 
 
 FROZEN_CREATED_AT = "2026-07-27T00:00:00Z"
-SUITE_VERSION = "3.1.0"
+SUITE_VERSION = "3.2.0"
 
 # Ground-truth corrections and redefinitions, each made independently of any
 # candidate's output.
@@ -75,6 +75,11 @@ SUITE_REVISIONS = [
      "reason": "the proxy is now measured on the output of the executed command, not on the command string: "
                "'failure' marks a destructive command that must be blocked without confirmation and is never executed; "
                "'deterministic' marks the safe commands whose raw output can be compared byte for byte with a direct run"},
+    {"revision": "3.2.0", "cases": [f"holdout_{n:03d}" for n in range(1, 37)],
+     "reason": "held-out routing cases added; the router's phrase rules were written against the frozen routing cases, "
+               "so it is also measured on requests it was not shaped around. holdout_001-024 were run once before the "
+               "router recognised a run verb followed by a program the risk policy names (holdout_009 failed); "
+               "holdout_025-036 were written after that change and before any run"},
     {"revision": "3.1.0", "cases": ["proxy_002", "proxy_005", "proxy_007", "proxy_011", "proxy_014", "proxy_019"],
      "reason": "the proxy refuses an unconfirmed destructive command at /v1/execute, where governance's recorded "
                "confirmation is checked; /v1/plan only plans. Blocked now requires the plan to grade the case destructive "
@@ -175,7 +180,9 @@ def frozen_acceptance_cases() -> dict[str, list[dict[str, Any]]]:
             {"id": "proxy_009", "command": "grep -R FIXME_MARKER " + "src/ " * 200, "failure": False, "deterministic": True},
             {"id": "proxy_010", "command": "echo ok", "failure": False, "deterministic": True},
             {"id": "proxy_011", "command": "rm -rf / --no-preserve-root", "failure": True},
-            {"id": "proxy_012", "command": "find / -name '*.log' " + "-print " * 200, "failure": False, "deterministic": False},
+            # /usr rather than /: a full-filesystem walk on a host with large
+            # data mounts outlasts the request timeout and stalls the programme.
+            {"id": "proxy_012", "command": "find /usr -xdev -name '*.so*' " + "-print " * 200, "failure": False, "deterministic": False},
             {"id": "proxy_013", "command": "printf '%s\\n' " + "warn " * 600, "failure": False, "deterministic": True},
             {"id": "proxy_014", "command": "rm -rf / ", "failure": True},
             {"id": "proxy_015", "command": "pwd", "failure": False, "deterministic": True},
@@ -184,6 +191,49 @@ def frozen_acceptance_cases() -> dict[str, list[dict[str, Any]]]:
             {"id": "proxy_018", "command": "tail -n 5000 " + "app.log " * 300, "failure": False, "deterministic": True},
             {"id": "proxy_019", "command": "cat /etc/passwd && rm -rf / ", "failure": True},
             {"id": "proxy_020", "command": "journalctl -u scos " + "-n 1 " * 300, "failure": False, "deterministic": False},
+        ],
+        # Held out: written after the router's phrase rules and never used to
+        # tune them, so the router is also measured on requests it was not
+        # shaped around. Ground truth follows the same rules as the frozen
+        # cases: code for code lookup, proxy and governance for any command
+        # run, nothing conditional for conversation or recall.
+        "control_plane_routing_holdout": [
+            {"id": "holdout_001", "query": "where is the retry backoff implemented in our codebase", "expected": ["code"]},
+            {"id": "holdout_002", "query": "list the files under the logs directory using a shell command", "expected": ["proxy", "governance"]},
+            {"id": "holdout_003", "query": "what did we decide about the billing schema last week", "expected": []},
+            {"id": "holdout_004", "query": "summarise our conversation so far", "expected": []},
+            {"id": "holdout_005", "query": "show me the callers of parseConfig in the repo", "expected": ["code"]},
+            {"id": "holdout_006", "query": "please run the test suite in the terminal", "expected": ["proxy", "governance"]},
+            {"id": "holdout_007", "query": "remind me which database we picked for the analytics store", "expected": []},
+            {"id": "holdout_008", "query": "explain how the authentication middleware is structured in this repository", "expected": ["code"]},
+            {"id": "holdout_009", "query": "execute git status and show me the output", "expected": ["proxy", "governance"]},
+            {"id": "holdout_010", "query": "what is my preferred review style", "expected": []},
+            {"id": "holdout_011", "query": "which function handles webhook signature verification", "expected": ["code"]},
+            {"id": "holdout_012", "query": "kill the stuck process with a shell command", "expected": ["proxy", "governance"]},
+            {"id": "holdout_013", "query": "thanks, that's all for today", "expected": []},
+            {"id": "holdout_014", "query": "find every place the Order struct is referenced in the source code", "expected": ["code"]},
+            {"id": "holdout_015", "query": "tail the last hundred lines of the service log in the terminal", "expected": ["proxy", "governance"]},
+            {"id": "holdout_016", "query": "draft an outline for tomorrow's meeting agenda", "expected": []},
+            {"id": "holdout_017", "query": "which module defines the rate limiter class", "expected": ["code"]},
+            {"id": "holdout_018", "query": "run npm install for the frontend in the shell", "expected": ["proxy", "governance"]},
+            {"id": "holdout_019", "query": "what was the outcome of the incident we talked about yesterday", "expected": []},
+            {"id": "holdout_020", "query": "trace how a request flows from the gateway handler into the store package in the codebase", "expected": ["code"]},
+            {"id": "holdout_021", "query": "delete the temp directory using rm in the shell", "expected": ["proxy", "governance"]},
+            {"id": "holdout_022", "query": "how do I like my status updates formatted", "expected": []},
+            {"id": "holdout_023", "query": "open the implementation of the token bucket in the source code", "expected": ["code"]},
+            {"id": "holdout_024", "query": "execute the database migration script from the terminal", "expected": ["proxy", "governance"]},
+            {"id": "holdout_025", "query": "what timezone did I say I work in", "expected": []},
+            {"id": "holdout_026", "query": "locate the definition of the Invoice type in the codebase", "expected": ["code"]},
+            {"id": "holdout_027", "query": "run docker ps to see which containers are up", "expected": ["proxy", "governance"]},
+            {"id": "holdout_028", "query": "good morning, how are you", "expected": []},
+            {"id": "holdout_029", "query": "which file in the repository declares the http router", "expected": ["code"]},
+            {"id": "holdout_030", "query": "use a shell command to count the lines in main.go", "expected": ["proxy", "governance"]},
+            {"id": "holdout_031", "query": "what are my notes about the quarterly goals", "expected": []},
+            {"id": "holdout_032", "query": "show the source code for the session cache eviction", "expected": ["code"]},
+            {"id": "holdout_033", "query": "execute make build and report any errors", "expected": ["proxy", "governance"]},
+            {"id": "holdout_034", "query": "tell me what we agreed about naming conventions", "expected": []},
+            {"id": "holdout_035", "query": "where in the repo is the config loader implemented", "expected": ["code"]},
+            {"id": "holdout_036", "query": "run ls -la on the uploads folder", "expected": ["proxy", "governance"]},
         ],
         "control_plane_routing": [
             {"id": "route_001", "query": "retrieve memory and compile context for this turn", "expected": ["memory", "context"]},
@@ -617,6 +667,7 @@ METRICS: dict[str, Callable[[dict[str, Any], dict[str, Any]], dict[str, float]]]
     "code_intelligence": code_metrics,
     "execution_proxy": proxy_metrics,
     "control_plane_routing": route_metrics,
+    "control_plane_routing_holdout": route_metrics,
 }
 
 
@@ -663,6 +714,7 @@ THRESHOLDS = {
     "execution_proxy": {"token_reduction": (">=", 0.70), "failure_preservation": (">=", 1.0), "raw_result_restoration": (">=", 1.0),
                         "destructive_blocked": (">=", 1.0)},
     "control_plane_routing": {"routing_precision": (">=", 0.98), "routing_recall": (">=", 0.98)},
+    "control_plane_routing_holdout": {"routing_precision": (">=", 0.98), "routing_recall": (">=", 0.98)},
 }
 MEDIAN_METRICS = {"total_token_reduction", "token_reduction"}
 
@@ -701,6 +753,7 @@ DOMAIN_SERVICES = {
     "code_intelligence": ["code-intelligence"],
     "execution_proxy": ["execution-proxy"],
     "control_plane_routing": [],
+    "control_plane_routing_holdout": [],
 }
 SYSTEMS = {
     "context_optimization": "context-optimisation service binary over HTTP (/v1/context/compile, /v1/context/restore)",
@@ -708,18 +761,21 @@ SYSTEMS = {
     "execution_proxy": "execution-proxy service binary authorised by the tool-governance service over HTTP "
                        "(/v1/plan, /v1/execute, /v1/proxy/restore)",
     "control_plane_routing": "autonomous-control-plane binary, classify mode (the /v1/control/route builder)",
+    "control_plane_routing_holdout": "autonomous-control-plane binary, classify mode, on held-out requests",
 }
 BASELINES = {
     "context_optimization": "unoptimised pass-through of the input",
     "code_intelligence": "file-name search over the same corpus",
     "execution_proxy": "the command run directly, its raw output returned unreduced",
     "control_plane_routing": "keyword router",
+    "control_plane_routing_holdout": "keyword router",
 }
 NAMES = {
     "context_optimization": ("context_optimisation_service", "unoptimised_context_baseline"),
     "code_intelligence": ("code_intelligence_service", "code_filename_baseline"),
     "execution_proxy": ("execution_proxy_service", "raw_output_baseline"),
     "control_plane_routing": ("control_plane_router", "keyword_router_baseline"),
+    "control_plane_routing_holdout": ("control_plane_router_holdout", "keyword_router_holdout_baseline"),
 }
 
 
@@ -840,9 +896,11 @@ def main() -> int:
                                            wall_time_ms=sum(c["latency_ms"] for c in live_cases)))
         if published is not None:
             print(json.dumps({"published_run_id": published.get("run_id"), "suite": "retrieval:live-gateway"}))
+    failing = sorted(e["domain"] for e in artifact["comparisons"] if not e["all_thresholds_pass"])
     print(json.dumps({"output": str(args.output), "domains": artifact["domain_status"],
-                      "live_included": "live" in artifact}, indent=2))
-    return 0
+                      "live_included": "live" in artifact, "failing_domains": failing}, indent=2))
+    # Any domain not run, or measured below a threshold, fails the run.
+    return 1 if failing else 0
 
 
 if __name__ == "__main__":

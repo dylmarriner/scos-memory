@@ -95,6 +95,20 @@ def gateway_headers():
     return h
 
 
+# Tool calls that do bounded but long work upstream (taking a backup,
+# running a restore drill); mcp-gateway gives them 30 minutes, so the bridge
+# must not give up first.
+LONG_TOOLS = {"scos_backup_start", "scos_restore_test_start", "scos_okf_mirror_push", "scos_backup_plan"}
+
+
+def call_timeout(msg):
+    # params may legally be an array; only a tools/call object names a tool.
+    params = msg.get("params")
+    if msg.get("method") == "tools/call" and isinstance(params, dict) and params.get("name") in LONG_TOOLS:
+        return 1800.0
+    return 30.0
+
+
 def relay(rpc_request, timeout=30.0):
     """POST one JSON-RPC message to mcp-gateway and return the decoded
     response, or a JSON-RPC error object on transport failure."""
@@ -127,28 +141,53 @@ def relay(rpc_request, timeout=30.0):
         }
 
 
-log(f"relaying to {GATEWAY_URL}")
 
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    if os.environ.get("SCOS_MCP_DEBUG"):
-        sys.stderr.write(f"[scos-mcp-bridge:debug] GOT: {line}\n")
-        sys.stderr.flush()
+def rpc_error(msg_id, code, message):
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+def handle(msg):
+    """Relay one JSON-RPC message; returns the response to write, or None
+    for a notification (which gets no response)."""
+    if not isinstance(msg, dict):
+        return rpc_error(None, -32600, "invalid request: a JSON-RPC message must be an object")
+    is_notification = "id" not in msg
+    response = relay(msg, timeout=call_timeout(msg))
+    if response is None or is_notification:
+        return None
+    return response
+
+
+def handle_line(line):
+    """The response to one line of input: an object for a single message,
+    an array for a batch (one response per request, in order, notifications
+    omitted), or None when nothing is owed."""
     try:
         msg = json.loads(line)
-    except json.JSONDecodeError:
-        continue
+    except json.JSONDecodeError as e:
+        return rpc_error(None, -32700, f"parse error: {e}")
+    if isinstance(msg, list):
+        if not msg:
+            return rpc_error(None, -32600, "invalid request: empty batch")
+        responses = [r for r in (handle(m) for m in msg) if r is not None]
+        return responses or None
+    return handle(msg)
 
-    is_notification = "id" not in msg
-    response = relay(msg)
 
-    if response is None or is_notification:
-        continue
-
-    if os.environ.get("SCOS_MCP_DEBUG"):
-        sys.stderr.write(f"[scos-mcp-bridge:debug] SENT: {json.dumps(response)[:200]}\n")
-        sys.stderr.flush()
-    sys.stdout.write(json.dumps(response) + "\n")
-    sys.stdout.flush()
+if __name__ == "__main__":
+    log(f"relaying to {GATEWAY_URL}")
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if os.environ.get("SCOS_MCP_DEBUG"):
+            sys.stderr.write(f"[scos-mcp-bridge:debug] GOT: {line}\n")
+            sys.stderr.flush()
+        response = handle_line(line)
+        if response is None:
+            continue
+        if os.environ.get("SCOS_MCP_DEBUG"):
+            sys.stderr.write(f"[scos-mcp-bridge:debug] SENT: {json.dumps(response)[:200]}\n")
+            sys.stderr.flush()
+        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()

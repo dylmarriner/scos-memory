@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"regexp"
 	"sort"
@@ -155,6 +156,10 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 	// match the stored content is the redacted form and sensitivity is
 	// elevated to 'secret'; the original content is never persisted.
 	sensitivity := "internal"
+	switch fact.Sensitivity {
+	case "public", "internal", "confidential", "restricted", "secret":
+		sensitivity = fact.Sensitivity
+	}
 	content := fact.Content
 	if findings := secretscan.Scan(content); len(findings) > 0 {
 		content = secretscan.Redact(content, findings)
@@ -270,7 +275,8 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 	}
 	query := fmt.Sprintf(`
 		SELECT mi.id, mi.namespace_id, mi.authority_level, mi.confidence_score, mi.created_at, mi.status, mi.type,
-		       mv.content, mv.structured_content, mv.version_number, mv.created_at
+		       mv.content, mv.structured_content, mv.version_number, mv.created_at,
+		       COALESCE(mi.superseded_by_id::text, ''), mi.sensitivity::text
 		FROM memory_items mi
 		JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1 AND mi.status IN (%s)
@@ -288,7 +294,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		var structuredRaw []byte
 		var itemCreatedAt, versionCreatedAt time.Time
 		var memoryType string
-		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &memoryType, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.NamespaceID, &f.Authority, &f.Confidence, &itemCreatedAt, &f.Status, &memoryType, &f.Content, &structuredRaw, &f.Revision, &versionCreatedAt, &f.SupersededBy, &f.Sensitivity); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -682,55 +688,81 @@ func resolveEntityMentions(ctx context.Context, content string) []string {
 // does. Best-effort: a failure to link one mention does not fail the fact
 // write, since these are candidate proper nouns, not required data.
 func linkEntityMentions(ctx context.Context, tx *sql.Tx, tenantID, factID string, mentions []string) {
-	for _, mention := range mentions {
-		var entityID string
-		var metadataRaw []byte
-		err := tx.QueryRowContext(ctx, `
-			SELECT id, metadata FROM entities
-			WHERE tenant_id=$1 AND entity_type='entity' AND lower(display_name)=lower($2)
-		`, tenantID, mention).Scan(&entityID, &metadataRaw)
-		if err == sql.ErrNoRows {
-			newID, genErr := newID()
-			if genErr != nil {
-				continue
-			}
-			metadata, _ := json.Marshal(map[string]any{"fact_ids": []string{factID}})
-			// $1 is passed twice (id and entity_key are both this generated
-			// UUID) rather than reused positionally: pgx's extended protocol
-			// infers each bind parameter's type once, and id (uuid) vs
-			// entity_key (text) sharing $1 makes that inference ambiguous --
-			// "inconsistent types deduced for parameter $1: uuid versus text".
-			if _, insErr := tx.ExecContext(ctx, `
-				INSERT INTO entities (id, tenant_id, entity_key, entity_type, display_name, scope, metadata)
-				VALUES ($1,$2,$3,'entity',$4,'global',$5)
-			`, newID, tenantID, newID, mention, metadata); insErr != nil {
-				continue
-			}
-			continue
+	// Each mention is linked under its own savepoint: in PostgreSQL a
+	// failed statement aborts the whole transaction, so without one a
+	// mention that fails to link would fail the fact write after all.
+	for i, mention := range mentions {
+		savepoint := fmt.Sprintf("entity_mention_%d", i)
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT "+savepoint); err != nil {
+			log.Printf("entity mentions for fact %s not linked: %v", factID, err)
+			return
 		}
-		if err != nil {
-			continue
-		}
-		var metadata struct {
-			FactIDs []string `json:"fact_ids"`
-		}
-		if len(metadataRaw) > 0 {
-			_ = json.Unmarshal(metadataRaw, &metadata)
-		}
-		linked := false
-		for _, existing := range metadata.FactIDs {
-			if existing == factID {
-				linked = true
-				break
+		if err := linkEntityMention(ctx, tx, tenantID, factID, mention); err != nil {
+			log.Printf("entity mention %q of fact %s not linked: %v", mention, factID, err)
+			if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+savepoint); err != nil {
+				log.Printf("entity mentions for fact %s: rollback to savepoint: %v", factID, err)
+				return
 			}
 		}
-		if linked {
-			continue
+		if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepoint); err != nil {
+			log.Printf("entity mentions for fact %s: release savepoint: %v", factID, err)
+			return
 		}
-		metadata.FactIDs = append(metadata.FactIDs, factID)
-		updated, _ := json.Marshal(metadata)
-		_, _ = tx.ExecContext(ctx, `UPDATE entities SET metadata=$1 WHERE id=$2`, updated, entityID)
 	}
+}
+
+// linkEntityMention finds or creates the entity for one mention and adds
+// factID to its linked facts.
+func linkEntityMention(ctx context.Context, tx *sql.Tx, tenantID, factID, mention string) error {
+	var entityID string
+	var metadataRaw []byte
+	err := tx.QueryRowContext(ctx, `
+		SELECT id, metadata FROM entities
+		WHERE tenant_id=$1 AND entity_type='entity' AND lower(display_name)=lower($2)
+	`, tenantID, mention).Scan(&entityID, &metadataRaw)
+	if err == sql.ErrNoRows {
+		id, err := newID()
+		if err != nil {
+			return err
+		}
+		metadata, err := json.Marshal(map[string]any{"fact_ids": []string{factID}})
+		if err != nil {
+			return err
+		}
+		// $1 is passed twice (id and entity_key are both this generated
+		// UUID) rather than reused positionally: pgx's extended protocol
+		// infers each bind parameter's type once, and id (uuid) vs
+		// entity_key (text) sharing $1 makes that inference ambiguous --
+		// "inconsistent types deduced for parameter $1: uuid versus text".
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO entities (id, tenant_id, entity_key, entity_type, display_name, scope, metadata)
+			VALUES ($1,$2,$3,'entity',$4,'global',$5)
+		`, id, tenantID, id, mention, metadata)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	var metadata struct {
+		FactIDs []string `json:"fact_ids"`
+	}
+	if len(metadataRaw) > 0 {
+		if err := json.Unmarshal(metadataRaw, &metadata); err != nil {
+			return fmt.Errorf("entity %s metadata: %w", entityID, err)
+		}
+	}
+	for _, existing := range metadata.FactIDs {
+		if existing == factID {
+			return nil
+		}
+	}
+	metadata.FactIDs = append(metadata.FactIDs, factID)
+	updated, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE entities SET metadata=$1 WHERE id=$2`, updated, entityID)
+	return err
 }
 
 // forgetFact implements scos_forget (§25/§42): the fact is soft-deleted

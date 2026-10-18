@@ -213,6 +213,24 @@ func validEmail(v string) bool { return strings.Contains(v, "@") && len(v) <= 32
 
 // decodePerks tolerates a nil/empty column so callers never have to nil-check
 // before ranging over the result.
+// customPerks drops from perks every line planLines generates for any of
+// the given limits, keeping the order of the rest.
+func customPerks(perks []string, limits ...planLimits) []string {
+	generated := map[string]bool{}
+	for _, l := range limits {
+		for _, line := range planLines(l.MonthlyMCPRequests, l.StorageBytes, l.Features) {
+			generated[line] = true
+		}
+	}
+	out := []string{}
+	for _, p := range perks {
+		if p = strings.TrimSpace(p); p != "" && !generated[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func decodePerks(b []byte) []string {
 	if len(b) == 0 {
 		return nil
@@ -925,14 +943,6 @@ func (s *server) adminPlanUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	if in.Perks == nil {
-		in.Perks = []string{}
-	}
-	perksJSON, err := json.Marshal(in.Perks)
-	if err != nil {
-		http.Error(w, "invalid perks", 400)
-		return
-	}
 	const planColumns = `id,name,price,perks,monthly_mcp_requests,storage_bytes,features`
 	before, err := scanPlanDefinition(s.db.QueryRowContext(r.Context(), `SELECT `+planColumns+` FROM cloud_plan_definitions WHERE id=$1`, in.ID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -949,6 +959,15 @@ func (s *server) adminPlanUpdate(w http.ResponseWriter, r *http.Request) {
 		if limits.Features == nil {
 			limits.Features = []string{}
 		}
+	}
+	// Plans are read back with lines generated from their limits ahead of
+	// the stored perks, and the editor sends that whole list back: only the
+	// perks that are not generated lines are stored, or every save would
+	// add another copy of them.
+	perksJSON, err := json.Marshal(customPerks(in.Perks, before.Limits, limits))
+	if err != nil {
+		http.Error(w, "invalid perks", 400)
+		return
 	}
 	featuresJSON, err := json.Marshal(limits.Features)
 	if err != nil {

@@ -8,6 +8,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -116,10 +117,62 @@ func findOKFRoot() string {
 	return "okf"
 }
 
+// ── scheduled sync ───────────────────────────────────────────────────────
+
+// defaultSyncInterval is how often the store is re-synchronised into the
+// index when SCOS_OKF_SYNC_INTERVAL is not set.
+const defaultSyncInterval = 5 * time.Minute
+
+// syncInterval parses SCOS_OKF_SYNC_INTERVAL: a Go duration of at least a
+// second, or "0" to synchronise only at startup and on request.
+func syncInterval(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultSyncInterval, nil
+	}
+	if raw == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < time.Second {
+		return 0, fmt.Errorf("SCOS_OKF_SYNC_INTERVAL must be a duration of at least 1s, or 0: %q", raw)
+	}
+	return d, nil
+}
+
+// runSyncLoop synchronises the store into the index at startup -- a fresh
+// deployment's seeded documents are indexed without anyone calling
+// /v1/sync -- and then every interval, so commits made to the store
+// outside a merged proposal (a restored backup, a pulled mirror) reach the
+// index and divergence is detected without waiting for a request.
+func (s *okfServer) runSyncLoop(ctx context.Context, interval time.Duration) {
+	for {
+		result := s.synchronise(ctx)
+		if n := len(result.Added) + len(result.Updated) + len(result.Removed) + len(result.Diverged); n > 0 || len(result.Errors) > 0 {
+			log.Printf("okf sync: %d added, %d updated, %d removed, %d diverged, errors %v",
+				len(result.Added), len(result.Updated), len(result.Removed), len(result.Diverged), result.Errors)
+		}
+		if interval <= 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+	}
+}
+
 // ── main ─────────────────────────────────────────────────────────────────
 
 func main() {
 	srv := newOKFServer()
+	if root := strings.TrimSpace(os.Getenv("SCOS_OKF_ROOT")); root != "" {
+		if err := prepareOKFStore(root, srv.okfRoot); err != nil {
+			log.Fatalf("prepare the OKF store at %s: %v", root, err)
+		}
+		srv.okfRoot = root
+	}
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		log.Fatal("DATABASE_URL is required")
@@ -150,6 +203,11 @@ func main() {
 	if err := srv.loadProposalsFromDB(context.Background()); err != nil {
 		log.Fatalf("load okf proposals: %v", err)
 	}
+	interval, err := syncInterval(os.Getenv("SCOS_OKF_SYNC_INTERVAL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	go srv.runSyncLoop(context.Background(), interval)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", healthOK)
 	mux.HandleFunc("/health/version", release.Handler("okf-synchroniser"))
@@ -233,6 +291,14 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 	}
 	commitHash := gitCommit(s.okfRoot)
 
+	// Divergence is judged against what the index holds now, not what this
+	// process loaded at startup: an out-of-band edit to okf_concepts must be
+	// detected here, and must not be overwritten by the write-back below.
+	if err := s.refreshIndexedContent(ctx); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("read indexed content: %v; sync not applied", err))
+		return result
+	}
+
 	// Track seen paths
 	seen := make(map[string]bool)
 
@@ -252,7 +318,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 		existing, exists := s.projections[file]
 		if !exists {
 			// New document
-			id := fmt.Sprintf("okf-%d", len(s.documents)+1)
+			id := newDocumentID()
 			doc := &OKFDocument{
 				ID:          id,
 				Path:        file,
@@ -283,7 +349,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 			// Changed - update
 			doc := s.documentForPath(file)
 			if doc == nil {
-				id := fmt.Sprintf("okf-%d", len(s.documents)+1)
+				id := newDocumentID()
 				doc = &OKFDocument{ID: id, Path: file, Category: category, ImportedAt: time.Now().UTC().Format(time.RFC3339)}
 				s.documents[id] = doc
 			}
@@ -302,7 +368,7 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 			existing.ImportStatus = "synced"
 			doc := s.documentForPath(file)
 			if doc == nil {
-				id := fmt.Sprintf("okf-%d", len(s.documents)+1)
+				id := newDocumentID()
 				doc = &OKFDocument{ID: id, Path: file, Category: category, Title: extractTitle(content), ContentHash: contentHash, CommitID: commitHash, Status: "current", ImportedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339), Content: string(content)}
 				s.documents[id] = doc
 			} else {
@@ -312,17 +378,30 @@ func (s *okfServer) synchronise(ctx context.Context) SyncResult {
 		}
 	}
 
-	// Detect removed files
-	for path := range s.projections {
-		if !seen[path] {
-			// A missing repository file is a destructive change. Preserve the
-			// indexed record until an explicit governance action resolves it.
-			if doc := s.documentForPath(path); doc != nil {
-				doc.Status = "diverged"
-			}
-			s.projections[path].ImportStatus = "diverged"
-			result.Diverged = appendUnique(result.Diverged, path)
+	// Detect removed files. A file deleted from the authoritative repository
+	// whose indexed copy is exactly what was last imported is a removal: the
+	// document is marked removed (its record and the Git history remain) and
+	// reported once. If the indexed copy was edited since, the deletion and
+	// the edit conflict, so it is diverged and left for explicit review.
+	for path, proj := range s.projections {
+		if seen[path] || proj.ImportStatus == "removed" {
+			continue
 		}
+		doc := s.documentForPath(path)
+		if doc != nil && indexedContentHash(doc) != proj.ContentHash {
+			doc.Status = "diverged"
+			proj.ImportStatus = "diverged"
+			result.Diverged = appendUnique(result.Diverged, path)
+			continue
+		}
+		if doc != nil {
+			doc.Status = "removed"
+			doc.CommitID = commitHash
+			doc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		proj.ImportStatus = "removed"
+		proj.CommitHash = commitHash
+		result.Removed = append(result.Removed, path)
 	}
 
 	// Detect divergence between the indexed (DB) content and the projection
@@ -423,6 +502,39 @@ func (s *okfServer) documentForPath(path string) *OKFDocument {
 		}
 	}
 	return nil
+}
+
+// newDocumentID allocates an indexed document's id. It is random rather than
+// a count of the documents in memory, which can collide with rows already in
+// okf_concepts (the table's primary key).
+func newDocumentID() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return "okf-" + hex.EncodeToString(b)
+}
+
+// refreshIndexedContent reloads each indexed document's content from
+// okf_concepts, so the divergence checks compare what the index holds now.
+// Callers must hold s.mu.
+func (s *okfServer) refreshIndexedContent(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT path, content FROM okf_concepts`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path, content string
+		if err := rows.Scan(&path, &content); err != nil {
+			return err
+		}
+		if doc := s.documentForPath(path); doc != nil {
+			doc.Content = content
+		}
+	}
+	return rows.Err()
 }
 
 // loadConceptsFromDB hydrates in-memory documents and projections from the

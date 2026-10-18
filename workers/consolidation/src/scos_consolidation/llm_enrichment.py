@@ -100,7 +100,8 @@ def enrich_candidates(candidates: list[MemoryCandidate]) -> list[MemoryCandidate
             new_content = str(result.get("content", "")).strip()
             if not new_title or not new_content:
                 raise ValueError("model returned an empty title or content")
-            enriched.append(candidate.model_copy(update={"title": new_title, "content": new_content}))
+            metadata = {**candidate.metadata, "rewritten_by": model, "extracted_content": candidate.content}
+            enriched.append(candidate.model_copy(update={"title": new_title, "content": new_content, "metadata": metadata}))
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError, IndexError,
                 json.JSONDecodeError, ValidationError) as exc:
             logger.warning("candidate %s: LLM enrichment skipped (%s)", candidate.candidate_id, exc)

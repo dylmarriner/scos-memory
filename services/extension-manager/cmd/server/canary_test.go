@@ -21,7 +21,7 @@ func canaryFixture(t *testing.T) (*extServer, ed25519.PrivateKey) {
 	srv := newExtServerAt(filepath.Join(t.TempDir(), "extension-state.json"))
 	stable := canaryManifest(t, privateKey, "1.0.0")
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, stable))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, stable))))
 	if res.Code != http.StatusOK {
 		t.Fatalf("install stable returned %d: %s", res.Code, res.Body.String())
 	}
@@ -45,7 +45,7 @@ func startCanary(t *testing.T, srv *extServer, m ExtensionManifest, scope Canary
 	t.Helper()
 	body := mustJSON(t, map[string]any{"manifest": m, "scope": scope})
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/canary.ext/canary", bytes.NewReader(body)))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/canary.ext/canary", bytes.NewReader(body)))
 	return res
 }
 
@@ -149,7 +149,7 @@ func TestCanaryPromotionInstallsCandidate(t *testing.T) {
 	startCanary(t, srv, canaryManifest(t, key, "2.0.0"), CanaryScope{Organisation: true})
 
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/canary.ext/canary/promote", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/canary.ext/canary/promote", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("promote returned %d: %s", res.Code, res.Body.String())
 	}
@@ -164,7 +164,7 @@ func TestCanaryPromotionInstallsCandidate(t *testing.T) {
 		t.Fatal("promotion did not preserve the superseded manifest for rollback")
 	}
 	res = httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/canary.ext/rollback", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/canary.ext/rollback", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("post-promotion rollback returned %d: %s", res.Code, res.Body.String())
 	}
@@ -178,7 +178,7 @@ func TestCanaryRollbackDiscardsCandidate(t *testing.T) {
 	startCanary(t, srv, canaryManifest(t, key, "2.0.0"), CanaryScope{Organisation: true})
 
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodPost, "/v1/extensions/canary.ext/canary/rollback", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/canary.ext/canary/rollback", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("rollback returned %d: %s", res.Code, res.Body.String())
 	}
@@ -244,7 +244,7 @@ func TestCanarySurvivesRestart(t *testing.T) {
 	srv := newExtServerAt(path)
 	stable := canaryManifest(t, privateKey, "1.0.0")
 	res := httptest.NewRecorder()
-	srv.handleInstall(res, httptest.NewRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, stable))))
+	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, stable))))
 	if res.Code != http.StatusOK {
 		t.Fatalf("install returned %d", res.Code)
 	}

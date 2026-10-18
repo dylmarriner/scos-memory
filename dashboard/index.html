@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%226%22 fill=%22none%22 stroke=%22%2300e5ff%22 stroke-width=%222%22/%3E%3C/svg%3E">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SCOS Memory Command Center</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -150,6 +151,7 @@
     .panel-body::-webkit-scrollbar, dialog::-webkit-scrollbar { width: 9px; height: 9px; }
     .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
     .missing { color: var(--text-faint); font-style: italic; }
+    body.data-stale .panel-body, body.data-stale .stat-grid, body.data-stale .hud-panel { opacity: .5; filter: grayscale(.6); transition: opacity .3s; }
     pre.raw { white-space: pre-wrap; word-break: break-word; background: #04060b; color: #9fe8b0; padding: .7rem .8rem; border-radius: .5rem; overflow: auto; max-height: 320px; margin: 0; font: .78rem/1.5 ui-monospace, 'SF Mono', Menlo, monospace; border: 1px solid var(--border-soft); }
 
     table.kv { width: 100%; border-collapse: collapse; font-size: .78rem; }
@@ -355,7 +357,7 @@
         <div class="col-stack">
           <div class="hud-panel" style="--hud-accent:var(--violet)">
             <div class="hud-panel-head"><span class="hud-tag">ENT</span><span class="hud-title">Entities</span></div>
-            <table class="kv" id="mem-entities"></table>
+            <div id="mem-entities"></div>
           </div>
           <div class="hud-panel">
             <div class="hud-panel-head"><span class="hud-tag">LNK</span><span class="hud-title">Link types</span></div>
@@ -423,8 +425,8 @@
         <div class="glass-card violet">
           <div class="card-title violet" style="margin-bottom:.65rem">Routing decisions</div>
           <p style="color:var(--text-dim);font-size:.76rem;margin:0 0 .5rem">
-            The control plane's decision store is per-interaction, not a live list -- this shows
-            whatever the projection could resolve without one, which is usually "unavailable" by design.
+            The control plane's most recent routing decisions: which systems each interaction was
+            routed through, its risk class, and whether it needed confirmation.
           </p>
           <div class="panel-body" id="agt-routing-mount"></div>
         </div>
@@ -603,11 +605,11 @@
 
       <div class="flow-grid" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start;margin-top:1rem">
         <div class="glass-card green">
-          <div class="card-title green" style="margin-bottom:.8rem">Token flow</div>
+          <div class="card-title green" style="margin-bottom:.8rem">LLM tokens</div>
           <div class="panel-body" id="flow-tokens-mount"></div>
         </div>
         <div class="glass-card plain">
-          <div class="card-title plain" style="margin-bottom:.7rem">Cost breakdown</div>
+          <div class="card-title plain" style="margin-bottom:.7rem">LLM cost</div>
           <div class="panel-body" id="flow-costs-mount"></div>
         </div>
       </div>
@@ -1215,9 +1217,9 @@
     // governance-level "how does it connect") and tool-governance's recent
     // operations (which tools have actually been exercised lately). There is
     // deliberately no fabricated agent->operation edge: /v1/operations does
-    // not carry an agent_id, and /v1/control/decisions is per-interaction,
-    // not a list, so this never pretends to show live call traffic it can't
-    // actually attribute.
+    // not carry an agent_id, and the control plane's recent decisions do not
+    // name the operation they started, so this never pretends to show live
+    // call traffic it can't actually attribute.
     const AGENT_STATUS_COLOR = { active: 'var(--green)', degraded: 'var(--amber)', inactive: 'var(--text-faint)' };
     const TOOL_COLOR = 'var(--amber)';
 
@@ -1528,8 +1530,8 @@
       { key: 'routing',           title: 'Routing',              tag: 'RTG', group: 'ops' },
       { key: 'recovery',          title: 'Recovery',             tag: 'REC', group: 'identity' },
       { key: 'security',          title: 'Security',             tag: 'SEC', group: 'identity' },
-      { key: 'token_flow',        title: 'Token Flow',         tag: 'TKN', group: 'signal' },
-      { key: 'costs',             title: 'Costs',                 tag: 'CST', group: 'signal' },
+      { key: 'token_flow',        title: 'LLM Tokens',         tag: 'TKN', group: 'signal' },
+      { key: 'costs',             title: 'LLM Cost',              tag: 'CST', group: 'signal' },
       { key: 'memory_summary',    title: 'Memory Summary',     tag: 'SUM', group: 'signal' },
       { key: 'code_repos',        title: 'Code Repos',           tag: 'REP', group: 'identity' },
       { key: 'credentials',       title: 'Vault',                 tag: 'VLT', group: 'identity' },
@@ -1569,6 +1571,14 @@
     }
 
     function defaultPaint(bodyEl, value) { bodyEl.appendChild(render(value)); }
+
+    // The facts view is memory-intelligence's DashboardView: {type, entries,
+    // total_count, last_updated}. Older payloads were a bare array.
+    function factEntries(value) {
+      if (Array.isArray(value)) return value;
+      if (value && Array.isArray(value.entries)) return value.entries;
+      return null;
+    }
 
     // ── build the tab bar ────────────────────────────────────────────────
     const TABS = [
@@ -1629,8 +1639,10 @@
       if (looksLikeGraph(value)) meta.textContent = `${value.nodes.length} nodes · ${value.edges.length} links`;
     });
     mountPanel('facts', null, document.getElementById('ov-facts-mount'), (bodyEl, value) => {
-      bodyEl.appendChild(render(value));
-      document.getElementById('ov-facts-count').textContent = Array.isArray(value) ? `${value.length} indexed` : '';
+      const entries = factEntries(value);
+      bodyEl.appendChild(render(entries === null ? value : entries));
+      const total = value && typeof value.total_count === 'number' ? value.total_count : entries ? entries.length : null;
+      document.getElementById('ov-facts-count').textContent = total === null ? '' : `${total} indexed`;
     });
 
     // ── Memory tab: full graph + derived stats (all real, computed from
@@ -1672,12 +1684,15 @@
     });
     mountPanel('memory', null, document.getElementById('mem-stats'), (bodyEl, value) => {
       if (!looksLikeGraph(value)) { bodyEl.appendChild(render(value)); return; }
-      const degree = new Map();
+      // An orphan fact is one no entity links to: links between two facts
+      // do not count.
+      const kind = new Map(value.nodes.map((n) => [n.id, n.type]));
+      const entityLinked = new Set();
       for (const e of value.edges) {
-        degree.set(e.source, (degree.get(e.source) || 0) + 1);
-        degree.set(e.target, (degree.get(e.target) || 0) + 1);
+        if (kind.get(e.source) === 'entity') entityLinked.add(e.target);
+        if (kind.get(e.target) === 'entity') entityLinked.add(e.source);
       }
-      const orphanFacts = value.nodes.filter((n) => n.type !== 'entity' && !degree.get(n.id)).length;
+      const orphanFacts = value.nodes.filter((n) => n.type !== 'entity' && !entityLinked.has(n.id)).length;
       const clusters = countConnectedComponents(value.nodes, value.edges);
       bodyEl.append(
         statTile('nodes', String(value.nodes.length), 'facts + entities', 'var(--cyan)'),
@@ -1727,9 +1742,13 @@
     // ── Facts tab: full table + honest stat tiles (total / distinct
     // networks / average confidence / forgotten — every one of these comes
     // straight off the fetched fact records, nothing invented). ─────────
-    mountPanel('facts', null, document.getElementById('facts-table-mount'), defaultPaint);
-    mountPanel('facts', null, document.getElementById('facts-stats'), (bodyEl, value) => {
-      if (!Array.isArray(value)) { bodyEl.appendChild(render(value)); return; }
+    mountPanel('facts', null, document.getElementById('facts-table-mount'), (bodyEl, value) => {
+      const entries = factEntries(value);
+      bodyEl.appendChild(render(entries === null ? value : entries));
+    });
+    mountPanel('facts', null, document.getElementById('facts-stats'), (bodyEl, raw) => {
+      const value = factEntries(raw);
+      if (value === null) { bodyEl.appendChild(render(raw)); return; }
       const networks = new Set(value.map((f) => f.network).filter(Boolean));
       const confidences = value.map((f) => Number(f.confidence)).filter((n) => !isNaN(n));
       const avgConfidence = confidences.length ? (confidences.reduce((a, b) => a + b, 0) / confidences.length) : null;
@@ -1812,8 +1831,41 @@
     }
 
     // ── Flow tab ─────────────────────────────────────────────────────────
-    mountPanel('token_flow', null, document.getElementById('flow-tokens-mount'), defaultPaint);
-    mountPanel('costs', null, document.getElementById('flow-costs-mount'), defaultPaint);
+    // Model usage as the provider counted it (scos.llm.tokens, scos.llm.cost),
+    // summed per service and model over the retained points.
+    const fmtCount = (n) => Math.round(n).toLocaleString('en');
+    function usageTable(points, valueOf, columns, emptyText) {
+      if (!Array.isArray(points)) return render(points);
+      const rows = new Map();
+      for (const p of points) {
+        const labels = p.labels || {};
+        const key = `${labels.service || '?'}|${labels.model || '?'}`;
+        const row = rows.get(key) || { service: labels.service || '?', model: labels.model || '?', calls: 0, prompt: 0, completion: 0, value: 0 };
+        valueOf(row, p, labels);
+        rows.set(key, row);
+      }
+      if (rows.size === 0) { const el = document.createElement('p'); el.className = 'missing'; el.textContent = emptyText; return el; }
+      const table = document.createElement('table');
+      table.className = 'kv';
+      table.innerHTML = `<tr>${columns.map((c) => `<th>${escapeHtml(c.label)}</th>`).join('')}</tr>` +
+        [...rows.values()].map((r) => `<tr>${columns.map((c) => `<td>${escapeHtml(c.cell(r))}</td>`).join('')}</tr>`).join('');
+      return table;
+    }
+    mountPanel('token_flow', null, document.getElementById('flow-tokens-mount'), (bodyEl, value) => {
+      bodyEl.appendChild(usageTable(value, (row, p, labels) => {
+        if (labels.kind === 'prompt') { row.prompt += p.value; row.calls += 1; } else row.completion += p.value;
+      }, [
+        { label: 'service', cell: (r) => r.service }, { label: 'model', cell: (r) => r.model },
+        { label: 'calls', cell: (r) => fmtCount(r.calls) }, { label: 'prompt', cell: (r) => fmtCount(r.prompt) },
+        { label: 'completion', cell: (r) => fmtCount(r.completion) },
+      ], 'no model calls recorded'));
+    });
+    mountPanel('costs', null, document.getElementById('flow-costs-mount'), (bodyEl, value) => {
+      bodyEl.appendChild(usageTable(value, (row, p) => { row.value += p.value; row.calls += 1; }, [
+        { label: 'service', cell: (r) => r.service }, { label: 'model', cell: (r) => r.model },
+        { label: 'calls', cell: (r) => fmtCount(r.calls) }, { label: 'USD', cell: (r) => r.value.toFixed(4) },
+      ], 'no priced model calls (set SCOS_LLM_PRICE_INPUT_PER_MTOK and SCOS_LLM_PRICE_OUTPUT_PER_MTOK)'));
+    });
     mountPanel('timeline', null, document.getElementById('flow-timeline-mount'), defaultPaint);
 
     // ── Flow // telemetry deck ───────────────────────────────────────────
@@ -2028,7 +2080,7 @@
 
       // ── service flow graph ────────────────────────────────────────────
       let anim = null;
-      function layoutFlows(flows, W, H) {
+      function layoutFlows(flows, W, minH) {
         const nodes = flows.nodes.map((n) => ({ ...n, traffic: n.inbound_requests + n.outbound_requests }));
         const byId = new Map(nodes.map((n) => [n.id, n]));
         const out = new Map(nodes.map((n) => [n.id, []]));
@@ -2060,6 +2112,12 @@
         const columns = [];
         for (const n of nodes) (columns[depth.get(n.id)] = columns[depth.get(n.id)] || []).push(n);
         const padX = 80, padY = 44;
+        // Each node in a column needs room for its circle plus its two label
+        // lines (up to ~22px radius + ~26px of text); grow the canvas instead
+        // of letting a busy column overlap.
+        const rowPx = 64;
+        const tallest = Math.max(1, ...columns.map((col) => (col ? col.length : 0)));
+        const H = Math.max(minH, 2 * padY + (tallest - 1) * rowPx);
         columns.forEach((col, c) => {
           col.sort((a, b) => b.traffic - a.traffic || a.id.localeCompare(b.id));
           col.forEach((n, i) => {
@@ -2070,7 +2128,7 @@
         });
         const maxTraffic = Math.max(1, ...nodes.map((n) => n.traffic));
         for (const n of nodes) n.r = 9 + 13 * Math.sqrt(n.traffic / maxTraffic);
-        return { nodes, byId };
+        return { nodes, byId, H };
       }
 
       function edgeGeometry(a, b, offset) {
@@ -2101,9 +2159,9 @@
         }
         meta.textContent = `${flows.nodes.length} nodes · ${flows.edges.length} edges · ${fmtNum(flows.requests)} requests`;
         const W = Math.max(mount.clientWidth || 900, 320);
-        const H = 460;
-        const { nodes, byId } = layoutFlows(flows, W, H);
+        const { nodes, byId, H } = layoutFlows(flows, W, 460);
         const svg = el('svg', { class: 'fx-graph-svg', viewBox: `0 0 ${W} ${H}` }, mount);
+        svg.style.height = H + 'px';
         const defs = el('defs', {}, svg);
         const pg = el('radialGradient', { id: 'fx-particle-grad' }, defs);
         el('stop', { offset: '0%', 'stop-color': '#ffffff', 'stop-opacity': 1 }, pg);
@@ -2244,15 +2302,14 @@
         if (!flows) return;
         const minutes = Math.max((new Date(flows.to) - new Date(flows.from)) / 60000, 1);
         const services = flows.nodes.filter((n) => n.kind === 'service');
-        const p95s = services.map((n) => n.p95_ms).filter((v) => v !== null && v !== undefined);
         const hottest = services.slice().sort((a, b) => b.inbound_requests - a.inbound_requests)[0];
-        const slowest = services.filter((n) => n.p95_ms !== undefined).sort((a, b) => b.p95_ms - a.p95_ms)[0];
+        const slowest = services.filter((n) => typeof n.p95_ms === 'number').sort((a, b) => b.p95_ms - a.p95_ms)[0];
         const ratio = flows.requests ? flows.errors / flows.requests : 0;
         mount.append(
           statTile('requests', fmtNum(flows.requests), `in ${range}`, 'var(--cyan)'),
           statTile('throughput', fmtNum(flows.requests / minutes) + '/min', 'mean over window', 'var(--cyan)'),
           statTile('5xx ratio', flows.requests ? fmtPct(ratio) : '—', `${flows.errors} errors`, ratio >= 0.05 ? 'var(--red)' : ratio >= 0.01 ? 'var(--amber)' : 'var(--green)'),
-          statTile('worst p95', p95s.length ? fmtMs(Math.max(...p95s)) : '—', slowest ? slowest.id : 'no latency samples', 'var(--violet)'),
+          statTile('worst p95', slowest ? fmtMs(slowest.p95_ms) : '—', slowest ? slowest.id : 'no latency samples', 'var(--violet)'),
           statTile('active services', String(services.length), `${flows.edges.length} live edges`, 'var(--violet)'),
           statTile('hottest', hottest ? hottest.id : '—', hottest ? `${fmtNum(hottest.inbound_requests)} inbound` : 'no traffic', 'var(--amber)'),
         );
@@ -2633,13 +2690,24 @@
       renderAgentTopology();
       FX.fromSnapshot(views.service_flows);
       statusPill.classList.remove('error');
-      statusText.textContent = `refreshed ${new Date().toISOString()}`;
+      lastSnapshotAt = new Date();
+      document.body.classList.remove('data-stale');
+      statusText.textContent = `refreshed ${lastSnapshotAt.toISOString()}`;
       if (anyUnavailable) statusText.textContent += ' (partial)';
     }
 
+    let lastSnapshotAt = null;
     function setStatusError(message) {
       statusPill.classList.add('error');
       statusText.textContent = message;
+    }
+    // When the snapshot cannot be refreshed the panels keep their last
+    // values; they are dimmed and the status says how old they are, so
+    // stale numbers never pass for live ones.
+    function markSnapshotStale(error) {
+      document.body.classList.add('data-stale');
+      const age = lastSnapshotAt ? ` -- showing data from ${lastSnapshotAt.toISOString()}` : '';
+      setStatusError(`projection unavailable: ${error.message}${age}`);
     }
 
     // ── live trace (SSE) → both the Flow tab's full log and the sticky
@@ -2649,8 +2717,20 @@
     const marqueeScroll = document.getElementById('marquee-scroll');
     const traceBuffer = [];
 
+    // The time shown is when the event happened, read from its payload;
+    // an event that carries no time is marked as received now.
+    function eventTime(data) {
+      try {
+        const parsed = JSON.parse(data);
+        for (const key of ['occurred_at', 'timestamp', 'time', 'created_at', 'recorded_at']) {
+          if (parsed && typeof parsed[key] === 'string' && !isNaN(Date.parse(parsed[key]))) return new Date(parsed[key]).toISOString();
+        }
+      } catch (e) { /* not JSON */ }
+      return `${new Date().toISOString()} (received)`;
+    }
+
     function appendTraceLine(eventName, data) {
-      const ts = new Date().toISOString();
+      const ts = eventTime(data);
       traceBuffer.push(`[${ts}] ${eventName} ${data}`);
       while (traceBuffer.length > 200) traceBuffer.shift();
 
@@ -2667,7 +2747,9 @@
       // panel shows -- keep it in sync instead of waiting for the next
       // 15s poll.
       if (/fact/i.test(eventName)) refreshSnapshot().catch(() => {});
-      FX.pulse();
+      // Only request traffic ripples the ingress node; memory and fact
+      // events are not ingress requests.
+      if (/request|http|ingress|route/i.test(eventName)) FX.pulse();
     }
 
     // The stream endpoint is public like every other transparency route
@@ -2875,7 +2957,7 @@
       const errEl = document.getElementById('acct-settings-error');
       errEl.textContent = '';
       try {
-        await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify({ display_name: document.getElementById('set-display-name').value }) });
+        await apiFetch('/api/settings', { method: 'PATCH', body: JSON.stringify({ display_name: document.getElementById('set-display-name').value }) });
         await checkSession();
       } catch (error) { errEl.textContent = error.message; }
     });
@@ -3103,8 +3185,8 @@
     };
 
     renderEditState();
-    refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`));
-    setInterval(() => refreshSnapshot().catch((error) => setStatusError(`projection unavailable: ${error.message}`)), 15000);
+    refreshSnapshot().catch(markSnapshotStale);
+    setInterval(() => refreshSnapshot().catch(markSnapshotStale), 15000);
     connectTrace();
     checkSession();
   </script>

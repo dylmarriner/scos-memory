@@ -42,6 +42,9 @@ func TestLoadGraphMatchesRealGraphifyOutput(t *testing.T) {
 	if relationTypeFor(extracted.Confidence) != "extracted_from" {
 		t.Fatalf("relationTypeFor(EXTRACTED) = %q, want extracted_from", relationTypeFor(extracted.Confidence))
 	}
+	if got := relationTypeFor("AMBIGUOUS"); got != "ambiguous_with" {
+		t.Fatalf("relationTypeFor(AMBIGUOUS) = %q, want ambiguous_with", got)
+	}
 	if relationTypeFor(inferred.Confidence) != "inferred_from" {
 		t.Fatalf("relationTypeFor(INFERRED) = %q, want inferred_from", relationTypeFor(inferred.Confidence))
 	}

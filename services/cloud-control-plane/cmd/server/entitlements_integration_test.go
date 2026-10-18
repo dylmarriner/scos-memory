@@ -115,7 +115,7 @@ func TestHostedMCPEnforcesPlanEntitlements(t *testing.T) {
 		t.Fatalf("free plan recall: %d %s", res.Code, res.Body.String())
 	}
 	for _, s := range lastScopes {
-		if s == "backups:admin" || s == "recovery:admin" {
+		if s == "backups:admin" || s == "recovery:admin" || s == "extensions:admin" {
 			t.Fatalf("customer key carried operator scope %s", s)
 		}
 	}

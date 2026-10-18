@@ -425,7 +425,14 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	idemKey := "hermes_sync_turn:" + req.SessionID + ":" + req.TurnID
-	requestHash := sha256Hex(req.SessionID, req.TurnID)
+	// The hash covers the content, so a retry of the same turn_id carrying
+	// different messages is refused rather than answered as a duplicate.
+	content, err := json.Marshal([]any{req.Messages, req.ToolCalls})
+	if err != nil {
+		http.Error(w, "encode turn: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	requestHash := sha256Hex(req.SessionID, req.TurnID, string(content))
 	var replayed map[string]any
 	found, err := idempotentReplay(ctx, tx, identity, idemKey, requestHash, &replayed)
 	if err != nil {
@@ -452,6 +459,10 @@ func (s *hermesServer) handleSyncTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := insertTurnWithMessages(ctx, tx, identity, req.SessionID, generatedTurnID, req.Messages, req.ToolCalls); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := enqueueConsolidation(ctx, tx, identity, req.SessionID, generatedTurnID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -495,7 +506,7 @@ func (s *hermesServer) handleToolSchemas(w http.ResponseWriter, r *http.Request)
 		},
 		{
 			"name":        "scos_status",
-			"description": "Check SCOS Nexus memory provider status",
+			"description": "Check the memory provider status for your tenant: queued and completed pre-warms and the last pre-warm error",
 			"input_schema": map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
@@ -674,10 +685,16 @@ func (s *hermesServer) handlePreCompress(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	insightID := generatedTurnID
-	if err := appendEvent(ctx, tx, identity.TenantID, req.SessionID, "session.pre_compress_insight", "session/"+req.SessionID, identity.PrincipalID,
-		map[string]string{"turn_id": insightID}); err != nil {
-		http.Error(w, "record insight event: "+err.Error(), http.StatusInternalServerError)
+	// The messages about to be compressed away are kept as a turn and
+	// queued for consolidation, which extracts the durable memories from
+	// them; nothing is summarised here.
+	if err := enqueueConsolidation(ctx, tx, identity, req.SessionID, generatedTurnID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := appendEvent(ctx, tx, identity.TenantID, req.SessionID, "session.pre_compress", "session/"+req.SessionID, identity.PrincipalID,
+		map[string]string{"turn_id": generatedTurnID}); err != nil {
+		http.Error(w, "record pre-compress event: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -686,9 +703,10 @@ func (s *hermesServer) handlePreCompress(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, map[string]any{
-		"preserved":        true,
-		"durable_insights": []string{insightID},
-		"session_id":       req.SessionID,
+		"preserved":     true,
+		"turn_id":       generatedTurnID,
+		"consolidation": "queued",
+		"session_id":    req.SessionID,
 	})
 }
 

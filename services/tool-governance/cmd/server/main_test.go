@@ -145,3 +145,38 @@ func TestRequestFingerprintIsStableAndSensitiveToChange(t *testing.T) {
 		t.Fatal("expected different input to produce different fingerprint")
 	}
 }
+
+func TestReconcileFollowsTheTransitionTable(t *testing.T) {
+	cases := []struct {
+		from   ToolState
+		result string
+		want   ToolState
+	}{
+		{StateExecuting, "succeeded", StateSucceeded},
+		{StateExecuting, "failed", StateFailed},
+		{StateExecuting, "unknown", StateUnknown},
+		{StateExecuting, "", ""},
+		{StateUnknown, "", StateReconciling},
+		{StateUnknown, "succeeded", StateReconciled},
+		{StateUnknown, "failed", StateFailed},
+		{StateFailed, "unknown", StateReconciling},
+		{StateFailed, "succeeded", StateReconciled},
+		{StateFailed, "failed", StateFailed},
+		{StateReconciling, "succeeded", StateReconciled},
+		{StateReconciling, "failed", StateFailed},
+		{StateReconciling, "", ""},
+		{StateExecuting, "maybe", ""},
+	}
+	for _, c := range cases {
+		got, err := reconciledState(c.from, c.result)
+		if c.want == "" {
+			if err == nil {
+				t.Errorf("%s + %q: expected refusal, got %s", c.from, c.result, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("%s + %q = %s, %v; want %s", c.from, c.result, got, err, c.want)
+		}
+	}
+}
