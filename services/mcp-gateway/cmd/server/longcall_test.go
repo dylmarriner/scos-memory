@@ -33,6 +33,32 @@ func TestForwardLongPOSTOutlastsTheShortClient(t *testing.T) {
 	}
 }
 
+// The backup plan verifies the newest backup and its object-store copy on
+// every call, so scos_backup_plan must ride the long client too.
+func TestBackupPlanUsesTheLongClient(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/plan" {
+			http.NotFound(w, r)
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"items":{"base_backups":{"covered":true}}}`))
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{client: &http.Client{Timeout: 50 * time.Millisecond}, longClient: &http.Client{Timeout: 5 * time.Second}, backupManagerURL: upstream.URL}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	if _, err := s.forwardGET(context.Background(), r, upstream.URL+"/v1/plan"); err == nil {
+		t.Fatal("the short client should give up on a slow upstream")
+	}
+	got, err := s.dispatchTool(context.Background(), r, requestIdentity{TenantID: "t", PrincipalID: "p"}, "scos_backup_plan", map[string]any{})
+	if err != nil {
+		t.Fatalf("scos_backup_plan: %v", err)
+	}
+	if m, _ := got.(map[string]any); m["items"] == nil {
+		t.Fatalf("unexpected result %#v", got)
+	}
+}
+
 func TestEachCallGetsItsOwnIdempotencyKeyUnlessTheCallerNamesOne(t *testing.T) {
 	var keys []string
 	var bodies []map[string]any

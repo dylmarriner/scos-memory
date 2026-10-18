@@ -570,7 +570,10 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	case "scos_restore_cadence":
 		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/restore-tests/cadence")
 	case "scos_backup_plan":
-		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/plan")
+		// Coverage is re-derived from evidence on every call: the newest
+		// backup and its object-store copy are read back and verified, which
+		// grows with the backups and can outlast the short client.
+		return s.forwardLongGET(ctx, r, s.backupManagerURL+"/v1/plan")
 	case "scos_okf_mirror_status":
 		return s.forwardGET(ctx, r, s.backupManagerURL+"/v1/git-mirror")
 	case "scos_okf_mirror_push":
@@ -884,12 +887,25 @@ func (s *gatewayServer) callHermesProvider(ctx context.Context, r *http.Request,
 }
 
 func (s *gatewayServer) forwardGET(ctx context.Context, r *http.Request, url string) (any, error) {
+	return s.forwardGETWith(s.client, ctx, r, url)
+}
+
+// forwardLongGET is forwardGET for upstream reads measured in minutes.
+func (s *gatewayServer) forwardLongGET(ctx context.Context, r *http.Request, url string) (any, error) {
+	client := s.longClient
+	if client == nil {
+		client = s.client
+	}
+	return s.forwardGETWith(client, ctx, r, url)
+}
+
+func (s *gatewayServer) forwardGETWith(client *http.Client, ctx context.Context, r *http.Request, url string) (any, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	s.copyIdentityHeaders(r, req)
-	resp, err := s.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errUnreachable(upstreamName(url) + " unavailable: " + err.Error())
 	}
