@@ -1,6 +1,8 @@
 // Package secretscan does write-time pattern matching for secret- and
 // PII-shaped content (AWS keys, JWTs, PEM private key headers, SSNs,
-// credit-card-shaped digit sequences, generic high-entropy tokens). Pattern
+// credit-card-shaped digit sequences, generic high-entropy tokens, and
+// credentials written out in text: labelled passwords and keys, passwords in
+// URLs, and user/password pairs). Pattern
 // shapes are adapted from gitleaks' default gitleaks.toml (MIT-licensed) --
 // gitleaks itself is a CLI tool, not embedded here, only its pattern shapes
 // are borrowed.
@@ -8,6 +10,7 @@ package secretscan
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -15,12 +18,15 @@ import (
 type Kind string
 
 const (
-	KindAWSAccessKey  Kind = "aws_access_key"
-	KindJWT           Kind = "jwt"
-	KindPrivateKeyPEM Kind = "private_key_pem"
-	KindSSN           Kind = "ssn"
-	KindCreditCard    Kind = "credit_card"
-	KindHighEntropy   Kind = "high_entropy_token"
+	KindAWSAccessKey   Kind = "aws_access_key"
+	KindJWT            Kind = "jwt"
+	KindPrivateKeyPEM  Kind = "private_key_pem"
+	KindSSN            Kind = "ssn"
+	KindCreditCard     Kind = "credit_card"
+	KindHighEntropy    Kind = "high_entropy_token"
+	KindPassword       Kind = "password"
+	KindURLCredential  Kind = "url_credential"
+	KindCredentialPair Kind = "credential_pair"
 )
 
 // Finding is one pattern match within scanned content.
@@ -33,19 +39,34 @@ type Finding struct {
 type pattern struct {
 	kind Kind
 	re   *regexp.Regexp
+	// group, when non-zero, is the submatch holding the secret itself: only
+	// it is redacted, so "router admin/[REDACTED:credential_pair]" still
+	// says what the memory is about.
+	group int
 }
 
 var patterns = []pattern{
-	{KindAWSAccessKey, regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`)},
-	{KindJWT, regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)},
-	{KindPrivateKeyPEM, regexp.MustCompile(`-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----`)},
-	{KindSSN, regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
-	{KindCreditCard, regexp.MustCompile(`\b(?:\d[ -]?){13,16}\b`)},
+	{KindAWSAccessKey, regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`), 0},
+	{KindJWT, regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`), 0},
+	{KindPrivateKeyPEM, regexp.MustCompile(`-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----`), 0},
+	{KindSSN, regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`), 0},
+	{KindCreditCard, regexp.MustCompile(`\b(?:\d[ -]?){13,16}\b`), 0},
 	// Generic high-entropy token: a long run of base64/hex-alphabet
 	// characters mixing case and digits, the shape gitleaks' generic-api-key
 	// rule targets. Deliberately conservative (32+ chars, must mix letter
 	// case and digits) to keep false positives on ordinary prose low.
-	{KindHighEntropy, regexp.MustCompile(`\b(?:[A-Za-z0-9+/_-]{32,})\b`)},
+	{KindHighEntropy, regexp.MustCompile(`\b(?:[A-Za-z0-9+/_-]{32,})\b`), 0},
+	// A value given for a password-, secret-, key- or token-like label
+	// ("password: hunter22", "api_key=...", "token is ..."), the same label
+	// set security-gate classifies as secret.
+	{KindPassword, regexp.MustCompile(`(?i)\b(?:password|passwd|pwd|passphrase|passcode|pin|secret|client[ _-]?secret|api[ _-]?key|access[ _-]?key|secret[ _-]?key|private[ _-]?key|token|access[ _-]?token|auth[ _-]?token|bearer)\b\s*(?:is|:|=|=>)\s*["']?([^\s"',;]{4,})`), 1},
+	// The password in a URL's userinfo: scheme://user:password@host.
+	{KindURLCredential, regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:([^/\s@]+)@`), 1},
+	// An account name and its password written together, "admin/s3cret" or
+	// "root:s3cret". The account must be a login name, not a path segment,
+	// and the password must mix letters with digits or symbols, so paths
+	// and repository names ("user/scos-memory") are left alone.
+	{KindCredentialPair, regexp.MustCompile(`(?i)(?:^|[\s(\[,;'"])(?:admin|administrator|root|user|username|login|pi|ubuntu|sa|postgres)\s*[/:]\s*([^\s/,;'")\]]{4,})`), 1},
 }
 
 // Scan returns every pattern match in content. Findings are ordered by
@@ -56,8 +77,22 @@ func Scan(content string) []Finding {
 	var findings []Finding
 	var claimed [][2]int
 	for _, p := range patterns {
-		for _, l := range p.re.FindAllStringIndex(content, -1) {
+		for _, l := range p.re.FindAllStringSubmatchIndex(content, -1) {
 			loc := [2]int{l[0], l[1]}
+			if p.group > 0 {
+				if l[2*p.group] < 0 {
+					continue
+				}
+				loc = [2]int{l[2*p.group], l[2*p.group+1]}
+			}
+			// A labelled value or account pair is a credential only if it is
+			// shaped like one: "token is required" names no secret.
+			if (p.kind == KindCredentialPair || p.kind == KindPassword) && !credentialShaped(content[loc[0]:loc[1]]) {
+				continue
+			}
+			if p.group > 0 && overlapsAny(loc, claimed) {
+				continue
+			}
 			if p.kind == KindHighEntropy && overlapsAny(loc, claimed) {
 				continue
 			}
@@ -72,7 +107,26 @@ func Scan(content string) []Finding {
 			claimed = append(claimed, loc)
 		}
 	}
+	// Redact walks findings in order and skips a span that starts before
+	// the previous one ends, so they must be in content order: in pattern
+	// order, a secret a later pattern found earlier in the text was left in.
+	sort.SliceStable(findings, func(i, j int) bool { return findings[i].Span[0] < findings[j].Span[0] })
 	return findings
+}
+
+// credentialShaped reports whether s mixes letters with digits or symbols,
+// as a password does and a plain word or name does not.
+func credentialShaped(s string) bool {
+	var letter, other bool
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+			letter = true
+		default:
+			other = true
+		}
+	}
+	return letter && other
 }
 
 // Redact replaces every finding's span in content with its Kind, e.g.
