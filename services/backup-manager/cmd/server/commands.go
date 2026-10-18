@@ -23,8 +23,9 @@ import (
 //	    verifies a backup's object-store copy and writes it back to the
 //	    provider, for when the provider's own copy is lost or damaged.
 //	backup-manager secret-drill
-//	    recovers the backup key from Bitwarden Secrets Manager and decrypts
-//	    the newest encrypted backup with it, recording the result.
+//	    recovers the backup key from Bitwarden (Secrets Manager or a vault
+//	    item) and decrypts the newest encrypted backup with it, recording
+//	    the result.
 func runCommand(args []string) int {
 	switch args[0] {
 	case "restore-config":
