@@ -66,7 +66,7 @@ test that fails on the old behaviour.
 - **`packages/hermes-memory-provider`:** an unused file-backed duplicate of the `hermes-provider` service. Removing it is recommended but was not done, because the deletion needs owner approval.
 - **Other packages nothing imports:** `agent-adapter-sdk`, `hook-sdk`, `skill-sdk`, `context-contracts`, `extension-contracts`, `routing-contracts`, `language-adapters` and `benchmark-harness`. Nothing in the repository imports them, but they are tested public SDK and contract packages, and the code-intelligence acceptance corpus looks some of them up. They are kept.
 - **Bitwarden drill (`secret_manager_recovery`):** the code is complete. Running it needs a Bitwarden Secrets Manager machine-account token from the owner.
-- **Acceptance artifact:** `benchmarks/acceptance-results.json` must be regenerated on a host with Docker, because the code-intelligence and execution-proxy domains need it. This sandbox has no Docker. The routing domains were measured here: frozen 24/24, held-out 34/36 (precision 0.98, recall 1.0).
+- **execution-proxy legacy records with no tenant:** these are left unreadable on purpose, so that access fails closed. Whether to backfill them is the owner's decision, pending on the PR #45 review thread.
 
 ## Verification
 
@@ -95,7 +95,7 @@ The fabric was redeployed from this branch, and the results below were verified 
 - **Text model enabled:** bge-m3 now runs through `model-runtime` on CPU, using the `text-model` profile. Its caches are on the backup drive. It has `--max-batch-tokens 4096` and a 5 GB memory cap, because TEI's default warm-up crash-looped it on this 15 GB host.
 - **Re-embedding:** the embeddings worker activated the 1024-dimension space and re-embedded all 36 memory versions.
 - **Recall:** now returns `fulltext+semantic` hits.
-- **Reranker not run:** bge-reranker is not run on kubuntux, because running it alongside bge-m3 exhausted host memory. Retrieval reports it as degraded. Running it needs more RAM or a remote inference backend set through `SCOS_MODEL_RERANK_URL`.
+- **Reranker:** a first attempt with bge-reranker beside bge-m3 exhausted host memory. A smaller cross-encoder now runs (see "Retrieval models on kubuntux: complete" below).
 
 ## Live dashboard audit (kubuntux)
 
