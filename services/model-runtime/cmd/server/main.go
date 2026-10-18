@@ -31,12 +31,22 @@ const (
 	defaultTimeoutSec = 60
 )
 
+// Backend protocols. TEI (text-embeddings-inference) serves /embed and
+// /rerank. llama.cpp's server serves the OpenAI /v1/embeddings shape and a
+// Jina-style /v1/rerank; its Vulkan build runs models entirely in GPU memory
+// on cards TEI has no build for, such as AMD Polaris.
+const (
+	protocolTEI      = "tei"
+	protocolLlamaCPP = "llamacpp"
+)
+
 type backendConfig struct {
 	URL        string
 	Model      string
 	Revision   string
 	Dimensions int
 	Required   bool
+	Protocol   string
 }
 
 type runtimeConfig struct {
@@ -185,8 +195,12 @@ func (s *runtimeServer) embed(w http.ResponseWriter, r *http.Request, role strin
 		return
 	}
 
-	payload, _ := json.Marshal(map[string]any{"inputs": body.Input})
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(cfg.URL, "/")+"/embed", bytes.NewReader(payload))
+	path, payload := "/embed", map[string]any{"inputs": body.Input}
+	if cfg.Protocol == protocolLlamaCPP {
+		path, payload = "/v1/embeddings", map[string]any{"input": body.Input}
+	}
+	encoded, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(cfg.URL, "/")+path, bytes.NewReader(encoded))
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create backend request"})
 		return
@@ -207,7 +221,7 @@ func (s *runtimeServer) embed(w http.ResponseWriter, r *http.Request, role strin
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "read embedding backend response"})
 		return
 	}
-	embedding, err := decodeEmbedding(raw)
+	embedding, err := decodeEmbedding(raw, cfg.Protocol)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid embedding backend response"})
 		return
@@ -266,8 +280,12 @@ func (s *runtimeServer) rerank(w http.ResponseWriter, r *http.Request) {
 		body.TopN = len(body.Documents)
 	}
 
-	payload, _ := json.Marshal(map[string]any{"query": body.Query, "texts": body.Documents})
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(cfg.URL, "/")+"/rerank", bytes.NewReader(payload))
+	path, payload := "/rerank", map[string]any{"query": body.Query, "texts": body.Documents}
+	if cfg.Protocol == protocolLlamaCPP {
+		path, payload = "/v1/rerank", map[string]any{"query": body.Query, "documents": body.Documents}
+	}
+	encoded, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(cfg.URL, "/")+path, bytes.NewReader(encoded))
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "create rerank backend request"})
 		return
@@ -283,8 +301,8 @@ func (s *runtimeServer) rerank(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "rerank backend returned " + resp.Status})
 		return
 	}
-	var raw []rerankResult
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&raw); err != nil {
+	raw, err := decodeRerank(io.LimitReader(resp.Body, 4<<20), cfg.Protocol)
+	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid rerank backend response"})
 		return
 	}
@@ -319,7 +337,45 @@ func decodeBody(w http.ResponseWriter, r *http.Request, target any) error {
 	return nil
 }
 
-func decodeEmbedding(raw []byte) ([]float64, error) {
+// decodeRerank reads a backend's scores: TEI answers [{index, score}],
+// llama.cpp {"results": [{index, relevance_score}]}.
+func decodeRerank(body io.Reader, protocol string) ([]rerankResult, error) {
+	if protocol != protocolLlamaCPP {
+		var raw []rerankResult
+		err := json.NewDecoder(body).Decode(&raw)
+		return raw, err
+	}
+	var resp struct {
+		Results []struct {
+			Index *int     `json:"index"`
+			Score *float64 `json:"relevance_score"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(body).Decode(&resp); err != nil {
+		return nil, err
+	}
+	out := make([]rerankResult, 0, len(resp.Results))
+	for _, r := range resp.Results {
+		if r.Index == nil || r.Score == nil {
+			return nil, errors.New("rerank result without index or relevance_score")
+		}
+		out = append(out, rerankResult{Index: *r.Index, Score: *r.Score})
+	}
+	return out, nil
+}
+
+func decodeEmbedding(raw []byte, protocol string) ([]float64, error) {
+	if protocol == protocolLlamaCPP {
+		var resp struct {
+			Data []struct {
+				Embedding []float64 `json:"embedding"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil || len(resp.Data) != 1 || len(resp.Data[0].Embedding) == 0 {
+			return nil, errors.New("expected one embedding in data")
+		}
+		return resp.Data[0].Embedding, nil
+	}
 	var vector []float64
 	if err := json.Unmarshal(raw, &vector); err == nil && len(vector) > 0 {
 		return vector, nil
@@ -344,19 +400,27 @@ func configFromEnvironment() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
+	protocols := map[string]string{}
+	for _, role := range []string{"TEXT", "CODE", "RERANK"} {
+		p := strings.ToLower(envString("SCOS_MODEL_"+role+"_PROTOCOL", protocolTEI))
+		if p != protocolTEI && p != protocolLlamaCPP {
+			return runtimeConfig{}, fmt.Errorf("SCOS_MODEL_%s_PROTOCOL must be %s or %s, not %q", role, protocolTEI, protocolLlamaCPP, p)
+		}
+		protocols[role] = p
+	}
 
 	cfg := runtimeConfig{
 		Text: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_TEXT_URL")), Model: envString("SCOS_MODEL_TEXT_MODEL", "BAAI/bge-m3"),
-			Revision: envString("SCOS_MODEL_TEXT_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_TEXT_DIMENSIONS", 1024), Required: textRequired,
+			Revision: envString("SCOS_MODEL_TEXT_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_TEXT_DIMENSIONS", 1024), Required: textRequired, Protocol: protocols["TEXT"],
 		},
 		Code: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_CODE_URL")), Model: envString("SCOS_MODEL_CODE_MODEL", "BAAI/bge-code-v1"),
-			Revision: envString("SCOS_MODEL_CODE_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_CODE_DIMENSIONS", 1536), Required: codeRequired,
+			Revision: envString("SCOS_MODEL_CODE_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_CODE_DIMENSIONS", 1536), Required: codeRequired, Protocol: protocols["CODE"],
 		},
 		Rerank: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_RERANK_URL")), Model: envString("SCOS_MODEL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
-			Revision: envString("SCOS_MODEL_RERANK_REVISION", "main"), Required: rerankRequired,
+			Revision: envString("SCOS_MODEL_RERANK_REVISION", "main"), Required: rerankRequired, Protocol: protocols["RERANK"],
 		},
 	}
 	for name, backend := range map[string]backendConfig{"text": cfg.Text, "code": cfg.Code, "rerank": cfg.Rerank} {

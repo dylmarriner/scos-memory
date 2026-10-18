@@ -143,3 +143,72 @@ func TestConfigRejectsMalformedRequiredFlag(t *testing.T) {
 		t.Fatal("expected malformed required flag to fail configuration")
 	}
 }
+
+// A llama.cpp backend (the Vulkan GPU build) is spoken to in its own shapes:
+// OpenAI /v1/embeddings and Jina-style /v1/rerank.
+func TestLlamaCPPBackendProtocol(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch r.URL.Path {
+		case "/v1/embeddings":
+			if req["input"] != "hello scos" {
+				t.Fatalf("embeddings request = %v", req)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float64{0.1, 0.2, 0.3}}}})
+		case "/v1/rerank":
+			if req["query"] != "q" || len(req["documents"].([]any)) != 2 {
+				t.Fatalf("rerank request = %v", req)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{
+				map[string]any{"index": 0, "relevance_score": -1.5},
+				map[string]any{"index": 1, "relevance_score": 2.25},
+			}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+	h := newRuntimeHandler(runtimeConfig{
+		Text:   backendConfig{URL: backend.URL, Model: "BAAI/bge-m3", Revision: "gguf-q8_0", Dimensions: 3, Required: true, Protocol: protocolLlamaCPP},
+		Rerank: backendConfig{URL: backend.URL, Model: "BAAI/bge-reranker-v2-m3", Revision: "gguf-q8_0", Required: true, Protocol: protocolLlamaCPP},
+	}, &http.Client{Timeout: time.Second})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/embed/text", strings.NewReader(`{"input":"hello scos"}`)))
+	var emb embeddingResponse
+	if rec.Code != http.StatusOK || json.NewDecoder(rec.Body).Decode(&emb) != nil || len(emb.Embedding) != 3 || emb.ModelRevision != "gguf-q8_0" {
+		t.Fatalf("embed = %d %+v", rec.Code, emb)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/rerank", strings.NewReader(`{"query":"q","documents":["a","b"]}`)))
+	var rr rerankResponse
+	if rec.Code != http.StatusOK || json.NewDecoder(rec.Body).Decode(&rr) != nil || len(rr.Results) != 2 || rr.Results[0].Index != 1 || rr.Results[0].Score != 2.25 {
+		t.Fatalf("rerank = %d %+v", rec.Code, rr)
+	}
+}
+
+func TestLlamaCPPRerankWithoutScoreIsInvalid(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[{"index":0}]}`))
+	}))
+	defer backend.Close()
+	h := newRuntimeHandler(runtimeConfig{Rerank: backendConfig{URL: backend.URL, Protocol: protocolLlamaCPP}}, &http.Client{Timeout: time.Second})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/rerank", strings.NewReader(`{"query":"q","documents":["a"]}`)))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("missing relevance_score = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestConfigRejectsUnknownProtocol(t *testing.T) {
+	t.Setenv("SCOS_MODEL_TEXT_PROTOCOL", "onnx")
+	if _, err := configFromEnvironment(); err == nil || !strings.Contains(err.Error(), "SCOS_MODEL_TEXT_PROTOCOL") {
+		t.Fatalf("unknown protocol = %v", err)
+	}
+	t.Setenv("SCOS_MODEL_TEXT_PROTOCOL", "LlamaCPP")
+	cfg, err := configFromEnvironment()
+	if err != nil || cfg.Text.Protocol != protocolLlamaCPP || cfg.Rerank.Protocol != protocolTEI {
+		t.Fatalf("cfg = %+v, %v", cfg, err)
+	}
+}
