@@ -63,10 +63,10 @@ test that fails on the old behaviour.
 
 ## Open items
 
-- **`packages/hermes-memory-provider`:** an unused file-backed duplicate of the `hermes-provider` service. Removing it is recommended but was not done, because the deletion needs owner approval.
+- **`packages/hermes-memory-provider`:** an unused file-backed duplicate of the `hermes-provider` service. Deleted with the owner's approval (2026-10-18). The code index and acceptance results were regenerated afterwards.
 - **Other packages nothing imports:** `agent-adapter-sdk`, `hook-sdk`, `skill-sdk`, `context-contracts`, `extension-contracts`, `routing-contracts`, `language-adapters` and `benchmark-harness`. Nothing in the repository imports them, but they are tested public SDK and contract packages, and the code-intelligence acceptance corpus looks some of them up. They are kept.
 - **Bitwarden drill (`secret_manager_recovery`):** the code is complete. Running it needs a Bitwarden Secrets Manager machine-account token from the owner.
-- **execution-proxy legacy records with no tenant:** these are left unreadable on purpose, so that access fails closed. Whether to backfill them is the owner's decision, pending on the PR #45 review thread.
+- **execution-proxy legacy records with no tenant:** these are left unreadable on purpose, so that access fails closed. The owner decided (2026-10-18) to keep them fail-closed.
 
 ## Verification
 
