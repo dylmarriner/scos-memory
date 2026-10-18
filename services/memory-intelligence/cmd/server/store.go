@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 )
@@ -1346,9 +1347,14 @@ func loadDiary(ctx context.Context, db querier, tenantID string) ([]any, error) 
 	return entries, rows.Err()
 }
 
+// truncate cuts s to at most max bytes without splitting a UTF-8
+// character: Postgres rejects a string ending in half a rune.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
 	}
 	return s[:max]
 }

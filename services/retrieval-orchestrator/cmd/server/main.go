@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/release"
@@ -1275,9 +1276,14 @@ func estimateTokens(text string) int {
 	return len(text) / 4
 }
 
+// truncate cuts text to at most maxLen bytes, never inside a UTF-8
+// character, and marks the cut.
 func truncate(text string, maxLen int) string {
 	if len(text) <= maxLen {
 		return text
+	}
+	for maxLen > 0 && !utf8.RuneStart(text[maxLen]) {
+		maxLen--
 	}
 	return text[:maxLen] + "..."
 }

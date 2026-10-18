@@ -50,6 +50,8 @@ COMMENT = re.compile(r"<!--.*?-->", re.S)
 INCLUDE = re.compile(r"^@\S+$")
 INDEX_LINK = re.compile(r"^\[[^\]]+\]\([^)\s]+\.md\)")
 EMPHASIS = re.compile(r"(\*\*|__)(.+?)\1")
+# A label with no value, or one still holding a template's stand-in text.
+EMPTY_VALUE = re.compile(r":\s*(?:_?\(?(?:optional|tbd|n/?a|none|-+)\)?_?|\[[^\]]*\]|<[^>]*>)?\s*$", re.I)
 
 
 def iso(ts: float) -> str:
@@ -135,8 +137,11 @@ def units(markdown: str):
             item = b.group(1).strip()
             if INDEX_LINK.match(item):
                 continue  # points at another memory file, imported on its own
-            if heading and len(item) < 160 and heading.lower() not in item.lower():
-                item = f"{heading}: {item}"
+            if heading and len(item) < 160 and ":" not in item[:50] and heading.lower() not in item.lower():
+                # After the text, not before it: "Heading: text" would read as
+                # a key/value, and SCOS would flag every bullet under one
+                # heading as contradicting the others.
+                item = f"{item} ({heading})"
             found.append(item)
             continue
         if INDEX_LINK.match(stripped):
@@ -147,7 +152,7 @@ def units(markdown: str):
     result = []
     for u in found:
         u = re.sub(r"\s+", " ", EMPHASIS.sub(r"\2", u)).strip()
-        if len(u) >= MIN_UNIT:
+        if len(u) >= MIN_UNIT and not EMPTY_VALUE.search(u):
             result.extend(split_sentences(u))
     return result
 

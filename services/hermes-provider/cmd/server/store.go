@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // requestIdentity is the authenticated tenant/principal pair a request acts
@@ -584,9 +585,14 @@ func classifyMemoryScope(scope string) (memoryType string, authority int) {
 	}
 }
 
+// truncate cuts s to at most max bytes without splitting a UTF-8
+// character: Postgres rejects a string ending in half a rune.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
 	}
 	return s[:max]
 }

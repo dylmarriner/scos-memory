@@ -2608,7 +2608,7 @@ func truncateContent(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return truncate(s, n) + "..."
 }
 
 func toAnySlice[T any](items []T) []any {

@@ -18,6 +18,10 @@ name: x
 ---
 # Deploys
 - runs from kubuntux backup drive
+- Email: someone@example.com
+- Notes:
+- Pronouns: _(optional)_
+- Phone: [Phone number]
 - Deploys never touch the DEVELOPMENT drive.
 
 A paragraph that
@@ -36,7 +40,8 @@ code is not memory
 """
         got = mod.units(md)
         self.assertEqual(got, [
-            "Deploys: runs from kubuntux backup drive",
+            "runs from kubuntux backup drive (Deploys)",
+            "Email: someone@example.com",
             "Deploys never touch the DEVELOPMENT drive.",
             "A paragraph that spans two lines.",
             "Status: the deploy is green.",
