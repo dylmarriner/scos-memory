@@ -279,6 +279,93 @@ func (st *observabilityStore) scan(fn func(journalRecord)) error {
 	return scanner.Err()
 }
 
+// compactJournalBytes is the journal size past which a checkpoint rewrites
+// the journal without the records the snapshot already holds.
+var compactJournalBytes int64 = 4 << 20
+
+// compact rewrites the journal without the records a durable snapshot holds
+// (sequence numbers up to through), once the journal has grown past
+// compactJournalBytes. The rewritten journal keeps its identity and carries
+// through in its header, so numbering continues after a restart even when no
+// later record remains. Appends wait while it runs.
+func (st *observabilityStore) compact(through uint64) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	info, err := st.file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() < compactJournalBytes || st.id == "" {
+		return nil
+	}
+	tmp := st.path + ".compact"
+	if err := st.writeCompacted(tmp, through); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, st.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if dir, err := os.Open(filepath.Dir(st.path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	f, err := os.OpenFile(st.path, os.O_APPEND|os.O_WRONLY, 0640)
+	if err != nil {
+		return err
+	}
+	_ = st.file.Close()
+	st.file = f
+	return nil
+}
+
+// writeCompacted writes the header and every record after through to path.
+func (st *observabilityStore) writeCompacted(path string, through uint64) error {
+	in, err := os.Open(st.path)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0640)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	w := bufio.NewWriter(out)
+	header, err := json.Marshal(journalRecord{Kind: "journal", JournalID: st.id, Seq: through})
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(append(header, '\n')); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(in)
+	scanner.Buffer(make([]byte, 64*1024), 2<<20)
+	for scanner.Scan() {
+		var position struct {
+			Kind string `json:"kind"`
+			Seq  uint64 `json:"seq"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &position); err != nil {
+			return err
+		}
+		if position.Kind == "journal" || position.Seq <= through {
+			continue
+		}
+		if _, err := w.Write(append(scanner.Bytes(), '\n')); err != nil {
+			return err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
 // load applies the journal to s, learns the journal's identity and last
 // sequence number, and names a journal that has no identity yet so later
 // snapshots can refer to positions in it.
@@ -286,13 +373,13 @@ func (st *observabilityStore) load(s *observabilityServer) error {
 	err := st.scan(func(record journalRecord) {
 		if record.Kind == "journal" {
 			st.id = record.JournalID
-			return
 		}
 		if record.Seq > st.seq {
 			st.seq = record.Seq
 		}
 		if s.applyRecord(record) {
 			st.records++
+			s.boundRetention()
 		}
 	})
 	if err != nil {
@@ -356,6 +443,14 @@ func (st *observabilityStore) ready() error {
 }
 
 func (st *observabilityStore) close() error { return st.file.Close() }
+
+// boundRetention trims the ring once it holds twice its retention, so
+// replaying a long journal holds at most twice the ring in memory.
+func (s *observabilityServer) boundRetention() {
+	if len(s.metrics) > 2*s.maxMetrics || len(s.traces) > 2*s.maxTraces || len(s.logs) > 2*s.maxLogs {
+		s.trimRetention()
+	}
+}
 
 func (s *observabilityServer) trimRetention() {
 	if len(s.metrics) > s.maxMetrics {
@@ -422,8 +517,14 @@ func (s *observabilityServer) checkpoint(ctx context.Context) error {
 	s.persistMu.Unlock()
 	if err != nil {
 		s.rollups.requeue(rows)
+		return err
 	}
-	return err
+	if s.store != nil {
+		if err := s.store.compact(state.JournalSeq); err != nil {
+			log.Printf("observability: journal compaction: %v", err)
+		}
+	}
+	return nil
 }
 
 // restoreSnapshot rebuilds the raw signal ring from the PostgreSQL snapshot
@@ -465,16 +566,23 @@ func (s *observabilityServer) restoreSnapshot(state persistedObservabilityState)
 		after = state.JournalSeq
 	}
 	restored := &observabilityServer{
-		metrics: append([]*MetricPoint(nil), state.Metrics...),
-		traces:  append([]*TraceSpan(nil), state.Traces...),
-		logs:    append([]*LogEntry(nil), state.Logs...),
+		metrics:    append([]*MetricPoint(nil), state.Metrics...),
+		traces:     append([]*TraceSpan(nil), state.Traces...),
+		logs:       append([]*LogEntry(nil), state.Logs...),
+		maxMetrics: s.maxMetrics,
+		maxTraces:  s.maxTraces,
+		maxLogs:    s.maxLogs,
 	}
 	var replayed []*MetricPoint
 	err := s.store.scan(func(record journalRecord) {
 		if record.Seq == 0 || record.Seq <= after {
 			return
 		}
-		if restored.applyRecord(record) && record.Kind == "metric" {
+		if !restored.applyRecord(record) {
+			return
+		}
+		restored.boundRetention()
+		if record.Kind == "metric" {
 			replayed = append(replayed, record.Metric)
 		}
 	})

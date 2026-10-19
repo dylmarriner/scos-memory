@@ -181,3 +181,92 @@ func TestSnapshotWithoutJournalPositionDoesNotOverrideTheJournal(t *testing.T) {
 		t.Fatalf("restored %v, want the journal's two points", got)
 	}
 }
+
+func journalLines(t *testing.T, s *observabilityServer) (headers int, seqs []uint64) {
+	t.Helper()
+	if err := s.store.scan(func(r journalRecord) {
+		if r.Kind == "journal" {
+			headers++
+			return
+		}
+		seqs = append(seqs, r.Seq)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return headers, seqs
+}
+
+func TestCheckpointCompactsTheJournalAndRestartLosesNothing(t *testing.T) {
+	old := compactJournalBytes
+	compactJournalBytes = 1
+	t.Cleanup(func() { compactJournalBytes = old })
+
+	path := filepath.Join(t.TempDir(), "observability.jsonl")
+	hist := &fakeHistory{}
+	s, err := newObservabilityServerAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.history = hist
+	now := time.Now()
+	for v := 1.0; v <= 3; v++ {
+		ingest(t, s, []MetricPoint{requestPoint(now, "ingress", "memory-gateway", "/v1/turns", "200", v)})
+	}
+	if err := s.checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if headers, seqs := journalLines(t, s); headers != 1 || len(seqs) != 0 {
+		t.Fatalf("journal after compaction has %d headers and records %v, want only the header", headers, seqs)
+	}
+	// Appends after compaction go to the rewritten journal.
+	ingest(t, s, []MetricPoint{requestPoint(now, "ingress", "memory-gateway", "/v1/turns", "200", 4)})
+	if _, seqs := journalLines(t, s); len(seqs) != 1 || seqs[0] != 4 {
+		t.Fatalf("journal records after compaction %v, want [4]", seqs)
+	}
+	_ = s.store.close()
+
+	recovered := restart(t, path, hist)
+	if got := metricValues(recovered); len(got) != 4 || got[0] != 1 || got[3] != 4 {
+		t.Fatalf("restart restored metrics %v, want [1 2 3 4]", got)
+	}
+	if got := flowRequests(recovered); got != 4 {
+		t.Fatalf("rollups after restart count %d requests, want 4", got)
+	}
+	if _, seq := recovered.store.position(); seq != 4 {
+		t.Fatalf("journal sequence after restart is %d, want 4", seq)
+	}
+
+	// A compaction that leaves no records still carries the sequence, so a
+	// record written after the next restart is not mistaken for one the
+	// snapshot already holds.
+	if err := recovered.checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_ = recovered.store.close()
+	again := restart(t, path, hist)
+	ingest(t, again, []MetricPoint{requestPoint(now, "ingress", "memory-gateway", "/v1/turns", "200", 5)})
+	_ = again.store.close()
+	last := restart(t, path, hist)
+	if got := metricValues(last); len(got) != 5 || got[4] != 5 {
+		t.Fatalf("restart after an empty compaction restored %v, want [1 2 3 4 5]", got)
+	}
+}
+
+func TestReplayHoldsAtMostTwiceTheRing(t *testing.T) {
+	s := &observabilityServer{maxMetrics: 3, maxTraces: 3, maxLogs: 3}
+	peak := 0
+	for i := 0; i < 50; i++ {
+		s.applyRecord(journalRecord{Kind: "metric", Seq: uint64(i + 1), Metric: &MetricPoint{Name: "m", Value: float64(i)}})
+		s.boundRetention()
+		if len(s.metrics) > peak {
+			peak = len(s.metrics)
+		}
+	}
+	s.trimRetention()
+	if peak > 6 {
+		t.Fatalf("replay held %d metrics, want at most twice the ring (6)", peak)
+	}
+	if len(s.metrics) != 3 || s.metrics[2].Value != 49 {
+		t.Fatalf("ring after replay %v, want the last 3", metricValues(s))
+	}
+}
