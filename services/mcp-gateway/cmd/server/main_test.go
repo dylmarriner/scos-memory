@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
 )
@@ -197,6 +198,51 @@ func TestResolveIdentityLocalAuthModeIgnoresClaimsAndHeaders(t *testing.T) {
 	}
 	if identity.TenantID != localModeTenantID || identity.PrincipalID != localModePrincipalID {
 		t.Fatalf("expected reserved local-mode identity, got %+v", identity)
+	}
+}
+
+// A hosted tenant reaches a local-mode gateway through cloud-control-plane,
+// which signs claims for that tenant: the claims name the caller, so the
+// tenant never lands in the local-mode tenant.
+func TestLocalAuthModeHonoursVerifiedClaims(t *testing.T) {
+	t.Setenv("SCOS_AUTH_MODE", "local")
+	const secret = "local-mode-test-issuer-secret"
+	config := auth.Config{Token: "internal-service-token", IssuerSecret: secret, Identity: "internal-service"}
+	var got requestIdentity
+	var gotStatus int
+	handler := localModeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, gotStatus, _ = resolveIdentity(r)
+	}), config)
+	call := func(authorization string) int {
+		got, gotStatus = requestIdentity{}, -1
+		r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		if authorization != "" {
+			r.Header.Set("Authorization", authorization)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w.Code
+	}
+
+	token, err := auth.SignClaims(auth.Claims{TenantID: "hosted-tenant", PrincipalID: "hosted-principal", ExpiresAt: time.Now().Add(time.Minute)}, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := call("Bearer " + token); code != http.StatusOK || gotStatus != 0 || got.TenantID != "hosted-tenant" || got.PrincipalID != "hosted-principal" {
+		t.Fatalf("claims caller resolved to %+v (status %d, http %d), want its own tenant", got, gotStatus, code)
+	}
+	if code := call(""); code != http.StatusOK || got.TenantID != localModeTenantID {
+		t.Fatalf("token-less local caller resolved to %+v (http %d), want the local-mode tenant", got, code)
+	}
+	if code := call("Bearer internal-service-token"); code != http.StatusOK || got.TenantID != localModeTenantID {
+		t.Fatalf("service-token caller resolved to %+v (http %d), want the local-mode tenant", got, code)
+	}
+	forged, err := auth.SignClaims(auth.Claims{TenantID: "hosted-tenant", PrincipalID: "hosted-principal", ExpiresAt: time.Now().Add(time.Minute)}, "another-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := call("Bearer " + forged); code != http.StatusUnauthorized || gotStatus != -1 {
+		t.Fatalf("forged token got http %d, want 401 before any identity is resolved", code)
 	}
 }
 
