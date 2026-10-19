@@ -303,17 +303,22 @@ func (st *observabilityStore) compact(through uint64) error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	// Opened before the rename, so a failure leaves the journal and its
+	// handle as they were; after the rename nothing can fail, and appends
+	// never go to the replaced, unlinked file.
+	f, err := os.OpenFile(tmp, os.O_APPEND|os.O_WRONLY, 0640)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	if err := os.Rename(tmp, st.path); err != nil {
+		_ = f.Close()
 		_ = os.Remove(tmp)
 		return err
 	}
 	if dir, err := os.Open(filepath.Dir(st.path)); err == nil {
 		_ = dir.Sync()
 		_ = dir.Close()
-	}
-	f, err := os.OpenFile(st.path, os.O_APPEND|os.O_WRONLY, 0640)
-	if err != nil {
-		return err
 	}
 	_ = st.file.Close()
 	st.file = f

@@ -455,7 +455,7 @@ func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID,
 	// Same P0-B gate as handleFacts POST: redact before newContent reaches
 	// resolveEntityMentions (an LLM call) or ends up on the corrected Fact
 	// that maybePromoteToOKF later sends to DeepSeek.
-	pending := &Fact{Content: newContent, Redacted: old.Redacted}
+	pending := &Fact{Content: newContent}
 	redactSecrets(pending)
 	newContent = pending.Content
 	// Resolved before the transaction opens: this may be an LLM call
@@ -520,16 +520,24 @@ func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID,
 	return corrected, nil
 }
 
+// redactionMarkerKind matches a redaction marker and captures its kind.
+var redactionMarkerKind = regexp.MustCompile(`\[REDACTED:([a-z_]+)\]`)
+
 // redactSecrets replaces every secret the scanner finds in f.Content with a
-// redaction marker and adds the kinds it replaced to f.Redacted.
+// redaction marker and sets f.Redacted to the kinds of the markers the
+// content then holds: it is derived from the stored text alone, never taken
+// from the caller or carried over from an earlier version.
 func redactSecrets(f *Fact) {
-	findings := secretscan.Scan(f.Content)
-	if len(findings) == 0 {
-		return
+	if findings := secretscan.Scan(f.Content); len(findings) > 0 {
+		f.Content = secretscan.Redact(f.Content, findings)
 	}
-	f.Content = secretscan.Redact(f.Content, findings)
-	for _, finding := range findings {
-		f.Redacted = append(f.Redacted, string(finding.Kind))
+	f.Redacted = nil
+	seen := map[string]bool{}
+	for _, m := range redactionMarkerKind.FindAllStringSubmatch(f.Content, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			f.Redacted = append(f.Redacted, m[1])
+		}
 	}
 }
 

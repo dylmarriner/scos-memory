@@ -207,7 +207,12 @@ func TestResolveIdentityLocalAuthModeIgnoresClaimsAndHeaders(t *testing.T) {
 func TestLocalAuthModeHonoursVerifiedClaims(t *testing.T) {
 	t.Setenv("SCOS_AUTH_MODE", "local")
 	const secret = "local-mode-test-issuer-secret"
-	config := auth.Config{Token: "internal-service-token", IssuerSecret: secret, Identity: "internal-service"}
+	// Local mode verifies tokens without the control-plane token it never
+	// checks.
+	t.Setenv("SCOS_CONTROL_PLANE_TOKEN", "")
+	t.Setenv("SCOS_SECURITY_ISSUER_SECRET", secret)
+	t.Setenv("SCOS_INTERNAL_SERVICE_TOKEN", "internal-service-token")
+	config := localModeAuthConfig()
 	var got requestIdentity
 	var gotStatus int
 	handler := localModeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

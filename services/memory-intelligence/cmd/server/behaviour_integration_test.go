@@ -458,4 +458,29 @@ func TestFactWithACredentialIsRedactedReadableAndCorrectable(t *testing.T) {
 	if corrected["content"] != "The build box db login root:[REDACTED:credential_pair] is in Vaultwarden." {
 		t.Fatalf("corrected content = %v", corrected["content"])
 	}
+
+	// The redaction record follows the stored text: a correction that drops
+	// the marker drops its kind, and a caller cannot assert one.
+	code, out, _ = f.call(f.srv.handleFactByID, http.MethodPatch, "/v1/facts/"+corrected["id"].(string), `{"content":"The build box credentials are in Vaultwarden.","reason":"clean"}`)
+	if code != http.StatusOK {
+		t.Fatalf("clean correction = %d %v", code, out)
+	}
+	clean := out
+	if fact, ok := out["fact"].(map[string]any); ok {
+		clean = fact
+	}
+	code, out, _ = f.call(f.srv.handleFacts, http.MethodPost, "/v1/facts", `{"content":"The staging box runs Debian.","redacted":["password"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("remember = %d %v", code, out)
+	}
+	asserted := out["fact"].(map[string]any)["id"].(string)
+	for _, id := range []string{clean["id"].(string), asserted} {
+		var redactedKinds sql.NullString
+		if err := f.admin.QueryRow(`SELECT v.structured_content->>'redacted' FROM memory_items i JOIN memory_versions v ON v.id = i.current_version_id WHERE i.id = $1`, id).Scan(&redactedKinds); err != nil {
+			t.Fatal(err)
+		}
+		if redactedKinds.Valid && redactedKinds.String != "null" {
+			t.Fatalf("fact %s with no marker records redacted %q", id, redactedKinds.String)
+		}
+	}
 }

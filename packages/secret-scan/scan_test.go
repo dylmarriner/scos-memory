@@ -82,6 +82,16 @@ func TestCredentialsInText(t *testing.T) {
 	}
 }
 
+// A marker elsewhere in the text does not hide a secret beside it, even one
+// made only of punctuation.
+func TestMarkerDoesNotHideANeighbouringSecret(t *testing.T) {
+	in := "old [REDACTED:password] then https://dylan:!!!!@git.example.com/repo.git"
+	want := "old [REDACTED:password] then https://dylan:[REDACTED:url_credential]@git.example.com/repo.git"
+	if got := Redact(in, Scan(in)); got != want {
+		t.Fatalf("Redact(%q)\n got  %q\n want %q", in, got, want)
+	}
+}
+
 // Findings come back in content order, so Redact replaces every one: a
 // secret found by a later pattern earlier in the text is not skipped.
 func TestFindingsAreInContentOrder(t *testing.T) {

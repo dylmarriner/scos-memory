@@ -122,29 +122,32 @@ func Scan(content string) []Finding {
 // redactionMarker is what Redact puts in place of a secret.
 var redactionMarker = regexp.MustCompile(`\[REDACTED:[a-z_]+\]`)
 
-// onlyRedacted reports whether every letter and digit of content[span]
-// lies inside a redaction marker: text the scanner already redacted is not a
-// new secret, so redacting redacted text changes nothing.
+// onlyRedacted reports whether content[span] is redaction-marker text: it
+// overlaps a marker and every letter and digit in it lies inside one. Text
+// the scanner already redacted is not a new secret, so redacting redacted
+// text changes nothing; a span that touches no marker, even one made only of
+// punctuation, is still a finding.
 func onlyRedacted(content string, span [2]int, markers [][]int) bool {
-	if len(markers) == 0 {
-		return false
-	}
-	for i, r := range content[span[0]:span[1]] {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			continue
-		}
-		at, inside := span[0]+i, false
+	inMarker := func(at int) bool {
 		for _, m := range markers {
 			if at >= m[0] && at < m[1] {
-				inside = true
-				break
+				return true
 			}
 		}
-		if !inside {
+		return false
+	}
+	touches := false
+	for i, r := range content[span[0]:span[1]] {
+		at := span[0] + i
+		if inMarker(at) {
+			touches = true
+			continue
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			return false
 		}
 	}
-	return true
+	return touches
 }
 
 // credentialShaped reports whether s mixes letters with digits or symbols,
