@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -377,5 +378,51 @@ func TestMergedFactsNameTheirCanonicalFact(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("merged fact %s not listed with include_merged", bare)
+	}
+}
+
+// A fact imported from another agent's memory must name where it came from,
+// ranks below a fact stated here, and keeps its origin, sensitivity and
+// observation time when read back.
+func TestExternalFactsCarryTheirOriginAndRankBelowExplicitFacts(t *testing.T) {
+	f := newBehaviourFixture(t)
+	code, out, _ := f.call(f.srv.handleFacts, http.MethodPost, "/v1/facts", `{"content":"The release branch is release-2027.","source":"external"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("external fact without origin = %d %v", code, out)
+	}
+	// The owner's namespace holds memories up to internal: a confidential
+	// one would be written and then hidden from its own writer.
+	code, out, _ = f.call(f.srv.handleFacts, http.MethodPost, "/v1/facts", `{"content":"The release branch is release-2027.","source":"external","origin":"codex@kubuntux:~/.codex/memories/MEMORY.md","sensitivity":"confidential"}`)
+	if code != http.StatusBadRequest || !strings.Contains(fmt.Sprint(out["error"]), "up to internal") {
+		t.Fatalf("above-ceiling fact = %d %v", code, out)
+	}
+	body := `{"content":"The release branch is release-2027.","source":"external","origin":"codex@kubuntux:~/.codex/memories/MEMORY.md","sensitivity":"internal","observed_at":"2026-10-11T03:51:00Z","scope":"scos"}`
+	code, out, _ = f.call(f.srv.handleFacts, http.MethodPost, "/v1/facts", body)
+	if code != http.StatusOK {
+		t.Fatalf("external fact = %d %v", code, out)
+	}
+	id := out["fact"].(map[string]any)["id"].(string)
+	var authority int
+	var confidence float64
+	var sensitivity string
+	if err := f.admin.QueryRow(`SELECT authority_level, confidence_score, sensitivity FROM memory_items WHERE id = $1`, id).Scan(&authority, &confidence, &sensitivity); err != nil {
+		t.Fatal(err)
+	}
+	if authority != externalFactAuthority || confidence != externalFactConfidence || sensitivity != "internal" {
+		t.Fatalf("stored authority %d confidence %v sensitivity %s", authority, confidence, sensitivity)
+	}
+	if authority >= explicitFactAuthority {
+		t.Fatal("an imported fact must rank below an explicit one")
+	}
+	code, out, _ = f.call(f.srv.handleFactByID, http.MethodGet, "/v1/facts/"+id, "")
+	if code != http.StatusOK {
+		t.Fatalf("get = %d %v", code, out)
+	}
+	got := out
+	if fact, ok := out["fact"].(map[string]any); ok {
+		got = fact
+	}
+	if got["origin"] != "codex@kubuntux:~/.codex/memories/MEMORY.md" || got["source"] != "external" || got["observed_at"] != "2026-10-11T03:51:00Z" || got["scope"] != "scos" {
+		t.Fatalf("read back = %v", got)
 	}
 }

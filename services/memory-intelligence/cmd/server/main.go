@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -70,23 +71,31 @@ const (
 const (
 	explicitFactAuthority  = 70
 	explicitFactConfidence = 0.75
+	// A fact imported from another agent's memory store was curated by that
+	// agent, not stated to this fabric by the user, so it ranks below an
+	// explicit fact and below the OKF promotion threshold until confirmed.
+	externalFactAuthority  = 50
+	externalFactConfidence = 0.6
 )
 
 type Fact struct {
-	ID           string        `json:"id"`
-	Network      MemoryNetwork `json:"network"`
-	Content      string        `json:"content"`
-	Source       string        `json:"source"` // explicit, observed, inferred, external
-	Authority    int           `json:"authority_level"`
-	Confidence   float64       `json:"confidence"`
-	Scope        string        `json:"scope"`
-	ObservedAt   string        `json:"observed_at"`
-	ValidFrom    string        `json:"valid_from,omitempty"`
-	ValidUntil   string        `json:"valid_until,omitempty"`
-	RecordedAt   string        `json:"recorded_at"`
-	SupersededBy string        `json:"superseded_by,omitempty"`
-	Status       string        `json:"status,omitempty"` // active, merged -- see loadFactsIncludingMerged
-	Evidence     []string      `json:"evidence,omitempty"`
+	ID      string        `json:"id"`
+	Network MemoryNetwork `json:"network"`
+	Content string        `json:"content"`
+	Source  string        `json:"source"` // explicit, observed, inferred, external
+	// Origin names where an external fact came from (the agent and the
+	// store it was read from); empty for facts first recorded here.
+	Origin       string   `json:"origin,omitempty"`
+	Authority    int      `json:"authority_level"`
+	Confidence   float64  `json:"confidence"`
+	Scope        string   `json:"scope"`
+	ObservedAt   string   `json:"observed_at"`
+	ValidFrom    string   `json:"valid_from,omitempty"`
+	ValidUntil   string   `json:"valid_until,omitempty"`
+	RecordedAt   string   `json:"recorded_at"`
+	SupersededBy string   `json:"superseded_by,omitempty"`
+	Status       string   `json:"status,omitempty"` // active, merged -- see loadFactsIncludingMerged
+	Evidence     []string `json:"evidence,omitempty"`
 	// CodeSymbolVersionIDs are code_symbol_versions.id values the caller
 	// already knows this fact cites (e.g. an agent recording a decision
 	// right after scos_code_impact/scos_code_query returned a result). P1-C
@@ -590,6 +599,34 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			}
 			fact.NamespaceID = ns
 		}
+		if fact.Sensitivity != "" {
+			// A memory above its namespace's sensitivity ceiling would be
+			// written and then hidden from everyone, its writer included
+			// (memory_items_namespace_access), so the write is refused.
+			ceiling, err := withPrincipalContext(r.Context(), s.db, identity, func(q querier) (string, error) {
+				var ceiling string
+				var allowed bool
+				err := q.QueryRowContext(r.Context(),
+					`SELECT sensitivity_ceiling::text, $2::sensitivity_class <= sensitivity_ceiling FROM namespaces WHERE id = $1`,
+					fact.NamespaceID, fact.Sensitivity).Scan(&ceiling, &allowed)
+				if err == nil && allowed {
+					ceiling = ""
+				}
+				return ceiling, err
+			})
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "namespace "+fact.NamespaceID+" is not visible to the caller", http.StatusBadRequest)
+				return
+			}
+			if err != nil {
+				http.Error(w, "invalid sensitivity "+fact.Sensitivity+": "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if ceiling != "" {
+				http.Error(w, fmt.Sprintf("namespace %s holds memories up to %s; a %s memory would be hidden from every reader", fact.NamespaceID, ceiling, fact.Sensitivity), http.StatusBadRequest)
+				return
+			}
+		}
 		if fact.Network == "" {
 			fact.Network = NetworkWorld
 		}
@@ -603,6 +640,18 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 			}
 			if fact.Confidence == 0 {
 				fact.Confidence = explicitFactConfidence
+			}
+		}
+		if fact.Source == "external" {
+			if fact.Origin == "" {
+				http.Error(w, "an external fact must name its origin", http.StatusBadRequest)
+				return
+			}
+			if fact.Authority == 0 {
+				fact.Authority = externalFactAuthority
+			}
+			if fact.Confidence == 0 {
+				fact.Confidence = externalFactConfidence
 			}
 		}
 		if fact.Scope == "" {
@@ -2374,6 +2423,12 @@ func loadTransparencyEvents(ctx context.Context, db *sql.DB, tenantID string, af
 const keyNormWords = 3
 
 func keyValueNorm(content string) (keyNorm, valueNorm string) {
+	// A memory that names its key outright ("Email: ...", "Phase 3 Task 7
+	// done: ...") is split there, so two different labels never read as one
+	// key; anything else keeps the leading-words heuristic.
+	if key, value, ok := explicitKey(content); ok {
+		return strings.Join(key, " "), strings.Join(value, " ")
+	}
 	words := significantWords(content)
 	if len(words) == 0 {
 		return "", ""
@@ -2387,13 +2442,55 @@ func keyValueNorm(content string) (keyNorm, valueNorm string) {
 	return keyNorm, valueNorm
 }
 
+// explicitKey splits "label: value" content at its first colon when the
+// label is specific (at least minExplicitKeyWords significant words) but
+// short (at most maxExplicitKeyWords words), and the colon is not part of a
+// URL scheme or a clock time.
+func explicitKey(content string) (key, value []string, ok bool) {
+	text := redactionMarker.ReplaceAllString(content, " ")
+	for i := 0; i < len(text); i++ {
+		if text[i] != ':' {
+			continue
+		}
+		if strings.HasPrefix(text[i:], "://") || (i > 0 && i+1 < len(text) && isASCIIDigit(text[i-1]) && isASCIIDigit(text[i+1])) {
+			continue
+		}
+		label := strings.Fields(text[:i])
+		if len(label) == 0 || len(label) > maxExplicitKeyWords {
+			return nil, nil, false
+		}
+		// A one-word label ("scope:", "desc:", "user:", "How to apply:")
+		// is a field name shared by unrelated notes, not one attribute
+		// with one value; only a specific label is a key.
+		key, value = significantWords(text[:i]), significantWords(text[i+1:])
+		return key, value, len(key) >= minExplicitKeyWords
+	}
+	return nil, nil, false
+}
+
+const (
+	minExplicitKeyWords = 2
+	maxExplicitKeyWords = 8
+)
+
+func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
+
+// redactionMarker is what the secret scanner leaves where it removed a
+// secret. It says nothing about what the memory is about, so it never forms
+// part of a key: two memories that each had a different token redacted are
+// not two values for one key.
+var redactionMarker = regexp.MustCompile(`\[REDACTED:[a-z0-9_]+\]`)
+
 func significantWords(content string) []string {
-	words := strings.Fields(strings.ToLower(content))
+	words := strings.Fields(strings.ToLower(redactionMarker.ReplaceAllString(content, " ")))
 	out := make([]string, 0, len(words))
 	for _, w := range words {
 		// Edge punctuation is not part of the word: "scos." restates "scos".
 		w = strings.TrimFunc(w, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
-		if len(w) > 3 {
+		// Short words are mostly filler, but a short token with a digit
+		// identifies something ("task 7", "v2", "p95"): dropping it made
+		// "Phase 3 Task 7 done" and "Phase 3 Task 5 done" share a key.
+		if len(w) > 3 || (w != "" && strings.ContainsAny(w, "0123456789")) {
 			out = append(out, w)
 		}
 	}
@@ -2559,7 +2656,7 @@ func truncateContent(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return truncate(s, n) + "..."
 }
 
 func toAnySlice[T any](items []T) []any {

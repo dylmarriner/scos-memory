@@ -1,0 +1,90 @@
+# GPU-only retrieval models: bge-m3 embeddings and the bge-reranker-v2-m3
+# cross-encoder served by llama.cpp's Vulkan build, which runs on GPUs TEI has
+# no build for (AMD Polaris and similar). Use it on top of
+# docker-compose.models.yml, instead of its CPU TEI profiles:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.models.yml \
+#                  -f docker-compose.models-vulkan.yml up -d
+#
+# Every weight and all inference compute are in GPU memory:
+#   -ngl 999          every layer is offloaded
+#   -ot '.*=Vulkan0'  every tensor is placed on the GPU, including the token
+#                     embedding table llama.cpp otherwise keeps in host memory
+#   --load-mode none  the GGUF is not memory-mapped, so no copy of the model
+#                     stays in the host page cache
+#   -c/-b/-ub 2048    keeps the host staging buffers small (about 25 MiB)
+# What stays on the host is the server process itself: HTTP, tokenisation and
+# the Vulkan driver (about 250 MiB RSS, one thread). The 512 MB memory cap is
+# below the size of the weights, so a build that fell back to CPU inference
+# could not load the model rather than quietly running it on the CPU.
+#
+# The models are GGUF files in SCOS_GGUF_DIR; docs/runbooks/gpu-models.md
+# lists their sources and SHA-256 digests.
+
+x-llamacpp-vulkan: &llamacpp-vulkan
+  image: ${SCOS_LLAMACPP_VULKAN_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:7f8b8664ea233cf10bc4369e681409c93b07a2e922b052e9eb6fab8d89b9966b}
+  restart: unless-stopped
+  devices:
+    - /dev/dri:/dev/dri
+  group_add:
+    - "${SCOS_GPU_RENDER_GID:?SCOS_GPU_RENDER_GID must be the host render group id}"
+    - "${SCOS_GPU_VIDEO_GID:?SCOS_GPU_VIDEO_GID must be the host video group id}"
+  mem_limit: ${SCOS_GPU_MODEL_MEM_LIMIT:-512m}
+  memswap_limit: ${SCOS_GPU_MODEL_MEM_LIMIT:-512m}
+  cpus: 1
+  volumes:
+    - ${SCOS_GGUF_DIR:?SCOS_GGUF_DIR must name the directory holding the GGUF models}:/models:ro
+  expose:
+    - "8080"
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+    interval: 30s
+    timeout: 5s
+    start_period: 30s
+    retries: 5
+
+services:
+  bge-m3-gpu:
+    <<: *llamacpp-vulkan
+    command: ["-m", "/models/${SCOS_MODEL_TEXT_GGUF:-bge-m3-Q8_0.gguf}", "--embedding", "--pooling", "cls",
+              "-ngl", "999", "-ot", ".*=${SCOS_GPU_DEVICE:-Vulkan0}", "--device", "${SCOS_GPU_DEVICE:-Vulkan0}", "--load-mode", "none",
+              "-t", "1", "-c", "2048", "-b", "2048", "-ub", "2048", "-np", "1", "--host", "0.0.0.0", "--port", "8080"]
+
+  bge-reranker-gpu:
+    <<: *llamacpp-vulkan
+    command: ["-m", "/models/${SCOS_MODEL_RERANK_GGUF:-bge-reranker-v2-m3-Q8_0.gguf}", "--rerank",
+              "-ngl", "999", "-ot", ".*=${SCOS_GPU_DEVICE:-Vulkan0}", "--device", "${SCOS_GPU_DEVICE:-Vulkan0}", "--load-mode", "none",
+              "-t", "1", "-c", "2048", "-b", "2048", "-ub", "2048", "-np", "1", "--host", "0.0.0.0", "--port", "8080"]
+
+  # The revision names the quantised GGUF, so its vectors form their own
+  # embedding space and the embeddings worker re-embeds every memory with it.
+  model-runtime:
+    environment:
+      SCOS_MODEL_TEXT_URL: http://bge-m3-gpu:8080
+      SCOS_MODEL_TEXT_PROTOCOL: llamacpp
+      SCOS_MODEL_TEXT_MODEL: BAAI/bge-m3
+      SCOS_MODEL_TEXT_REVISION: ${SCOS_MODEL_TEXT_GGUF_REVISION:-gguf-q8_0}
+      SCOS_MODEL_TEXT_DIMENSIONS: "1024"
+      SCOS_MODEL_RERANK_URL: http://bge-reranker-gpu:8080
+      SCOS_MODEL_RERANK_PROTOCOL: llamacpp
+      SCOS_MODEL_RERANK_MODEL: BAAI/bge-reranker-v2-m3
+      SCOS_MODEL_RERANK_REVISION: ${SCOS_MODEL_RERANK_GGUF_REVISION:-gguf-q8_0}
+    depends_on:
+      bge-m3-gpu:
+        condition: service_healthy
+      bge-reranker-gpu:
+        condition: service_healthy
+
+  retrieval-orchestrator:
+    environment:
+      SCOS_MODEL_TEXT_MODEL: BAAI/bge-m3
+      SCOS_MODEL_TEXT_REVISION: ${SCOS_MODEL_TEXT_GGUF_REVISION:-gguf-q8_0}
+      SCOS_MODEL_TEXT_DIMENSIONS: "1024"
+      SCOS_MODEL_RERANK_MODEL: BAAI/bge-reranker-v2-m3
+      SCOS_MODEL_RERANK_REVISION: ${SCOS_MODEL_RERANK_GGUF_REVISION:-gguf-q8_0}
+
+  embeddings-worker:
+    environment:
+      SCOS_EMBED_MODEL: BAAI/bge-m3
+      SCOS_EMBED_MODEL_REVISION: ${SCOS_MODEL_TEXT_GGUF_REVISION:-gguf-q8_0}
+      SCOS_EMBED_DIMENSIONS: "1024"

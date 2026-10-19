@@ -264,6 +264,10 @@ func (s *toolGovernanceServer) handleToolByID(w http.ResponseWriter, r *http.Req
 		http.Error(w, msg, status)
 		return
 	}
+	if !isUUID(id) {
+		http.Error(w, "tool id must be a UUID", http.StatusBadRequest)
+		return
+	}
 	ctx := r.Context()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -467,6 +471,10 @@ func (s *toolGovernanceServer) handleOperationByID(w http.ResponseWriter, r *htt
 	identity, status, msg := resolveIdentity(r, "", "")
 	if status != 0 {
 		http.Error(w, msg, status)
+		return
+	}
+	if !isUUID(id) {
+		http.Error(w, "operation id must be a UUID", http.StatusBadRequest)
 		return
 	}
 	ctx := r.Context()

@@ -1048,6 +1048,10 @@ func (c *controlPlane) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if interactionID == r.URL.Path {
 		interactionID = r.URL.Query().Get("interaction_id")
 	}
+	if strings.TrimSpace(interactionID) == "" {
+		writeControlError(w, http.StatusBadRequest, "interaction_id is required")
+		return
+	}
 	decision, err := c.decisionForInteraction(r.Context(), tenantID, actorID, interactionID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errLocalStateNotFound) {

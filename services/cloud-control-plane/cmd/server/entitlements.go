@@ -46,6 +46,7 @@ var featureTools = map[string]string{
 // quota.
 var storageGrowingTools = map[string]bool{
 	"scos_remember":          true,
+	"scos_memory_import":     true,
 	"scos_correct":           true,
 	"scos_correct_batch":     true,
 	"scos_link_evidence":     true,
