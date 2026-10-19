@@ -26,7 +26,6 @@ import (
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/llmclient"
-	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -107,8 +106,12 @@ type Fact struct {
 	Derivation           string   `json:"derivation,omitempty"`
 	Revision             int      `json:"revision"`
 	// Sensitivity is the class to store the fact at (default internal);
-	// content the secret scanner flags is stored secret whatever it says.
+	// content the secret scanner flags is stored at its namespace's
+	// ceiling, the most restricted class the namespace's readers can see.
 	Sensitivity string `json:"sensitivity,omitempty"`
+	// Redacted lists the kinds of secret replaced by redaction markers in
+	// Content before it was stored.
+	Redacted []string `json:"redacted,omitempty"`
 
 	// Identity/placement fields. These carry no meaning in the historical
 	// in-memory shape but are required to satisfy the relational schema's
@@ -668,9 +671,7 @@ func (s *engineServer) handleFacts(w http.ResponseWriter, r *http.Request) {
 		// third-party LLM API in the same request that redacted it in
 		// storage. insertFact's own scan is now a harmless no-op safety net
 		// on already-redacted text, not the sole gate.
-		if findings := secretscan.Scan(fact.Content); len(findings) > 0 {
-			fact.Content = secretscan.Redact(fact.Content, findings)
-		}
+		redactSecrets(&fact)
 
 		ctx := r.Context()
 		// Resolved before the transaction opens: both of these may be LLM

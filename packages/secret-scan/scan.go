@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Kind names which pattern a Finding matched.
@@ -76,6 +77,7 @@ var patterns = []pattern{
 func Scan(content string) []Finding {
 	var findings []Finding
 	var claimed [][2]int
+	markers := redactionMarker.FindAllStringIndex(content, -1)
 	for _, p := range patterns {
 		for _, l := range p.re.FindAllStringSubmatchIndex(content, -1) {
 			loc := [2]int{l[0], l[1]}
@@ -84,6 +86,9 @@ func Scan(content string) []Finding {
 					continue
 				}
 				loc = [2]int{l[2*p.group], l[2*p.group+1]}
+			}
+			if onlyRedacted(content, loc, markers) {
+				continue
 			}
 			// A labelled value or account pair is a credential only if it is
 			// shaped like one: "token is required" names no secret.
@@ -112,6 +117,34 @@ func Scan(content string) []Finding {
 	// order, a secret a later pattern found earlier in the text was left in.
 	sort.SliceStable(findings, func(i, j int) bool { return findings[i].Span[0] < findings[j].Span[0] })
 	return findings
+}
+
+// redactionMarker is what Redact puts in place of a secret.
+var redactionMarker = regexp.MustCompile(`\[REDACTED:[a-z_]+\]`)
+
+// onlyRedacted reports whether every letter and digit of content[span]
+// lies inside a redaction marker: text the scanner already redacted is not a
+// new secret, so redacting redacted text changes nothing.
+func onlyRedacted(content string, span [2]int, markers [][]int) bool {
+	if len(markers) == 0 {
+		return false
+	}
+	for i, r := range content[span[0]:span[1]] {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			continue
+		}
+		at, inside := span[0]+i, false
+		for _, m := range markers {
+			if at >= m[0] && at < m[1] {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			return false
+		}
+	}
+	return true
 }
 
 // credentialShaped reports whether s mixes letters with digits or symbols,

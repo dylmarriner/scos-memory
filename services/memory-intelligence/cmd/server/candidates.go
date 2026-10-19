@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	secretscan "github.com/dylmarriner/scos-memory/packages/secret-scan"
 )
 
 // The consolidation worker holds back memory candidates that its promotion
@@ -294,9 +292,6 @@ func approvedFact(c ReviewCandidate, req reviewDecisionRequest, candidateID stri
 	if content == "" {
 		content = c.Content
 	}
-	if findings := secretscan.Scan(content); len(findings) > 0 {
-		content = secretscan.Redact(content, findings)
-	}
 	network := MemoryNetwork(req.Network)
 	if network == "" {
 		network = memoryTypeToNetwork(c.ProposedType)
@@ -313,6 +308,7 @@ func approvedFact(c ReviewCandidate, req reviewDecisionRequest, candidateID stri
 		Evidence:    []string{"memory_candidate:" + candidateID},
 		Sensitivity: c.Sensitivity,
 	}
+	redactSecrets(fact)
 	// A candidate the synthesis pass proposed is an inference from the
 	// facts it cites; approving it keeps both.
 	var assessment struct {

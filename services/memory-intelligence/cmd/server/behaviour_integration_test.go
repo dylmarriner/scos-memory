@@ -426,3 +426,36 @@ func TestExternalFactsCarryTheirOriginAndRankBelowExplicitFacts(t *testing.T) {
 		t.Fatalf("read back = %v", got)
 	}
 }
+
+// A fact holding a credential is stored redacted and flagged at the most
+// restricted class its namespace admits, so its writer can still read and
+// correct it; the scanner does not re-flag its own markers on correction.
+func TestFactWithACredentialIsRedactedReadableAndCorrectable(t *testing.T) {
+	f := newBehaviourFixture(t)
+	code, out, _ := f.call(f.srv.handleFacts, http.MethodPost, "/v1/facts", `{"content":"The build box db login root:Tr0ub4dor&3 is in the vault."}`)
+	if code != http.StatusOK {
+		t.Fatalf("remember = %d %v", code, out)
+	}
+	id := out["fact"].(map[string]any)["id"].(string)
+	var content, sensitivity, redacted string
+	if err := f.admin.QueryRow(`SELECT v.content, i.sensitivity, v.structured_content->>'redacted' FROM memory_items i JOIN memory_versions v ON v.id = i.current_version_id WHERE i.id = $1`, id).Scan(&content, &sensitivity, &redacted); err != nil {
+		t.Fatal(err)
+	}
+	if content != "The build box db login root:[REDACTED:credential_pair] is in the vault." || sensitivity != "internal" || redacted != `["credential_pair"]` {
+		t.Fatalf("stored %q sensitivity %s redacted %s", content, sensitivity, redacted)
+	}
+	if code, out, _ := f.call(f.srv.handleFactByID, http.MethodGet, "/v1/facts/"+id, ""); code != http.StatusOK {
+		t.Fatalf("writer cannot read its own redacted fact: %d %v", code, out)
+	}
+	code, out, _ = f.call(f.srv.handleFactByID, http.MethodPatch, "/v1/facts/"+id, `{"content":"The build box db login root:[REDACTED:credential_pair] is in Vaultwarden.","reason":"moved"}`)
+	if code != http.StatusOK {
+		t.Fatalf("correct redacted fact = %d %v", code, out)
+	}
+	corrected := out
+	if fact, ok := out["fact"].(map[string]any); ok {
+		corrected = fact
+	}
+	if corrected["content"] != "The build box db login root:[REDACTED:credential_pair] is in Vaultwarden." {
+		t.Fatalf("corrected content = %v", corrected["content"])
+	}
+}

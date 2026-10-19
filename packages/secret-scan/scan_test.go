@@ -63,6 +63,11 @@ func TestCredentialsInText(t *testing.T) {
 		if got := Redact(c.in, Scan(c.in)); got != c.want {
 			t.Errorf("Redact(%q)\n got  %q\n want %q", c.in, got, c.want)
 		}
+		// Redacted text is clean: the scanner does not take its own
+		// markers for secrets, so redacting twice changes nothing.
+		if f := Scan(c.want); len(f) != 0 {
+			t.Errorf("Scan(%q) = %+v, want no findings in redacted text", c.want, f)
+		}
 	}
 	for _, clean := range []string{
 		"the token is required before deploy",
