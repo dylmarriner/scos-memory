@@ -474,6 +474,16 @@ func configFromEnvironment() (runtimeConfig, error) {
 	if err != nil {
 		return runtimeConfig{}, err
 	}
+	// A token limit that does not parse must stop startup: falling back to
+	// 0 would switch context fitting off and let oversized input through.
+	textMaxTokens, err := envIntStrict("SCOS_MODEL_TEXT_MAX_TOKENS", 0)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	codeMaxTokens, err := envIntStrict("SCOS_MODEL_CODE_MAX_TOKENS", 0)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	protocols := map[string]string{}
 	for _, role := range []string{"TEXT", "CODE", "RERANK"} {
 		p := strings.ToLower(envString("SCOS_MODEL_"+role+"_PROTOCOL", protocolTEI))
@@ -487,12 +497,12 @@ func configFromEnvironment() (runtimeConfig, error) {
 		Text: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_TEXT_URL")), Model: envString("SCOS_MODEL_TEXT_MODEL", "BAAI/bge-m3"),
 			Revision: envString("SCOS_MODEL_TEXT_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_TEXT_DIMENSIONS", 1024), Required: textRequired, Protocol: protocols["TEXT"],
-			MaxTokens: envInt("SCOS_MODEL_TEXT_MAX_TOKENS", 0),
+			MaxTokens: textMaxTokens,
 		},
 		Code: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_CODE_URL")), Model: envString("SCOS_MODEL_CODE_MODEL", "BAAI/bge-code-v1"),
 			Revision: envString("SCOS_MODEL_CODE_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_CODE_DIMENSIONS", 1536), Required: codeRequired, Protocol: protocols["CODE"],
-			MaxTokens: envInt("SCOS_MODEL_CODE_MAX_TOKENS", 0),
+			MaxTokens: codeMaxTokens,
 		},
 		Rerank: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_RERANK_URL")), Model: envString("SCOS_MODEL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
@@ -546,6 +556,18 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func envIntStrict(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a whole number, not %q", name, value)
+	}
+	return parsed, nil
 }
 
 func envBoolStrict(name string, fallback bool) (bool, error) {

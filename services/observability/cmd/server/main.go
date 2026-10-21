@@ -926,21 +926,20 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 		return
 	}
 	for i := range points {
-		// The journal is the record: a journaled batch is accepted and
-		// applied whatever the collector does, so a failed forward neither
-		// strands it unapplied nor invites a retry that would duplicate it.
-		if s.otlp != nil {
-			if err := s.otlp.exportMetric(r.Context(), &points[i]); err != nil {
-				log.Printf("metrics: OTLP export failed (kept in the journal): %v", err)
-			}
-		}
 		s.metrics = append(s.metrics, &points[i])
 		if scope.service {
 			s.rollups.add(&points[i])
 		}
 	}
 	s.trimRetention()
+	exporter := s.otlp
 	s.mu.Unlock()
+	// The journal is the record: a journaled batch is accepted and applied
+	// whatever the collector does. Forwarding happens outside the lock, so a
+	// stalled collector never holds up ingest or queries.
+	if exporter != nil {
+		forwardBatch("metrics", points, func(item *MetricPoint) error { return exporter.exportMetric(r.Context(), item) })
+	}
 	if err := s.persistDB(); err != nil {
 		http.Error(w, "persist metrics: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -1068,18 +1067,17 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 		return
 	}
 	for i := range spans {
-		// The journal is the record: a journaled batch is accepted and
-		// applied whatever the collector does, so a failed forward neither
-		// strands it unapplied nor invites a retry that would duplicate it.
-		if s.otlp != nil {
-			if err := s.otlp.exportTrace(r.Context(), &spans[i]); err != nil {
-				log.Printf("traces: OTLP export failed (kept in the journal): %v", err)
-			}
-		}
 		s.traces = append(s.traces, &spans[i])
 	}
 	s.trimRetention()
+	exporter := s.otlp
 	s.mu.Unlock()
+	// The journal is the record: a journaled batch is accepted and applied
+	// whatever the collector does. Forwarding happens outside the lock, so a
+	// stalled collector never holds up ingest or queries.
+	if exporter != nil {
+		forwardBatch("traces", spans, func(item *TraceSpan) error { return exporter.exportTrace(r.Context(), item) })
+	}
 	if err := s.persistDB(); err != nil {
 		http.Error(w, "persist traces: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -1189,18 +1187,17 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 		return
 	}
 	for i := range entries {
-		// The journal is the record: a journaled batch is accepted and
-		// applied whatever the collector does, so a failed forward neither
-		// strands it unapplied nor invites a retry that would duplicate it.
-		if s.otlp != nil {
-			if err := s.otlp.exportLog(r.Context(), &entries[i]); err != nil {
-				log.Printf("logs: OTLP export failed (kept in the journal): %v", err)
-			}
-		}
 		s.logs = append(s.logs, &entries[i])
 	}
 	s.trimRetention()
+	exporter := s.otlp
 	s.mu.Unlock()
+	// The journal is the record: a journaled batch is accepted and applied
+	// whatever the collector does. Forwarding happens outside the lock, so a
+	// stalled collector never holds up ingest or queries.
+	if exporter != nil {
+		forwardBatch("logs", entries, func(item *LogEntry) error { return exporter.exportLog(r.Context(), item) })
+	}
 	if err := s.persistDB(); err != nil {
 		http.Error(w, "persist logs: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -1211,4 +1208,17 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// forwardBatch sends a journaled batch to the OTLP collector. The first
+// failure ends the attempt: a collector that is down would fail every
+// remaining item after its own timeout, and the batch is already kept in the
+// journal and applied here, so nothing is lost by stopping.
+func forwardBatch[T any](kind string, items []T, export func(*T) error) {
+	for i := range items {
+		if err := export(&items[i]); err != nil {
+			log.Printf("%s: OTLP export failed, %d of %d not forwarded (all kept in the journal): %v", kind, len(items)-i, len(items), err)
+			return
+		}
+	}
 }

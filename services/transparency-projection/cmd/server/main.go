@@ -33,12 +33,13 @@ var serviceMetrics = telemetry.FromEnvironment("transparency-projection")
 type projectionServer struct {
 	upstream             string // primary dependency (memory-intelligence), used for readiness
 	upstreams            map[string]string
-	cloudControlPlaneURL string       // same-origin browser API proxy for account/admin views
-	accountsDisabled     bool         // SCOS_CLOUD_CONTROL_PLANE_URL=disabled: this deployment runs without accounts
-	controlPlaneToken    string       // forwarded to control-plane-protected upstreams (code-intelligence etc.)
-	client               *http.Client // fast client for health probes and event streaming
-	snapshotClient       *http.Client // slow client for snapshot assembly (heavyweight views)
-	streamClient         *http.Client // no overall deadline: the live event stream stays open
+	cloudControlPlaneURL string        // same-origin browser API proxy for account/admin views
+	accountsDisabled     bool          // SCOS_CLOUD_CONTROL_PLANE_URL=disabled: this deployment runs without accounts
+	controlPlaneToken    string        // forwarded to control-plane-protected upstreams (code-intelligence etc.)
+	client               *http.Client  // fast client for health probes and event streaming
+	snapshotClient       *http.Client  // slow client for snapshot assembly (heavyweight views)
+	streamClient         *http.Client  // no overall deadline: the live event stream stays open
+	streamHeaderTimeout  time.Duration // how long the stream's upstream may take to answer; 0 = streamHeaderTimeout
 
 	editPassphrase string // SCOS_DASHBOARD_EDIT_PASSPHRASE; empty disables editing entirely
 	editSecret     string // HMAC key for dashboard edit-session tokens (reuses the security issuer secret)
@@ -391,6 +392,10 @@ func normaliseListView(name string, body json.RawMessage) json.RawMessage {
 	return body
 }
 
+// streamHeaderTimeout bounds the wait for the live stream's upstream to
+// answer; the stream it then sends has no deadline.
+const streamHeaderTimeout = 15 * time.Second
+
 func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -416,7 +421,21 @@ func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
 	if client == nil {
 		client = s.client
 	}
-	resp, err := client.Do(req)
+	// The stream itself has no deadline, but the upstream must start it
+	// promptly: one that accepts the connection and never answers would
+	// otherwise leave the viewer waiting with no error to reconnect on.
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	headerWait := s.streamHeaderTimeout
+	if headerWait <= 0 {
+		headerWait = streamHeaderTimeout
+	}
+	stalled := time.AfterFunc(headerWait, cancel)
+	resp, err := client.Do(req.WithContext(ctx))
+	if !stalled.Stop() && err == nil {
+		resp.Body.Close()
+		err = errors.New("upstream stream sent no response headers in time")
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream stream unavailable"})
 		return

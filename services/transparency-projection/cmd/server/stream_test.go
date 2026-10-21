@@ -34,3 +34,29 @@ func TestEventStreamOutlivesTheServiceCallDeadline(t *testing.T) {
 		t.Fatalf("stream was cut before its second event: %q", body)
 	}
 }
+
+// TestEventStreamGivesUpOnAnUpstreamThatNeverAnswers covers an upstream that
+// accepts the connection but never starts the stream: the viewer gets an
+// error to reconnect on instead of waiting forever.
+func TestEventStreamGivesUpOnAnUpstreamThatNeverAnswers(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer upstream.Close()
+	defer close(release)
+
+	s := &projectionServer{upstream: upstream.URL, client: upstream.Client(), streamClient: upstream.Client(), streamHeaderTimeout: 100 * time.Millisecond}
+	res := httptest.NewRecorder()
+	started := time.Now()
+	s.events(res, httptest.NewRequest(http.MethodGet, "/v1/transparency/stream", nil))
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", res.Code)
+	}
+	if waited := time.Since(started); waited > 2*time.Second {
+		t.Fatalf("waited %v for an upstream that never answered", waited)
+	}
+}
