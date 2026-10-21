@@ -492,12 +492,15 @@ func TestRedactHistoryRemovesALeakedSecretAndNothingElse(t *testing.T) {
 	id := f.remember("The build box login is kept in the vault.", 0.8)
 	// A version written before the scanner recognised this credential.
 	leaked := "The build box db login root:Tr0ub4dor&3 is kept in the vault."
+	// Provenance that looks like a token to the scanner must survive: only
+	// free text is redacted.
+	provenance := "codex@kubuntux:AbCdEf0123456789AbCdEf0123456789xyz"
 	version := f.scalar(`INSERT INTO memory_versions (memory_id, version_number, content, structured_content, content_hash, change_reason, created_by)
-		VALUES ($1, 2, $2, jsonb_build_object('derivation', $2::text), 'h', 'legacy_write', $3) RETURNING id::text`, id, leaked, f.owner)
+		VALUES ($1, 2, $2, jsonb_build_object('derivation', $2::text, 'origin', $4::text), 'h', 'legacy_write', $3) RETURNING id::text`, id, leaked, f.owner, provenance)
 	f.scalar(`UPDATE memory_items SET current_version_id = $2, title = $3, canonical_summary = $4 WHERE id = $1 RETURNING id::text`,
 		id, version, truncate(leaked, 120), truncate(leaked, 500))
 	f.scalar(`INSERT INTO diary_entries (tenant_id, principal_id, entry_type, content) VALUES ($1, $2, 'fact_recorded', $3) RETURNING id::text`,
-		f.tenant, f.owner, `{"fact_id":"`+id+`","summary":"`+truncate(leaked, 40)+`"}`)
+		f.tenant, f.owner, `{"fact_id":"`+id+`","origin":"`+provenance+`","summary":"`+truncate(leaked, 40)+`"}`)
 
 	code, out, _ := f.call(f.srv.handleFactByID, http.MethodPost, "/v1/facts/"+id+"/redact", `{}`)
 	if code != http.StatusOK {
@@ -517,6 +520,12 @@ func TestRedactHistoryRemovesALeakedSecretAndNothingElse(t *testing.T) {
 	}
 	if got := f.scalar(`SELECT content FROM memory_versions WHERE id = $1`, version); got != "The build box db login root:[REDACTED:credential_pair] is kept in the vault." {
 		t.Fatalf("redacted version = %q", got)
+	}
+	if got := f.scalar(`SELECT structured_content->>'origin' FROM memory_versions WHERE id = $1`, version); got != provenance {
+		t.Fatalf("provenance was rewritten: %q", got)
+	}
+	if n := f.scalar(`SELECT count(*) FROM diary_entries WHERE content LIKE '%' || $1 || '%' AND content LIKE '%' || $2 || '%'`, id, provenance); n != "1" {
+		t.Fatalf("diary provenance was rewritten (%s entries keep it)", n)
 	}
 	// Redacting again finds nothing new.
 	if code, out, _ := f.call(f.srv.handleFactByID, http.MethodPost, "/v1/facts/"+id+"/redact", `{}`); code != http.StatusOK || out["versions_redacted"] != float64(0) {

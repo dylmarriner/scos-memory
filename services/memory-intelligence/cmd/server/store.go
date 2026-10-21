@@ -1443,9 +1443,13 @@ func redactDerived(s string, versions []redactedText) string {
 }
 
 // redactFactHistory removes from a fact's stored history every secret the
-// scanner now finds, in place: each version's content and structured
-// content, the item's title, summary and normalised key/value, and the diary
-// entries that quote the fact. Spans become [REDACTED:kind] markers and
+// scanner now finds, in place, in exactly the text the write path guards:
+// each version's content and the free text in its structured content
+// (historyFreeTextKeys), the item's title, summary and normalised key/value,
+// and the summaries and reasons of the diary entries that quote the fact.
+// Provenance (origin, scope, network, timestamps) and identifiers are never
+// touched: they are not free text, and paths and ids in them are not
+// secrets. Spans become [REDACTED:kind] markers and
 // nothing else changes; the memory_versions_append_only trigger admits only
 // that rewrite, announced per row through scos.redacting_version. It works
 // on a fact in any status, since a superseded or forgotten version holds a
@@ -1497,7 +1501,7 @@ func redactFactHistory(ctx context.Context, db *sql.DB, id requestIdentity, fact
 	for _, v := range versions {
 		findings := secretscan.Scan(v.content)
 		content := secretscan.Redact(v.content, findings)
-		structured, structuredKinds, err := redactJSONStrings(v.structured)
+		structured, structuredKinds, err := redactJSONFields(v.structured, historyFreeTextKeys)
 		if err != nil {
 			return nil, fmt.Errorf("version %s structured content: %w", v.id, err)
 		}
@@ -1577,8 +1581,8 @@ func redactFactHistory(ctx context.Context, db *sql.DB, id requestIdentity, fact
 			continue
 		}
 		changed := false
-		for k, v := range body {
-			if s, ok := v.(string); ok {
+		for _, k := range diaryFreeTextKeys {
+			if s, ok := body[k].(string); ok {
 				if r := redactDerived(s, texts); r != s {
 					body[k] = r
 					changed = true
@@ -1612,39 +1616,36 @@ func redactFactHistory(ctx context.Context, db *sql.DB, id requestIdentity, fact
 	return result, nil
 }
 
-// redactJSONStrings redacts every string value in a JSON document, keeping
-// its keys and shape, and returns the kinds it redacted. Redacting values
-// rather than the encoded text keeps the document valid whatever the secret
-// contains.
-func redactJSONStrings(raw string) (string, []string, error) {
-	var doc any
+// historyFreeTextKeys are the structured-content fields that hold free text
+// a caller wrote (a correction's reason lands in derivation); every other
+// field is provenance or classification.
+var historyFreeTextKeys = []string{"derivation"}
+
+// diaryFreeTextKeys are the diary fields that quote a fact's text or a
+// caller's reason.
+var diaryFreeTextKeys = []string{"summary", "reason"}
+
+// redactJSONFields redacts the named top-level string fields of a JSON
+// object, keeping every other field, and returns the kinds it redacted.
+// Redacting values rather than the encoded text keeps the document valid
+// whatever the secret contains.
+func redactJSONFields(raw string, keys []string) (string, []string, error) {
+	var doc map[string]any
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return "", nil, err
 	}
 	var kinds []string
-	var walk func(v any) any
-	walk = func(v any) any {
-		switch t := v.(type) {
-		case string:
-			findings := secretscan.Scan(t)
-			for _, f := range findings {
-				kinds = append(kinds, string(f.Kind))
-			}
-			return secretscan.Redact(t, findings)
-		case map[string]any:
-			for k, inner := range t {
-				t[k] = walk(inner)
-			}
-			return t
-		case []any:
-			for i, inner := range t {
-				t[i] = walk(inner)
-			}
-			return t
+	for _, k := range keys {
+		s, ok := doc[k].(string)
+		if !ok {
+			continue
 		}
-		return v
+		findings := secretscan.Scan(s)
+		for _, f := range findings {
+			kinds = append(kinds, string(f.Kind))
+		}
+		doc[k] = secretscan.Redact(s, findings)
 	}
-	doc = walk(doc)
 	if len(kinds) == 0 {
 		return raw, nil, nil
 	}
