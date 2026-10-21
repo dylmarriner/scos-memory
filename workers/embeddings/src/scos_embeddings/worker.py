@@ -202,13 +202,31 @@ def _runtime_embed_text(text: str) -> list[float]:
 
 
 def embed_texts(texts: list[str]) -> list[list[float]] | None:
-    if MODEL_RUNTIME_URL:
-        try:
-            return [_runtime_embed_text(text) for text in texts]
-        except Exception as exc:
-            logger.warning("model-runtime embedding failed (%s)", exc)
-            return None
+    vectors, failure = embed_texts_prefix(texts)
+    return None if failure is not None else vectors
 
+
+def embed_texts_prefix(texts: list[str]) -> tuple[list[list[float]], str | None]:
+    """Embed texts in order, stopping at the first that fails: the vectors of
+    the texts before it, and why it failed (None when every text was
+    embedded). A text that cannot be embedded then costs one request per
+    cycle instead of discarding, and recomputing, every vector before it."""
+    if MODEL_RUNTIME_URL:
+        out: list[list[float]] = []
+        for text in texts:
+            try:
+                out.append(_runtime_embed_text(text))
+            except Exception as exc:
+                logger.warning("model-runtime embedding failed (%s)", exc)
+                return out, str(exc)
+        return out, None
+    vectors = _local_embed_texts(texts)
+    if vectors is None:
+        return [], "the local embedding model is unavailable"
+    return vectors, None
+
+
+def _local_embed_texts(texts: list[str]) -> list[list[float]] | None:
     em = get_embedder()
     if em is None:
         return None
@@ -369,13 +387,15 @@ def run_cycle(conn: psycopg.Connection) -> int:
         conn.commit()
         return 0
 
-    embeddings = embed_texts([row["content"] for row in batch])
-    if embeddings is None:
+    embeddings, failure = embed_texts_prefix([row["content"] for row in batch])
+    if not embeddings and failure is not None:
         conn.rollback()
         # A batch that could not be embedded is a failed cycle, not an idle
         # one: it is raised so the loop logs it and readiness reports it.
-        raise EmbeddingUnavailable(f"embedding {len(batch)} memory version(s) failed; see the warning above")
-    if len(embeddings) != len(batch) or any(len(vec) != MODEL_DIMENSIONS for vec in embeddings):
+        raise EmbeddingUnavailable(f"embedding memory version {batch[0]['id']} failed: {failure}")
+    if (failure is None and len(embeddings) != len(batch)) or len(embeddings) > len(batch) or any(
+        len(vec) != MODEL_DIMENSIONS for vec in embeddings
+    ):
         conn.rollback()
         # Never skip a row silently: a skipped row would be retried forever
         # without anything reporting why it never gets an embedding.
@@ -398,6 +418,13 @@ def run_cycle(conn: psycopg.Connection) -> int:
         )
         written += 1
     conn.commit()
+    if failure is not None:
+        # The versions embedded before the failure are kept; the one that
+        # failed is never skipped, and fails the cycle until it embeds.
+        raise EmbeddingUnavailable(
+            f"embedded {written} of {len(batch)} memory version(s); version "
+            f"{batch[written]['id']} failed: {failure}"
+        )
     return written
 
 

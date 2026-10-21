@@ -47,6 +47,11 @@ type backendConfig struct {
 	Dimensions int
 	Required   bool
 	Protocol   string
+	// MaxTokens is the longest input, in the backend's own tokens, that a
+	// llama.cpp embedding backend accepts (its context and batch size). A
+	// longer input is cut to fit rather than refused; zero leaves inputs as
+	// they are.
+	MaxTokens int
 }
 
 type runtimeConfig struct {
@@ -197,7 +202,12 @@ func (s *runtimeServer) embed(w http.ResponseWriter, r *http.Request, role strin
 
 	path, payload := "/embed", map[string]any{"inputs": body.Input}
 	if cfg.Protocol == protocolLlamaCPP {
-		path, payload = "/v1/embeddings", map[string]any{"input": body.Input}
+		input, err := s.fitToContext(r.Context(), cfg, body.Input)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "embedding backend tokenizer: " + err.Error()})
+			return
+		}
+		path, payload = "/v1/embeddings", map[string]any{"input": input}
 	}
 	encoded, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(cfg.URL, "/")+path, bytes.NewReader(encoded))
@@ -240,6 +250,63 @@ func (s *runtimeServer) embed(w http.ResponseWriter, r *http.Request, role strin
 		Embedding: embedding, Model: cfg.Model, ModelRevision: cfg.Revision,
 		Dimensions: len(embedding), Role: role,
 	})
+}
+
+// llamaCPPSpecialTokens is the room left for the special tokens a llama.cpp
+// embedding backend adds around an input (CLS and SEP for bge-m3).
+const llamaCPPSpecialTokens = 8
+
+// fitToContext returns input cut to the backend's MaxTokens, counted by the
+// backend's own tokenizer, so a memory longer than the model's context is
+// embedded from its beginning instead of being refused outright: llama.cpp
+// rejects such an input, and one refused memory otherwise stalls every
+// embedding behind it. An input that may fit is checked only when it could
+// exceed the limit at all (a token is at least one byte).
+func (s *runtimeServer) fitToContext(ctx context.Context, cfg backendConfig, input string) (string, error) {
+	limit := cfg.MaxTokens - llamaCPPSpecialTokens
+	if cfg.MaxTokens <= 0 || len(input) <= limit {
+		return input, nil
+	}
+	var tokenized struct {
+		Tokens []int `json:"tokens"`
+	}
+	if err := s.llamaCall(ctx, cfg, "/tokenize", map[string]any{"content": input, "add_special": false}, &tokenized); err != nil {
+		return "", err
+	}
+	if len(tokenized.Tokens) <= limit {
+		return input, nil
+	}
+	var detokenized struct {
+		Content string `json:"content"`
+	}
+	if err := s.llamaCall(ctx, cfg, "/detokenize", map[string]any{"tokens": tokenized.Tokens[:limit]}, &detokenized); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(detokenized.Content) == "" {
+		return "", errors.New("detokenize returned no text")
+	}
+	return detokenized.Content, nil
+}
+
+func (s *runtimeServer) llamaCall(ctx context.Context, cfg backendConfig, path string, payload any, out any) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.URL, "/")+path, bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s unavailable", path)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("%s returned %s", path, resp.Status)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out)
 }
 
 func (s *runtimeServer) rerank(w http.ResponseWriter, r *http.Request) {
@@ -413,10 +480,12 @@ func configFromEnvironment() (runtimeConfig, error) {
 		Text: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_TEXT_URL")), Model: envString("SCOS_MODEL_TEXT_MODEL", "BAAI/bge-m3"),
 			Revision: envString("SCOS_MODEL_TEXT_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_TEXT_DIMENSIONS", 1024), Required: textRequired, Protocol: protocols["TEXT"],
+			MaxTokens: envInt("SCOS_MODEL_TEXT_MAX_TOKENS", 0),
 		},
 		Code: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_CODE_URL")), Model: envString("SCOS_MODEL_CODE_MODEL", "BAAI/bge-code-v1"),
 			Revision: envString("SCOS_MODEL_CODE_REVISION", "main"), Dimensions: envInt("SCOS_MODEL_CODE_DIMENSIONS", 1536), Required: codeRequired, Protocol: protocols["CODE"],
+			MaxTokens: envInt("SCOS_MODEL_CODE_MAX_TOKENS", 0),
 		},
 		Rerank: backendConfig{
 			URL: strings.TrimSpace(os.Getenv("SCOS_MODEL_RERANK_URL")), Model: envString("SCOS_MODEL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),

@@ -65,6 +65,9 @@ services:
       SCOS_MODEL_TEXT_MODEL: BAAI/bge-m3
       SCOS_MODEL_TEXT_REVISION: ${SCOS_MODEL_TEXT_GGUF_REVISION:-gguf-q8_0}
       SCOS_MODEL_TEXT_DIMENSIONS: "1024"
+      # The servers above run with -c/-b/-ub 2048: a longer input is cut to
+      # fit instead of being refused.
+      SCOS_MODEL_TEXT_MAX_TOKENS: "2048"
       SCOS_MODEL_RERANK_URL: http://bge-reranker-gpu:8080
       SCOS_MODEL_RERANK_PROTOCOL: llamacpp
       SCOS_MODEL_RERANK_MODEL: BAAI/bge-reranker-v2-m3
