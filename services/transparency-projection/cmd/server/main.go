@@ -59,19 +59,27 @@ type upstreamDefault struct {
 }
 
 var upstreamDefaults = []upstreamDefault{
-	{"memory_intelligence", "SCOS_MEMORY_INTELLIGENCE_URL", "http://memory-intelligence:8089"},
-	{"agent_registry", "SCOS_AGENT_REGISTRY_URL", "http://agent-registry:8093"},
-	{"tool_governance", "SCOS_TOOL_GOVERNANCE_URL", "http://tool-governance:8092"},
-	{"extension_manager", "SCOS_EXTENSION_MANAGER_URL", "http://extension-manager:8086"},
-	{"code_intelligence", "SCOS_CODE_INTELLIGENCE_URL", "http://code-intelligence:8084"},
-	{"autonomous_control_plane", "SCOS_AUTONOMOUS_CONTROL_PLANE_URL", "http://autonomous-control-plane:8081"},
-	{"recovery_orchestrator", "SCOS_RECOVERY_ORCHESTRATOR_URL", "http://recovery-orchestrator:8094"},
-	{"security_gate", "SCOS_SECURITY_GATE_URL", "http://security-gate:8091"},
-	{"observability", "SCOS_OBSERVABILITY_URL", "http://observability:8096"},
+	{"memory_intelligence", "SCOS_MEMORY_INTELLIGENCE_URL", "https://memory-intelligence:8089"},
+	{"agent_registry", "SCOS_AGENT_REGISTRY_URL", "https://agent-registry:8093"},
+	{"tool_governance", "SCOS_TOOL_GOVERNANCE_URL", "https://tool-governance:8092"},
+	{"extension_manager", "SCOS_EXTENSION_MANAGER_URL", "https://extension-manager:8086"},
+	{"code_intelligence", "SCOS_CODE_INTELLIGENCE_URL", "https://code-intelligence:8084"},
+	{"autonomous_control_plane", "SCOS_AUTONOMOUS_CONTROL_PLANE_URL", "https://autonomous-control-plane:8081"},
+	{"recovery_orchestrator", "SCOS_RECOVERY_ORCHESTRATOR_URL", "https://recovery-orchestrator:8094"},
+	{"security_gate", "SCOS_SECURITY_GATE_URL", "https://security-gate:8091"},
+	{"observability", "SCOS_OBSERVABILITY_URL", "https://observability:8096"},
 	{"credential_vault", "SCOS_CREDENTIAL_VAULT_URL", "https://credential-vault:8100"},
 	{"okf_synchroniser", "SCOS_OKF_SYNCHRONISER_URL", "https://okf-synchroniser:8090"},
 	{"graphify_provider", "SCOS_GRAPHIFY_PROVIDER_URL", "https://graphify-provider:8099"},
 	{"cloud_control_plane", "SCOS_CLOUD_CONTROL_PLANE_URL", "https://cloud-control-plane:8079"},
+	{"memory_gateway", "SCOS_MEMORY_GATEWAY_URL", "https://memory-gateway:8080"},
+	{"retrieval_orchestrator", "SCOS_RETRIEVAL_ORCHESTRATOR_URL", "https://retrieval-orchestrator:8082"},
+	{"context_optimisation", "SCOS_CONTEXT_OPTIMISATION_URL", "https://context-optimisation:8083"},
+	{"execution_proxy", "SCOS_EXECUTION_PROXY_URL", "https://execution-proxy:8085"},
+	{"compatibility_gateway", "SCOS_COMPATIBILITY_GATEWAY_URL", "https://compatibility-gateway:8087"},
+	{"hermes_provider", "SCOS_HERMES_PROVIDER_URL", "https://hermes-provider:8088"},
+	{"backup_manager", "SCOS_BACKUP_MANAGER_URL", "https://backup-manager:8095"},
+	{"mcp_gateway", "SCOS_MCP_GATEWAY_URL", "https://mcp-gateway:8098"},
 }
 
 func resolveUpstreams() map[string]string {
@@ -260,6 +268,44 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		// Every repository graphify has built a graph of, with the caller's
 		// extraction jobs into memory.
 		"graphify_graphs": {s.upstreams["graphify_provider"], "/v1/graphify/graphs"},
+
+		// Every backend service's own lists, one view per list, so the
+		// dashboard has a tab per tool category showing everything each
+		// service holds. Secret references are left out: listing them
+		// writes a restricted-retrieval audit record every time.
+		"memory_candidates":      {s.upstream, "/v1/candidates?status=pending_review"},
+		"entities":               {s.upstream, "/v1/entities"},
+		"beliefs":                {s.upstream, "/v1/beliefs"},
+		"hierarchy":              {s.upstream, "/v1/hierarchy"},
+		"handoffs":               {s.upstreams["agent_registry"], "/v1/handoffs"},
+		"governed_tools":         {s.upstreams["tool_governance"], "/v1/tools"},
+		"exec_results":           {s.upstreams["execution_proxy"], "/v1/results"},
+		"exec_rules":             {s.upstreams["execution_proxy"], "/v1/rules"},
+		"hook_executions":        {s.upstreams["extension_manager"], "/v1/hooks/executions?limit=100"},
+		"extension_receipts":     {s.upstreams["extension_manager"], "/v1/receipts"},
+		"extension_capabilities": {s.upstreams["extension_manager"], "/v1/capabilities"},
+		"compatibility":          {s.upstreams["compatibility_gateway"], "/v1/compatibility"},
+		"compat_conformance":     {s.upstreams["compatibility_gateway"], "/v1/compatibility/conformance"},
+		"mg_turns":               {s.upstreams["memory_gateway"], "/v1/turns?limit=50"},
+		"mg_outbox":              {s.upstreams["memory_gateway"], "/v1/outbox/status"},
+		"mg_dead_letters":        {s.upstreams["memory_gateway"], "/v1/outbox/dead-letters"},
+		"hermes_status":          {s.upstreams["hermes_provider"], "/v1/provider/status"},
+		"retrieval_version":      {s.upstreams["retrieval_orchestrator"], "/v1/version"},
+		"context_version":        {s.upstreams["context_optimisation"], "/v1/version"},
+		"okf_projections":        {s.upstreams["okf_synchroniser"], "/v1/projections"},
+		"okf_divergence":         {s.upstreams["okf_synchroniser"], "/v1/divergence"},
+		"okf_mirror":             {s.upstreams["backup_manager"], "/v1/git-mirror"},
+		"recovery_interrupted":   {s.upstreams["recovery_orchestrator"], "/v1/recovery/interrupted-turns"},
+		"backups":                {s.upstreams["backup_manager"], "/v1/backups"},
+		"restore_tests":          {s.upstreams["backup_manager"], "/v1/restore-tests"},
+		"restore_cadence":        {s.upstreams["backup_manager"], "/v1/restore-tests/cadence"},
+		"backup_retention":       {s.upstreams["backup_manager"], "/v1/retention"},
+		"retention_audit":        {s.upstreams["backup_manager"], "/v1/retention/audit?limit=100"},
+		"traces":                 {s.upstreams["observability"], "/v1/traces?limit=100"},
+		"logs":                   {s.upstreams["observability"], "/v1/logs?limit=100"},
+		"slo_targets":            {s.upstreams["observability"], "/v1/targets"},
+		"otlp_export":            {s.upstreams["observability"], "/v1/export/status"},
+		"benchmarks":             {s.upstreams["observability"], "/v1/benchmarks?limit=50"},
 	}
 	result := make(map[string]json.RawMessage, len(views))
 	errored := make(map[string]string)
@@ -288,6 +334,18 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 			result[name] = normaliseListView(name, body)
 		}(name, view)
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tools, err := s.fetchToolCatalogue(r)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			errored["mcp_tools"] = err.Error()
+			return
+		}
+		result["mcp_tools"] = tools
+	}()
 	wg.Wait()
 	if len(result) == 0 {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "no transparency views were available", "unavailable": errored})
@@ -315,6 +373,11 @@ var listViews = map[string]bool{
 	"code_intelligence": true, "routing": true, "recovery": true, "security": true,
 	"token_flow": true, "costs": true, "code_repos": true, "credentials": true, "okf_documents": true,
 	"okf_proposals": true, "graphify_graphs": true,
+	"entities": true, "beliefs": true, "hierarchy": true, "handoffs": true, "governed_tools": true,
+	"exec_results": true, "exec_rules": true, "hook_executions": true, "extension_receipts": true,
+	"extension_capabilities": true, "compat_conformance": true, "mg_dead_letters": true,
+	"okf_projections": true, "okf_divergence": true, "recovery_interrupted": true, "backups": true,
+	"restore_tests": true, "restore_cadence": true, "retention_audit": true, "traces": true, "logs": true,
 }
 
 // normaliseListView turns a list view's JSON null -- how a Go service
@@ -706,6 +769,53 @@ func (s *projectionServer) fetch(r *http.Request, base, path string) (json.RawMe
 		return nil, resp.StatusCode, errors.New("upstream returned invalid JSON")
 	}
 	return json.RawMessage(body), resp.StatusCode, nil
+}
+
+// fetchToolCatalogue asks mcp-gateway for every tool it serves (MCP
+// tools/list): each tool's name, description and input schema, exactly as
+// agents see them.
+func (s *projectionServer) fetchToolCatalogue(r *http.Request) (json.RawMessage, error) {
+	base := s.upstreams["mcp_gateway"]
+	if base == "" {
+		return nil, errors.New("mcp-gateway URL is not configured")
+	}
+	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, base+"/mcp", body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.copyIdentityHeaders(r, req)
+	client := s.snapshotClient
+	if client == nil {
+		client = s.client
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("upstream returned status %d", resp.StatusCode)
+	}
+	var rpc struct {
+		Result *struct {
+			Tools json.RawMessage `json:"tools"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpc); err != nil {
+		return nil, fmt.Errorf("decode tools/list: %w", err)
+	}
+	if rpc.Error != nil {
+		return nil, errors.New("tools/list: " + rpc.Error.Message)
+	}
+	if rpc.Result == nil || len(rpc.Result.Tools) == 0 {
+		return nil, errors.New("tools/list returned no tools")
+	}
+	return rpc.Result.Tools, nil
 }
 
 func (s *projectionServer) copyIdentityHeaders(src *http.Request, dst *http.Request) {

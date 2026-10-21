@@ -56,6 +56,14 @@
     .dream-legend { display: flex; flex-wrap: wrap; gap: 1rem; font-size: .7rem; color: var(--text-dim); margin-top: .6rem; }
     .dream-stage-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .6rem .9rem; }
     .dream-stage-list div { font-size: .76rem; color: var(--text-dim); line-height: 1.45; }
+    .tool-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: .55rem .9rem; }
+    .tool-item { border: 1px solid var(--border-soft); border-radius: .45rem; padding: .55rem .7rem; background: rgba(5,7,13,.6); }
+    .tool-item code { color: var(--cyan); font-size: .78rem; }
+    .tool-item p { margin: .3rem 0 0; color: var(--text-dim); font-size: .74rem; line-height: 1.45; }
+    .tool-args { margin-top: .35rem; font-size: .68rem; color: var(--text-faint); }
+    .tool-args b { color: var(--amber); font-weight: 500; }
+    .cat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; margin-top: 1rem; }
+    .tool-search { width: 100%; box-sizing: border-box; background: #05070d; color: var(--text); border: 1px solid rgba(255,255,255,.12); border-radius: .4rem; padding: .55rem .7rem; font: inherit; margin-bottom: .8rem; }
     .dream-stage-list b { color: var(--text); display: block; font-size: .78rem; }
     @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
@@ -1607,10 +1615,74 @@
       const el = document.createElement('div');
       el.className = 'hud-panel';
       el.style.setProperty('--hud-accent', accent);
-      el.innerHTML = `<div class="hud-panel-head"><span class="hud-tag">${tag}</span><span class="hud-title"></span></div><div class="hud-body"></div>`;
+      const explain = PANEL_EXPLAIN[key] ? `<p class="panel-explain">${escapeHtml(PANEL_EXPLAIN[key])}</p>` : '';
+      el.innerHTML = `<div class="hud-panel-head"><span class="hud-tag">${tag}</span><span class="hud-title"></span></div>${explain}<div class="hud-body"></div>`;
       return { el, titleEl: el.querySelector('.hud-title'), bodyEl: el.querySelector('.hud-body') };
     }
 
+    // What every panel shows, in a sentence; shown under each panel's title.
+    const PANEL_EXPLAIN = {
+      system: 'Every SCOS service as memory-intelligence last probed it: whether it answered, its version and uptime.',
+      memory: 'Facts and entities as a graph; links are relations between facts and entities mentioned by them.',
+      user_model: 'What SCOS has learned about you: preferences, goals and traits drawn from your facts.',
+      facts: 'Every active fact in memory, newest first, with its network, source and confidence.',
+      learnings: 'Lessons recorded from outcomes, so agents repeat what worked and avoid what did not.',
+      contradictions: 'Pairs of facts that state opposite things; one has to be corrected or forgotten.',
+      timeline: 'Memory events in time order: facts recorded, corrected and forgotten.',
+      diary: 'The running diary of memory changes, each entry quoting what changed and why.',
+      agents: 'Agents registered with SCOS, their capabilities, permissions and last heartbeat.',
+      tool_operations: 'Governed tool calls: what was requested, its risk, whether it was confirmed, and how it ended.',
+      plugins: 'Installed extensions, their status, isolation and health.',
+      skills: 'Skills agents can activate: their purpose, required tools, permissions and token budget.',
+      hooks: 'Events extensions subscribe to, and how each handles failure.',
+      code_intelligence: 'Recent code index runs: which repository, commit, status and file and symbol counts.',
+      routing: 'Decisions the control plane made: how each interaction was classified, scoped and routed.',
+      recovery: 'Recovery runs after a crash: the checklist, interrupted turns and resume points per service.',
+      security: 'The audit log: every security decision, who asked, for what, and the result.',
+      token_flow: 'Model tokens used, per service and model, as each provider reported them.',
+      costs: 'Model spend, per service and model, from the providers\' own usage reports.',
+      memory_summary: 'A plain-language summary of your active facts.',
+      code_repos: 'Repositories registered for code indexing.',
+      credentials: 'Shared credentials (names and versions only; values never leave the vault).',
+      okf_documents: 'Curated organisational knowledge documents (OKF) indexed from the governance repository.',
+      okf_proposals: 'Proposed edits to OKF documents and where each stands in review.',
+      dream: 'The consolidation pipeline that turns conversations into memories.',
+      graphify_graphs: 'Repositories graphify has built a code graph of.',
+      memory_candidates: 'Memories held back until a person approves them: high-impact, sensitive or conflicting statements and synthesis patterns.',
+      entities: 'People, agents and things facts are about, with the facts that mention each.',
+      beliefs: 'Conclusions drawn from facts, with their premise, confidence and evidence.',
+      hierarchy: 'Facts grouped into topics and sub-topics, each with a summary.',
+      handoffs: 'Work handed from one agent to another: objective, constraints, permissions and status.',
+      governed_tools: 'Tools registered for governed use, their declared properties and lifecycle state.',
+      exec_results: 'Commands run through the execution proxy: what ran, how it was rewritten or redacted, and the exit status.',
+      exec_rules: 'Rewrite and redaction rules the execution proxy applies to commands before they run.',
+      hook_executions: 'Each time an extension hook ran: the event, the result and how long it took.',
+      extension_receipts: 'Installation receipts: what was installed, by whom, for which agents, and any warnings.',
+      extension_capabilities: 'Capabilities installed extensions expose, and their health.',
+      compatibility: 'Compatibility adapters per agent boundary and the agent instances using them.',
+      compat_conformance: 'The conformance run each adapter\'s "tested" flag comes from.',
+      mg_turns: 'The newest conversation turns memory-gateway journalled, and their state.',
+      mg_outbox: 'Background work waiting to run: pending, processing, retrying and dead-lettered jobs, and the oldest wait.',
+      mg_dead_letters: 'Jobs that failed every retry, with why.',
+      hermes_status: 'The Hermes memory provider: whether it is available and healthy.',
+      retrieval_version: 'The retrieval orchestrator, which finds and ranks memory for a query.',
+      context_version: 'The context optimiser, which compresses context into faithful capsules.',
+      okf_projections: 'Which OKF commit and content each indexed document was projected from.',
+      okf_divergence: 'OKF documents whose indexed copy no longer matches the repository.',
+      okf_mirror: 'The last push of the OKF repository to its off-host mirror.',
+      recovery_interrupted: 'Turns a crash interrupted, waiting to be resumed or closed.',
+      backups: 'Backups taken, verified and where they are stored.',
+      restore_tests: 'Restore drills: each backup actually restored and checked.',
+      restore_cadence: 'Whether each kind of restore drill passed recently enough.',
+      backup_retention: 'How long each kind of backup is kept.',
+      retention_audit: 'Backups retention removed or kept, and why.',
+      traces: 'The newest trace spans: one per step of a request across services.',
+      logs: 'The newest log lines from every service.',
+      slo_targets: 'Service-level objectives and whether measurements currently meet them.',
+      otlp_export: 'Whether telemetry is also exported to an external OpenTelemetry collector.',
+      benchmarks: 'Recorded benchmark runs: the latest per suite and the history.',
+      mcp_tools: 'Every tool SCOS offers agents over MCP.',
+    };
     // Panel labels are illustrative only; every value rendered comes from an
     // authoritative backend projection. A view the backend could not reach
     // is shown as explicitly missing, never filled with fabricated data.
@@ -1641,6 +1713,40 @@
       { key: 'okf_proposals',     title: 'OKF Proposals',      tag: 'PRP', group: 'tab' },
       { key: 'dream',             title: 'Dream Pipeline',     tag: 'DRM', group: 'tab' },
       { key: 'graphify_graphs',   title: 'Graphified Repos',   tag: 'GFY', group: 'tab' },
+      { key: 'memory_candidates', title: 'Review Queue', tag: 'RVW', group: 'tab' },
+      { key: 'entities', title: 'Entity Records', tag: 'ENR', group: 'tab' },
+      { key: 'beliefs', title: 'Beliefs', tag: 'BLF', group: 'tab' },
+      { key: 'hierarchy', title: 'Topic Hierarchy', tag: 'HIE', group: 'tab' },
+      { key: 'handoffs', title: 'Handoffs', tag: 'HND', group: 'tab' },
+      { key: 'governed_tools', title: 'Governed Tools', tag: 'GTL', group: 'tab' },
+      { key: 'exec_results', title: 'Execution Results', tag: 'EXR', group: 'tab' },
+      { key: 'exec_rules', title: 'Execution Rules', tag: 'EXU', group: 'tab' },
+      { key: 'hook_executions', title: 'Hook Executions', tag: 'HKX', group: 'tab' },
+      { key: 'extension_receipts', title: 'Install Receipts', tag: 'RCP', group: 'tab' },
+      { key: 'extension_capabilities', title: 'Extension Capabilities', tag: 'CAP', group: 'tab' },
+      { key: 'compatibility', title: 'Compatibility', tag: 'CMP', group: 'tab' },
+      { key: 'compat_conformance', title: 'Conformance', tag: 'CNF', group: 'tab' },
+      { key: 'mg_turns', title: 'Conversation Turns', tag: 'TRN', group: 'tab' },
+      { key: 'mg_outbox', title: 'Outbox', tag: 'OBX', group: 'tab' },
+      { key: 'mg_dead_letters', title: 'Dead Letters', tag: 'DLQ', group: 'tab' },
+      { key: 'hermes_status', title: 'Hermes Provider', tag: 'HRM', group: 'tab' },
+      { key: 'retrieval_version', title: 'Retrieval Orchestrator', tag: 'RET', group: 'tab' },
+      { key: 'context_version', title: 'Context Optimiser', tag: 'CTX', group: 'tab' },
+      { key: 'okf_projections', title: 'OKF Projections', tag: 'PRJ', group: 'tab' },
+      { key: 'okf_divergence', title: 'OKF Divergence', tag: 'DIV', group: 'tab' },
+      { key: 'okf_mirror', title: 'OKF Mirror', tag: 'MIR', group: 'tab' },
+      { key: 'recovery_interrupted', title: 'Interrupted Turns', tag: 'INT', group: 'tab' },
+      { key: 'backups', title: 'Backups', tag: 'BAK', group: 'tab' },
+      { key: 'restore_tests', title: 'Restore Drills', tag: 'RST', group: 'tab' },
+      { key: 'restore_cadence', title: 'Drill Cadence', tag: 'CAD', group: 'tab' },
+      { key: 'backup_retention', title: 'Retention Policy', tag: 'RTN', group: 'tab' },
+      { key: 'retention_audit', title: 'Retention Audit', tag: 'RTA', group: 'tab' },
+      { key: 'traces', title: 'Traces', tag: 'TRC', group: 'tab' },
+      { key: 'logs', title: 'Logs', tag: 'LOG', group: 'tab' },
+      { key: 'slo_targets', title: 'SLO Targets', tag: 'SLO', group: 'tab' },
+      { key: 'otlp_export', title: 'OTLP Export', tag: 'OTL', group: 'tab' },
+      { key: 'benchmarks', title: 'Benchmarks', tag: 'BEN', group: 'tab' },
+      { key: 'mcp_tools', title: 'MCP Tools', tag: 'MCP', group: 'tab' },
     ];
     const GROUP_ACCENT = { identity: 'var(--violet)', ops: 'var(--cyan)', signal: 'var(--green)', center: 'var(--cyan)' };
 
@@ -1685,6 +1791,213 @@
       return null;
     }
 
+    // ── Tool categories ─────────────────────────────────────────────────
+    // Every MCP tool belongs to one tab, decided by its name. A tab lists its
+    // tools as mcp-gateway describes them, and shows the live data the
+    // services behind those tools hold.
+    const TOOL_CATEGORY_PREFIXES = [
+      ['dream', ['scos_memory_review']],
+      ['code', ['scos_code_']],
+      ['graphify', ['scos_graphify_']],
+      ['okf', ['scos_okf_']],
+      ['agents', ['scos_agent_', 'scos_handoff_']],
+      ['compat', ['scos_adapter_', 'scos_compat_', 'scos_envelope_', 'scos_translate']],
+      ['sessions', ['scos_mg_', 'scos_retrieve', 'scos_context_']],
+      ['control', ['scos_control_', 'scos_exec_', 'scos_tool_', 'scos_operation_']],
+      ['extensions', ['scos_extension_', 'scos_skill_', 'scos_hook_']],
+      ['security', ['scos_auth_', 'scos_permission_', 'scos_audit_', 'scos_secret_', 'scos_credential_']],
+      ['backup', ['scos_backup_', 'scos_restore_', 'scos_recovery_']],
+      ['observability', ['scos_metrics_', 'scos_trace', 'scos_log', 'scos_observability_', 'scos_benchmarks', 'scos_transparency_']],
+    ];
+    function toolCategory(name) {
+      for (const [cat, prefixes] of TOOL_CATEGORY_PREFIXES) {
+        if (prefixes.some((p) => name.startsWith(p))) return cat;
+      }
+      return 'memory';
+    }
+    const TOOL_CATEGORY_LABEL = {
+      memory: 'Memory', dream: 'Dreaming & review', code: 'Code Index', graphify: 'Graphify', okf: 'OKF',
+      agents: 'Agents & handoffs', compat: 'Compatibility', sessions: 'Sessions & context', control: 'Control & execution',
+      extensions: 'Extensions', security: 'Security', backup: 'Backup & recovery', observability: 'Observability',
+    };
+    function toolList(tools) {
+      const wrap = document.createElement('div');
+      wrap.className = 'tool-list';
+      for (const tool of tools) {
+        const item = document.createElement('div');
+        item.className = 'tool-item';
+        const props = Object.keys((tool.inputSchema && tool.inputSchema.properties) || {});
+        const required = new Set((tool.inputSchema && tool.inputSchema.required) || []);
+        const args = props.length
+          ? props.map((a) => (required.has(a) ? `<b>${escapeHtml(a)}</b>` : escapeHtml(a))).join(', ')
+          : 'no arguments';
+        item.innerHTML = `<code>${escapeHtml(tool.name)}</code><p>${escapeHtml(tool.description || '')}</p><div class="tool-args">arguments: ${args}</div>`;
+        wrap.appendChild(item);
+      }
+      if (!tools.length) {
+        const p = document.createElement('p');
+        p.className = 'missing';
+        p.textContent = 'no tools in this category';
+        return p;
+      }
+      return wrap;
+    }
+    // A "Tools" card at the end of a tab, kept in step with the catalogue.
+    function mountToolCard(tabId, category, accent) {
+      const section = document.getElementById('tab-' + tabId);
+      if (!section) return;
+      const card = document.createElement('div');
+      card.className = `glass-card ${accent || 'plain'}`;
+      card.style.marginTop = '1rem';
+      card.innerHTML = `<div class="card-head"><div class="card-title cyan">Tools &middot; ${escapeHtml(TOOL_CATEGORY_LABEL[category])}</div><div class="card-meta"></div></div><p class="panel-explain">What agents can do here over MCP. Required arguments are highlighted.</p><div class="tool-mount"></div>`;
+      section.appendChild(card);
+      const meta = card.querySelector('.card-meta');
+      mountPanel('mcp_tools', null, card.querySelector('.tool-mount'), (bodyEl, tools) => {
+        if (!Array.isArray(tools)) { bodyEl.appendChild(render(tools)); return; }
+        const mine = tools.filter((t) => toolCategory(t.name) === category).sort((a, b) => a.name.localeCompare(b.name));
+        meta.textContent = `${mine.length} tool${mine.length === 1 ? '' : 's'}`;
+        bodyEl.appendChild(toolList(mine));
+      });
+    }
+
+    // Category tabs that did not exist before: an introduction, one card per
+    // list the services behind the category hold, and the category's tools.
+    const CATEGORY_TABS = [
+      { id: 'sessions', accent: 'cyan', intro: '<b>Sessions</b> are how conversations enter SCOS. memory-gateway journals every session, message and turn before anything else happens, so nothing is lost if a service crashes; finished turns queue background jobs in an outbox that the workers drain. The Hermes provider, retrieval orchestrator and context optimiser are the services an agent talks to while working: recall, ranked retrieval, and compressing context without losing facts.',
+        panels: ['mg_turns', 'mg_outbox', 'mg_dead_letters', 'hermes_status', 'retrieval_version', 'context_version'] },
+      { id: 'control', accent: 'violet', intro: '<b>Control and execution</b> keeps agents\' actions governed. The autonomous control plane classifies each interaction, scopes it and routes it, and holds anything destructive until the person who asked confirms it. Tool governance registers the tools agents may use and records every operation; the execution proxy runs commands, rewriting or redacting them by rule and keeping the raw output recoverable.',
+        panels: ['routing', 'tool_operations', 'governed_tools', 'exec_results', 'exec_rules'] },
+      { id: 'extensions', accent: 'green', intro: '<b>Extensions</b> add skills, hooks and capabilities to SCOS. Each is installed from a manifest, isolated, health-checked and recorded with a receipt; hooks run when the events they subscribe to happen, and every run is logged.',
+        panels: ['plugins', 'skills', 'hooks', 'hook_executions', 'extension_receipts', 'extension_capabilities'] },
+      { id: 'compat', accent: 'amber', intro: '<b>Compatibility</b> lets many different agents share one memory. Each agent boundary (Claude Code, Codex, Hermes, Cursor and others) has an adapter that translates its events to SCOS\'s common model; conformance runs prove each adapter works, and context envelopes carry a session\'s context between agents.',
+        panels: ['compatibility', 'compat_conformance'] },
+      { id: 'security', accent: 'red', intro: '<b>Security</b> decides who may do what and records it. The security gate checks permissions against each principal\'s grants, classifies how sensitive content is, and writes every decision to an append-only audit log. The credential vault stores shared secrets encrypted; only names and versions are ever shown here.',
+        panels: ['security', 'credentials'] },
+      { id: 'backup', accent: 'violet', intro: '<b>Backup and recovery</b> make sure memory survives. backup-manager takes and verifies backups, keeps them by a retention policy, mirrors the OKF repository off-host, and proves backups restore by running drills on a schedule. recovery-orchestrator resumes work a crash interrupted.',
+        panels: ['backups', 'restore_tests', 'restore_cadence', 'backup_retention', 'retention_audit', 'okf_mirror', 'recovery', 'recovery_interrupted'] },
+      { id: 'observability', accent: 'cyan', intro: '<b>Observability</b> is SCOS watching itself. Every service reports metrics, traces and logs; the observability service keeps them, measures them against service-level objectives, and can forward them to an external OpenTelemetry collector. Model token use and cost come from the providers\' own reports. The Flow tab draws the same telemetry as a live service graph.',
+        panels: ['traces', 'logs', 'slo_targets', 'otlp_export', 'benchmarks', 'token_flow', 'costs'] },
+    ];
+    const connectSection = document.getElementById('tab-connect');
+    for (const cat of CATEGORY_TABS) {
+      const section = document.createElement('section');
+      section.className = 'tab-panel';
+      section.dataset.tab = cat.id;
+      section.id = 'tab-' + cat.id;
+      section.hidden = true;
+      section.innerHTML = `<p class="tab-intro">${cat.intro}</p><div class="cat-grid"></div>`;
+      connectSection.before(section);
+      const grid = section.querySelector('.cat-grid');
+      for (const key of cat.panels) {
+        const panel = PANELS.find((p) => p.key === key);
+        if (!panel) continue;
+        const { el, bodyEl } = makeHudPanel(panel.key, panel.tag, `var(--${cat.accent})`);
+        el.querySelector('.hud-title').textContent = panel.title;
+        bodyEl.classList.add('panel-body');
+        grid.appendChild(el);
+        mountPanel(panel.key, null, bodyEl, defaultPaint);
+      }
+      mountToolCard(cat.id, cat.id, cat.accent);
+    }
+
+    // The All Tools tab: every tool, searchable, grouped by category.
+    (function () {
+      const section = document.createElement('section');
+      section.className = 'tab-panel';
+      section.dataset.tab = 'tools';
+      section.id = 'tab-tools';
+      section.hidden = true;
+      section.innerHTML = '<p class="tab-intro"><b>All tools</b> SCOS offers agents over MCP (the Model Context Protocol), exactly as mcp-gateway describes them, grouped by the tab that shows their data. Required arguments are highlighted. An agent connected through Connect can call any of these it has permission for.</p><input class="tool-search" id="tool-search" type="search" placeholder="filter tools by name or description&hellip;"><div class="stat-grid" id="tool-stats"></div><div id="tool-groups" style="margin-top:1rem"></div>';
+      connectSection.before(section);
+      const search = section.querySelector('#tool-search');
+      let catalogue = [];
+      function paint() {
+        const q = search.value.trim().toLowerCase();
+        const groupsEl = section.querySelector('#tool-groups');
+        groupsEl.innerHTML = '';
+        const shown = catalogue.filter((t) => !q || t.name.toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q));
+        const byCat = new Map();
+        for (const t of shown) {
+          const c = toolCategory(t.name);
+          if (!byCat.has(c)) byCat.set(c, []);
+          byCat.get(c).push(t);
+        }
+        for (const [cat, label] of Object.entries(TOOL_CATEGORY_LABEL)) {
+          const tools = (byCat.get(cat) || []).sort((a, b) => a.name.localeCompare(b.name));
+          if (!tools.length) continue;
+          const card = document.createElement('div');
+          card.className = 'glass-card plain';
+          card.style.marginBottom = '1rem';
+          card.innerHTML = `<div class="card-head"><div class="card-title cyan">${escapeHtml(label)}</div><div class="card-meta">${tools.length} tool${tools.length === 1 ? '' : 's'}</div></div>`;
+          card.appendChild(toolList(tools));
+          groupsEl.appendChild(card);
+        }
+        if (!shown.length) groupsEl.innerHTML = '<p class="missing">no tool matches</p>';
+      }
+      search.addEventListener('input', paint);
+      mountPanel('mcp_tools', null, section.querySelector('#tool-stats'), (statsEl, tools) => {
+        if (!Array.isArray(tools)) { statsEl.appendChild(render(tools)); return; }
+        catalogue = tools;
+        const cats = new Set(tools.map((t) => toolCategory(t.name)));
+        const writes = tools.filter((t) => /(create|register|start|delete|forget|correct|remember|install|ingest|grant|revoke|set|update|push|trigger|route|confirm|complete|execute|append|import|redact|sync|action|transition|dispatch|record|heartbeat|initiate|respond|recover|replay)/.test(t.name)).length;
+        statsEl.append(
+          statTile('tools', String(tools.length), 'offered over MCP', 'var(--cyan)'),
+          statTile('categories', String(cats.size), 'one tab each', 'var(--violet)'),
+          statTile('change something', String(writes), 'write, run or decide', 'var(--amber)'),
+          statTile('read only', String(tools.length - writes), 'inspect and report', 'var(--green)'),
+        );
+        paint();
+      });
+    })();
+
+    // Existing tabs: their introduction, the new lists that belong with
+    // them, and their tools.
+    const TAB_INTRO = {
+      overview: '<b>Overview</b>: SCOS at a glance. The centre shows your memory as a graph and your newest facts; the left column is identity and system state, the right column what agents are doing, and the strip below live signals. Every value is read from the service that owns it; a panel a service could not answer says so instead of showing anything made up.',
+      memory: '<b>Memory</b> is what SCOS knows: facts stated or observed in conversations, the entities they are about, the relations between them, and what has been learned about you. Recall searches it by meaning and by words, so any connected agent can pick up where another left off.',
+      facts: '<b>Facts</b> are memory\'s individual statements. Each carries its network (world, experience, opinion, observation), where it came from, how much it is trusted, and its full revision history; corrections keep the old version, and forgetting keeps a record that it was forgotten.',
+      code: '<b>Code Index</b> reads your repositories and records every file and symbol (functions, types, methods) with its signature and who calls it, so agents can search code by name or by meaning and see what a change would affect before making it.',
+      graphify: '<b>Graphify</b> builds a knowledge graph of a repository: modules, files and symbols as nodes, and imports, calls and containment as edges. Ask it questions, trace the path between two concepts, or ingest the graph into memory so recall can use it.',
+      okf: '<b>OKF</b> (organisational knowledge files) is curated, reviewed knowledge kept in a Git repository: governance, architecture, procedures, decisions. SCOS indexes every document, watches for drift between the index and the repository, and takes changes only as proposals a different person reviews.',
+      agents: '<b>Agents</b> are the AI assistants connected to SCOS. Each is registered with what it can do and which tools and memory it may use; handoffs pass work from one agent to another with explicit constraints and permissions.',
+      connect: '<b>Connect</b> an agent to SCOS: install its plugin, check the integration with the doctor, and see which agents are connected.',
+      system: '<b>System</b> shows how SCOS is put together: the architecture, every governed service and whether it is healthy, and the identity-side records.',
+      flow: '<b>Flow</b> is live telemetry: requests between services as a graph, with throughput, latency and errors over time. Pick a range to see history.',
+      account: '<b>Account</b>: sign in or create an account for the hosted service.',
+      admin: '<b>Admin</b>: tenant and account administration.',
+    };
+    for (const [id, html] of Object.entries(TAB_INTRO)) {
+      const section = document.getElementById('tab-' + id);
+      if (!section || section.querySelector(':scope > .tab-intro')) continue;
+      const p = document.createElement('p');
+      p.className = 'tab-intro';
+      p.innerHTML = html;
+      section.prepend(p);
+    }
+    function appendPanels(tabId, keys, accent) {
+      const section = document.getElementById('tab-' + tabId);
+      if (!section) return;
+      const grid = document.createElement('div');
+      grid.className = 'cat-grid';
+      section.appendChild(grid);
+      for (const key of keys) {
+        const panel = PANELS.find((p) => p.key === key);
+        if (!panel) continue;
+        const { el, bodyEl } = makeHudPanel(panel.key, panel.tag, `var(--${accent})`);
+        el.querySelector('.hud-title').textContent = panel.title;
+        bodyEl.classList.add('panel-body');
+        grid.appendChild(el);
+        mountPanel(panel.key, null, bodyEl, defaultPaint);
+      }
+    }
+    appendPanels('memory', ['entities', 'beliefs', 'hierarchy'], 'cyan');
+    appendPanels('dream', ['memory_candidates'], 'amber');
+    appendPanels('okf', ['okf_projections', 'okf_divergence', 'okf_mirror'], 'amber');
+    appendPanels('agents', ['handoffs'], 'violet');
+    for (const [tab, accent] of [['memory', 'cyan'], ['dream', 'violet'], ['code', 'cyan'], ['graphify', 'violet'], ['okf', 'amber'], ['agents', 'violet']]) {
+      mountToolCard(tab, tab, accent);
+    }
+
     // ── build the tab bar ────────────────────────────────────────────────
     const TABS = [
       { id: 'overview', label: 'Overview' },
@@ -1695,6 +2008,14 @@
       { id: 'graphify', label: 'Graphify' },
       { id: 'okf',      label: 'OKF' },
       { id: 'agents',   label: 'Agents' },
+      { id: 'sessions', label: 'Sessions' },
+      { id: 'control',  label: 'Control' },
+      { id: 'extensions', label: 'Extensions' },
+      { id: 'compat',   label: 'Compatibility' },
+      { id: 'security', label: 'Security' },
+      { id: 'backup',   label: 'Backup' },
+      { id: 'observability', label: 'Observability' },
+      { id: 'tools',    label: 'All Tools' },
       { id: 'connect',  label: 'Connect' },
       { id: 'system',   label: 'System' },
       { id: 'flow',     label: 'Flow' },
