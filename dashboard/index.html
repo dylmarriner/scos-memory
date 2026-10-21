@@ -403,6 +403,56 @@
       </div>
     </section>
 
+    <section class="tab-panel" data-tab="code" id="tab-code" hidden>
+      <div class="stat-grid" id="code-stats"></div>
+      <div class="glass-card cyan" style="margin-top:1rem">
+        <div class="card-head">
+          <div class="card-title cyan">Indexed repositories</div>
+          <div class="card-meta">code-intelligence &middot; one row per repository, its newest index</div>
+        </div>
+        <div class="panel-body" id="code-repos-mount" style="max-height:none"></div>
+      </div>
+      <div class="glass-card violet" style="margin-top:1rem">
+        <div class="card-title violet" style="margin-bottom:.65rem">Index history</div>
+        <div class="panel-body" id="code-history-mount"></div>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-tab="graphify" id="tab-graphify" hidden>
+      <div class="stat-grid" id="gfy-stats"></div>
+      <div class="glass-card violet" style="margin-top:1rem">
+        <div class="card-head">
+          <div class="card-title violet">Graphified repositories</div>
+          <div class="card-meta">graphify-provider &middot; each repository's newest code graph</div>
+        </div>
+        <div class="panel-body" id="gfy-repos-mount" style="max-height:none"></div>
+      </div>
+      <div class="glass-card cyan" style="margin-top:1rem">
+        <div class="card-title cyan" style="margin-bottom:.6rem">Ask a repository's graph</div>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+          <select id="gfy-repo" style="background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.5rem .65rem;font:inherit;min-width:180px"></select>
+          <input type="text" id="gfy-question" placeholder="ask a question about this repository&hellip;" style="flex:1;min-width:200px;background:#05070d;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:.4rem;padding:.5rem .65rem;font:inherit">
+          <button id="gfy-ask-btn" class="primary">ask</button>
+        </div>
+        <div class="panel-body" id="gfy-result" style="margin-top:.7rem"></div>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-tab="okf" id="tab-okf" hidden>
+      <div class="stat-grid" id="okf-stats"></div>
+      <div class="glass-card amber" style="margin-top:1rem">
+        <div class="card-head">
+          <div class="card-title amber">OKF documents</div>
+          <div class="card-meta">okf-synchroniser &middot; click a document to read it</div>
+        </div>
+        <div class="panel-body" id="okf-docs-mount" style="max-height:none"></div>
+      </div>
+      <div class="glass-card violet" style="margin-top:1rem">
+        <div class="card-title violet" style="margin-bottom:.65rem">Proposals</div>
+        <div class="panel-body" id="okf-proposals-mount"></div>
+      </div>
+    </section>
+
     <section class="tab-panel" data-tab="agents" id="tab-agents" hidden>
       <div class="glass-card cyan">
         <div class="card-head">
@@ -1541,6 +1591,8 @@
       { key: 'code_repos',        title: 'Code Repos',           tag: 'REP', group: 'identity' },
       { key: 'credentials',       title: 'Vault',                 tag: 'VLT', group: 'identity' },
       { key: 'okf_documents',     title: 'OKF Documents',      tag: 'OKF', group: 'signal' },
+      { key: 'okf_proposals',     title: 'OKF Proposals',      tag: 'PRP', group: 'tab' },
+      { key: 'graphify_graphs',   title: 'Graphified Repos',   tag: 'GFY', group: 'tab' },
     ];
     const GROUP_ACCENT = { identity: 'var(--violet)', ops: 'var(--cyan)', signal: 'var(--green)', center: 'var(--cyan)' };
 
@@ -1590,6 +1642,9 @@
       { id: 'overview', label: 'Overview' },
       { id: 'memory',   label: 'Memory' },
       { id: 'facts',    label: 'Facts' },
+      { id: 'code',     label: 'Code Index' },
+      { id: 'graphify', label: 'Graphify' },
+      { id: 'okf',      label: 'OKF' },
       { id: 'agents',   label: 'Agents' },
       { id: 'connect',  label: 'Connect' },
       { id: 'system',   label: 'System' },
@@ -1622,7 +1677,7 @@
     const ovRight = document.getElementById('ov-right');
     const ovSignals = document.getElementById('ov-signals');
     for (const panel of PANELS) {
-      if (panel.group === 'center') continue;
+      if (panel.group === 'center' || panel.group === 'tab') continue;
       const accent = GROUP_ACCENT[panel.group];
       if (panel.group === 'signal') {
         const tile = document.createElement('div');
@@ -1798,6 +1853,262 @@
       btn.addEventListener('click', ask);
       input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') ask(); });
     })();
+
+    // ── Code Index, Graphify and OKF tabs ────────────────────────────────
+    // One row per repository or document, from code-intelligence,
+    // graphify-provider and okf-synchroniser as each reports it.
+    function listOf(value) {
+      if (Array.isArray(value)) return value;
+      if (value && Array.isArray(value.entries)) return value.entries;
+      return null;
+    }
+    function fmtWhen(t) {
+      if (!t) return '—';
+      const d = new Date(t);
+      return isNaN(d) ? String(t) : d.toISOString().replace('T', ' ').slice(0, 16) + 'Z';
+    }
+    const fmtNum = (n) => (typeof n === 'number' ? n.toLocaleString('en') : '—');
+    const STATUS_TONE = {
+      active: 'var(--green)', built: 'var(--green)', current: 'var(--green)', synced: 'var(--green)', merged: 'var(--green)', done: 'var(--green)',
+      indexing: 'var(--cyan)', building: 'var(--cyan)', ingesting: 'var(--cyan)', pending: 'var(--cyan)', open: 'var(--cyan)', proposed: 'var(--cyan)',
+      changed: 'var(--amber)', superseded: 'var(--text-dim)', rejected: 'var(--text-dim)',
+      failed: 'var(--red)', diverged: 'var(--red)', error: 'var(--red)',
+    };
+    function statusChip(status) {
+      const span = document.createElement('span');
+      const tone = STATUS_TONE[status] || 'var(--text-dim)';
+      span.style.cssText = `display:inline-flex;align-items:center;gap:.35rem;color:${tone};font-size:.72rem;letter-spacing:.06em;text-transform:uppercase`;
+      span.innerHTML = `<span style="width:.45rem;height:.45rem;border-radius:50%;background:${tone};box-shadow:0 0 8px ${tone}"></span>${escapeHtml(status || 'unknown')}`;
+      return span;
+    }
+    // columns: [{ label, cell: (row) => string | Node }]
+    function recordTable(rows, columns, emptyText, onRowClick) {
+      if (rows.length === 0) {
+        const p = document.createElement('p');
+        p.className = 'missing';
+        p.textContent = emptyText;
+        return p;
+      }
+      const table = document.createElement('table');
+      table.className = 'records';
+      const head = document.createElement('tr');
+      for (const col of columns) {
+        const th = document.createElement('th');
+        th.textContent = col.label;
+        head.appendChild(th);
+      }
+      const thead = document.createElement('thead');
+      thead.appendChild(head);
+      const tbody = document.createElement('tbody');
+      for (const row of rows) {
+        const tr = document.createElement('tr');
+        for (const col of columns) {
+          const td = document.createElement('td');
+          const v = col.cell(row);
+          if (v instanceof Node) td.appendChild(v);
+          else td.textContent = v === undefined || v === null || v === '' ? '—' : String(v);
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+        if (onRowClick) {
+          tr.style.cursor = 'pointer';
+          tr.addEventListener('click', () => onRowClick(row, tr));
+        }
+      }
+      table.append(thead, tbody);
+      return table;
+    }
+    const baseName = (p) => (p ? String(p).replace(/\/+$/, '').split('/').pop() : '');
+    const mono = (text) => { const c = document.createElement('code'); c.textContent = text || '—'; return c; };
+
+    // Code Index: code_repos joined with code_intelligence's snapshots.
+    function paintCodeTab() {
+      const repos = listOf(panelState.get('code_repos').lastValue);
+      const snaps = listOf(panelState.get('code_intelligence').lastValue) || [];
+      const statsEl = document.getElementById('code-stats');
+      const reposEl = document.getElementById('code-repos-mount');
+      const historyEl = document.getElementById('code-history-mount');
+      statsEl.innerHTML = '';
+      reposEl.innerHTML = '';
+      historyEl.innerHTML = '';
+      if (!repos) {
+        reposEl.appendChild(render(panelState.get('code_repos').lastValue));
+        return;
+      }
+      const byRepo = new Map();
+      for (const snap of snaps) {
+        if (!byRepo.has(snap.repository_id)) byRepo.set(snap.repository_id, []);
+        byRepo.get(snap.repository_id).push(snap);
+      }
+      for (const list of byRepo.values()) list.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      const current = (id) => {
+        const list = byRepo.get(id) || [];
+        return list.find((s) => s.status === 'active') || list[0] || null;
+      };
+      let files = 0, symbols = 0, indexed = 0;
+      for (const repo of repos) {
+        const snap = current(repo.repository_id);
+        if (snap) { files += snap.file_count || 0; symbols += snap.symbol_count || 0; if (snap.status === 'active') indexed++; }
+      }
+      statsEl.append(
+        statTile('repositories', String(repos.length), `${indexed} with an active index`, 'var(--cyan)'),
+        statTile('files indexed', fmtNum(files), 'in active indexes', 'var(--cyan)'),
+        statTile('symbols', fmtNum(symbols), 'extracted by tree-sitter', 'var(--violet)'),
+        statTile('index runs', String(snaps.length), 'recent snapshots', 'var(--green)'),
+      );
+      const rows = [...repos].sort((a, b) => baseName(a.canonical_path).localeCompare(baseName(b.canonical_path)));
+      reposEl.appendChild(recordTable(rows, [
+        { label: 'repository', cell: (r) => baseName(r.canonical_path) || r.repository_id },
+        { label: 'path', cell: (r) => mono(r.canonical_path) },
+        { label: 'branch', cell: (r) => r.branch_or_worktree },
+        { label: 'commit', cell: (r) => mono((r.commit_id || '').slice(0, 10)) },
+        { label: 'languages', cell: (r) => (r.language_set || []).join(', ') },
+        { label: 'index', cell: (r) => { const s = current(r.repository_id); return s ? statusChip(s.status) : statusChip('not indexed'); } },
+        { label: 'files', cell: (r) => { const s = current(r.repository_id); return s ? fmtNum(s.file_count) : '—'; } },
+        { label: 'symbols', cell: (r) => { const s = current(r.repository_id); return s ? fmtNum(s.symbol_count) : '—'; } },
+        { label: 'runs', cell: (r) => String((byRepo.get(r.repository_id) || []).length) },
+        { label: 'indexed at', cell: (r) => { const s = current(r.repository_id); return fmtWhen(s && (s.activated_at || s.created_at)); } },
+      ], 'no repositories registered for indexing yet'));
+      historyEl.appendChild(recordTable(snaps, [
+        { label: 'repository', cell: (s) => baseName(s.canonical_path) || s.repository_id },
+        { label: 'status', cell: (s) => statusChip(s.status) },
+        { label: 'branch', cell: (s) => s.branch },
+        { label: 'commit', cell: (s) => mono((s.commit_id || '').slice(0, 10)) },
+        { label: 'files', cell: (s) => fmtNum(s.file_count) },
+        { label: 'symbols', cell: (s) => fmtNum(s.symbol_count) },
+        { label: 'started', cell: (s) => fmtWhen(s.created_at) },
+        { label: 'error', cell: (s) => s.error || '' },
+      ], 'no index runs yet'));
+    }
+    mountPanel('code_repos', null, document.getElementById('code-repos-mount'), paintCodeTab);
+    mountPanel('code_intelligence', null, document.getElementById('code-history-mount'), paintCodeTab);
+
+    // Graphify: every repository graphify-provider holds a graph of.
+    const gfyRepoSelect = document.getElementById('gfy-repo');
+    mountPanel('graphify_graphs', null, document.getElementById('gfy-repos-mount'), (bodyEl, value) => {
+      const graphs = listOf(value);
+      const statsEl = document.getElementById('gfy-stats');
+      statsEl.innerHTML = '';
+      if (!graphs) { bodyEl.appendChild(render(value)); return; }
+      const nodes = graphs.reduce((n, g) => n + (g.nodes || 0), 0);
+      const edges = graphs.reduce((n, g) => n + (g.edges || 0), 0);
+      const busy = graphs.filter((g) => g.status === 'building').length;
+      const failed = graphs.filter((g) => g.status === 'failed').length;
+      statsEl.append(
+        statTile('repositories graphed', String(graphs.length), busy ? `${busy} building now` : 'none building', 'var(--violet)'),
+        statTile('graph nodes', fmtNum(nodes), 'symbols, files and modules', 'var(--violet)'),
+        statTile('graph edges', fmtNum(edges), 'calls, imports, containment', 'var(--cyan)'),
+        statTile('failed builds', String(failed), failed ? 'see the error column' : 'all builds succeeded', failed ? 'var(--red)' : 'var(--green)'),
+      );
+      bodyEl.appendChild(recordTable(graphs, [
+        { label: 'repository', cell: (g) => g.name },
+        { label: 'path', cell: (g) => mono(g.repo_path || 'not recorded (graphed before paths were kept)') },
+        { label: 'status', cell: (g) => statusChip(g.status) },
+        { label: 'nodes', cell: (g) => fmtNum(g.nodes) },
+        { label: 'edges', cell: (g) => fmtNum(g.edges) },
+        { label: 'builds', cell: (g) => String(g.builds || 0) },
+        { label: 'built at', cell: (g) => fmtWhen(g.built_at) },
+        { label: 'into memory', cell: (g) => {
+          const job = (g.extractions || [])[0];
+          if (!job) return 'not extracted';
+          return `${job.status} · ${fmtNum(job.nodes_ingested)}/${fmtNum(job.nodes)} nodes`;
+        } },
+        { label: 'error', cell: (g) => g.error || '' },
+      ], 'no repository has been graphified yet'));
+      const chosen = gfyRepoSelect.value;
+      gfyRepoSelect.innerHTML = '';
+      for (const g of graphs.filter((x) => x.repo_path)) {
+        const opt = document.createElement('option');
+        opt.value = g.repo_path;
+        opt.textContent = g.name;
+        gfyRepoSelect.appendChild(opt);
+      }
+      if (chosen) gfyRepoSelect.value = chosen;
+    });
+    (function () {
+      const input = document.getElementById('gfy-question');
+      const out = document.getElementById('gfy-result');
+      async function ask() {
+        const q = input.value.trim();
+        if (!q) return;
+        out.innerHTML = '<p class="missing">asking&hellip;</p>';
+        try {
+          const body = { q };
+          if (gfyRepoSelect.value) body.repo_path = gfyRepoSelect.value;
+          const resp = await fetch('/v1/transparency/graphify/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const payload = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(payload.error || `graphify returned ${resp.status}`);
+          out.innerHTML = '';
+          out.appendChild(render(payload));
+        } catch (error) {
+          out.innerHTML = `<p class="missing">${escapeHtml(error.message)}</p>`;
+        }
+      }
+      document.getElementById('gfy-ask-btn').addEventListener('click', ask);
+      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') ask(); });
+    })();
+
+    // OKF: every curated document and every proposal against one.
+    function okfDocument(doc, tr) {
+      const next = tr.nextElementSibling;
+      if (next && next.classList.contains('okf-doc-body')) { next.remove(); return; }
+      const row = document.createElement('tr');
+      row.className = 'okf-doc-body';
+      const td = document.createElement('td');
+      td.colSpan = tr.children.length;
+      const pre = document.createElement('pre');
+      pre.style.cssText = 'white-space:pre-wrap;max-height:420px;overflow:auto;margin:0;padding:.75rem;background:#05070d;border:1px solid var(--border-soft);border-radius:.4rem;font-size:.75rem';
+      pre.textContent = doc.content || '(no content stored for this document)';
+      td.appendChild(pre);
+      row.appendChild(td);
+      tr.after(row);
+    }
+    function paintOkfTab() {
+      const docs = listOf(panelState.get('okf_documents').lastValue);
+      const proposals = listOf(panelState.get('okf_proposals').lastValue) || [];
+      const statsEl = document.getElementById('okf-stats');
+      const docsEl = document.getElementById('okf-docs-mount');
+      const propEl = document.getElementById('okf-proposals-mount');
+      statsEl.innerHTML = '';
+      docsEl.innerHTML = '';
+      propEl.innerHTML = '';
+      if (!docs) { docsEl.appendChild(render(panelState.get('okf_documents').lastValue)); return; }
+      const categories = new Set(docs.map((d) => d.category).filter(Boolean));
+      const diverged = docs.filter((d) => d.status === 'diverged' || d.status === 'changed').length;
+      const open = proposals.filter((p) => !['merged', 'rejected'].includes(p.status)).length;
+      statsEl.append(
+        statTile('documents', String(docs.length), categories.size ? `${categories.size} categor${categories.size === 1 ? 'y' : 'ies'}` : '', 'var(--amber)'),
+        statTile('categories', String(categories.size), [...categories].slice(0, 3).join(', '), 'var(--amber)'),
+        statTile('changed or diverged', String(diverged), diverged ? 'differ from the indexed copy' : 'all in sync', diverged ? 'var(--red)' : 'var(--green)'),
+        statTile('open proposals', String(open), `${proposals.length} in total`, 'var(--violet)'),
+      );
+      const rows = [...docs].sort((a, b) => String(a.category).localeCompare(String(b.category)) || String(a.path).localeCompare(String(b.path)));
+      docsEl.appendChild(recordTable(rows, [
+        { label: 'title', cell: (d) => d.title || baseName(d.path) },
+        { label: 'category', cell: (d) => d.category },
+        { label: 'path', cell: (d) => mono(d.path) },
+        { label: 'status', cell: (d) => statusChip(d.status) },
+        { label: 'commit', cell: (d) => mono((d.commit_id || '').slice(0, 10)) },
+        { label: 'imported', cell: (d) => fmtWhen(d.imported_at) },
+        { label: 'updated', cell: (d) => fmtWhen(d.updated_at) },
+      ], 'no OKF documents have been synchronised yet', okfDocument));
+      const sortedProposals = [...proposals].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      propEl.appendChild(recordTable(sortedProposals, [
+        { label: 'path', cell: (p) => mono(p.path) },
+        { label: 'status', cell: (p) => statusChip(p.status) },
+        { label: 'proposer', cell: (p) => p.proposer },
+        { label: 'reviewer', cell: (p) => p.reviewer },
+        { label: 'decision', cell: (p) => [p.decision, p.reason].filter(Boolean).join(': ') },
+        { label: 'created', cell: (p) => fmtWhen(p.created_at) },
+        { label: 'merged commit', cell: (p) => mono((p.merged_commit || '').slice(0, 10)) },
+      ], 'no proposals'));
+    }
+    mountPanel('okf_documents', null, document.getElementById('okf-docs-mount'), paintOkfTab);
+    mountPanel('okf_proposals', null, document.getElementById('okf-proposals-mount'), paintOkfTab);
 
     // ── Agents tab ───────────────────────────────────────────────────────
     mountPanel('agents', null, document.getElementById('agt-agents-mount'), defaultPaint);

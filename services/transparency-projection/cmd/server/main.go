@@ -253,6 +253,10 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		// operator dashboard alongside the security audit log it already shows.
 		"credentials":   {s.upstreams["credential_vault"], "/v1/credentials"},
 		"okf_documents": {s.upstreams["okf_synchroniser"], "/v1/documents"},
+		"okf_proposals": {s.upstreams["okf_synchroniser"], "/v1/proposals"},
+		// Every repository graphify has built a graph of, with the caller's
+		// extraction jobs into memory.
+		"graphify_graphs": {s.upstreams["graphify_provider"], "/v1/graphify/graphs"},
 	}
 	result := make(map[string]json.RawMessage, len(views))
 	errored := make(map[string]string)
@@ -307,6 +311,7 @@ var listViews = map[string]bool{
 	"agents": true, "tool_operations": true, "plugins": true, "skills": true, "hooks": true,
 	"code_intelligence": true, "routing": true, "recovery": true, "security": true,
 	"token_flow": true, "costs": true, "code_repos": true, "credentials": true, "okf_documents": true,
+	"okf_proposals": true, "graphify_graphs": true,
 }
 
 // normaliseListView turns a list view's JSON null -- how a Go service
