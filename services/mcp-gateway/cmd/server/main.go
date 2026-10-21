@@ -1866,7 +1866,7 @@ func governedTools() []map[string]any {
 		tool("scos_control_route", "Route an interaction through the autonomous control plane. A decision that requires confirmation returns status awaiting_confirmation and runs nothing until scos_control_confirm", map[string]any{
 			"interaction_id":      strField("Interaction ID"),
 			"actor_id":            strField("Actor ID"),
-			"agent_id":            strField("Agent ID"),
+			"agent_id":            strField("Agent that answers (defaults to, and must match, the caller's agent claim when it has one; required otherwise)"),
 			"session_id":          strField("Session ID"),
 			"turn_id":             strField("Turn ID"),
 			"project_id":          strField("Project ID"),
@@ -1879,7 +1879,7 @@ func governedTools() []map[string]any {
 		tool("scos_control_ingest", "Ingest and route an interaction (alias of scos_control_route)", map[string]any{
 			"interaction_id":      strField("Interaction ID"),
 			"actor_id":            strField("Actor ID"),
-			"agent_id":            strField("Agent ID"),
+			"agent_id":            strField("Agent that answers (defaults to, and must match, the caller's agent claim when it has one; required otherwise)"),
 			"session_id":          strField("Session ID"),
 			"turn_id":             strField("Turn ID"),
 			"project_id":          strField("Project ID"),

@@ -256,6 +256,9 @@ func TestAuditRecordStoresCallerFieldsOnlyAsAnnotation(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &read); err != nil {
 		t.Fatal(err)
 	}
+	if read.Tenant != f.tenantID {
+		t.Fatalf("read-back tenant = %q, want the tenant the entry is stored under (%s)", read.Tenant, f.tenantID)
+	}
 	if read.Action != "caller_annotation" || read.Result != "recorded" || read.AgentID != "agent-owner" || read.TraceID != "claims-trace" || read.DataClass != "" {
 		t.Fatalf("unexpected attested fields on read-back: %+v", read)
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewEngineServerUsesDatabaseAuthority(t *testing.T) {
@@ -178,5 +179,34 @@ func TestContradictionKeysKeepNumbersAndIgnoreRedactions(t *testing.T) {
 		if isContradictory(f(pair[0]), f(pair[1])) {
 			t.Fatalf("%q and %q only share a field name", pair[0], pair[1])
 		}
+	}
+}
+
+// scos_link_evidence with a malformed id is the caller's mistake: it is
+// refused with 400 before any database work, never surfaced as a 500.
+func TestEvidenceLinkRejectsMalformedIDs(t *testing.T) {
+	s := &engineServer{}
+	for _, body := range []string{
+		`{"fact_id":"not-a-uuid","code_symbol_version_id":"4cbe32c6-891c-4155-a9ec-6aa39e66704a"}`,
+		`{"fact_id":"4cbe32c6-891c-4155-a9ec-6aa39e66704a","code_symbol_version_id":"not-a-uuid"}`,
+	} {
+		w := httptest.NewRecorder()
+		s.handleEvidenceLinks(w, httptest.NewRequest(http.MethodPost, "/v1/evidence-links", strings.NewReader(body)))
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "must be UUIDs") {
+			t.Fatalf("%s -> %d %s", body, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestFactHistoryIsOrderedOldestFactFirst(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	history := []FactVersion{
+		{FactID: "correction", VersionNumber: 1, factCreated: base.Add(time.Millisecond), recorded: base.Add(time.Millisecond)},
+		{FactID: "original", VersionNumber: 2, factCreated: base, recorded: base.Add(time.Millisecond)},
+		{FactID: "original", VersionNumber: 1, factCreated: base, recorded: base},
+	}
+	sortFactHistory(history)
+	if history[0].FactID != "original" || history[0].VersionNumber != 1 || history[1].VersionNumber != 2 || history[2].FactID != "correction" {
+		t.Fatalf("order = %+v", history)
 	}
 }

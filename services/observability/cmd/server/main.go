@@ -8,6 +8,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -250,6 +251,39 @@ func (st *observabilityStore) append(record journalRecord) error {
 		return err
 	}
 	st.seq = record.Seq
+	return nil
+}
+
+// appendBatch journals records under consecutive sequence numbers with one
+// write and one fsync. Ingest journals a whole request this way: a per-record
+// fsync under the server lock serialised every caller behind one disk flush
+// per point, and the fleet's telemetry batches alone kept ingest blocked for
+// longer than its callers wait.
+func (st *observabilityStore) appendBatch(records []journalRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	var buf bytes.Buffer
+	seq := st.seq
+	for i := range records {
+		seq++
+		records[i].Seq = seq
+		b, err := json.Marshal(records[i])
+		if err != nil {
+			return err
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	if _, err := st.file.Write(buf.Bytes()); err != nil {
+		return err
+	}
+	if err := st.file.Sync(); err != nil {
+		return err
+	}
+	st.seq = seq
 	return nil
 }
 
@@ -881,11 +915,17 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 				points[i].SpanID = spanID
 			}
 		}
-		if err := s.store.append(journalRecord{Kind: "metric", Metric: &points[i]}); err != nil {
-			s.mu.Unlock()
-			http.Error(w, "metrics storage failure: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
+	}
+	records := make([]journalRecord, len(points))
+	for i := range points {
+		records[i] = journalRecord{Kind: "metric", Metric: &points[i]}
+	}
+	if err := s.store.appendBatch(records); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "metrics storage failure: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	for i := range points {
 		if s.otlp != nil {
 			if err := s.otlp.exportMetric(r.Context(), &points[i]); err != nil {
 				s.mu.Unlock()
@@ -1016,11 +1056,17 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 				spans[i].ParentID = parentID
 			}
 		}
-		if err := s.store.append(journalRecord{Kind: "trace", Trace: &spans[i]}); err != nil {
-			s.mu.Unlock()
-			http.Error(w, "traces storage failure: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
+	}
+	records := make([]journalRecord, len(spans))
+	for i := range spans {
+		records[i] = journalRecord{Kind: "trace", Trace: &spans[i]}
+	}
+	if err := s.store.appendBatch(records); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "traces storage failure: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	for i := range spans {
 		if s.otlp != nil {
 			if err := s.otlp.exportTrace(r.Context(), &spans[i]); err != nil {
 				s.mu.Unlock()
@@ -1130,11 +1176,17 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 				entries[i].SpanID = spanID
 			}
 		}
-		if err := s.store.append(journalRecord{Kind: "log", Log: &entries[i]}); err != nil {
-			s.mu.Unlock()
-			http.Error(w, "logs storage failure: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
+	}
+	records := make([]journalRecord, len(entries))
+	for i := range entries {
+		records[i] = journalRecord{Kind: "log", Log: &entries[i]}
+	}
+	if err := s.store.appendBatch(records); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "logs storage failure: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	for i := range entries {
 		if s.otlp != nil {
 			if err := s.otlp.exportLog(r.Context(), &entries[i]); err != nil {
 				s.mu.Unlock()

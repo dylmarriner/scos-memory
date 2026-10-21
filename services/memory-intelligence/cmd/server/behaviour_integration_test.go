@@ -632,3 +632,20 @@ func TestFactHistorySpansCorrectionsAndForgets(t *testing.T) {
 		}
 	}
 }
+
+// scos_link_evidence naming a fact or code symbol version that does not
+// exist (or is another tenant's) is refused with 404, not a 500.
+func TestEvidenceLinkToUnknownTargetsIsNotFound(t *testing.T) {
+	f := newBehaviourFixture(t)
+	fact := f.remember("The evidence fixture fact.", 0.8)
+	unknown := "4cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	for _, body := range []string{
+		`{"fact_id":"` + fact + `","code_symbol_version_id":"` + unknown + `"}`,
+		`{"fact_id":"` + unknown + `","code_symbol_version_id":"` + unknown + `"}`,
+		`{"fact_id":"` + f.otherTenantFact() + `","code_symbol_version_id":"` + unknown + `"}`,
+	} {
+		if code, out, _ := f.call(f.srv.handleEvidenceLinks, http.MethodPost, "/v1/evidence-links", body); code != http.StatusNotFound {
+			t.Fatalf("%s -> %d %v, want 404", body, code, out)
+		}
+	}
+}
