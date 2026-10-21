@@ -50,11 +50,16 @@ func (s *backupServer) pitrPrepare(ctx context.Context, target time.Time, dir, r
 	if err != nil {
 		return pitrPreparation{}, err
 	}
-	var chosen backupManifest
-	var chosenAt time.Time
-	var archive []byte
+	// Choose from the manifests alone: loading proves an archive by
+	// decrypting all of it, which only the backup used needs. Candidates are
+	// tried newest first; one whose archive does not verify is passed over.
+	type candidate struct {
+		m  backupManifest
+		at time.Time
+	}
+	var candidates []candidate
 	for _, id := range ids {
-		m, _, _, err := s.provider.Load(ctx, id)
+		m, err := s.provider.Manifest(ctx, id)
 		if err != nil || m.Type != backupTypePhysical {
 			continue
 		}
@@ -64,17 +69,31 @@ func (s *backupServer) pitrPrepare(ctx context.Context, target time.Time, dir, r
 		if err != nil || !at.Before(target) {
 			continue
 		}
-		if at.After(chosenAt) || at.Equal(chosenAt) && m.ID > chosen.ID {
-			chosen, chosenAt = m, at
+		candidates = append(candidates, candidate{m, at})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if !candidates[i].at.Equal(candidates[j].at) {
+			return candidates[i].at.After(candidates[j].at)
 		}
+		return candidates[i].m.ID > candidates[j].m.ID
+	})
+	var chosen backupManifest
+	var archive []byte
+	var skipped []string
+	for _, c := range candidates {
+		_, a, _, err := s.provider.Load(ctx, c.m.ID)
+		if err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s (%v)", c.m.ID, err))
+			continue
+		}
+		chosen, archive = c.m, a
+		break
 	}
-	if chosenAt.IsZero() {
+	if chosen.ID == "" {
+		if len(skipped) > 0 {
+			return pitrPreparation{}, fmt.Errorf("no %s taken before %s verifies: %s", backupTypePhysical, target.Format(time.RFC3339), strings.Join(skipped, "; "))
+		}
 		return pitrPreparation{}, fmt.Errorf("no verified %s was taken before %s", backupTypePhysical, target.Format(time.RFC3339))
-	}
-	// Load again for the archive of the chosen backup only: each backup is
-	// held in memory once, not all of them at the same time.
-	if _, archive, _, err = s.provider.Load(ctx, chosen.ID); err != nil {
-		return pitrPreparation{}, fmt.Errorf("load backup %s: %w", chosen.ID, err)
 	}
 
 	through, count, err := contiguousArchivedWAL(walDir, chosen.WALStart)

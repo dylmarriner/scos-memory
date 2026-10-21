@@ -112,3 +112,22 @@ func TestPITRPrepareUsesTheNewestBackupBeforeTheTarget(t *testing.T) {
 		t.Fatalf("gap was not refused: %v", err)
 	}
 }
+
+func TestPITRPreparePassesOverABackupThatDoesNotVerify(t *testing.T) {
+	walDir := t.TempDir()
+	t.Setenv("SCOS_WAL_ARCHIVE_DESTINATION", "file://"+walDir)
+	s := newTestServer(t, nil)
+	target := time.Date(2026, 10, 21, 9, 33, 50, 0, time.UTC)
+	storePhysicalArchive(t, s, "backup-older", "000000010000000400000001", target.Add(-48*time.Hour), map[string]string{"which": "older"})
+	storePhysicalArchive(t, s, "backup-damaged", "000000010000000400000003", target.Add(-time.Hour), map[string]string{"which": "damaged"})
+	// Damage the newest archive: its manifest still reads, its content does not verify.
+	if err := os.WriteFile(filepath.Join(s.provider.Destination(), "backup-damaged.dump"), []byte("not the archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSegments(t, walDir, 16<<20, "000000010000000400000001", "000000010000000400000002", "000000010000000400000003")
+	data := filepath.Join(t.TempDir(), "restore")
+	p, err := s.pitrPrepare(context.Background(), target, data, "")
+	if err != nil || p.BackupID != "backup-older" {
+		t.Fatalf("got %+v, %v; want the older backup", p, err)
+	}
+}
