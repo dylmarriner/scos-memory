@@ -1176,6 +1176,12 @@ services:
     <<: [*service-limits, *fabric-image]
     command: ["backup-manager"]
     restart: unless-stopped
+    # Backups are encrypted with AES-256-GCM as one sealed message, so a
+    # backup, a restore drill or pitr-prepare holds the encrypted and the
+    # decrypted archive in memory at once; the fleet-wide 160m limit was
+    # OOM-killing it on a 44 MB physical backup.
+    mem_limit: ${SCOS_BACKUP_MANAGER_MEM_LIMIT:-1g}
+    memswap_limit: ${SCOS_BACKUP_MANAGER_MEM_LIMIT:-1g}
     # Reads archived WAL (group 999, see wal-archive-permissions) to ship
     # encrypted copies and expire old segments.
     group_add:
