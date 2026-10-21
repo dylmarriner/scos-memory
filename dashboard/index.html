@@ -1061,6 +1061,10 @@
         nodes = [...allNodes].sort((a, b) => (rawDegree.get(b.id) || 0) - (rawDegree.get(a.id) || 0)).slice(0, GRAPH_MAX_NODES);
         const keep = new Set(nodes.map((n) => n.id));
         edges = allEdges.filter((e) => keep.has(e.source) && keep.has(e.target));
+        // A kept node with no link to another kept node has nothing to
+        // anchor it in the layout and only crowds the frame's edge.
+        const linked = new Set(edges.flatMap((e) => [e.source, e.target]));
+        if (linked.size > 0) nodes = nodes.filter((n) => linked.has(n.id));
         truncated = true;
       }
 
@@ -1205,7 +1209,7 @@
       if (truncated) {
         const note = document.createElement('p');
         note.className = 'missing graph-truncated';
-        note.textContent = `showing the ${nodes.length} most-connected of ${allNodes.length} nodes`;
+        note.textContent = `showing the ${nodes.length} most-connected linked nodes of ${allNodes.length}`;
         wrap.appendChild(note);
       }
 
