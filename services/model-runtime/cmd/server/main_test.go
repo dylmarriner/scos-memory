@@ -267,3 +267,18 @@ func TestLlamaCPPEmbeddingIsCutToTheBackendContext(t *testing.T) {
 		t.Fatalf("short input = %d, calls = %v", rec.Code, paths)
 	}
 }
+
+// A token limit that leaves no room beside the special tokens is refused at
+// start-up rather than failing every long input at request time.
+func TestConfigRejectsATokenLimitWithNoRoomForInput(t *testing.T) {
+	for _, value := range []string{"8", "-1"} {
+		t.Setenv("SCOS_MODEL_TEXT_MAX_TOKENS", value)
+		if _, err := configFromEnvironment(); err == nil {
+			t.Errorf("SCOS_MODEL_TEXT_MAX_TOKENS=%s was accepted", value)
+		}
+	}
+	t.Setenv("SCOS_MODEL_TEXT_MAX_TOKENS", "2048")
+	if cfg, err := configFromEnvironment(); err != nil || cfg.Text.MaxTokens != 2048 {
+		t.Fatalf("2048 = %+v, %v", cfg.Text, err)
+	}
+}

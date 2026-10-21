@@ -926,11 +926,12 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 		return
 	}
 	for i := range points {
+		// The journal is the record: a journaled batch is accepted and
+		// applied whatever the collector does, so a failed forward neither
+		// strands it unapplied nor invites a retry that would duplicate it.
 		if s.otlp != nil {
 			if err := s.otlp.exportMetric(r.Context(), &points[i]); err != nil {
-				s.mu.Unlock()
-				http.Error(w, "metrics export failure: "+err.Error(), http.StatusServiceUnavailable)
-				return
+				log.Printf("metrics: OTLP export failed (kept in the journal): %v", err)
 			}
 		}
 		s.metrics = append(s.metrics, &points[i])
@@ -1067,11 +1068,12 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 		return
 	}
 	for i := range spans {
+		// The journal is the record: a journaled batch is accepted and
+		// applied whatever the collector does, so a failed forward neither
+		// strands it unapplied nor invites a retry that would duplicate it.
 		if s.otlp != nil {
 			if err := s.otlp.exportTrace(r.Context(), &spans[i]); err != nil {
-				s.mu.Unlock()
-				http.Error(w, "traces export failure: "+err.Error(), http.StatusServiceUnavailable)
-				return
+				log.Printf("traces: OTLP export failed (kept in the journal): %v", err)
 			}
 		}
 		s.traces = append(s.traces, &spans[i])
@@ -1187,11 +1189,12 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 		return
 	}
 	for i := range entries {
+		// The journal is the record: a journaled batch is accepted and
+		// applied whatever the collector does, so a failed forward neither
+		// strands it unapplied nor invites a retry that would duplicate it.
 		if s.otlp != nil {
 			if err := s.otlp.exportLog(r.Context(), &entries[i]); err != nil {
-				s.mu.Unlock()
-				http.Error(w, "logs export failure: "+err.Error(), http.StatusServiceUnavailable)
-				return
+				log.Printf("logs: OTLP export failed (kept in the journal): %v", err)
 			}
 		}
 		s.logs = append(s.logs, &entries[i])

@@ -204,7 +204,8 @@ func (s *runtimeServer) embed(w http.ResponseWriter, r *http.Request, role strin
 	if cfg.Protocol == protocolLlamaCPP {
 		input, err := s.fitToContext(r.Context(), cfg, body.Input)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "embedding backend tokenizer: " + err.Error()})
+			log.Printf("fit %s embedding input to the backend context: %v", role, err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "embedding backend tokenizer unavailable"})
 			return
 		}
 		path, payload = "/v1/embeddings", map[string]any{"input": input}
@@ -263,8 +264,14 @@ const llamaCPPSpecialTokens = 8
 // embedding behind it. An input that may fit is checked only when it could
 // exceed the limit at all (a token is at least one byte).
 func (s *runtimeServer) fitToContext(ctx context.Context, cfg backendConfig, input string) (string, error) {
+	if cfg.MaxTokens <= 0 {
+		return input, nil
+	}
 	limit := cfg.MaxTokens - llamaCPPSpecialTokens
-	if cfg.MaxTokens <= 0 || len(input) <= limit {
+	if limit <= 0 {
+		return "", fmt.Errorf("max tokens %d leaves no room beside %d special tokens", cfg.MaxTokens, llamaCPPSpecialTokens)
+	}
+	if len(input) <= limit {
 		return input, nil
 	}
 	var tokenized struct {
@@ -500,6 +507,9 @@ func configFromEnvironment() (runtimeConfig, error) {
 		}
 		if name != "rerank" && backend.Dimensions <= 0 {
 			return runtimeConfig{}, fmt.Errorf("%s backend dimensions must be positive", name)
+		}
+		if backend.MaxTokens < 0 || (backend.MaxTokens > 0 && backend.MaxTokens <= llamaCPPSpecialTokens) {
+			return runtimeConfig{}, fmt.Errorf("%s backend max tokens must be 0 (no limit) or more than %d", name, llamaCPPSpecialTokens)
 		}
 	}
 	return cfg, nil
