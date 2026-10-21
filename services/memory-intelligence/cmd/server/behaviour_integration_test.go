@@ -484,3 +484,168 @@ func TestFactWithACredentialIsRedactedReadableAndCorrectable(t *testing.T) {
 		}
 	}
 }
+
+// A secret written before the scanner knew its shape is removed from every
+// stored copy, and the history guard admits that rewrite and nothing else.
+func TestRedactHistoryRemovesALeakedSecretAndNothingElse(t *testing.T) {
+	f := newBehaviourFixture(t)
+	id := f.remember("The build box login is kept in the vault.", 0.8)
+	// A version written before the scanner recognised this credential.
+	leaked := "The build box db login root:Tr0ub4dor&3 is kept in the vault."
+	// Provenance that looks like a token to the scanner must survive: only
+	// free text is redacted.
+	provenance := "codex@kubuntux:AbCdEf0123456789AbCdEf0123456789xyz"
+	version := f.scalar(`INSERT INTO memory_versions (memory_id, version_number, content, structured_content, content_hash, change_reason, created_by)
+		VALUES ($1, 2, $2, jsonb_build_object('derivation', $2::text, 'origin', $4::text), 'h', 'legacy_write', $3) RETURNING id::text`, id, leaked, f.owner, provenance)
+	f.scalar(`UPDATE memory_items SET current_version_id = $2, title = $3, canonical_summary = $4 WHERE id = $1 RETURNING id::text`,
+		id, version, truncate(leaked, 120), truncate(leaked, 500))
+	f.scalar(`INSERT INTO diary_entries (tenant_id, principal_id, entry_type, content) VALUES ($1, $2, 'fact_recorded', $3) RETURNING id::text`,
+		f.tenant, f.owner, `{"fact_id":"`+id+`","origin":"`+provenance+`","summary":"`+truncate(leaked, 40)+`"}`)
+
+	code, out, _ := f.call(f.srv.handleFactByID, http.MethodPost, "/v1/facts/"+id+"/redact", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("redact = %d %v", code, out)
+	}
+	if out["versions_redacted"] != float64(1) || out["diary_entries_redacted"] != float64(1) || out["item_redacted"] != true {
+		t.Fatalf("redaction report = %v", out)
+	}
+	for _, q := range []string{
+		`SELECT count(*) FROM memory_versions WHERE memory_id = $1 AND (content LIKE '%Tr0ub4dor%' OR structured_content::text LIKE '%Tr0ub4dor%')`,
+		`SELECT count(*) FROM memory_items WHERE id = $1 AND (title LIKE '%Tr0ub4dor%' OR canonical_summary LIKE '%Tr0ub4dor%' OR COALESCE(value_norm, '') ILIKE '%tr0ub4dor%')`,
+		`SELECT count(*) FROM diary_entries WHERE content LIKE '%' || $1 || '%' AND content LIKE '%Tr0ub4dor%'`,
+	} {
+		if n := f.scalar(q, id); n != "0" {
+			t.Fatalf("secret still stored: %s = %s", q, n)
+		}
+	}
+	if got := f.scalar(`SELECT content FROM memory_versions WHERE id = $1`, version); got != "The build box db login root:[REDACTED:credential_pair] is kept in the vault." {
+		t.Fatalf("redacted version = %q", got)
+	}
+	if got := f.scalar(`SELECT structured_content->>'origin' FROM memory_versions WHERE id = $1`, version); got != provenance {
+		t.Fatalf("provenance was rewritten: %q", got)
+	}
+	if n := f.scalar(`SELECT count(*) FROM diary_entries WHERE content LIKE '%' || $1 || '%' AND content LIKE '%' || $2 || '%'`, id, provenance); n != "1" {
+		t.Fatalf("diary provenance was rewritten (%s entries keep it)", n)
+	}
+	// Redacting again finds nothing new.
+	if code, out, _ := f.call(f.srv.handleFactByID, http.MethodPost, "/v1/facts/"+id+"/redact", `{}`); code != http.StatusOK || out["versions_redacted"] != float64(0) {
+		t.Fatalf("second redact = %d %v", code, out)
+	}
+
+	// The guard: even announced, a version can only lose spans to markers.
+	app := f.srv.db
+	for name, stmt := range map[string]string{
+		"rewrite":  `UPDATE memory_versions SET content = 'The build box has no login.' WHERE id = $1`,
+		"addition": `UPDATE memory_versions SET content = content || ' Extra.' WHERE id = $1`,
+		"reattach": `UPDATE memory_versions SET change_reason = 'edited' WHERE id = $1`,
+		"delete":   `DELETE FROM memory_versions WHERE id = $1`,
+		"unmarked": `UPDATE memory_versions SET content = replace(content, '[REDACTED:credential_pair]', 'x') WHERE id = $1`,
+		// A redaction must rehash: a hash left as it was, or set to anything
+		// but the SHA-256 of the new content, no longer describes the row.
+		"stale hash":  `UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]') WHERE id = $1`,
+		"forged hash": `UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]'), content_hash = repeat('0', 64) WHERE id = $1`,
+	} {
+		tx, err := app.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = setPrincipalContext(context.Background(), tx, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner})
+		if _, err := tx.Exec(`SELECT set_config('scos.redacting_version', $1, true)`, version); err != nil {
+			t.Fatal(err)
+		}
+		res, err := tx.Exec(stmt, version)
+		_ = tx.Rollback()
+		if err == nil {
+			// Row-level security gives the runtime role no DELETE policy,
+			// so a delete matches no row before the trigger is reached.
+			if n, _ := res.RowsAffected(); n == 0 && name == "delete" {
+				continue
+			}
+			t.Fatalf("%s was not refused", name)
+		}
+		if !strings.Contains(err.Error(), "append-only") {
+			t.Fatalf("%s failed for another reason: %v", name, err)
+		}
+	}
+	// Announced and rehashed, the same redaction is admitted.
+	{
+		tx, err := app.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = setPrincipalContext(context.Background(), tx, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner})
+		if _, err := tx.Exec(`SELECT set_config('scos.redacting_version', $1, true)`, version); err != nil {
+			t.Fatal(err)
+		}
+		res, err := tx.Exec(`UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]'),
+			content_hash = encode(sha256(convert_to(replace(content, 'vault', '[REDACTED:password]'), 'UTF8')), 'hex') WHERE id = $1`, version)
+		_ = tx.Rollback()
+		if err != nil {
+			t.Fatalf("a rehashed redaction was refused: %v", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			t.Fatalf("a rehashed redaction updated %d rows", n)
+		}
+	}
+	// Unannounced, even a valid redaction is refused.
+	if _, err := f.admin.Exec(`UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]') WHERE id = $1`, version); err == nil || !strings.Contains(err.Error(), "append-only") {
+		t.Fatalf("unannounced redaction was not refused: %v", err)
+	}
+}
+
+// scos_fact_history of a corrected fact includes the version it replaced,
+// and after a forget every version is still listed with the fact's status.
+func TestFactHistorySpansCorrectionsAndForgets(t *testing.T) {
+	f := newBehaviourFixture(t)
+	original := f.remember("The history fixture codename is Bluefin.", 0.8)
+	code, out, _ := f.call(f.srv.handleFactByID, http.MethodPatch, "/v1/facts/"+original, `{"content":"The history fixture codename is Greenfin.","reason":"renamed"}`)
+	if code != http.StatusOK {
+		t.Fatalf("correct = %d %v", code, out)
+	}
+	corrected := out["fact"].(map[string]any)["id"].(string)
+
+	history := func() []any {
+		code, out, _ := f.call(f.srv.handleFactByID, http.MethodGet, "/v1/facts/"+corrected+"/history", "")
+		if code != http.StatusOK {
+			t.Fatalf("history = %d %v", code, out)
+		}
+		return out["history"].([]any)
+	}
+	got := history()
+	if len(got) != 2 {
+		t.Fatalf("history of a corrected fact = %v, want the original and the correction", got)
+	}
+	first, second := got[0].(map[string]any), got[1].(map[string]any)
+	if first["fact_id"] != original || first["status"] != "superseded" || !strings.Contains(first["content"].(string), "Bluefin") {
+		t.Fatalf("first entry %v is not the superseded original", first)
+	}
+	if second["fact_id"] != corrected || second["status"] != "active" {
+		t.Fatalf("second entry %v is not the active correction", second)
+	}
+
+	if code, out, _ := f.call(f.srv.handleFactByID, http.MethodDelete, "/v1/facts/"+corrected+"?cascade=true", ""); code != http.StatusOK {
+		t.Fatalf("forget = %d %v", code, out)
+	}
+	for _, entry := range history() {
+		if status := entry.(map[string]any)["status"]; status != "revoked" {
+			t.Fatalf("after a cascading forget, entry %v status = %v, want revoked", entry, status)
+		}
+	}
+}
+
+// scos_link_evidence naming a fact or code symbol version that does not
+// exist (or is another tenant's) is refused with 404, not a 500.
+func TestEvidenceLinkToUnknownTargetsIsNotFound(t *testing.T) {
+	f := newBehaviourFixture(t)
+	fact := f.remember("The evidence fixture fact.", 0.8)
+	unknown := "4cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	for _, body := range []string{
+		`{"fact_id":"` + fact + `","code_symbol_version_id":"` + unknown + `"}`,
+		`{"fact_id":"` + unknown + `","code_symbol_version_id":"` + unknown + `"}`,
+		`{"fact_id":"` + f.otherTenantFact() + `","code_symbol_version_id":"` + unknown + `"}`,
+	} {
+		if code, out, _ := f.call(f.srv.handleEvidenceLinks, http.MethodPost, "/v1/evidence-links", body); code != http.StatusNotFound {
+			t.Fatalf("%s -> %d %v, want 404", body, code, out)
+		}
+	}
+}

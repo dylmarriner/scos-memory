@@ -83,6 +83,28 @@ The result is kept in `secret-recovery-drill.json` in `SCOS_BACKUP_DIR`.
 - `quarterly_full_recovery`: restores into a temporary database and compares every table and the schema catalog; a missing or extra table fails it.
 - `pitr_recovery` (weekly): writes a marker to `scos_ops.pitr_markers` (migration 000059), creates a named restore point, writes a second marker, switches WAL and waits for the segment to be archived. It then unpacks the newest physical base backup into a scratch cluster (the image's `postgres` binary, a private socket, no TCP), replays WAL up to that restore point -- from the encrypted off-host copies through `backup-manager wal-fetch` when WAL is shipped, otherwise from the archive directory -- and passes only if the first marker is present, the second absent, and the recovered schema catalog matches the live one. The scratch cluster and the markers are removed afterwards. The scheduler runs it only when WAL archiving is covered and a physical backup exists.
 
-To recover to a point in time for real, restore the newest physical backup taken before that point the same way: unpack `base.tar.gz` into an empty data directory, create `recovery.signal`, and start PostgreSQL with `restore_command` set to `backup-manager wal-fetch %f %p` (inside the backup-manager container, which has the key) or to a copy from the WAL archive, and with `recovery_target_time` (or `recovery_target_name`/`recovery_target_lsn`) set.
+To recover to a point in time for real:
+
+1. Prepare the data directory on the backup volume, which outlives the container: inside the backup-manager container, run `backup-manager pitr-prepare <target-time> /var/lib/scos/backups/pitr-<stamp> /var/lib/scos/wal-archive` (target time in RFC 3339). The last argument is the WAL archive path as the PostgreSQL that runs the recovery sees it; it must be absolute and hold no quote, `%` or line break. The command:
+   - picks the newest verified physical backup taken before the target, decrypts it, and unpacks it into the directory;
+   - writes `recovery.signal`, and appends to `postgresql.auto.conf` a `restore_command` that copies from the archive, `recovery_target_time`, `recovery_target_timeline` (the backup's own timeline, whose WAL it checked) and `recovery_target_action = 'promote'`;
+   - refuses unless the archive holds every segment from the backup's start onward without a gap.
+2. Stop every service that writes to the database, then PostgreSQL. Swap the prepared directory into the PostgreSQL data volume with a one-off container that mounts both volumes (`<project>` is the compose project name):
+
+   ```sh
+   docker run --rm \
+     -v <project>_backup-data:/backups -v <project>_postgres-data:/data alpine sh -euc '
+       mkdir /data/pre-pitr && find /data -mindepth 1 -maxdepth 1 ! -name pre-pitr -exec mv {} /data/pre-pitr/ \;
+       cp -a /backups/pitr-<stamp>/. /data/
+       mv /data/pre-pitr /backups/postgres-data.pre-pitr-<stamp>
+       chown -R 999:999 /data && chmod 0700 /data'
+   ```
+
+   This keeps the live data directory on the backup volume until the recovery is verified, and leaves the prepared directory owned by the postgres user (uid 999 in the pgvector image) with mode 0700.
+3. Start PostgreSQL alone. Wait for `archive recovery complete` in its log and for `pg_is_in_recovery()` to return false.
+4. Remove the recovery settings with `ALTER SYSTEM RESET restore_command` (and the same for `recovery_target_time`, `recovery_target_inclusive`, `recovery_target_timeline` and `recovery_target_action`), then run `SELECT pg_reload_conf()`.
+5. Start the rest of the stack. Take a new `physical_base_backup`: the recovered cluster runs on a new timeline, and point-in-time coverage needs a base backup on it.
+
+To recover from the encrypted off-host copies instead of the archive directory, set `restore_command` to `backup-manager wal-fetch %f %p` run inside the backup-manager container, which holds the key.
 
 `GET /v1/restore-tests/cadence` reports each cadence from passing drills of its own type only. With `SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED=true` the scheduler runs overdue drills, takes the backups that are due, applies retention, and runs the OKF mirror every `SCOS_OKF_GIT_MIRROR_INTERVAL` (default 1h).

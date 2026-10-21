@@ -188,6 +188,7 @@ func main() {
 	}))
 	mux.HandleFunc("/v1/graphify/extract", srv.handleExtract)
 	mux.HandleFunc("/v1/graphify/extract/", srv.handleExtractStatus)
+	mux.HandleFunc("/v1/graphify/graphs", srv.handleGraphs)
 	mux.HandleFunc("/v1/graphify/query", srv.handleQuery)
 	mux.HandleFunc("/v1/graphify/path", srv.handlePath)
 	mux.HandleFunc("/v1/graphify/explain", srv.handleExplain)

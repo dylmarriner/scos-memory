@@ -78,6 +78,24 @@ time.
 | `SCOS_NAMESPACE_ID` | persistence | namespace for Hermes turns and mirrored memory, saved in `scos.json` |
 | `SCOS_TLS_CA_PATH` | optional TLS trust | custom CA bundle path when required |
 
+### Self-hosted local mode
+
+On a stack started with `deploy/compose/docker-compose.local.yml`
+(`SCOS_AUTH_MODE=local`), mcp-gateway and hermes-provider give a caller that
+presents no bearer token the reserved local identity. Put this in
+`~/.hermes/scos.env` instead of a token and identity:
+
+```bash
+SCOS_AUTH_MODE=local
+SCOS_GATEWAY_URL=https://<host>:8098/mcp
+SCOS_HERMES_PROVIDER_URL=https://<host>:8088
+SCOS_TLS_CA_PATH=/path/to/scos-ca.crt
+```
+
+The provider then sends no credentials and acts as tenant, principal and
+namespace `00000000-0000-0000-0000-000000000001`; any tenant, principal or
+namespace configured elsewhere is ignored in this mode.
+
 `hermes memory setup` requires the complete configuration, stores non-secret
 settings in the active profile's `scos.json`, stores the bearer token through
 Hermes' secret environment handling, and checks both gateway recall and

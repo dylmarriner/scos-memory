@@ -225,7 +225,7 @@ func listAuditEntries(ctx context.Context, db *sql.DB, id requestIdentity) ([]*A
 		return nil, err
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id::text, action, actor_id::text, resource_id, decision, details, occurred_at
+		SELECT id::text, tenant_id::text, action, actor_id::text, resource_id, decision, details, occurred_at
 		FROM audit_entries WHERE tenant_id = $1 ORDER BY occurred_at DESC LIMIT 500
 	`, id.TenantID)
 	if err != nil {
@@ -252,7 +252,7 @@ func getAuditEntry(ctx context.Context, db *sql.DB, id requestIdentity, auditID 
 		return nil, err
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id::text, action, actor_id::text, resource_id, decision, details, occurred_at
+		SELECT id::text, tenant_id::text, action, actor_id::text, resource_id, decision, details, occurred_at
 		FROM audit_entries WHERE tenant_id = $1 AND id = $2
 	`, id.TenantID, auditID)
 	if err != nil {
@@ -277,7 +277,7 @@ func scanAuditRows(rows *sql.Rows) ([]*AuditRecord, error) {
 			detailsJSON []byte
 			occurredAt  time.Time
 		)
-		if err := rows.Scan(&rec.ID, &rec.Action, &rec.Principal, &rec.Resource, &rec.Result, &detailsJSON, &occurredAt); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Tenant, &rec.Action, &rec.Principal, &rec.Resource, &rec.Result, &detailsJSON, &occurredAt); err != nil {
 			return nil, err
 		}
 		var details struct {

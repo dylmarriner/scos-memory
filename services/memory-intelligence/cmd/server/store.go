@@ -544,18 +544,35 @@ func redactSecrets(f *Fact) {
 // FactVersion is one entry in a fact's append-only revision history —
 // memory_versions rows are never mutated or deleted, so this is a complete,
 // tamper-evident audit trail of every correction ever made to a fact.
+//
+// A correction records a new fact rather than a new version of the old one,
+// so a fact's history spans its supersession chain: FactID names the fact
+// each version belongs to and Status is that fact's current lifecycle state
+// (active, superseded, merged or revoked), which is how a version from
+// before a correction, or of a fact since forgotten, is told apart.
 type FactVersion struct {
+	FactID        string `json:"fact_id"`
+	Status        string `json:"status"`
 	VersionNumber int    `json:"version_number"`
 	Content       string `json:"content"`
 	ChangeReason  string `json:"change_reason"`
 	CreatedAt     string `json:"created_at"`
 	CreatedBy     string `json:"created_by"`
+
+	// factCreated and recorded order the history at full precision.
+	factCreated, recorded time.Time
 }
 
-// loadFactHistory returns every version ever recorded for factID, oldest
-// first. Unlike loadFacts/getFact it does not filter on status: history
-// must remain visible for a fact that has since been corrected or
-// forgotten, since that is exactly what an audit trail is for (§42).
+// maxHistoryChain bounds how many facts one history walks, so a corrupt
+// (cyclic or enormous) supersession graph cannot run unbounded.
+const maxHistoryChain = 1000
+
+// loadFactHistory returns every version ever recorded for factID and for
+// every fact it superseded (directly or transitively: the facts scos_correct
+// replaced and the duplicates merged into it), oldest first. Unlike
+// loadFacts/getFact it does not filter on status: history must remain
+// visible for a fact that has since been corrected or forgotten, since that
+// is exactly what an audit trail is for (§42).
 func loadFactHistory(ctx context.Context, db querier, tenantID, factID string) ([]FactVersion, error) {
 	var exists bool
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, factID, tenantID).Scan(&exists); err != nil {
@@ -564,29 +581,76 @@ func loadFactHistory(ctx context.Context, db querier, tenantID, factID string) (
 	if !exists {
 		return nil, sql.ErrNoRows
 	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT mv.version_number, mv.content, mv.change_reason, mv.created_at, COALESCE(p.display_name, mv.created_by::text)
-		FROM memory_versions mv
-		JOIN memory_items mi ON mi.id = mv.memory_id
-		LEFT JOIN principals p ON p.id = mv.created_by
-		WHERE mv.memory_id = $1 AND mi.tenant_id = $2
-		ORDER BY mv.version_number ASC
-	`, factID, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	history := make([]FactVersion, 0)
-	for rows.Next() {
-		var v FactVersion
-		var createdAt time.Time
-		if err := rows.Scan(&v.VersionNumber, &v.Content, &v.ChangeReason, &createdAt, &v.CreatedBy); err != nil {
+	chain := []string{factID}
+	seen := map[string]bool{factID: true}
+	for next := 0; next < len(chain) && len(chain) < maxHistoryChain; next++ {
+		rows, err := db.QueryContext(ctx, `SELECT id::text FROM memory_items WHERE superseded_by_id=$1 AND tenant_id=$2`, chain[next], tenantID)
+		if err != nil {
 			return nil, err
 		}
-		v.CreatedAt = createdAt.UTC().Format(time.RFC3339)
-		history = append(history, v)
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !seen[id] && len(chain) < maxHistoryChain {
+				seen[id] = true
+				chain = append(chain, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return history, rows.Err()
+	history := make([]FactVersion, 0, len(chain))
+	for _, id := range chain {
+		rows, err := db.QueryContext(ctx, `
+			SELECT mi.id::text, mi.status::text, mi.created_at, mv.version_number, mv.content, mv.change_reason, mv.created_at, COALESCE(p.display_name, mv.created_by::text)
+			FROM memory_versions mv
+			JOIN memory_items mi ON mi.id = mv.memory_id
+			LEFT JOIN principals p ON p.id = mv.created_by
+			WHERE mv.memory_id = $1 AND mi.tenant_id = $2
+			ORDER BY mv.version_number ASC
+		`, id, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var v FactVersion
+			if err := rows.Scan(&v.FactID, &v.Status, &v.factCreated, &v.VersionNumber, &v.Content, &v.ChangeReason, &v.recorded, &v.CreatedBy); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			v.CreatedAt = v.recorded.UTC().Format(time.RFC3339)
+			history = append(history, v)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	sortFactHistory(history)
+	return history, nil
+}
+
+// sortFactHistory orders versions oldest first: by when each fact was
+// recorded (a correction is always recorded after the fact it replaces),
+// then by when each version was written, then by version number.
+func sortFactHistory(history []FactVersion) {
+	sort.SliceStable(history, func(i, j int) bool {
+		a, b := history[i], history[j]
+		if !a.factCreated.Equal(b.factCreated) {
+			return a.factCreated.Before(b.factCreated)
+		}
+		if !a.recorded.Equal(b.recorded) {
+			return a.recorded.Before(b.recorded)
+		}
+		return a.VersionNumber < b.VersionNumber
+	})
 }
 
 // forgetAllFacts implements bulk scos_forget (mem0's delete_all/reset):
@@ -1410,4 +1474,256 @@ func defaultWritableNamespace(ctx context.Context, q querier, id requestIdentity
 		return "", nil
 	}
 	return ns, err
+}
+
+// HistoryRedaction reports what redactFactHistory rewrote.
+type HistoryRedaction struct {
+	FactID           string   `json:"fact_id"`
+	VersionsRedacted int      `json:"versions_redacted"`
+	ItemRedacted     bool     `json:"item_redacted"`
+	DiaryRedacted    int      `json:"diary_entries_redacted"`
+	Kinds            []string `json:"kinds"`
+}
+
+// redactedText is one stored text and its redacted form.
+type redactedText struct{ original, redacted string }
+
+// redactDerived redacts text derived from a fact's content: a truncation of
+// one of its versions (a title, a summary) becomes the same truncation of
+// the redacted version, since a cut can leave half a secret the scanner no
+// longer recognises; anything else is scanned on its own.
+func redactDerived(s string, versions []redactedText) string {
+	for _, v := range versions {
+		for _, n := range []int{120, 500} {
+			if s == truncate(v.original, n) {
+				return truncate(v.redacted, n)
+			}
+		}
+	}
+	if findings := secretscan.Scan(s); len(findings) > 0 {
+		return secretscan.Redact(s, findings)
+	}
+	return s
+}
+
+// redactFactHistory removes from a fact's stored history every secret the
+// scanner now finds, in place, in exactly the text the write path guards:
+// each version's content and the free text in its structured content
+// (historyFreeTextKeys), the item's title, summary and normalised key/value,
+// and the summaries and reasons of the diary entries that quote the fact.
+// Provenance (origin, scope, network, timestamps) and identifiers are never
+// touched: they are not free text, and paths and ids in them are not
+// secrets. Spans become [REDACTED:kind] markers and
+// nothing else changes; the memory_versions_append_only trigger admits only
+// that rewrite, announced per row through scos.redacting_version. It works
+// on a fact in any status, since a superseded or forgotten version holds a
+// leaked secret as surely as the current one, and records what it did in
+// the diary.
+func redactFactHistory(ctx context.Context, db *sql.DB, id requestIdentity, factID string) (*HistoryRedaction, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return nil, err
+	}
+	var title, summary, currentVersion string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT title, canonical_summary, COALESCE(current_version_id::text, '')
+		FROM memory_items WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+	`, factID, id.TenantID).Scan(&title, &summary, &currentVersion); err != nil {
+		return nil, err
+	}
+
+	type version struct{ id, content, structured string }
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id::text, content, structured_content::text FROM memory_versions
+		WHERE memory_id = $1 ORDER BY version_number
+	`, factID)
+	if err != nil {
+		return nil, err
+	}
+	var versions []version
+	for rows.Next() {
+		var v version
+		if err := rows.Scan(&v.id, &v.content, &v.structured); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := &HistoryRedaction{FactID: factID, Kinds: []string{}}
+	seen := map[string]bool{}
+	var texts []redactedText
+	currentRedacted := ""
+	for _, v := range versions {
+		findings := secretscan.Scan(v.content)
+		content := secretscan.Redact(v.content, findings)
+		structured, structuredKinds, err := redactJSONFields(v.structured, historyFreeTextKeys)
+		if err != nil {
+			return nil, fmt.Errorf("version %s structured content: %w", v.id, err)
+		}
+		texts = append(texts, redactedText{original: v.content, redacted: content})
+		if v.id == currentVersion {
+			currentRedacted = content
+		}
+		if content == v.content && structured == v.structured {
+			continue
+		}
+		for _, f := range findings {
+			structuredKinds = append(structuredKinds, string(f.Kind))
+		}
+		for _, k := range structuredKinds {
+			if !seen[k] {
+				seen[k] = true
+				result.Kinds = append(result.Kinds, k)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.redacting_version', $1, true)`, v.id); err != nil {
+			return nil, err
+		}
+		res, err := tx.ExecContext(ctx, `
+			UPDATE memory_versions SET content = $2, structured_content = $3::jsonb, content_hash = $4 WHERE id = $1
+		`, v.id, content, structured, sha256Hex(content))
+		if err != nil {
+			return nil, fmt.Errorf("redact version %s: %w", v.id, err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, fmt.Errorf("redact version %s: the caller may not write this fact's namespace", v.id)
+		}
+		result.VersionsRedacted++
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.redacting_version', '', true)`); err != nil {
+		return nil, err
+	}
+
+	newTitle, newSummary := redactDerived(title, texts), redactDerived(summary, texts)
+	if newTitle != title || newSummary != summary || result.VersionsRedacted > 0 {
+		keyNorm, valueNorm := keyValueNorm(currentRedacted)
+		res, err := tx.ExecContext(ctx, `
+			UPDATE memory_items SET title = $2, canonical_summary = $3, key_norm = $4, value_norm = $5
+			WHERE id = $1 AND tenant_id = $6
+		`, factID, newTitle, newSummary, keyNorm, valueNorm, id.TenantID)
+		if err != nil {
+			return nil, fmt.Errorf("redact fact item: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, fmt.Errorf("redact fact item: the caller may not write this fact's namespace")
+		}
+		result.ItemRedacted = newTitle != title || newSummary != summary
+	}
+
+	diaryRows, err := tx.QueryContext(ctx, `
+		SELECT id::text, content FROM diary_entries WHERE tenant_id = $1 AND content LIKE '%' || $2 || '%'
+	`, id.TenantID, factID)
+	if err != nil {
+		return nil, err
+	}
+	type diary struct{ id, content string }
+	var entries []diary
+	for diaryRows.Next() {
+		var d diary
+		if err := diaryRows.Scan(&d.id, &d.content); err != nil {
+			diaryRows.Close()
+			return nil, err
+		}
+		entries = append(entries, d)
+	}
+	diaryRows.Close()
+	if err := diaryRows.Err(); err != nil {
+		return nil, err
+	}
+	for _, d := range entries {
+		var body map[string]any
+		if json.Unmarshal([]byte(d.content), &body) != nil {
+			continue
+		}
+		changed := false
+		for _, k := range diaryFreeTextKeys {
+			if s, ok := body[k].(string); ok {
+				if r := redactDerived(s, texts); r != s {
+					body[k] = r
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			continue
+		}
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE diary_entries SET content = $2 WHERE id = $1 AND tenant_id = $3`, d.id, string(encoded), id.TenantID)
+		if err != nil {
+			return nil, fmt.Errorf("redact diary entry %s: %w", d.id, err)
+		}
+		// A row policy that hides the entry from UPDATE leaves it as it was
+		// without an error; the secret must not be reported gone.
+		if n, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if n != 1 {
+			return nil, fmt.Errorf("redact diary entry %s: %d rows updated, want 1", d.id, n)
+		}
+		result.DiaryRedacted++
+	}
+
+	if result.VersionsRedacted > 0 || result.ItemRedacted || result.DiaryRedacted > 0 {
+		if err := recordDiaryEntry(ctx, tx, id, "fact_history_redacted", map[string]any{
+			"fact_id": factID, "versions_redacted": result.VersionsRedacted,
+			"diary_entries_redacted": result.DiaryRedacted, "kinds": result.Kinds,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// historyFreeTextKeys are the structured-content fields that hold free text
+// a caller wrote (a correction's reason lands in derivation); every other
+// field is provenance or classification.
+var historyFreeTextKeys = []string{"derivation"}
+
+// diaryFreeTextKeys are the diary fields that quote a fact's text or a
+// caller's reason.
+var diaryFreeTextKeys = []string{"summary", "reason"}
+
+// redactJSONFields redacts the named top-level string fields of a JSON
+// object, keeping every other field, and returns the kinds it redacted.
+// Redacting values rather than the encoded text keeps the document valid
+// whatever the secret contains.
+func redactJSONFields(raw string, keys []string) (string, []string, error) {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return "", nil, err
+	}
+	var kinds []string
+	for _, k := range keys {
+		s, ok := doc[k].(string)
+		if !ok {
+			continue
+		}
+		findings := secretscan.Scan(s)
+		for _, f := range findings {
+			kinds = append(kinds, string(f.Kind))
+		}
+		doc[k] = secretscan.Redact(s, findings)
+	}
+	if len(kinds) == 0 {
+		return raw, nil, nil
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(encoded), kinds, nil
 }

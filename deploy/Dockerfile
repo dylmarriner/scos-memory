@@ -22,7 +22,7 @@
 # `toolchain go1.26.6`, and the build should always reproduce with the same
 # toolchain rather than whatever patch Docker Hub resolves the tag to on a
 # given day.
-FROM golang:1.27.2-alpine AS build
+FROM golang:1.27.3-alpine AS build
 # CGO_ENABLED=1: code-intelligence's Tree-sitter parsers (tree-sitter-go,
 # -javascript, -python, -rust, -typescript) are cgo bindings around the C
 # tree-sitter runtime -- built with CGO disabled their Go files are excluded
@@ -103,7 +103,11 @@ ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
 # git is what backup-manager mirrors the OKF repository with. The postgresql17
 # server runs only inside backup-manager's point-in-time recovery drill, as a
 # scratch cluster on a private socket that replays archived WAL.
-RUN apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client postgresql17 git \
+# apk upgrade first: the alpine:3.24 tag lags the release repository, and a
+# package already in the base image (libexpat, musl, busybox) only picks up a
+# security fix if it is upgraded here.
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates python3 py3-pip pipx postgresql17-client postgresql17 git \
     && pipx install graphifyy \
     # pip is only needed to install graphify. Every pip release vendors its
     # own urllib3/msgpack/setuptools copies, which carry HIGH CVEs, so pip

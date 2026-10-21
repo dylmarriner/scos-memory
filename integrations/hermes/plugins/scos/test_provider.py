@@ -219,6 +219,56 @@ class ScosMemoryProviderV2Tests(unittest.TestCase):
             self.assertEqual(stored["SCOS_GATEWAY_URL"], "https://gateway.example")
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
+    def test_local_mode_sends_no_credentials_and_acts_as_the_local_identity(self):
+        local = "00000000-0000-0000-0000-000000000001"
+        with tempfile.TemporaryDirectory() as tmp:
+            # A config left over from another deployment names its own
+            # identity; local mode replaces it with the reserved one.
+            (Path(tmp) / "scos.json").write_text(json.dumps({
+                "SCOS_TENANT_ID": "tenant-elsewhere",
+                "SCOS_PRINCIPAL_ID": "principal-elsewhere",
+                "SCOS_NAMESPACE_ID": "namespace-elsewhere",
+            }))
+            (Path(tmp) / "scos.env").write_text(
+                "SCOS_AUTH_MODE=local\n"
+                "SCOS_GATEWAY_URL=https://gateway.invalid/mcp\n"
+                "SCOS_HERMES_PROVIDER_URL=https://provider.invalid\n"
+            )
+            provider = ScosMemoryProvider()
+            provider._hermes_home = Path(tmp)
+            saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("SCOS_")}
+            try:
+                provider._env = provider._load_env()
+            finally:
+                os.environ.update(saved)
+        self.assertTrue(provider.is_available())
+        self.assertTrue(provider._persistence_configured())
+        self.assertEqual(provider._service_headers(), {"Content-Type": "application/json"})
+        payload = provider._session_payload("session-alpha")
+        self.assertEqual((payload["tenant_id"], payload["principal_id"], payload["namespace_id"]), (local, local, local))
+
+    def test_without_local_mode_credentials_are_still_required(self):
+        provider = ScosMemoryProvider()
+        provider._env = {
+            "SCOS_GATEWAY_URL": "https://gateway.invalid",
+            "SCOS_HERMES_PROVIDER_URL": "https://provider.invalid",
+        }
+        self.assertFalse(provider.is_available())
+        self.assertFalse(provider._persistence_configured())
+        with self.assertRaises(RuntimeError):
+            provider._service_headers()
+
+    def test_local_mode_setup_needs_only_the_service_urls(self):
+        provider = ScosMemoryProvider()
+        with tempfile.TemporaryDirectory() as tmp:
+            provider.save_config({
+                "SCOS_AUTH_MODE": "local",
+                "SCOS_GATEWAY_URL": "https://gateway.example/mcp",
+                "SCOS_HERMES_PROVIDER_URL": "https://provider.example",
+            }, tmp)
+            stored = json.loads((Path(tmp) / "scos.json").read_text())
+        self.assertEqual(stored["SCOS_AUTH_MODE"], "local")
+
     def test_tool_discovery_falls_back_to_minimum_safe_catalogue(self):
         provider = self.make_provider()
         provider._gateway_rpc = lambda *_args, **_kwargs: {"error": {"message": "offline"}}

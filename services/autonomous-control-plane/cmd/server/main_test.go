@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,7 +138,7 @@ func TestLocalStateSurvivesRestartAndReplayInspectsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := &controlPlane{store: store}
-	ingest := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"restart-1","input":"remember this"}`))
+	ingest := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"restart-1","agent_id":"agent-1","input":"remember this"}`))
 	ingest.Header.Set("X-SCOS-Tenant-ID", "tenant")
 	ingest.Header.Set("X-SCOS-Principal-ID", "actor")
 	response := httptest.NewRecorder()
@@ -260,7 +261,7 @@ func TestIngestOrchestratesConfiguredDependenciesAndExposesDegradedStages(t *tes
 		t.Fatal(err)
 	}
 	plane := &controlPlane{store: store, client: dependency.Client()}
-	req := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"i","input":"Run the tests in this Go repository","repository_path":"/repo","proposed_tool":"tool-1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"i","agent_id":"agent-1","input":"Run the tests in this Go repository","repository_path":"/repo","proposed_tool":"tool-1"}`))
 	req.Header.Set("X-SCOS-Tenant-ID", "tenant")
 	req.Header.Set("X-SCOS-Principal-ID", "actor")
 	response := httptest.NewRecorder()
@@ -288,7 +289,7 @@ func TestIngestOrchestratesConfiguredDependenciesAndExposesDegradedStages(t *tes
 	}
 
 	t.Setenv("SCOS_CONTEXT_OPTIMISATION_URL", "http://127.0.0.1:1")
-	degraded := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"i-degraded","input":"hello"}`))
+	degraded := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"i-degraded","agent_id":"agent-1","input":"hello"}`))
 	degraded.Header.Set("X-SCOS-Tenant-ID", "tenant")
 	degraded.Header.Set("X-SCOS-Principal-ID", "actor")
 	degradedResponse := httptest.NewRecorder()
@@ -314,7 +315,7 @@ func TestControlStatusReadsPersistedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	plane := &controlPlane{store: store}
-	ingest := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"status-1","input":"hello"}`))
+	ingest := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"status-1","agent_id":"agent-1","input":"hello"}`))
 	ingest.Header.Set("X-SCOS-Tenant-ID", "tenant")
 	ingest.Header.Set("X-SCOS-Principal-ID", "actor")
 	plane.handleIngest(httptest.NewRecorder(), ingest)
@@ -572,5 +573,26 @@ func TestStatusWithoutInteractionIDIsABadRequest(t *testing.T) {
 	(&controlPlane{}).handleStatus(response, req)
 	if response.Code != http.StatusBadRequest || !bytes.Contains(response.Body.Bytes(), []byte("interaction_id is required")) {
 		t.Fatalf("status = %d %s", response.Code, response.Body.String())
+	}
+}
+
+// Every plan ends in agent dispatch, so a route that names no agent is
+// refused at ingress instead of degrading after its other stages have run.
+func TestIngestRequiresAnAgent(t *testing.T) {
+	store, err := newLocalStateStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plane := &controlPlane{store: store}
+	req := httptest.NewRequest(http.MethodPost, "/v1/control/ingest", bytes.NewBufferString(`{"interaction_id":"no-agent","input":"hello"}`))
+	req.Header.Set("X-SCOS-Tenant-ID", "tenant")
+	req.Header.Set("X-SCOS-Principal-ID", "actor")
+	response := httptest.NewRecorder()
+	plane.handleIngest(response, req)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "agent_id is required") {
+		t.Fatalf("status = %d; body=%s", response.Code, response.Body.String())
+	}
+	if _, err := store.decision("tenant", "actor", "no-agent"); err == nil {
+		t.Fatal("a refused route was persisted")
 	}
 }

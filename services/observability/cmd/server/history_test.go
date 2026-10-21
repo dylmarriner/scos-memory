@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -440,5 +441,34 @@ func TestListsAreBounded(t *testing.T) {
 				t.Fatalf("%s?limit=%s answered %d, want 400", path, bad, w.Code)
 			}
 		}
+	}
+}
+
+// A collector that refuses the forward does not fail ingest: the batch is
+// journaled and applied, so a retry cannot duplicate it.
+func TestIngestKeepsAJournaledBatchWhenTheCollectorFails(t *testing.T) {
+	var forwards atomic.Int32
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwards.Add(1)
+		http.Error(w, "collector down", http.StatusServiceUnavailable)
+	}))
+	defer collector.Close()
+	s := newTestServer(t)
+	s.otlp = &otlpExporter{endpoint: collector.URL, client: collector.Client(), service: "test-service", resource: map[string]string{"service.name": "test-service"}}
+	now := time.Now()
+	ingest(t, s, []MetricPoint{
+		requestPoint(now, "a", "svc", "/x", "200", 5),
+		requestPoint(now, "a", "svc", "/x", "200", 7),
+	})
+	s.mu.RLock()
+	got := len(s.metrics)
+	s.mu.RUnlock()
+	if got != 2 {
+		t.Fatalf("applied %d points, want 2", got)
+	}
+	// The batch was offered to the collector, and its first failure ended
+	// the attempt rather than costing a timeout per remaining point.
+	if n := forwards.Load(); n != 1 {
+		t.Fatalf("collector received %d forwards, want 1", n)
 	}
 }

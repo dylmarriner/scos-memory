@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // runCommand runs backup-manager as a one-shot command instead of the
@@ -22,6 +23,11 @@ import (
 //	backup-manager object-fetch <backup-id>
 //	    verifies a backup's object-store copy and writes it back to the
 //	    provider, for when the provider's own copy is lost or damaged.
+//	backup-manager pitr-prepare <target-time> <data-dir> [<wal-dir-as-postgres-sees-it>]
+//	    lays out data-dir to recover the database to target-time (RFC 3339)
+//	    when PostgreSQL starts on it: the newest physical base backup taken
+//	    before then, recovery.signal, and a restore_command reading the WAL
+//	    archive. It refuses if the archive has a gap.
 //	backup-manager secret-drill
 //	    recovers the backup key from Bitwarden (Secrets Manager or a vault
 //	    item) and decrypts the newest encrypted backup with it, recording
@@ -40,6 +46,28 @@ func runCommand(args []string) int {
 			return 1
 		}
 		fmt.Printf("restored %d files from %s under %s\n", n, args[1], args[2])
+		return 0
+	case "pitr-prepare":
+		if len(args) != 3 && len(args) != 4 {
+			fmt.Fprintln(os.Stderr, "usage: backup-manager pitr-prepare <target-time> <data-dir> [<wal-dir-as-postgres-sees-it>]")
+			return 2
+		}
+		target, err := time.Parse(time.RFC3339, args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pitr-prepare: target time must be RFC 3339:", err)
+			return 2
+		}
+		restoreWALDir := ""
+		if len(args) == 4 {
+			restoreWALDir = args[3]
+		}
+		p, err := newBackupServer().pitrPrepare(context.Background(), target, args[2], restoreWALDir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pitr-prepare:", err)
+			return 1
+		}
+		fmt.Printf("prepared %s to recover to %s from backup %s (taken %s); %d archived WAL segments from %s through %s\n",
+			args[2], p.Target.UTC().Format(time.RFC3339), p.BackupID, p.BackupTakenAt, p.Segments, p.WALStart, p.ArchivedThrough)
 		return 0
 	case "wal-fetch":
 		if len(args) != 3 {

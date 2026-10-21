@@ -28,6 +28,7 @@ import (
 	"github.com/dylmarriner/scos-memory/packages/llmclient"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -440,6 +441,7 @@ func main() {
 	// Dashboard views (§25.9)
 	mux.HandleFunc("/v1/dashboard/system", srv.handleDashboardSystem)
 	mux.HandleFunc("/v1/dashboard/memory-graph", srv.handleDashboardMemoryGraph)
+	mux.HandleFunc("/v1/dashboard/dream", srv.handleDashboardDream)
 	mux.HandleFunc("/v1/dashboard/facts", srv.handleDashboardFacts)
 	mux.HandleFunc("/v1/dashboard/summary", srv.handleDashboardSummary)
 	mux.HandleFunc("/v1/dashboard/learnings", srv.handleDashboardLearnings)
@@ -835,6 +837,10 @@ func (s *engineServer) handleFactsForgetAll(w http.ResponseWriter, r *http.Reque
 func (s *engineServer) handleFactByID(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/history") {
 		s.handleFactHistory(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/redact") {
+		s.handleFactRedact(w, r)
 		return
 	}
 	if strings.HasSuffix(r.URL.Path, "/feedback") {
@@ -1244,6 +1250,10 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "fact_id and code_symbol_version_id are required", http.StatusBadRequest)
 		return
 	}
+	if !isUUIDLike(req.FactID) || !isUUIDLike(req.CodeSymbolVersionID) {
+		http.Error(w, "fact_id and code_symbol_version_id must be UUIDs", http.StatusBadRequest)
+		return
+	}
 	switch req.LinkType {
 	case "evidences", "motivated_by", "invalidated_by":
 	case "":
@@ -1272,8 +1282,25 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	var factExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, req.FactID, identity.TenantID).Scan(&factExists); err != nil {
+		http.Error(w, "look up fact: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !factExists {
+		http.Error(w, "fact not found", http.StatusNotFound)
+		return
+	}
 	id, err := insertEvidenceLink(ctx, tx, identity.TenantID, req.FactID, req.CodeSymbolVersionID, req.LinkType, "explicit", confidence)
 	if err != nil {
+		// The fact was checked above, so a foreign-key refusal names a code
+		// symbol version that does not exist: the caller's input, not a
+		// server fault.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			http.Error(w, "code symbol version not found (use a SymbolVersionID from scos_code_query or scos_code_impact)", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "insert evidence link: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1309,6 +1336,40 @@ func (s *engineServer) handleFactForget(w http.ResponseWriter, r *http.Request, 
 		"revoked_count": revoked,
 		"revoked_at":    time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// factIDPattern matches a fact id, a UUID in canonical form.
+var factIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// handleFactRedact implements scos_redact_history: POST
+// /v1/facts/{id}/redact removes every secret the scanner finds from the
+// fact's stored history, in place (see redactFactHistory).
+func (s *engineServer) handleFactRedact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/facts/"), "/redact")
+	if !factIDPattern.MatchString(id) {
+		http.Error(w, "fact id must be a UUID", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	result, err := redactFactHistory(r.Context(), s.db, identity, id)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		// A database error can carry row values; it goes to the log, not the caller.
+		log.Printf("redact fact history %s: %v", id, err)
+		http.Error(w, "redact fact history failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, result)
 }
 
 // handleFactFeedback implements scos_fact_feedback (mem0's feedback()):
@@ -1937,20 +1998,39 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 		return
 	}
 
+	nodes, edges := memoryGraph(facts, entities, relations)
+	writeJSON(w, map[string]any{
+		"type":  "memory_graph",
+		"nodes": nodes,
+		"edges": edges,
+	})
+}
+
+// memoryGraph builds the dashboard graph: every active fact and entity is a
+// node; relations and entity mentions are edges. Relations and mentions can
+// name superseded or merged facts, which loadFacts leaves out, so an edge is
+// drawn only when both of its ends are nodes of this graph.
+func memoryGraph(facts []*Fact, entities []*Entity, relations []*TemporalRelation) ([]map[string]any, []map[string]any) {
+	present := make(map[string]bool, len(facts)+len(entities))
 	nodes := make([]map[string]any, 0, len(facts)+len(entities))
 	for _, f := range facts {
+		present[f.ID] = true
 		nodes = append(nodes, map[string]any{
 			"id": f.ID, "label": truncate(f.Content, 60),
 			"type": "fact", "network": f.Network,
 		})
 	}
 	for _, e := range entities {
+		present[e.ID] = true
 		nodes = append(nodes, map[string]any{
 			"id": e.ID, "label": e.Name, "type": "entity",
 		})
 	}
 	edges := make([]map[string]any, 0, len(relations))
 	for _, rel := range relations {
+		if !present[rel.SourceID] || !present[rel.TargetID] {
+			continue
+		}
 		edges = append(edges, map[string]any{
 			"source": rel.SourceID, "target": rel.TargetID,
 			"type": rel.Type, "confidence": rel.Confidence,
@@ -1962,17 +2042,15 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 	// store does, not just fact<->fact relations.
 	for _, e := range entities {
 		for _, factID := range e.Facts {
+			if !present[factID] {
+				continue
+			}
 			edges = append(edges, map[string]any{
 				"source": e.ID, "target": factID, "type": "mentions",
 			})
 		}
 	}
-
-	writeJSON(w, map[string]any{
-		"type":  "memory_graph",
-		"nodes": nodes,
-		"edges": edges,
-	})
+	return nodes, edges
 }
 
 func (s *engineServer) handleDashboardFacts(w http.ResponseWriter, r *http.Request) {

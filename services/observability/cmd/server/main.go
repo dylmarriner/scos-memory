@@ -8,6 +8,7 @@ import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -250,6 +251,39 @@ func (st *observabilityStore) append(record journalRecord) error {
 		return err
 	}
 	st.seq = record.Seq
+	return nil
+}
+
+// appendBatch journals records under consecutive sequence numbers with one
+// write and one fsync. Ingest journals a whole request this way: a per-record
+// fsync under the server lock serialised every caller behind one disk flush
+// per point, and the fleet's telemetry batches alone kept ingest blocked for
+// longer than its callers wait.
+func (st *observabilityStore) appendBatch(records []journalRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	var buf bytes.Buffer
+	seq := st.seq
+	for i := range records {
+		seq++
+		records[i].Seq = seq
+		b, err := json.Marshal(records[i])
+		if err != nil {
+			return err
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	if _, err := st.file.Write(buf.Bytes()); err != nil {
+		return err
+	}
+	if err := st.file.Sync(); err != nil {
+		return err
+	}
+	st.seq = seq
 	return nil
 }
 
@@ -881,25 +915,31 @@ func (s *observabilityServer) handleMetricsIngest(w http.ResponseWriter, r *http
 				points[i].SpanID = spanID
 			}
 		}
-		if err := s.store.append(journalRecord{Kind: "metric", Metric: &points[i]}); err != nil {
-			s.mu.Unlock()
-			http.Error(w, "metrics storage failure: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		if s.otlp != nil {
-			if err := s.otlp.exportMetric(r.Context(), &points[i]); err != nil {
-				s.mu.Unlock()
-				http.Error(w, "metrics export failure: "+err.Error(), http.StatusServiceUnavailable)
-				return
-			}
-		}
+	}
+	records := make([]journalRecord, len(points))
+	for i := range points {
+		records[i] = journalRecord{Kind: "metric", Metric: &points[i]}
+	}
+	if err := s.store.appendBatch(records); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "metrics storage failure: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	for i := range points {
 		s.metrics = append(s.metrics, &points[i])
 		if scope.service {
 			s.rollups.add(&points[i])
 		}
 	}
 	s.trimRetention()
+	exporter := s.otlp
 	s.mu.Unlock()
+	// The journal is the record: a journaled batch is accepted and applied
+	// whatever the collector does. Forwarding happens outside the lock, so a
+	// stalled collector never holds up ingest or queries.
+	if exporter != nil {
+		forwardBatch("metrics", points, func(item *MetricPoint) error { return exporter.exportMetric(r.Context(), item) })
+	}
 	if err := s.persistDB(); err != nil {
 		http.Error(w, "persist metrics: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -1016,22 +1056,28 @@ func (s *observabilityServer) handleTraceIngest(w http.ResponseWriter, r *http.R
 				spans[i].ParentID = parentID
 			}
 		}
-		if err := s.store.append(journalRecord{Kind: "trace", Trace: &spans[i]}); err != nil {
-			s.mu.Unlock()
-			http.Error(w, "traces storage failure: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		if s.otlp != nil {
-			if err := s.otlp.exportTrace(r.Context(), &spans[i]); err != nil {
-				s.mu.Unlock()
-				http.Error(w, "traces export failure: "+err.Error(), http.StatusServiceUnavailable)
-				return
-			}
-		}
+	}
+	records := make([]journalRecord, len(spans))
+	for i := range spans {
+		records[i] = journalRecord{Kind: "trace", Trace: &spans[i]}
+	}
+	if err := s.store.appendBatch(records); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "traces storage failure: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	for i := range spans {
 		s.traces = append(s.traces, &spans[i])
 	}
 	s.trimRetention()
+	exporter := s.otlp
 	s.mu.Unlock()
+	// The journal is the record: a journaled batch is accepted and applied
+	// whatever the collector does. Forwarding happens outside the lock, so a
+	// stalled collector never holds up ingest or queries.
+	if exporter != nil {
+		forwardBatch("traces", spans, func(item *TraceSpan) error { return exporter.exportTrace(r.Context(), item) })
+	}
 	if err := s.persistDB(); err != nil {
 		http.Error(w, "persist traces: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -1130,22 +1176,28 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 				entries[i].SpanID = spanID
 			}
 		}
-		if err := s.store.append(journalRecord{Kind: "log", Log: &entries[i]}); err != nil {
-			s.mu.Unlock()
-			http.Error(w, "logs storage failure: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		if s.otlp != nil {
-			if err := s.otlp.exportLog(r.Context(), &entries[i]); err != nil {
-				s.mu.Unlock()
-				http.Error(w, "logs export failure: "+err.Error(), http.StatusServiceUnavailable)
-				return
-			}
-		}
+	}
+	records := make([]journalRecord, len(entries))
+	for i := range entries {
+		records[i] = journalRecord{Kind: "log", Log: &entries[i]}
+	}
+	if err := s.store.appendBatch(records); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "logs storage failure: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	for i := range entries {
 		s.logs = append(s.logs, &entries[i])
 	}
 	s.trimRetention()
+	exporter := s.otlp
 	s.mu.Unlock()
+	// The journal is the record: a journaled batch is accepted and applied
+	// whatever the collector does. Forwarding happens outside the lock, so a
+	// stalled collector never holds up ingest or queries.
+	if exporter != nil {
+		forwardBatch("logs", entries, func(item *LogEntry) error { return exporter.exportLog(r.Context(), item) })
+	}
 	if err := s.persistDB(); err != nil {
 		http.Error(w, "persist logs: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -1156,4 +1208,17 @@ func (s *observabilityServer) handleLogIngest(w http.ResponseWriter, r *http.Req
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// forwardBatch sends a journaled batch to the OTLP collector. The first
+// failure ends the attempt: a collector that is down would fail every
+// remaining item after its own timeout, and the batch is already kept in the
+// journal and applied here, so nothing is lost by stopping.
+func forwardBatch[T any](kind string, items []T, export func(*T) error) {
+	for i := range items {
+		if err := export(&items[i]); err != nil {
+			log.Printf("%s: OTLP export failed, %d of %d not forwarded (all kept in the journal): %v", kind, len(items)-i, len(items), err)
+			return
+		}
+	}
 }
