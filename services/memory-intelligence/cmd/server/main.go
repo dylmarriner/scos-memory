@@ -1997,20 +1997,39 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 		return
 	}
 
+	nodes, edges := memoryGraph(facts, entities, relations)
+	writeJSON(w, map[string]any{
+		"type":  "memory_graph",
+		"nodes": nodes,
+		"edges": edges,
+	})
+}
+
+// memoryGraph builds the dashboard graph: every active fact and entity is a
+// node; relations and entity mentions are edges. Relations and mentions can
+// name superseded or merged facts, which loadFacts leaves out, so an edge is
+// drawn only when both of its ends are nodes of this graph.
+func memoryGraph(facts []*Fact, entities []*Entity, relations []*TemporalRelation) ([]map[string]any, []map[string]any) {
+	present := make(map[string]bool, len(facts)+len(entities))
 	nodes := make([]map[string]any, 0, len(facts)+len(entities))
 	for _, f := range facts {
+		present[f.ID] = true
 		nodes = append(nodes, map[string]any{
 			"id": f.ID, "label": truncate(f.Content, 60),
 			"type": "fact", "network": f.Network,
 		})
 	}
 	for _, e := range entities {
+		present[e.ID] = true
 		nodes = append(nodes, map[string]any{
 			"id": e.ID, "label": e.Name, "type": "entity",
 		})
 	}
 	edges := make([]map[string]any, 0, len(relations))
 	for _, rel := range relations {
+		if !present[rel.SourceID] || !present[rel.TargetID] {
+			continue
+		}
 		edges = append(edges, map[string]any{
 			"source": rel.SourceID, "target": rel.TargetID,
 			"type": rel.Type, "confidence": rel.Confidence,
@@ -2022,17 +2041,15 @@ func (s *engineServer) handleDashboardMemoryGraph(w http.ResponseWriter, r *http
 	// store does, not just fact<->fact relations.
 	for _, e := range entities {
 		for _, factID := range e.Facts {
+			if !present[factID] {
+				continue
+			}
 			edges = append(edges, map[string]any{
 				"source": e.ID, "target": factID, "type": "mentions",
 			})
 		}
 	}
-
-	writeJSON(w, map[string]any{
-		"type":  "memory_graph",
-		"nodes": nodes,
-		"edges": edges,
-	})
+	return nodes, edges
 }
 
 func (s *engineServer) handleDashboardFacts(w http.ResponseWriter, r *http.Request) {

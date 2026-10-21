@@ -1037,7 +1037,8 @@
       const wrap = document.createElement('div');
 
       const allNodes = (data.nodes || []).filter((n) => n && n.id != null);
-      const allEdges = (data.edges || []).filter((e) => e && e.source != null && e.target != null);
+      const nodeIds = new Set(allNodes.map((n) => n.id));
+      const allEdges = (data.edges || []).filter((e) => e && nodeIds.has(e.source) && nodeIds.has(e.target));
 
       if (allNodes.length === 0) {
         const p = document.createElement('p');
