@@ -11,7 +11,7 @@ from hashlib import sha256
 from typing import Sequence
 
 from .models import EvidenceReference, MemoryCandidate
-from .statements import duplicate_score
+from .statements import duplicate_score, restates
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +111,11 @@ def _find_match(fp: str, existing: Sequence[dict], content: str = "") -> dict | 
     """The existing record this candidate duplicates, if any.
 
     An identical title and content always matches; otherwise the closest
-    record whose proposition overlap reaches DUPLICATE_OVERLAP and which
-    does not contradict the candidate.
+    record whose proposition overlap reaches DUPLICATE_OVERLAP, which does
+    not contradict the candidate, and of which one says nothing the other
+    does not (memory-intelligence's findMergeCandidate applies the same
+    rule). A restatement with a changed value is a new statement, not a
+    duplicate: merging it would keep the old value and drop the new one.
     """
     best: tuple[float, dict] | None = None
     for row in existing:
@@ -123,7 +126,8 @@ def _find_match(fp: str, existing: Sequence[dict], content: str = "") -> dict | 
             return row
         if content:
             score = _overlap(content, row.get("content", ""))
-            if score >= DUPLICATE_OVERLAP and (best is None or score > best[0]):
+            if (score >= DUPLICATE_OVERLAP and restates(content, row.get("content", ""))
+                    and (best is None or score > best[0])):
                 best = (score, row)
     return best[1] if best else None
 

@@ -115,3 +115,12 @@ def duplicate_score(text_a: str, text_b: str) -> float:
     if contradictions(text_a, text_b):
         return 0.0
     return similarity(parse(text_a), parse(text_b))
+
+
+def restates(text_a: str, text_b: str) -> bool:
+    """Whether one text says nothing the other does not: a repeat, or one
+    strictly richer than the other. Overlap alone would fold "the codename
+    is tangerine-037ea5" into "the codename is tangerine-94c27f"; the one
+    word that differs is the information."""
+    a, b = parse(text_a).proposition, parse(text_b).proposition
+    return a <= b or b <= a

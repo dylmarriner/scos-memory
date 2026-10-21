@@ -45,6 +45,17 @@ class DedupTests(unittest.TestCase):
         results = deduplicate([_candidate(title="Redis", content="Service uses Redis for caching")], existing)
         self.assertEqual(results[0].action, "merged")
 
+    def test_a_restatement_with_a_changed_value_is_not_merged(self):
+        for mine, theirs in [
+            ("Remember for future sessions: the codename of my SCOS integration check is tangerine-94c27f. Reply with just: noted.",
+             "Remember for future sessions: the codename of my SCOS integration check is tangerine-037ea5. Reply with just: noted."),
+            ("The weekly production deploy window for the billing service opens Wednesday at 14:00 UTC.",
+             "The weekly production deploy window for the billing service opens Tuesday at 14:00 UTC."),
+        ]:
+            existing = [{"id": str(uuid4()), "kind": "memory", "title": "Something else", "content": theirs, "authority_level": 70}]
+            results = deduplicate([_candidate(title="A statement", content=mine)], existing)
+            self.assertEqual(results[0].action, "new", mine)
+
     def test_new_candidate_no_match(self):
         c = _candidate()
         results = deduplicate([c], [])
