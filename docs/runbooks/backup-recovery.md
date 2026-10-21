@@ -85,13 +85,24 @@ The result is kept in `secret-recovery-drill.json` in `SCOS_BACKUP_DIR`.
 
 To recover to a point in time for real:
 
-1. Prepare the data directory. Inside the backup-manager container, run `backup-manager pitr-prepare <target-time> <empty-dir> /var/lib/scos/wal-archive` (target time in RFC 3339). The last argument is the WAL archive path as the PostgreSQL that runs the recovery sees it. The command:
+1. Prepare the data directory on the backup volume, which outlives the container: inside the backup-manager container, run `backup-manager pitr-prepare <target-time> /var/lib/scos/backups/pitr-<stamp> /var/lib/scos/wal-archive` (target time in RFC 3339). The last argument is the WAL archive path as the PostgreSQL that runs the recovery sees it; it must be absolute and hold no quote, `%` or line break. The command:
    - picks the newest verified physical backup taken before the target, decrypts it, and unpacks it into the directory;
-   - writes `recovery.signal`, and appends a `restore_command` that copies from the archive, `recovery_target_time` and `recovery_target_action = 'promote'` to `postgresql.auto.conf`;
+   - writes `recovery.signal`, and appends to `postgresql.auto.conf` a `restore_command` that copies from the archive, `recovery_target_time`, `recovery_target_timeline` (the backup's own timeline, whose WAL it checked) and `recovery_target_action = 'promote'`;
    - refuses unless the archive holds every segment from the backup's start onward without a gap.
-2. Stop every service that writes to the database. Move the live data directory aside (keep it until the recovery is verified), and put the prepared directory in its place, owned by the postgres user (uid 999 in the pgvector image) with mode 0700.
+2. Stop every service that writes to the database, then PostgreSQL. Swap the prepared directory into the PostgreSQL data volume with a one-off container that mounts both volumes (`<project>` is the compose project name):
+
+   ```sh
+   docker run --rm \
+     -v <project>_backup-data:/backups -v <project>_postgres-data:/data alpine sh -euc '
+       mkdir /data/pre-pitr && find /data -mindepth 1 -maxdepth 1 ! -name pre-pitr -exec mv {} /data/pre-pitr/ \;
+       cp -a /backups/pitr-<stamp>/. /data/
+       mv /data/pre-pitr /backups/postgres-data.pre-pitr-<stamp>
+       chown -R 999:999 /data && chmod 0700 /data'
+   ```
+
+   This keeps the live data directory on the backup volume until the recovery is verified, and leaves the prepared directory owned by the postgres user (uid 999 in the pgvector image) with mode 0700.
 3. Start PostgreSQL alone. Wait for `archive recovery complete` in its log and for `pg_is_in_recovery()` to return false.
-4. Remove the recovery settings with `ALTER SYSTEM RESET restore_command` (and the same for `recovery_target_time`, `recovery_target_inclusive` and `recovery_target_action`), then run `SELECT pg_reload_conf()`.
+4. Remove the recovery settings with `ALTER SYSTEM RESET restore_command` (and the same for `recovery_target_time`, `recovery_target_inclusive`, `recovery_target_timeline` and `recovery_target_action`), then run `SELECT pg_reload_conf()`.
 5. Start the rest of the stack. Take a new `physical_base_backup`: the recovered cluster runs on a new timeline, and point-in-time coverage needs a base backup on it.
 
 To recover from the encrypted off-host copies instead of the archive directory, set `restore_command` to `backup-manager wal-fetch %f %p` run inside the backup-manager container, which holds the key.

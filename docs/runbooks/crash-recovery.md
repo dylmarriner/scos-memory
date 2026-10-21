@@ -21,7 +21,7 @@ Restore SCOS Memory Fabric after a process crash, host reboot or power loss with
 
 ## Volumes on a drive that mounts after Docker
 
-If the compose volumes are bind mounts on a separate drive (as on kubuntux, where they live under `/run/media/kubuntux/backup-dev-ext4/scos/data`), Docker can start at boot before that drive is mounted.
+If the compose volumes are bind mounts on a separate drive (`<drive-mount>` below, the drive's mount point), Docker can start at boot before that drive is mounted.
 
 **Symptom:** every container that uses one of those volumes exits with `error while mounting volume ... no such file or directory`. The restart policy does not retry a mount failure, so the stack stays down while the services without such volumes keep running.
 
@@ -31,13 +31,19 @@ Use either fix:
 
   ```ini
   [Unit]
-  RequiresMountsFor=/run/media/kubuntux/backup-dev-ext4
+  RequiresMountsFor=<drive-mount>
   ```
 
   Then run `systemctl daemon-reload`.
-- **Start the stack once the drive is mounted (no root).** Install a lingering user service that waits for the mount point and for Docker, then runs the deployment's `docker compose ... up -d`. On kubuntux this is `~/.config/systemd/user/scos-stack.service`, which runs `~/.local/bin/scos-stack-up`.
+- **Start the stack once the drive is mounted (no root).** Install a lingering user service that waits for the mount point and for Docker, then runs the deployment's compose command (below), for example `~/.config/systemd/user/scos-stack.service` running a script that does so.
 
-To recover a host already in this state, run the same `docker compose ... up -d`. It recreates the exited containers once the drive is mounted. Then follow the recovery sequence above.
+To recover a host already in this state, run the deployment's compose command from `deploy/compose`, with the same files and environment file it was deployed with, once the drive is mounted:
+
+```sh
+docker compose -f docker-compose.yml -f <override>.yml --env-file .env up -d
+```
+
+Name every `-f` file the deployment uses, in the same order; an omitted override recreates its services without it. The command recreates the exited containers. Then follow the recovery sequence above.
 
 ## Prohibitions
 

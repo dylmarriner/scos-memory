@@ -28,6 +28,7 @@ import (
 	"github.com/dylmarriner/scos-memory/packages/llmclient"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -1248,6 +1249,10 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "fact_id and code_symbol_version_id are required", http.StatusBadRequest)
 		return
 	}
+	if !isUUIDLike(req.FactID) || !isUUIDLike(req.CodeSymbolVersionID) {
+		http.Error(w, "fact_id and code_symbol_version_id must be UUIDs", http.StatusBadRequest)
+		return
+	}
 	switch req.LinkType {
 	case "evidences", "motivated_by", "invalidated_by":
 	case "":
@@ -1276,8 +1281,25 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	var factExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, req.FactID, identity.TenantID).Scan(&factExists); err != nil {
+		http.Error(w, "look up fact: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !factExists {
+		http.Error(w, "fact not found", http.StatusNotFound)
+		return
+	}
 	id, err := insertEvidenceLink(ctx, tx, identity.TenantID, req.FactID, req.CodeSymbolVersionID, req.LinkType, "explicit", confidence)
 	if err != nil {
+		// The fact was checked above, so a foreign-key refusal names a code
+		// symbol version that does not exist: the caller's input, not a
+		// server fault.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			http.Error(w, "code symbol version not found (use a SymbolVersionID from scos_code_query or scos_code_impact)", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "insert evidence link: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1315,10 +1337,9 @@ func (s *engineServer) handleFactForget(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
-// handleFactFeedback implements scos_fact_feedback (mem0's feedback()):
-// POST /v1/facts/{id}/feedback with {"feedback":"POSITIVE|NEGATIVE|VERY_NEGATIVE","reason":"..."}
-// records quality signal against a fact without acting on it. See
-// recordFactFeedback.
+// factIDPattern matches a fact id, a UUID in canonical form.
+var factIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
 // handleFactRedact implements scos_redact_history: POST
 // /v1/facts/{id}/redact removes every secret the scanner finds from the
 // fact's stored history, in place (see redactFactHistory).
@@ -1328,8 +1349,8 @@ func (s *engineServer) handleFactRedact(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/facts/"), "/redact")
-	if id == "" || strings.Contains(id, "/") {
-		http.Error(w, "fact id is required", http.StatusBadRequest)
+	if !factIDPattern.MatchString(id) {
+		http.Error(w, "fact id must be a UUID", http.StatusBadRequest)
 		return
 	}
 	identity, status, msg := resolveIdentityFromRequest(r)
@@ -1342,12 +1363,18 @@ func (s *engineServer) handleFactRedact(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	} else if err != nil {
-		http.Error(w, "redact fact history: "+err.Error(), http.StatusInternalServerError)
+		// A database error can carry row values; it goes to the log, not the caller.
+		log.Printf("redact fact history %s: %v", id, err)
+		http.Error(w, "redact fact history failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, result)
 }
 
+// handleFactFeedback implements scos_fact_feedback (mem0's feedback()):
+// POST /v1/facts/{id}/feedback with {"feedback":"POSITIVE|NEGATIVE|VERY_NEGATIVE","reason":"..."}
+// records quality signal against a fact without acting on it. See
+// recordFactFeedback.
 func (s *engineServer) handleFactFeedback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

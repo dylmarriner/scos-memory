@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +45,12 @@ func (s *backupServer) pitrPrepare(ctx context.Context, target time.Time, dir, r
 	}
 	if restoreWALDir == "" {
 		restoreWALDir = walDir
+	}
+	// restoreWALDir is written into restore_command, a shell command inside
+	// a quoted configuration value: a quote or newline would end the value
+	// and a % would be expanded as one of its escapes (%f, %p).
+	if !strings.HasPrefix(restoreWALDir, "/") || strings.ContainsAny(restoreWALDir, "'%\r\n") {
+		return pitrPreparation{}, fmt.Errorf("WAL directory %q must be an absolute path without quotes, %%, or line breaks", restoreWALDir)
 	}
 
 	ids, err := s.provider.List(ctx)
@@ -100,6 +107,13 @@ func (s *backupServer) pitrPrepare(ctx context.Context, target time.Time, dir, r
 	if err != nil {
 		return pitrPreparation{}, err
 	}
+	// Recovery follows the timeline whose WAL was checked: left to its
+	// default, latest, it would follow any newer timeline in the archive,
+	// whose history was never checked for gaps.
+	timeline, err := strconv.ParseUint(chosen.WALStart[:8], 16, 32)
+	if err != nil {
+		return pitrPreparation{}, fmt.Errorf("WAL segment %q names no timeline: %w", chosen.WALStart, err)
+	}
 
 	baseTar, err := fileFromTar(archive, "base.tar.gz")
 	if err != nil {
@@ -117,8 +131,9 @@ func (s *backupServer) pitrPrepare(ctx context.Context, target time.Time, dir, r
 restore_command = 'cp ''%s/%%f'' ''%%p'''
 recovery_target_time = '%s'
 recovery_target_inclusive = off
+recovery_target_timeline = '%d'
 recovery_target_action = 'promote'
-`, chosen.ID, restoreWALDir, target.UTC().Format("2006-01-02 15:04:05.000000-07"))
+`, chosen.ID, restoreWALDir, target.UTC().Format("2006-01-02 15:04:05.000000-07"), timeline)
 	f, err := os.OpenFile(filepath.Join(dir, "postgresql.auto.conf"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return pitrPreparation{}, err

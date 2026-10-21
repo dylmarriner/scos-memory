@@ -17,9 +17,10 @@ Every write path redacts what the secret scanner (`packages/secret-scan`) recogn
 
 ## What the database allows
 
-`memory_versions` is append-only. The `memory_versions_append_only` trigger (migration `000062`) admits exactly one kind of update:
+`memory_versions` is append-only. The `memory_versions_append_only` trigger (migrations `000062` and `000063`) admits exactly one kind of update:
 - the transaction announces the version through `scos.redacting_version`;
 - the update replaces spans of `content` and `structured_content` with redaction markers, adding and changing nothing else;
+- `content_hash` becomes the SHA-256 of the redacted content;
 - every other column stays as it was.
 
 A delete, a rewrite, an addition, or an update that was not announced is refused. History can lose a secret but cannot be forged.

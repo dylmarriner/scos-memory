@@ -540,6 +540,10 @@ func TestRedactHistoryRemovesALeakedSecretAndNothingElse(t *testing.T) {
 		"reattach": `UPDATE memory_versions SET change_reason = 'edited' WHERE id = $1`,
 		"delete":   `DELETE FROM memory_versions WHERE id = $1`,
 		"unmarked": `UPDATE memory_versions SET content = replace(content, '[REDACTED:credential_pair]', 'x') WHERE id = $1`,
+		// A redaction must rehash: a hash left as it was, or set to anything
+		// but the SHA-256 of the new content, no longer describes the row.
+		"stale hash":  `UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]') WHERE id = $1`,
+		"forged hash": `UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]'), content_hash = repeat('0', 64) WHERE id = $1`,
 	} {
 		tx, err := app.Begin()
 		if err != nil {
@@ -563,8 +567,68 @@ func TestRedactHistoryRemovesALeakedSecretAndNothingElse(t *testing.T) {
 			t.Fatalf("%s failed for another reason: %v", name, err)
 		}
 	}
+	// Announced and rehashed, the same redaction is admitted.
+	{
+		tx, err := app.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = setPrincipalContext(context.Background(), tx, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner})
+		if _, err := tx.Exec(`SELECT set_config('scos.redacting_version', $1, true)`, version); err != nil {
+			t.Fatal(err)
+		}
+		res, err := tx.Exec(`UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]'),
+			content_hash = encode(sha256(convert_to(replace(content, 'vault', '[REDACTED:password]'), 'UTF8')), 'hex') WHERE id = $1`, version)
+		_ = tx.Rollback()
+		if err != nil {
+			t.Fatalf("a rehashed redaction was refused: %v", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			t.Fatalf("a rehashed redaction updated %d rows", n)
+		}
+	}
 	// Unannounced, even a valid redaction is refused.
 	if _, err := f.admin.Exec(`UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]') WHERE id = $1`, version); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("unannounced redaction was not refused: %v", err)
+	}
+}
+
+// scos_fact_history of a corrected fact includes the version it replaced,
+// and after a forget every version is still listed with the fact's status.
+func TestFactHistorySpansCorrectionsAndForgets(t *testing.T) {
+	f := newBehaviourFixture(t)
+	original := f.remember("The history fixture codename is Bluefin.", 0.8)
+	code, out, _ := f.call(f.srv.handleFactByID, http.MethodPatch, "/v1/facts/"+original, `{"content":"The history fixture codename is Greenfin.","reason":"renamed"}`)
+	if code != http.StatusOK {
+		t.Fatalf("correct = %d %v", code, out)
+	}
+	corrected := out["fact"].(map[string]any)["id"].(string)
+
+	history := func() []any {
+		code, out, _ := f.call(f.srv.handleFactByID, http.MethodGet, "/v1/facts/"+corrected+"/history", "")
+		if code != http.StatusOK {
+			t.Fatalf("history = %d %v", code, out)
+		}
+		return out["history"].([]any)
+	}
+	got := history()
+	if len(got) != 2 {
+		t.Fatalf("history of a corrected fact = %v, want the original and the correction", got)
+	}
+	first, second := got[0].(map[string]any), got[1].(map[string]any)
+	if first["fact_id"] != original || first["status"] != "superseded" || !strings.Contains(first["content"].(string), "Bluefin") {
+		t.Fatalf("first entry %v is not the superseded original", first)
+	}
+	if second["fact_id"] != corrected || second["status"] != "active" {
+		t.Fatalf("second entry %v is not the active correction", second)
+	}
+
+	if code, out, _ := f.call(f.srv.handleFactByID, http.MethodDelete, "/v1/facts/"+corrected+"?cascade=true", ""); code != http.StatusOK {
+		t.Fatalf("forget = %d %v", code, out)
+	}
+	for _, entry := range history() {
+		if status := entry.(map[string]any)["status"]; status != "revoked" {
+			t.Fatalf("after a cascading forget, entry %v status = %v, want revoked", entry, status)
+		}
 	}
 }

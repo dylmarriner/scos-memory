@@ -94,6 +94,7 @@ func TestPITRPrepareUsesTheNewestBackupBeforeTheTarget(t *testing.T) {
 	for _, want := range []string{
 		`restore_command = 'cp ''/var/lib/scos/wal-archive/%f'' ''%p'''`,
 		`recovery_target_time = '2026-10-21 09:33:50.000000+00'`,
+		`recovery_target_timeline = '1'`,
 		`recovery_target_action = 'promote'`,
 	} {
 		if !strings.Contains(string(conf), want) {
@@ -129,5 +130,22 @@ func TestPITRPreparePassesOverABackupThatDoesNotVerify(t *testing.T) {
 	p, err := s.pitrPrepare(context.Background(), target, data, "")
 	if err != nil || p.BackupID != "backup-older" {
 		t.Fatalf("got %+v, %v; want the older backup", p, err)
+	}
+}
+
+// The WAL directory is written into restore_command; one that could end the
+// quoted value or read as a placeholder is refused before anything is written.
+func TestPITRPrepareRefusesAnUnsafeWALDirectory(t *testing.T) {
+	t.Setenv("SCOS_WAL_ARCHIVE_DESTINATION", "file://"+t.TempDir())
+	s := newTestServer(t, nil)
+	target := time.Date(2026, 10, 21, 9, 33, 50, 0, time.UTC)
+	for _, dir := range []string{"wal-archive", "/wal'; rm -rf /; '", "/wal/%p", "/wal\nrecovery_target = 'immediate'"} {
+		data := filepath.Join(t.TempDir(), "restore")
+		if _, err := s.pitrPrepare(context.Background(), target, data, dir); err == nil || !strings.Contains(err.Error(), "absolute path") {
+			t.Errorf("WAL directory %q was not refused: %v", dir, err)
+		}
+		if _, err := os.Stat(data); !os.IsNotExist(err) {
+			t.Errorf("WAL directory %q: %s was written", dir, data)
+		}
 	}
 }

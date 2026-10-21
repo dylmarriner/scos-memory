@@ -544,18 +544,35 @@ func redactSecrets(f *Fact) {
 // FactVersion is one entry in a fact's append-only revision history —
 // memory_versions rows are never mutated or deleted, so this is a complete,
 // tamper-evident audit trail of every correction ever made to a fact.
+//
+// A correction records a new fact rather than a new version of the old one,
+// so a fact's history spans its supersession chain: FactID names the fact
+// each version belongs to and Status is that fact's current lifecycle state
+// (active, superseded, merged or revoked), which is how a version from
+// before a correction, or of a fact since forgotten, is told apart.
 type FactVersion struct {
+	FactID        string `json:"fact_id"`
+	Status        string `json:"status"`
 	VersionNumber int    `json:"version_number"`
 	Content       string `json:"content"`
 	ChangeReason  string `json:"change_reason"`
 	CreatedAt     string `json:"created_at"`
 	CreatedBy     string `json:"created_by"`
+
+	// factCreated and recorded order the history at full precision.
+	factCreated, recorded time.Time
 }
 
-// loadFactHistory returns every version ever recorded for factID, oldest
-// first. Unlike loadFacts/getFact it does not filter on status: history
-// must remain visible for a fact that has since been corrected or
-// forgotten, since that is exactly what an audit trail is for (§42).
+// maxHistoryChain bounds how many facts one history walks, so a corrupt
+// (cyclic or enormous) supersession graph cannot run unbounded.
+const maxHistoryChain = 1000
+
+// loadFactHistory returns every version ever recorded for factID and for
+// every fact it superseded (directly or transitively: the facts scos_correct
+// replaced and the duplicates merged into it), oldest first. Unlike
+// loadFacts/getFact it does not filter on status: history must remain
+// visible for a fact that has since been corrected or forgotten, since that
+// is exactly what an audit trail is for (§42).
 func loadFactHistory(ctx context.Context, db querier, tenantID, factID string) ([]FactVersion, error) {
 	var exists bool
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, factID, tenantID).Scan(&exists); err != nil {
@@ -564,29 +581,76 @@ func loadFactHistory(ctx context.Context, db querier, tenantID, factID string) (
 	if !exists {
 		return nil, sql.ErrNoRows
 	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT mv.version_number, mv.content, mv.change_reason, mv.created_at, COALESCE(p.display_name, mv.created_by::text)
-		FROM memory_versions mv
-		JOIN memory_items mi ON mi.id = mv.memory_id
-		LEFT JOIN principals p ON p.id = mv.created_by
-		WHERE mv.memory_id = $1 AND mi.tenant_id = $2
-		ORDER BY mv.version_number ASC
-	`, factID, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	history := make([]FactVersion, 0)
-	for rows.Next() {
-		var v FactVersion
-		var createdAt time.Time
-		if err := rows.Scan(&v.VersionNumber, &v.Content, &v.ChangeReason, &createdAt, &v.CreatedBy); err != nil {
+	chain := []string{factID}
+	seen := map[string]bool{factID: true}
+	for next := 0; next < len(chain) && len(chain) < maxHistoryChain; next++ {
+		rows, err := db.QueryContext(ctx, `SELECT id::text FROM memory_items WHERE superseded_by_id=$1 AND tenant_id=$2`, chain[next], tenantID)
+		if err != nil {
 			return nil, err
 		}
-		v.CreatedAt = createdAt.UTC().Format(time.RFC3339)
-		history = append(history, v)
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !seen[id] && len(chain) < maxHistoryChain {
+				seen[id] = true
+				chain = append(chain, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return history, rows.Err()
+	history := make([]FactVersion, 0, len(chain))
+	for _, id := range chain {
+		rows, err := db.QueryContext(ctx, `
+			SELECT mi.id::text, mi.status::text, mi.created_at, mv.version_number, mv.content, mv.change_reason, mv.created_at, COALESCE(p.display_name, mv.created_by::text)
+			FROM memory_versions mv
+			JOIN memory_items mi ON mi.id = mv.memory_id
+			LEFT JOIN principals p ON p.id = mv.created_by
+			WHERE mv.memory_id = $1 AND mi.tenant_id = $2
+			ORDER BY mv.version_number ASC
+		`, id, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var v FactVersion
+			if err := rows.Scan(&v.FactID, &v.Status, &v.factCreated, &v.VersionNumber, &v.Content, &v.ChangeReason, &v.recorded, &v.CreatedBy); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			v.CreatedAt = v.recorded.UTC().Format(time.RFC3339)
+			history = append(history, v)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	sortFactHistory(history)
+	return history, nil
+}
+
+// sortFactHistory orders versions oldest first: by when each fact was
+// recorded (a correction is always recorded after the fact it replaces),
+// then by when each version was written, then by version number.
+func sortFactHistory(history []FactVersion) {
+	sort.SliceStable(history, func(i, j int) bool {
+		a, b := history[i], history[j]
+		if !a.factCreated.Equal(b.factCreated) {
+			return a.factCreated.Before(b.factCreated)
+		}
+		if !a.recorded.Equal(b.recorded) {
+			return a.recorded.Before(b.recorded)
+		}
+		return a.VersionNumber < b.VersionNumber
+	})
 }
 
 // forgetAllFacts implements bulk scos_forget (mem0's delete_all/reset):
@@ -1596,8 +1660,16 @@ func redactFactHistory(ctx context.Context, db *sql.DB, id requestIdentity, fact
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE diary_entries SET content = $2 WHERE id = $1 AND tenant_id = $3`, d.id, string(encoded), id.TenantID); err != nil {
+		res, err := tx.ExecContext(ctx, `UPDATE diary_entries SET content = $2 WHERE id = $1 AND tenant_id = $3`, d.id, string(encoded), id.TenantID)
+		if err != nil {
 			return nil, fmt.Errorf("redact diary entry %s: %w", d.id, err)
+		}
+		// A row policy that hides the entry from UPDATE leaves it as it was
+		// without an error; the secret must not be reported gone.
+		if n, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if n != 1 {
+			return nil, fmt.Errorf("redact diary entry %s: %d rows updated, want 1", d.id, n)
 		}
 		result.DiaryRedacted++
 	}
