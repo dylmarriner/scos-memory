@@ -201,14 +201,10 @@ func overlapsAny(span [2]int, spans [][2]int) bool {
 // pathLike reports whether a high-entropy candidate is a path or compound
 // name rather than an encoded token: it mixes the standard base64
 // alphabet's '/' or '+' with the URL-safe alphabet's '-' or '_', which no
-// single encoding does ("projects/-media-kubuntux-DEVELOPMENT1-app/memory"),
-// or it has three or more '/' separators, as a directory path does
-// ("home/kubuntux/Projects/MyApp2025Release").
+// single encoding does ("projects/-media-kubuntux-DEVELOPMENT1-app/memory").
+// Slashes alone are no evidence: standard base64 is full of them.
 func pathLike(s string) bool {
-	if strings.ContainsAny(s, "/+") && strings.ContainsAny(s, "-_") {
-		return true
-	}
-	return strings.Count(s, "/") >= 3
+	return strings.ContainsAny(s, "/+") && strings.ContainsAny(s, "-_")
 }
 
 func mixedCaseAndDigits(s string) bool {
