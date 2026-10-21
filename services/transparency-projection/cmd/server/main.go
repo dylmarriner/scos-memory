@@ -38,6 +38,7 @@ type projectionServer struct {
 	controlPlaneToken    string       // forwarded to control-plane-protected upstreams (code-intelligence etc.)
 	client               *http.Client // fast client for health probes and event streaming
 	snapshotClient       *http.Client // slow client for snapshot assembly (heavyweight views)
+	streamClient         *http.Client // no overall deadline: the live event stream stays open
 
 	editPassphrase string // SCOS_DASHBOARD_EDIT_PASSPHRASE; empty disables editing entirely
 	editSecret     string // HMAC key for dashboard edit-session tokens (reuses the security issuer secret)
@@ -168,6 +169,14 @@ func main() {
 		log.Fatalf("configure snapshot TLS client: %v", err)
 	}
 	s.snapshotClient = snapshotClient
+	// The live event stream is open for as long as a dashboard is: a client
+	// deadline would cut every viewer's stream after 10s. It ends when the
+	// viewer disconnects, through the request context.
+	streamClient, err := tlsserve.TrustedClient(0)
+	if err != nil {
+		log.Fatalf("configure stream TLS client: %v", err)
+	}
+	s.streamClient = streamClient
 
 	addr := os.Getenv("SCOS_TRANSPARENCY_HTTP_ADDR")
 	if addr == "" {
@@ -332,7 +341,11 @@ func (s *projectionServer) events(w http.ResponseWriter, r *http.Request) {
 	if lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID")); lastEventID != "" {
 		req.Header.Set("Last-Event-ID", lastEventID)
 	}
-	resp, err := s.client.Do(req)
+	client := s.streamClient
+	if client == nil {
+		client = s.client
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream stream unavailable"})
 		return
