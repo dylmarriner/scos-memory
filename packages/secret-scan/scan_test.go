@@ -63,6 +63,11 @@ func TestCredentialsInText(t *testing.T) {
 		if got := Redact(c.in, Scan(c.in)); got != c.want {
 			t.Errorf("Redact(%q)\n got  %q\n want %q", c.in, got, c.want)
 		}
+		// Redacted text is clean: the scanner does not take its own
+		// markers for secrets, so redacting twice changes nothing.
+		if f := Scan(c.want); len(f) != 0 {
+			t.Errorf("Scan(%q) = %+v, want no findings in redacted text", c.want, f)
+		}
 	}
 	for _, clean := range []string{
 		"the token is required before deploy",
@@ -74,6 +79,16 @@ func TestCredentialsInText(t *testing.T) {
 		if f := Scan(clean); len(f) != 0 {
 			t.Errorf("Scan(%q) = %+v, want no findings", clean, f)
 		}
+	}
+}
+
+// A marker elsewhere in the text does not hide a secret beside it, even one
+// made only of punctuation.
+func TestMarkerDoesNotHideANeighbouringSecret(t *testing.T) {
+	in := "old [REDACTED:password] then https://dylan:!!!!@git.example.com/repo.git"
+	want := "old [REDACTED:password] then https://dylan:[REDACTED:url_credential]@git.example.com/repo.git"
+	if got := Redact(in, Scan(in)); got != want {
+		t.Fatalf("Redact(%q)\n got  %q\n want %q", in, got, want)
 	}
 }
 

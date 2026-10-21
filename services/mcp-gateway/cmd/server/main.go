@@ -138,7 +138,8 @@ func main() {
 		if _, err := s.localBearer.token(); err != nil {
 			log.Fatalf("mcp-gateway: SCOS_AUTH_MODE=local needs SCOS_SECURITY_ISSUER_SECRET to present the local identity to the services behind it: %v", err)
 		}
-		log.Printf("mcp-gateway (%s): SCOS_AUTH_MODE=local -- no bearer token required, every caller resolves to the reserved local-mode tenant %s", version, localModeTenantID)
+		handler = localModeHandler(mux, localModeAuthConfig())
+		log.Printf("mcp-gateway (%s): SCOS_AUTH_MODE=local -- a caller presenting no bearer token resolves to the reserved local-mode tenant %s; a presented token is verified and its claims name the caller", version, localModeTenantID)
 	} else {
 		handler = auth.AuthenticatedHandler(mux, auth.MustFromEnvironment())
 	}
@@ -266,11 +267,12 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 	// header still reaches the services behind this one.
 	r.Header.Set("X-SCOS-Tenant-ID", identity.TenantID)
 	r.Header.Set("X-SCOS-Principal-ID", identity.PrincipalID)
-	if isLocalAuthMode() {
-		// A local-mode caller presents no token, so the services behind
+	if isLocalAuthMode() && identity.TenantID == localModeTenantID && identity.PrincipalID == localModePrincipalID {
+		// A local-mode caller presents no claims, so the services behind
 		// this gateway would see an anonymous request and answer 401 to
 		// every tool. Present the local identity to them as a signed claims
-		// token, exactly as an authenticated caller's token would be.
+		// token, exactly as an authenticated caller's token would be. A
+		// caller whose claims named another identity keeps its own token.
 		token, err := s.localBearer.token()
 		if err != nil {
 			return nil, fmt.Errorf("local identity token: %w", err)
@@ -1241,9 +1243,8 @@ func isLocalAuthMode() bool {
 
 // resolveIdentity derives the caller's tenant and principal from validated
 // bearer claims and from nothing else -- unless SCOS_AUTH_MODE=local, in
-// which case every caller resolves to the reserved local-mode identity
-// above and no bearer token is required at all (see main(), which skips
-// auth.AuthenticatedHandler entirely in that mode).
+// which case a caller without claims resolves to the reserved local-mode
+// identity above and no bearer token is required (see localModeHandler).
 //
 // The internal services (hermes-provider, memory-intelligence,
 // tool-governance) still accept X-SCOS-Tenant-ID / X-SCOS-Principal-ID as a
@@ -1260,15 +1261,50 @@ func isLocalAuthMode() bool {
 // presenting only the shared static service token is authenticated but
 // anonymous, and is refused rather than being allowed to nominate an
 // identity.
+//
+// In local mode a caller without claims (no token, or the internal service
+// token) resolves to the reserved local-mode identity, but verified claims
+// still name the caller: a hosted tenant's API key, which cloud-control-plane
+// turns into claims for that tenant, must reach that tenant, never the
+// local one.
 func resolveIdentity(r *http.Request) (requestIdentity, int, string) {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
+	}
 	if isLocalAuthMode() {
 		return requestIdentity{TenantID: localModeTenantID, PrincipalID: localModePrincipalID}, 0, ""
 	}
-	claims, ok := auth.CanonicalClaims(r.Context())
-	if !ok {
-		return requestIdentity{}, http.StatusUnauthorized, "a bearer token carrying tenant_id and principal_id claims is required; X-SCOS-* identity headers are not accepted at this boundary"
+	return requestIdentity{}, http.StatusUnauthorized, "a bearer token carrying tenant_id and principal_id claims is required; X-SCOS-* identity headers are not accepted at this boundary"
+}
+
+// localModeAuthConfig is what local mode verifies a presented bearer token
+// against: claims signed with the issuer secret local mode already requires,
+// or the internal service token. Unlike auth.FromEnvironment it needs no
+// control-plane token, which local mode never checks.
+func localModeAuthConfig() auth.Config {
+	identity := strings.TrimSpace(os.Getenv("SCOS_SERVICE_IDENTITY"))
+	if identity == "" {
+		identity = "internal-service"
 	}
-	return requestIdentity{TenantID: claims.TenantID, PrincipalID: claims.PrincipalID}, 0, ""
+	return auth.Config{
+		Token:        strings.TrimSpace(os.Getenv("SCOS_INTERNAL_SERVICE_TOKEN")),
+		IssuerSecret: strings.TrimSpace(os.Getenv("SCOS_SECURITY_ISSUER_SECRET")),
+		Identity:     identity,
+	}
+}
+
+// localModeHandler admits a caller presenting no bearer token, who resolves
+// to the local-mode identity, and verifies a presented token exactly as
+// outside local mode, refusing an invalid one.
+func localModeHandler(next http.Handler, config auth.Config) http.Handler {
+	authenticated := auth.AuthenticatedHandler(next, config)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		authenticated.ServeHTTP(w, r)
+	})
 }
 
 func writeRPCResult(w http.ResponseWriter, id any, result any) {

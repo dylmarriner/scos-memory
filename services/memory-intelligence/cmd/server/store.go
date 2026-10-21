@@ -153,18 +153,26 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 	confidence := clampFloat(fact.Confidence, 0, 1)
 
 	// Write-time secret/PII gate (P0-B): redact-and-flag, not fail-closed --
-	// a false positive here should degrade the write, never block it. On a
-	// match the stored content is the redacted form and sensitivity is
-	// elevated to 'secret'; the original content is never persisted.
+	// a false positive here should degrade the write, never block it.
+	// Callers redact before content reaches an LLM; this scan is the
+	// backstop. A redacted fact records the kinds redacted and is raised to
+	// its namespace's ceiling: the most restricted class its readers can
+	// still see. Raising it past the ceiling would hide the memory from
+	// every reader, its writer included, and row-level security would
+	// refuse the write. The original content is never persisted.
 	sensitivity := "internal"
 	switch fact.Sensitivity {
 	case "public", "internal", "confidential", "restricted", "secret":
 		sensitivity = fact.Sensitivity
 	}
+	redactSecrets(fact)
 	content := fact.Content
-	if findings := secretscan.Scan(content); len(findings) > 0 {
-		content = secretscan.Redact(content, findings)
-		sensitivity = "secret"
+	if len(fact.Redacted) > 0 {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT GREATEST($2::sensitivity_class, sensitivity_ceiling)::text FROM namespaces WHERE id = $1`,
+			namespaceID, sensitivity).Scan(&sensitivity); err != nil {
+			return "", fmt.Errorf("namespace sensitivity ceiling: %w", err)
+		}
 	}
 
 	structured, err := json.Marshal(map[string]any{
@@ -177,6 +185,7 @@ func insertFact(ctx context.Context, tx *sql.Tx, id requestIdentity, namespaceID
 		"valid_until": fact.ValidUntil,
 		"inferred":    fact.Inferred,
 		"derivation":  fact.Derivation,
+		"redacted":    fact.Redacted,
 	})
 	if err != nil {
 		return "", err
@@ -310,6 +319,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 			ValidUntil string        `json:"valid_until"`
 			Inferred   bool          `json:"inferred"`
 			Derivation string        `json:"derivation"`
+			Redacted   []string      `json:"redacted"`
 		}
 		if err := json.Unmarshal(structuredRaw, &structured); err != nil {
 			rows.Close()
@@ -318,6 +328,7 @@ func loadFactsByStatus(ctx context.Context, db querier, tenantID, network string
 		f.Network = structured.Network
 		f.Source = structured.Source
 		f.Origin = structured.Origin
+		f.Redacted = structured.Redacted
 		// Memories promoted by the consolidation worker before it recorded
 		// these fields carry only a title and evidence: their network
 		// follows from the memory type, and they were observed in the
@@ -444,9 +455,9 @@ func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID,
 	// Same P0-B gate as handleFacts POST: redact before newContent reaches
 	// resolveEntityMentions (an LLM call) or ends up on the corrected Fact
 	// that maybePromoteToOKF later sends to DeepSeek.
-	if findings := secretscan.Scan(newContent); len(findings) > 0 {
-		newContent = secretscan.Redact(newContent, findings)
-	}
+	pending := &Fact{Content: newContent}
+	redactSecrets(pending)
+	newContent = pending.Content
 	// Resolved before the transaction opens: this may be an LLM call
 	// (resolveEntityMentions), and an outbound HTTP request must never hold a
 	// database transaction open.
@@ -466,15 +477,17 @@ func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID,
 		derivation += ": " + reason
 	}
 	corrected := &Fact{
-		Network:    old.Network,
-		Content:    newContent,
-		Source:     "explicit",
-		Authority:  old.Authority,
-		Confidence: old.Confidence,
-		Scope:      old.Scope,
-		ObservedAt: time.Now().UTC().Format(time.RFC3339),
-		Evidence:   old.Evidence,
-		Derivation: derivation,
+		Network:     old.Network,
+		Content:     newContent,
+		Source:      "explicit",
+		Sensitivity: old.Sensitivity,
+		Redacted:    pending.Redacted,
+		Authority:   old.Authority,
+		Confidence:  old.Confidence,
+		Scope:       old.Scope,
+		ObservedAt:  time.Now().UTC().Format(time.RFC3339),
+		Evidence:    old.Evidence,
+		Derivation:  derivation,
 	}
 	newFactID, err := insertFact(ctx, tx, id, old.NamespaceID, corrected, mentions)
 	if err != nil {
@@ -505,6 +518,27 @@ func correctFact(ctx context.Context, db *sql.DB, id requestIdentity, oldFactID,
 	}
 	corrected.SupersededBy = ""
 	return corrected, nil
+}
+
+// redactionMarkerKind matches a redaction marker and captures its kind.
+var redactionMarkerKind = regexp.MustCompile(`\[REDACTED:([a-z_]+)\]`)
+
+// redactSecrets replaces every secret the scanner finds in f.Content with a
+// redaction marker and sets f.Redacted to the kinds of the markers the
+// content then holds: it is derived from the stored text alone, never taken
+// from the caller or carried over from an earlier version.
+func redactSecrets(f *Fact) {
+	if findings := secretscan.Scan(f.Content); len(findings) > 0 {
+		f.Content = secretscan.Redact(f.Content, findings)
+	}
+	f.Redacted = nil
+	seen := map[string]bool{}
+	for _, m := range redactionMarkerKind.FindAllStringSubmatch(f.Content, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			f.Redacted = append(f.Redacted, m[1])
+		}
+	}
 }
 
 // FactVersion is one entry in a fact's append-only revision history —
