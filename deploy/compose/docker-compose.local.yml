@@ -3,7 +3,8 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 #
-# mcp-gateway resolves every caller to the reserved local-mode identity
+# mcp-gateway and hermes-provider resolve every caller that presents no
+# bearer token to the reserved local-mode identity
 # (see services/mcp-gateway/cmd/server/main.go, localModeTenantID) seeded by
 # database/migrations/000030_local_mode_default_identity.sql. Every other
 # service in the base file is untouched -- their internal-service-token and
@@ -32,6 +33,12 @@ services:
       # shared internal self-signed dev CA every other service already uses.
       SCOS_TLS_CERT_FILE: /etc/scos/tls/tls.crt
       SCOS_TLS_KEY_FILE: /etc/scos/tls/tls.key
+  hermes-provider:
+    environment:
+      # The Hermes memory provider plugin calls this service directly, so it
+      # takes the same local-mode identity as mcp-gateway for a caller that
+      # presents no bearer token.
+      SCOS_AUTH_MODE: local
   transparency-projection:
     environment:
       # The local stack does not run cloud-control-plane (accounts, teams,

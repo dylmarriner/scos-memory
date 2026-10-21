@@ -33,6 +33,17 @@ _PREFETCH_CHAR_LIMIT = 4000
 _PERSISTENCE_QUEUE_LIMIT = 256
 _SHUTDOWN_DRAIN_SECONDS = 5.0
 
+# SCOS_AUTH_MODE=local is the self-hosted, single-user stack: mcp-gateway and
+# hermes-provider give a caller that presents no bearer token the reserved
+# local identity seeded by migration 000030. In that mode this provider sends
+# no token and no identity headers, and acts as that identity.
+_LOCAL_IDENTITY_ID = "00000000-0000-0000-0000-000000000001"
+_LOCAL_IDENTITY = {
+    "SCOS_TENANT_ID": _LOCAL_IDENTITY_ID,
+    "SCOS_PRINCIPAL_ID": _LOCAL_IDENTITY_ID,
+    "SCOS_NAMESPACE_ID": _LOCAL_IDENTITY_ID,
+}
+
 FALLBACK_TOOLS = [
     {
         "name": "scos_recall",
@@ -52,6 +63,10 @@ FALLBACK_TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
 ]
+
+
+def _is_local_mode(values: Dict[str, Any]) -> bool:
+    return str(values.get("SCOS_AUTH_MODE", "")).strip().lower() == "local"
 
 
 class ScosMemoryProvider(MemoryProvider):
@@ -113,10 +128,16 @@ class ScosMemoryProvider(MemoryProvider):
                     values[key] = value
 
         values.update({k: v for k, v in os.environ.items() if k.startswith("SCOS_")})
+        if _is_local_mode(values):
+            # The services decide the identity in local mode; one configured
+            # for another deployment would only be refused as a mismatch.
+            values.update(_LOCAL_IDENTITY)
         return values
 
     def is_available(self) -> bool:
         env = self._load_env() if not self._env else self._env
+        if _is_local_mode(env):
+            return bool(env.get("SCOS_GATEWAY_URL") and env.get("SCOS_HERMES_PROVIDER_URL"))
         token = env.get("SCOS_BEARER_TOKEN") or env.get("SCOS_HERMES_BEARER_TOKEN")
         return bool(
             env.get("SCOS_GATEWAY_URL")
@@ -131,7 +152,9 @@ class ScosMemoryProvider(MemoryProvider):
         return (
             "SCOS Nexus not configured: set SCOS_GATEWAY_URL, SCOS_BEARER_TOKEN, "
             "SCOS_TENANT_ID, SCOS_PRINCIPAL_ID, SCOS_HERMES_PROVIDER_URL and "
-            f"SCOS_NAMESPACE_ID in {self._env_path()} or Hermes memory setup."
+            f"SCOS_NAMESPACE_ID in {self._env_path()} or Hermes memory setup "
+            "(or, for a self-hosted local-mode stack, SCOS_AUTH_MODE=local with "
+            "SCOS_GATEWAY_URL and SCOS_HERMES_PROVIDER_URL)."
         )
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
@@ -175,11 +198,14 @@ class ScosMemoryProvider(MemoryProvider):
             "SCOS_HERMES_PROVIDER_URL",
             "SCOS_NAMESPACE_ID",
         )
+        local = _is_local_mode(values)
+        if local:
+            required = ("SCOS_GATEWAY_URL", "SCOS_HERMES_PROVIDER_URL")
         missing = [key for key in required if not str(values.get(key, "")).strip()]
         if missing:
             raise ValueError("SCOS setup is incomplete; missing: " + ", ".join(missing))
 
-        allowed = set(required) | {"SCOS_TLS_CA_PATH"}
+        allowed = set(required) | {"SCOS_TLS_CA_PATH", "SCOS_AUTH_MODE"}
         unknown = sorted(
             set(values)
             - allowed
@@ -414,6 +440,8 @@ class ScosMemoryProvider(MemoryProvider):
         return context
 
     def _service_headers(self) -> Dict[str, str]:
+        if _is_local_mode(self._env):
+            return {"Content-Type": "application/json"}
         token = self._env.get("SCOS_BEARER_TOKEN") or self._env.get(
             "SCOS_HERMES_BEARER_TOKEN", ""
         )
@@ -493,6 +521,8 @@ class ScosMemoryProvider(MemoryProvider):
     # -- durable lifecycle transport ---------------------------------------
 
     def _persistence_configured(self) -> bool:
+        if _is_local_mode(self._env):
+            return bool(self._env.get("SCOS_HERMES_PROVIDER_URL"))
         token = self._env.get("SCOS_HERMES_BEARER_TOKEN") or self._env.get(
             "SCOS_BEARER_TOKEN"
         )

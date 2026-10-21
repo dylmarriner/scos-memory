@@ -210,8 +210,18 @@ func main() {
 	if addr == "" {
 		addr = ":8088"
 	}
+	authConfig := auth.MustFromEnvironment()
+	handler := auth.AuthenticatedHandler(mux, authConfig)
+	if isLocalAuthMode() {
+		local := &localIdentityToken{secret: authConfig.IssuerSecret}
+		if _, err := local.token(); err != nil {
+			log.Fatalf("hermes-provider: SCOS_AUTH_MODE=local needs SCOS_SECURITY_ISSUER_SECRET to present the local identity: %v", err)
+		}
+		handler = localModeHandler(handler, local)
+		log.Printf("hermes-provider: SCOS_AUTH_MODE=local -- a caller presenting no bearer token acts as the local-mode tenant %s", localModeTenantID)
+	}
 	log.Printf("hermes memory provider (%s) listening on %s", providerName, addr)
-	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("hermes-provider", auth.AuthenticatedHandler(mux, auth.MustFromEnvironment()))); err != nil {
+	if err := tlsserve.ListenAndServe(addr, telemetry.Instrument("hermes-provider", handler)); err != nil {
 		log.Fatal(err)
 	}
 }
