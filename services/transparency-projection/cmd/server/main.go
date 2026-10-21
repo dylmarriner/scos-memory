@@ -246,7 +246,10 @@ func (s *projectionServer) snapshot(w http.ResponseWriter, r *http.Request) {
 		"costs":          {s.upstreams["observability"], "/v1/metrics?metric=scos.llm.cost&limit=1000"},
 		"service_flows":  {s.upstreams["observability"], "/v1/flows?range=15m"},
 		"memory_summary": {s.upstream, "/v1/dashboard/summary"},
-		"code_repos":     {s.upstreams["code_intelligence"], "/v1/repos"},
+		// The Dream pipeline: each stage a memory passes through, with
+		// counts and hourly history over the last day.
+		"dream":      {s.upstream, "/v1/dashboard/dream?hours=24"},
+		"code_repos": {s.upstreams["code_intelligence"], "/v1/repos"},
 		// credential-vault's list route returns metadata only (name,
 		// key_version, created_by, timestamps) -- never a decrypted secret
 		// value -- so it's safe to surface on this otherwise-unauthenticated

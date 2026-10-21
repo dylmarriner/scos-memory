@@ -44,6 +44,19 @@
     @keyframes marquee { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
     @keyframes glowPulse { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
     @keyframes dash { to { stroke-dashoffset: -24; } }
+    @keyframes dreamFlow { to { stroke-dashoffset: -40; } }
+    .tab-intro { color: var(--text-dim); font-size: .82rem; line-height: 1.55; margin: 0 0 1rem; max-width: 70rem; }
+    .tab-intro b { color: var(--text); font-weight: 600; }
+    .panel-explain { color: var(--text-dim); font-size: .72rem; line-height: 1.45; margin: -.2rem 0 .6rem; }
+    .dream-svg { width: 100%; height: auto; display: block; }
+    .dream-edge { fill: none; stroke-linecap: round; }
+    .dream-edge.live { stroke-dasharray: 6 14; animation: dreamFlow linear infinite; }
+    .dream-node rect { rx: 10; ry: 10; }
+    .dream-node text { font-family: 'Space Grotesk', sans-serif; }
+    .dream-legend { display: flex; flex-wrap: wrap; gap: 1rem; font-size: .7rem; color: var(--text-dim); margin-top: .6rem; }
+    .dream-stage-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .6rem .9rem; }
+    .dream-stage-list div { font-size: .76rem; color: var(--text-dim); line-height: 1.45; }
+    .dream-stage-list b { color: var(--text); display: block; font-size: .78rem; }
     @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
     .shell { position: relative; z-index: 1; max-width: 1680px; margin: 0 auto; padding: 1.5rem 1.75rem 5.5rem; }
@@ -399,6 +412,40 @@
         <div class="hud-panel" style="--hud-accent:var(--amber)">
           <div class="hud-panel-head"><span class="hud-tag">OKF</span><span class="hud-title">OKF Documents</span></div>
           <div class="panel-body" id="facts-okf"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-tab="dream" id="tab-dream" hidden>
+      <p class="tab-intro"><b>Dreaming</b> is how SCOS turns raw conversations into lasting memory, in the background, the way sleep consolidates the day. Every completed agent turn queues a consolidation job; the worker extracts candidate statements, folds repeats into the memories they repeat (<b>merge</b>), holds risky or conflicting ones for a person to approve, and promotes the rest into active memories, which are then embedded so recall can find them by meaning. Separately, <b>synthesis</b> periodically reads a namespace's facts together and proposes patterns no single fact shows. The graph below is live: each edge is how many items moved along it in the last 24 hours, and its flow speeds up with the volume.</p>
+      <div class="stat-grid" id="dream-backlog"></div>
+      <div class="glass-card violet" style="margin-top:1rem">
+        <span class="corner tl"></span><span class="corner br"></span>
+        <div class="card-head">
+          <div class="card-title violet">DRM &middot; Dream pipeline &mdash; live flow</div>
+          <div class="card-meta" id="dream-meta">&nbsp;</div>
+        </div>
+        <div id="dream-graph-mount"></div>
+        <div class="dream-legend">
+          <span>edge width &amp; flow speed &prop; items in the last 24h</span>
+          <span>still, dim edge = nothing moved this way</span>
+          <span>hover a stage for what it does</span>
+        </div>
+      </div>
+      <div class="glass-card cyan" style="margin-top:1rem">
+        <div class="card-head"><div class="card-title cyan">Pipeline history &mdash; per hour, last 24h</div><div class="card-meta" id="dream-history-meta">&nbsp;</div></div>
+        <p class="panel-explain">How many turns came in, and how many candidates, new memories and embeddings each hour produced. A gap between turns and memories is consolidation catching up or work held for review.</p>
+        <div id="dream-history-mount"></div>
+      </div>
+      <div style="margin-top:1rem;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;align-items:start">
+        <div class="glass-card amber">
+          <div class="card-title amber" style="margin-bottom:.4rem">Synthesis by namespace</div>
+          <p class="panel-explain">When synthesis last read each namespace and how many patterns it proposed. A namespace needs enough active facts before synthesis considers it, and is revisited at most once per cadence.</p>
+          <div class="panel-body" id="dream-synthesis-mount"></div>
+        </div>
+        <div class="glass-card plain">
+          <div class="card-title cyan" style="margin-bottom:.6rem">What each stage does</div>
+          <div class="dream-stage-list" id="dream-stage-list"></div>
         </div>
       </div>
     </section>
@@ -1592,6 +1639,7 @@
       { key: 'credentials',       title: 'Vault',                 tag: 'VLT', group: 'identity' },
       { key: 'okf_documents',     title: 'OKF Documents',      tag: 'OKF', group: 'signal' },
       { key: 'okf_proposals',     title: 'OKF Proposals',      tag: 'PRP', group: 'tab' },
+      { key: 'dream',             title: 'Dream Pipeline',     tag: 'DRM', group: 'tab' },
       { key: 'graphify_graphs',   title: 'Graphified Repos',   tag: 'GFY', group: 'tab' },
     ];
     const GROUP_ACCENT = { identity: 'var(--violet)', ops: 'var(--cyan)', signal: 'var(--green)', center: 'var(--cyan)' };
@@ -1642,6 +1690,7 @@
       { id: 'overview', label: 'Overview' },
       { id: 'memory',   label: 'Memory' },
       { id: 'facts',    label: 'Facts' },
+      { id: 'dream',    label: 'Dreaming' },
       { id: 'code',     label: 'Code Index' },
       { id: 'graphify', label: 'Graphify' },
       { id: 'okf',      label: 'OKF' },
@@ -2109,6 +2158,150 @@
     }
     mountPanel('okf_documents', null, document.getElementById('okf-docs-mount'), paintOkfTab);
     mountPanel('okf_proposals', null, document.getElementById('okf-proposals-mount'), paintOkfTab);
+
+    // ── Dreaming tab: the consolidation pipeline as a live flow ─────────
+    // Stage positions are fixed so the pipeline reads left to right; every
+    // count comes from memory-intelligence's /v1/dashboard/dream.
+    const DREAM_LAYOUT = {
+      turns:      { x: 70,  y: 150, color: 'var(--cyan)' },
+      jobs:       { x: 230, y: 150, color: 'var(--cyan)' },
+      failed:     { x: 230, y: 290, color: 'var(--red)' },
+      candidates: { x: 400, y: 150, color: 'var(--violet)' },
+      merged:     { x: 580, y: 40,  color: 'var(--text-dim)' },
+      review:     { x: 580, y: 225, color: 'var(--amber)' },
+      rejected:   { x: 580, y: 330, color: 'var(--red)' },
+      promoted:   { x: 580, y: 130, color: 'var(--green)' },
+      memories:   { x: 760, y: 130, color: 'var(--green)' },
+      embedded:   { x: 930, y: 130, color: 'var(--cyan)' },
+      synthesis:  { x: 230, y: 400, color: 'var(--amber)' },
+      patterns:   { x: 400, y: 400, color: 'var(--amber)' },
+    };
+    const DREAM_W = 1000, DREAM_H = 450, NODE_W = 128, NODE_H = 52;
+    function svgEl(tag, attrs) {
+      const el = document.createElementNS(SVG_NS, tag);
+      for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+      return el;
+    }
+    function renderDreamGraph(view) {
+      const svg = svgEl('svg', { viewBox: `0 0 ${DREAM_W} ${DREAM_H}`, class: 'dream-svg', role: 'img', 'aria-label': 'Dream pipeline flow graph' });
+      const stages = new Map(view.stages.map((st) => [st.id, st]));
+      const maxFlow = Math.max(1, ...view.flows.map((f) => f.count));
+      const edgeLayer = svgEl('g');
+      const nodeLayer = svgEl('g');
+      svg.append(edgeLayer, nodeLayer);
+      for (const flow of view.flows) {
+        const a = DREAM_LAYOUT[flow.source], b = DREAM_LAYOUT[flow.target];
+        if (!a || !b) continue;
+        const sx = a.x + NODE_W / 2, sy = a.y, tx = b.x - NODE_W / 2, ty = b.y;
+        const back = tx < sx;
+        const d = back
+          ? `M${a.x},${a.y + NODE_H / 2} C${a.x},${a.y + 120} ${b.x},${b.y + 120} ${b.x},${b.y + NODE_H / 2}`
+          : `M${sx},${sy} C${(sx + tx) / 2},${sy} ${(sx + tx) / 2},${ty} ${tx},${ty}`;
+        const width = flow.count > 0 ? 1.5 + 7 * Math.log1p(flow.count) / Math.log1p(maxFlow) : 1;
+        const color = DREAM_LAYOUT[flow.target].color;
+        const base = svgEl('path', { d, class: 'dream-edge', stroke: color, 'stroke-opacity': flow.count > 0 ? 0.22 : 0.08, 'stroke-width': width });
+        edgeLayer.appendChild(base);
+        if (flow.count > 0) {
+          const live = svgEl('path', { d, class: 'dream-edge live', stroke: color, 'stroke-width': Math.max(1.5, width * 0.55) });
+          // More items, faster flow: 4s for a trickle down to 0.6s at the busiest edge.
+          live.style.animationDuration = `${(4 - 3.4 * Math.log1p(flow.count) / Math.log1p(maxFlow)).toFixed(2)}s`;
+          edgeLayer.appendChild(live);
+          const mid = back ? { x: (a.x + b.x) / 2, y: Math.max(a.y, b.y) + 105 } : { x: (sx + tx) / 2, y: (sy + ty) / 2 };
+          const label = svgEl('text', { x: mid.x, y: mid.y - 6, 'text-anchor': 'middle', fill: 'var(--text)', 'font-size': 12 });
+          label.textContent = fmtNum(flow.count);
+          edgeLayer.appendChild(label);
+        }
+        const title = svgEl('title');
+        title.textContent = `${stages.get(flow.source)?.label || flow.source} → ${stages.get(flow.target)?.label || flow.target}: ${fmtNum(flow.count)} in the last ${view.window_hours}h`;
+        base.appendChild(title);
+      }
+      for (const [id, pos] of Object.entries(DREAM_LAYOUT)) {
+        const st = stages.get(id);
+        if (!st) continue;
+        const g = svgEl('g', { class: 'dream-node', transform: `translate(${pos.x - NODE_W / 2},${pos.y - NODE_H / 2})` });
+        g.append(
+          svgEl('rect', { width: NODE_W, height: NODE_H, fill: 'rgba(8,12,22,.92)', stroke: pos.color, 'stroke-width': st.count > 0 ? 1.6 : 0.8, 'stroke-opacity': st.count > 0 ? 1 : 0.45 }),
+        );
+        const count = svgEl('text', { x: NODE_W / 2, y: 23, 'text-anchor': 'middle', fill: st.count > 0 ? pos.color : 'var(--text-dim)', 'font-size': 18, 'font-weight': 700 });
+        count.textContent = fmtNum(st.count);
+        const label = svgEl('text', { x: NODE_W / 2, y: 41, 'text-anchor': 'middle', fill: 'var(--text-dim)', 'font-size': 10.5, 'letter-spacing': '.04em' });
+        label.textContent = st.label;
+        const title = svgEl('title');
+        title.textContent = `${st.label}: ${st.description}`;
+        g.append(count, label, title);
+        nodeLayer.appendChild(g);
+      }
+      return svg;
+    }
+    // Hourly history: one line per series over the window.
+    function renderDreamHistory(history) {
+      const series = [
+        { key: 'turns', label: 'turns', color: 'var(--cyan)' },
+        { key: 'candidates', label: 'candidates', color: 'var(--violet)' },
+        { key: 'memories', label: 'new memories', color: 'var(--green)' },
+        { key: 'embedded', label: 'embedded', color: 'var(--amber)' },
+        { key: 'review', label: 'held for review', color: 'var(--red)' },
+      ];
+      const W = 1000, H = 220, L = 40, R = 10, T = 14, B = 28;
+      const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'dream-svg', role: 'img', 'aria-label': 'Dream pipeline hourly history' });
+      const max = Math.max(1, ...history.flatMap((b) => series.map((s) => b[s.key] || 0)));
+      const x = (i) => L + (history.length <= 1 ? 0 : (i * (W - L - R)) / (history.length - 1));
+      const y = (v) => T + (H - T - B) * (1 - v / max);
+      for (let k = 0; k <= 4; k++) {
+        const v = (max * k) / 4;
+        svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: 'rgba(255,255,255,.06)' }));
+        const t = svgEl('text', { x: L - 6, y: y(v) + 4, 'text-anchor': 'end', fill: 'var(--text-dim)', 'font-size': 10 });
+        t.textContent = Math.round(v);
+        svg.appendChild(t);
+      }
+      history.forEach((b, i) => {
+        if (i % 4 !== 0 && i !== history.length - 1) return;
+        const t = svgEl('text', { x: x(i), y: H - 8, 'text-anchor': 'middle', fill: 'var(--text-dim)', 'font-size': 10 });
+        t.textContent = String(b.hour).slice(11, 16);
+        svg.appendChild(t);
+      });
+      for (const s of series) {
+        const pts = history.map((b, i) => `${x(i).toFixed(1)},${y(b[s.key] || 0).toFixed(1)}`).join(' ');
+        svg.appendChild(svgEl('polyline', { points: pts, fill: 'none', stroke: s.color, 'stroke-width': 2, 'stroke-linejoin': 'round' }));
+      }
+      const wrap = document.createElement('div');
+      wrap.appendChild(svg);
+      const legend = document.createElement('div');
+      legend.className = 'dream-legend';
+      legend.innerHTML = series.map((s) => `<span><i class="fx-swatch" style="background:${s.color}"></i>${escapeHtml(s.label)}</span>`).join('');
+      wrap.appendChild(legend);
+      return wrap;
+    }
+    mountPanel('dream', null, document.getElementById('dream-graph-mount'), (bodyEl, view) => {
+      const backlogEl = document.getElementById('dream-backlog');
+      const historyEl = document.getElementById('dream-history-mount');
+      const synthEl = document.getElementById('dream-synthesis-mount');
+      const stagesEl = document.getElementById('dream-stage-list');
+      backlogEl.innerHTML = historyEl.innerHTML = synthEl.innerHTML = stagesEl.innerHTML = '';
+      if (!view || !Array.isArray(view.stages)) { bodyEl.appendChild(render(view)); return; }
+      const b = view.backlog || {};
+      backlogEl.append(
+        statTile('active memories', fmtNum(b.active_memories), 'what recall can return', 'var(--green)'),
+        statTile('jobs waiting', fmtNum(b.jobs_waiting), 'turns not yet consolidated', (b.jobs_waiting || 0) > 0 ? 'var(--amber)' : 'var(--cyan)'),
+        statTile('awaiting review', fmtNum(b.awaiting_review), 'need a person to approve', (b.awaiting_review || 0) > 0 ? 'var(--amber)' : 'var(--cyan)'),
+        statTile('awaiting embedding', fmtNum(b.awaiting_embedding), 'active but not yet searchable by meaning', (b.awaiting_embedding || 0) > 0 ? 'var(--amber)' : 'var(--cyan)'),
+      );
+      document.getElementById('dream-meta').textContent = `last ${view.window_hours}h · generated ${fmtWhen(view.generated_at)}`;
+      bodyEl.appendChild(renderDreamGraph(view));
+      const history = Array.isArray(view.history) ? view.history : [];
+      document.getElementById('dream-history-meta').textContent = `${history.length} hourly buckets`;
+      historyEl.appendChild(renderDreamHistory(history));
+      synthEl.appendChild(recordTable(view.synthesis || [], [
+        { label: 'namespace', cell: (n) => n.namespace },
+        { label: 'last run', cell: (n) => (n.last_run_at ? fmtWhen(n.last_run_at) : 'not yet') },
+        { label: 'patterns proposed', cell: (n) => String(n.last_pattern_count) },
+      ], 'no namespaces visible to this identity'));
+      for (const st of view.stages) {
+        const div = document.createElement('div');
+        div.innerHTML = `<b>${escapeHtml(st.label)} &middot; ${escapeHtml(fmtNum(st.count))}</b>${escapeHtml(st.description)}`;
+        stagesEl.appendChild(div);
+      }
+    });
 
     // ── Agents tab ───────────────────────────────────────────────────────
     mountPanel('agents', null, document.getElementById('agt-agents-mount'), defaultPaint);

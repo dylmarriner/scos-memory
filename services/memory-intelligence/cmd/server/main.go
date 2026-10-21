@@ -441,6 +441,7 @@ func main() {
 	// Dashboard views (§25.9)
 	mux.HandleFunc("/v1/dashboard/system", srv.handleDashboardSystem)
 	mux.HandleFunc("/v1/dashboard/memory-graph", srv.handleDashboardMemoryGraph)
+	mux.HandleFunc("/v1/dashboard/dream", srv.handleDashboardDream)
 	mux.HandleFunc("/v1/dashboard/facts", srv.handleDashboardFacts)
 	mux.HandleFunc("/v1/dashboard/summary", srv.handleDashboardSummary)
 	mux.HandleFunc("/v1/dashboard/learnings", srv.handleDashboardLearnings)
