@@ -101,12 +101,12 @@ type RetrieveResponse struct {
 // ── server state ─────────────────────────────────────────────────────────
 
 type server struct {
-	db               *pgxpool.Pool
-	modelRuntime     *modelRuntimeClient
-	textSpace        embeddingSpace
-	rerankModel      string
-	rerankRevision   string
-	rerankLimit      int
+	db             *pgxpool.Pool
+	modelRuntime   *modelRuntimeClient
+	textSpace      embeddingSpace
+	rerankModel    string
+	rerankRevision string
+	rerankLimit    int
 	// rerankBudget, when positive, bounds the rerank stage on its own: a
 	// reranker slower than that is treated as unavailable, so the request
 	// still answers in time from RRF + governance instead of waiting out its
