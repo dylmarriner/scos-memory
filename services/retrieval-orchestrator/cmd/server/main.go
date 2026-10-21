@@ -107,6 +107,14 @@ type server struct {
 	rerankModel      string
 	rerankRevision   string
 	rerankLimit      int
+	// rerankBudget, when positive, bounds the rerank stage on its own: a
+	// reranker slower than that is treated as unavailable, so the request
+	// still answers in time from RRF + governance instead of waiting out its
+	// caller's whole deadline (a GPU reranker scores one document at a time).
+	rerankBudget time.Duration
+	// rerankDocChars caps each document sent to the reranker; a cross-encoder
+	// scores the leading text, and its context bounds query plus document.
+	rerankDocChars   int
 	codeIntelligence *codeIntelligenceClient
 }
 
@@ -210,6 +218,14 @@ func main() {
 	if rerankLimit > 128 {
 		log.Fatal("SCOS_MODEL_RERANK_CANDIDATES must be <= 128")
 	}
+	rerankBudgetMS, err := nonNegativeEnvInt("SCOS_MODEL_RERANK_BUDGET_MS", 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rerankDocChars, err := positiveEnvInt("SCOS_MODEL_RERANK_DOCUMENT_CHARS", defaultRerankDocumentChars)
+	if err != nil {
+		log.Fatal(err)
+	}
 	codeClient, err := newCodeIntelligenceClientFromEnvironment()
 	if err != nil {
 		log.Fatalf("configure code-intelligence client: %v", err)
@@ -222,6 +238,8 @@ func main() {
 		rerankModel:      envOr("SCOS_MODEL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3"),
 		rerankRevision:   envOr("SCOS_MODEL_RERANK_REVISION", "main"),
 		rerankLimit:      rerankLimit,
+		rerankBudget:     time.Duration(rerankBudgetMS) * time.Millisecond,
+		rerankDocChars:   rerankDocChars,
 		codeIntelligence: codeClient,
 	}
 

@@ -31,7 +31,12 @@ func (s *server) rerankWithModel(ctx context.Context, query string, results []Re
 	}
 	documents := make([]string, limit)
 	for i := 0; i < limit; i++ {
-		documents[i] = rerankDocument(results[i])
+		documents[i] = rerankDocument(results[i], s.rerankDocChars)
+	}
+	if s.rerankBudget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.rerankBudget)
+		defer cancel()
 	}
 	response, err := s.modelRuntime.Rerank(ctx, query, documents, limit)
 	if err != nil {
@@ -53,7 +58,11 @@ func (s *server) rerankWithModel(ctx context.Context, query string, results []Re
 	return out, response.Model, response.ModelRevision, nil
 }
 
-func rerankDocument(result RetrievalResult) string {
+// defaultRerankDocumentChars is the document cap when
+// SCOS_MODEL_RERANK_DOCUMENT_CHARS is unset.
+const defaultRerankDocumentChars = 12000
+
+func rerankDocument(result RetrievalResult, maxChars int) string {
 	parts := make([]string, 0, 3)
 	for _, value := range []string{result.Title, result.Summary, result.Content} {
 		value = strings.TrimSpace(value)
@@ -62,8 +71,11 @@ func rerankDocument(result RetrievalResult) string {
 		}
 	}
 	document := strings.Join(parts, "\n\n")
-	if len(document) > 12000 {
-		document = document[:12000]
+	if maxChars <= 0 {
+		maxChars = defaultRerankDocumentChars
+	}
+	if len(document) > maxChars {
+		document = strings.ToValidUTF8(document[:maxChars], "")
 	}
 	return document
 }
