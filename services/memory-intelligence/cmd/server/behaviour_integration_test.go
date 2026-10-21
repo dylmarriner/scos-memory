@@ -484,3 +484,78 @@ func TestFactWithACredentialIsRedactedReadableAndCorrectable(t *testing.T) {
 		}
 	}
 }
+
+// A secret written before the scanner knew its shape is removed from every
+// stored copy, and the history guard admits that rewrite and nothing else.
+func TestRedactHistoryRemovesALeakedSecretAndNothingElse(t *testing.T) {
+	f := newBehaviourFixture(t)
+	id := f.remember("The build box login is kept in the vault.", 0.8)
+	// A version written before the scanner recognised this credential.
+	leaked := "The build box db login root:Tr0ub4dor&3 is kept in the vault."
+	version := f.scalar(`INSERT INTO memory_versions (memory_id, version_number, content, structured_content, content_hash, change_reason, created_by)
+		VALUES ($1, 2, $2, jsonb_build_object('derivation', $2::text), 'h', 'legacy_write', $3) RETURNING id::text`, id, leaked, f.owner)
+	f.scalar(`UPDATE memory_items SET current_version_id = $2, title = $3, canonical_summary = $4 WHERE id = $1 RETURNING id::text`,
+		id, version, truncate(leaked, 120), truncate(leaked, 500))
+	f.scalar(`INSERT INTO diary_entries (tenant_id, principal_id, entry_type, content) VALUES ($1, $2, 'fact_recorded', $3) RETURNING id::text`,
+		f.tenant, f.owner, `{"fact_id":"`+id+`","summary":"`+truncate(leaked, 40)+`"}`)
+
+	code, out, _ := f.call(f.srv.handleFactByID, http.MethodPost, "/v1/facts/"+id+"/redact", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("redact = %d %v", code, out)
+	}
+	if out["versions_redacted"] != float64(1) || out["diary_entries_redacted"] != float64(1) || out["item_redacted"] != true {
+		t.Fatalf("redaction report = %v", out)
+	}
+	for _, q := range []string{
+		`SELECT count(*) FROM memory_versions WHERE memory_id = $1 AND (content LIKE '%Tr0ub4dor%' OR structured_content::text LIKE '%Tr0ub4dor%')`,
+		`SELECT count(*) FROM memory_items WHERE id = $1 AND (title LIKE '%Tr0ub4dor%' OR canonical_summary LIKE '%Tr0ub4dor%' OR COALESCE(value_norm, '') ILIKE '%tr0ub4dor%')`,
+		`SELECT count(*) FROM diary_entries WHERE content LIKE '%' || $1 || '%' AND content LIKE '%Tr0ub4dor%'`,
+	} {
+		if n := f.scalar(q, id); n != "0" {
+			t.Fatalf("secret still stored: %s = %s", q, n)
+		}
+	}
+	if got := f.scalar(`SELECT content FROM memory_versions WHERE id = $1`, version); got != "The build box db login root:[REDACTED:credential_pair] is kept in the vault." {
+		t.Fatalf("redacted version = %q", got)
+	}
+	// Redacting again finds nothing new.
+	if code, out, _ := f.call(f.srv.handleFactByID, http.MethodPost, "/v1/facts/"+id+"/redact", `{}`); code != http.StatusOK || out["versions_redacted"] != float64(0) {
+		t.Fatalf("second redact = %d %v", code, out)
+	}
+
+	// The guard: even announced, a version can only lose spans to markers.
+	app := f.srv.db
+	for name, stmt := range map[string]string{
+		"rewrite":  `UPDATE memory_versions SET content = 'The build box has no login.' WHERE id = $1`,
+		"addition": `UPDATE memory_versions SET content = content || ' Extra.' WHERE id = $1`,
+		"reattach": `UPDATE memory_versions SET change_reason = 'edited' WHERE id = $1`,
+		"delete":   `DELETE FROM memory_versions WHERE id = $1`,
+		"unmarked": `UPDATE memory_versions SET content = replace(content, '[REDACTED:credential_pair]', 'x') WHERE id = $1`,
+	} {
+		tx, err := app.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = setPrincipalContext(context.Background(), tx, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner})
+		if _, err := tx.Exec(`SELECT set_config('scos.redacting_version', $1, true)`, version); err != nil {
+			t.Fatal(err)
+		}
+		res, err := tx.Exec(stmt, version)
+		_ = tx.Rollback()
+		if err == nil {
+			// Row-level security gives the runtime role no DELETE policy,
+			// so a delete matches no row before the trigger is reached.
+			if n, _ := res.RowsAffected(); n == 0 && name == "delete" {
+				continue
+			}
+			t.Fatalf("%s was not refused", name)
+		}
+		if !strings.Contains(err.Error(), "append-only") {
+			t.Fatalf("%s failed for another reason: %v", name, err)
+		}
+	}
+	// Unannounced, even a valid redaction is refused.
+	if _, err := f.admin.Exec(`UPDATE memory_versions SET content = replace(content, 'vault', '[REDACTED:password]') WHERE id = $1`, version); err == nil || !strings.Contains(err.Error(), "append-only") {
+		t.Fatalf("unannounced redaction was not refused: %v", err)
+	}
+}

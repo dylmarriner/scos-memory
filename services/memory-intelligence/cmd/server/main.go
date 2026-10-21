@@ -837,6 +837,10 @@ func (s *engineServer) handleFactByID(w http.ResponseWriter, r *http.Request) {
 		s.handleFactHistory(w, r)
 		return
 	}
+	if strings.HasSuffix(r.URL.Path, "/redact") {
+		s.handleFactRedact(w, r)
+		return
+	}
 	if strings.HasSuffix(r.URL.Path, "/feedback") {
 		s.handleFactFeedback(w, r)
 		return
@@ -1315,6 +1319,35 @@ func (s *engineServer) handleFactForget(w http.ResponseWriter, r *http.Request, 
 // POST /v1/facts/{id}/feedback with {"feedback":"POSITIVE|NEGATIVE|VERY_NEGATIVE","reason":"..."}
 // records quality signal against a fact without acting on it. See
 // recordFactFeedback.
+// handleFactRedact implements scos_redact_history: POST
+// /v1/facts/{id}/redact removes every secret the scanner finds from the
+// fact's stored history, in place (see redactFactHistory).
+func (s *engineServer) handleFactRedact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/facts/"), "/redact")
+	if id == "" || strings.Contains(id, "/") {
+		http.Error(w, "fact id is required", http.StatusBadRequest)
+		return
+	}
+	identity, status, msg := resolveIdentityFromRequest(r)
+	if status != 0 {
+		http.Error(w, msg, status)
+		return
+	}
+	result, err := redactFactHistory(r.Context(), s.db, identity, id)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "redact fact history: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, result)
+}
+
 func (s *engineServer) handleFactFeedback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

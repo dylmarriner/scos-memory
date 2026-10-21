@@ -1411,3 +1411,246 @@ func defaultWritableNamespace(ctx context.Context, q querier, id requestIdentity
 	}
 	return ns, err
 }
+
+// HistoryRedaction reports what redactFactHistory rewrote.
+type HistoryRedaction struct {
+	FactID           string   `json:"fact_id"`
+	VersionsRedacted int      `json:"versions_redacted"`
+	ItemRedacted     bool     `json:"item_redacted"`
+	DiaryRedacted    int      `json:"diary_entries_redacted"`
+	Kinds            []string `json:"kinds"`
+}
+
+// redactedText is one stored text and its redacted form.
+type redactedText struct{ original, redacted string }
+
+// redactDerived redacts text derived from a fact's content: a truncation of
+// one of its versions (a title, a summary) becomes the same truncation of
+// the redacted version, since a cut can leave half a secret the scanner no
+// longer recognises; anything else is scanned on its own.
+func redactDerived(s string, versions []redactedText) string {
+	for _, v := range versions {
+		for _, n := range []int{120, 500} {
+			if s == truncate(v.original, n) {
+				return truncate(v.redacted, n)
+			}
+		}
+	}
+	if findings := secretscan.Scan(s); len(findings) > 0 {
+		return secretscan.Redact(s, findings)
+	}
+	return s
+}
+
+// redactFactHistory removes from a fact's stored history every secret the
+// scanner now finds, in place: each version's content and structured
+// content, the item's title, summary and normalised key/value, and the diary
+// entries that quote the fact. Spans become [REDACTED:kind] markers and
+// nothing else changes; the memory_versions_append_only trigger admits only
+// that rewrite, announced per row through scos.redacting_version. It works
+// on a fact in any status, since a superseded or forgotten version holds a
+// leaked secret as surely as the current one, and records what it did in
+// the diary.
+func redactFactHistory(ctx context.Context, db *sql.DB, id requestIdentity, factID string) (*HistoryRedaction, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := setPrincipalContext(ctx, tx, id); err != nil {
+		return nil, err
+	}
+	var title, summary, currentVersion string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT title, canonical_summary, COALESCE(current_version_id::text, '')
+		FROM memory_items WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+	`, factID, id.TenantID).Scan(&title, &summary, &currentVersion); err != nil {
+		return nil, err
+	}
+
+	type version struct{ id, content, structured string }
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id::text, content, structured_content::text FROM memory_versions
+		WHERE memory_id = $1 ORDER BY version_number
+	`, factID)
+	if err != nil {
+		return nil, err
+	}
+	var versions []version
+	for rows.Next() {
+		var v version
+		if err := rows.Scan(&v.id, &v.content, &v.structured); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := &HistoryRedaction{FactID: factID, Kinds: []string{}}
+	seen := map[string]bool{}
+	var texts []redactedText
+	currentRedacted := ""
+	for _, v := range versions {
+		findings := secretscan.Scan(v.content)
+		content := secretscan.Redact(v.content, findings)
+		structured, structuredKinds, err := redactJSONStrings(v.structured)
+		if err != nil {
+			return nil, fmt.Errorf("version %s structured content: %w", v.id, err)
+		}
+		texts = append(texts, redactedText{original: v.content, redacted: content})
+		if v.id == currentVersion {
+			currentRedacted = content
+		}
+		if content == v.content && structured == v.structured {
+			continue
+		}
+		for _, f := range findings {
+			structuredKinds = append(structuredKinds, string(f.Kind))
+		}
+		for _, k := range structuredKinds {
+			if !seen[k] {
+				seen[k] = true
+				result.Kinds = append(result.Kinds, k)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.redacting_version', $1, true)`, v.id); err != nil {
+			return nil, err
+		}
+		res, err := tx.ExecContext(ctx, `
+			UPDATE memory_versions SET content = $2, structured_content = $3::jsonb, content_hash = $4 WHERE id = $1
+		`, v.id, content, structured, sha256Hex(content))
+		if err != nil {
+			return nil, fmt.Errorf("redact version %s: %w", v.id, err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, fmt.Errorf("redact version %s: the caller may not write this fact's namespace", v.id)
+		}
+		result.VersionsRedacted++
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('scos.redacting_version', '', true)`); err != nil {
+		return nil, err
+	}
+
+	newTitle, newSummary := redactDerived(title, texts), redactDerived(summary, texts)
+	if newTitle != title || newSummary != summary || result.VersionsRedacted > 0 {
+		keyNorm, valueNorm := keyValueNorm(currentRedacted)
+		res, err := tx.ExecContext(ctx, `
+			UPDATE memory_items SET title = $2, canonical_summary = $3, key_norm = $4, value_norm = $5
+			WHERE id = $1 AND tenant_id = $6
+		`, factID, newTitle, newSummary, keyNorm, valueNorm, id.TenantID)
+		if err != nil {
+			return nil, fmt.Errorf("redact fact item: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, fmt.Errorf("redact fact item: the caller may not write this fact's namespace")
+		}
+		result.ItemRedacted = newTitle != title || newSummary != summary
+	}
+
+	diaryRows, err := tx.QueryContext(ctx, `
+		SELECT id::text, content FROM diary_entries WHERE tenant_id = $1 AND content LIKE '%' || $2 || '%'
+	`, id.TenantID, factID)
+	if err != nil {
+		return nil, err
+	}
+	type diary struct{ id, content string }
+	var entries []diary
+	for diaryRows.Next() {
+		var d diary
+		if err := diaryRows.Scan(&d.id, &d.content); err != nil {
+			diaryRows.Close()
+			return nil, err
+		}
+		entries = append(entries, d)
+	}
+	diaryRows.Close()
+	if err := diaryRows.Err(); err != nil {
+		return nil, err
+	}
+	for _, d := range entries {
+		var body map[string]any
+		if json.Unmarshal([]byte(d.content), &body) != nil {
+			continue
+		}
+		changed := false
+		for k, v := range body {
+			if s, ok := v.(string); ok {
+				if r := redactDerived(s, texts); r != s {
+					body[k] = r
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			continue
+		}
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE diary_entries SET content = $2 WHERE id = $1 AND tenant_id = $3`, d.id, string(encoded), id.TenantID); err != nil {
+			return nil, fmt.Errorf("redact diary entry %s: %w", d.id, err)
+		}
+		result.DiaryRedacted++
+	}
+
+	if result.VersionsRedacted > 0 || result.ItemRedacted || result.DiaryRedacted > 0 {
+		if err := recordDiaryEntry(ctx, tx, id, "fact_history_redacted", map[string]any{
+			"fact_id": factID, "versions_redacted": result.VersionsRedacted,
+			"diary_entries_redacted": result.DiaryRedacted, "kinds": result.Kinds,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// redactJSONStrings redacts every string value in a JSON document, keeping
+// its keys and shape, and returns the kinds it redacted. Redacting values
+// rather than the encoded text keeps the document valid whatever the secret
+// contains.
+func redactJSONStrings(raw string) (string, []string, error) {
+	var doc any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return "", nil, err
+	}
+	var kinds []string
+	var walk func(v any) any
+	walk = func(v any) any {
+		switch t := v.(type) {
+		case string:
+			findings := secretscan.Scan(t)
+			for _, f := range findings {
+				kinds = append(kinds, string(f.Kind))
+			}
+			return secretscan.Redact(t, findings)
+		case map[string]any:
+			for k, inner := range t {
+				t[k] = walk(inner)
+			}
+			return t
+		case []any:
+			for i, inner := range t {
+				t[i] = walk(inner)
+			}
+			return t
+		}
+		return v
+	}
+	doc = walk(doc)
+	if len(kinds) == 0 {
+		return raw, nil, nil
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(encoded), kinds, nil
+}

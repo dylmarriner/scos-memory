@@ -483,6 +483,12 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			u += "?cascade=true"
 		}
 		return s.forwardDELETE(ctx, r, u)
+	case "scos_redact_history":
+		memoryID := stringArg(args, "memory_id")
+		if memoryID == "" {
+			return nil, fmt.Errorf("memory_id is required")
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+url.PathEscape(memoryID)+"/redact", map[string]any{})
 	case "scos_correct_batch":
 		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/batch-correct", map[string]any{
 			"corrections": args["corrections"],
@@ -1706,6 +1712,17 @@ func governedTools() []map[string]any {
 					"reason":    map[string]any{"type": "string", "description": "Why the memory is being corrected; kept in its history"},
 				},
 				"required": []string{"memory_id", "value"},
+			},
+		},
+		{
+			"name":        "scos_redact_history",
+			"description": "Remove every secret the scanner finds from a memory's stored history, in place: each version, its title and summary, and the diary entries quoting it. Secrets become [REDACTED:kind] markers; nothing else changes. Works on current, superseded and forgotten memories",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_id": map[string]any{"type": "string", "description": "Memory ID whose history to redact"},
+				},
+				"required": []string{"memory_id"},
 			},
 		},
 		{

@@ -35,6 +35,7 @@ var memoryWriteTools = map[string]bool{
 	"scos_forget":            true,
 	"scos_forget_batch":      true,
 	"scos_forget_all":        true,
+	"scos_redact_history":    true,
 	"scos_fact_feedback":     true,
 	"scos_link_evidence":     true,
 	"scos_mg_session_create": true,
