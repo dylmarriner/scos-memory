@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -121,6 +122,7 @@ func (s *server) handlePGRevalidations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		log.Printf("list revalidation events: %v", err)
 		http.Error(w, "revalidation lookup unavailable", http.StatusInternalServerError)
 		return
 	}

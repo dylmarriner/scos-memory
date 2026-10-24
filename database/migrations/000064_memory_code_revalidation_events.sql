@@ -38,6 +38,32 @@ CREATE POLICY memory_revalidation_events_read ON memory_revalidation_events
         AND EXISTS (SELECT 1 FROM memory_items i WHERE i.id = fact_id)
     );
 
+-- Forced RLS applies to the SECURITY DEFINER function when the migration
+-- owner is not a superuser/BYPASSRLS role. Give the schema owner only the
+-- policies needed by the internal snapshot-activation trigger, while normal
+-- scos_app remains excluded. The owner is resolved at migration time to
+-- support configured PostgreSQL installation role names.
+DO $revalidator_owner_policies$
+DECLARE
+    migration_owner name := current_user;
+BEGIN
+    EXECUTE format(
+        'CREATE POLICY revalidation_owner_write ON memory_revalidation_events FOR INSERT TO %I WITH CHECK (true)',
+        migration_owner);
+    -- INSERT ... ON CONFLICT requires a matching SELECT RLS policy to
+    -- inspect conflict candidates even when the action is DO NOTHING.
+    EXECUTE format(
+        'CREATE POLICY revalidation_owner_read_events ON memory_revalidation_events FOR SELECT TO %I USING (true)',
+        migration_owner);
+    EXECUTE format(
+        'CREATE POLICY revalidation_owner_read_links ON memory_code_links FOR SELECT TO %I USING (true)',
+        migration_owner);
+    EXECUTE format(
+        'CREATE POLICY revalidation_owner_read_facts ON memory_items FOR SELECT TO %I USING (true)',
+        migration_owner);
+END
+$revalidator_owner_policies$;
+
 -- Called in the exact transaction that changes an immutable snapshot to
 -- active. Failure rolls back activation: a code change never silently loses
 -- its associated review work. This trigger observes the branch-local parent
