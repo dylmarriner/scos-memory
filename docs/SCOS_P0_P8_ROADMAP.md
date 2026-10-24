@@ -4,6 +4,8 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+> **Live/merge evidence update, 2026-10-25 NZ:** PR #29 merged on 2026-09-10. PR #48 (backup recovery, memory-history redaction, model/runtime and Docker CVE fixes) and PR #44 (x/crypto 0.58.0) are merged; latest main CI passed on commits `5d8d969` and `f840bea`. The Kubuntux SCOS backup manager was repaired after its SSHFS bind mount became stale; a new logical backup, physical backup, scratch PITR recovery, recovered Bitwarden decryption key, and OKF Git mirror all verified through SCOS's live APIs. The live backup plan reached **12/12** passing checks at 2026-10-24 22:03 UTC. **Release parity is NOT complete:** the live Kubuntux containers report source SHA `4f9e643`, not merged `main` `f840bea`. Source/CI proof does not imply those merges are deployed; run the controlled rollout, health and recovery gates before claiming deployment. P0 full model-quality benchmarks and P5–P8 acceptance items remain outstanding and must not be marked 100% done.
+
 ## Goal
 
 Build SCOS into a governed persistent-memory + code-intelligence substrate for AI agents that can answer:
@@ -107,7 +109,7 @@ Operational rules:
 | **P1** | Immutable snapshots + durable code store | **SUBSTANTIALLY COMPLETE** |
 | **P2** | SCIP + AST / Tree-sitter extraction | **SUBSTANTIALLY COMPLETE** |
 | **P3** | Incremental Git-aware indexing | **SUBSTANTIALLY COMPLETE; hardening remains** |
-| **P4** | Hybrid memory + code retrieval | **SOURCE IMPLEMENTED ON PR #29; merge/P0/live gates pending** |
+| **P4** | Hybrid memory + code retrieval | **MERGED TO MAIN (PR #29 on 2026-09-10); frozen P0/live performance qualification still pending** |
 | **P5** | Temporal evidence | **PARTIAL** |
 | **P6** | Unified memory + code graph | **PARTIAL** |
 | **P7** | Stale-memory revalidation | **EARLY / MOSTLY UNBUILT** |
@@ -355,7 +357,7 @@ GitHub Actions has also experienced runner-launch failures where jobs are create
 - [x] Query planning exists and cannot affect authorization boundaries.
 - [x] A deterministic P0/P4 smoke corpus exists.
 - [ ] Full P0 before/after quality, latency and cost evidence is recorded with actual model backends.
-- [ ] PR #29 is merged to `main` and `main` is re-read afterward.
+- [x] PR #29 merged to `main` on 2026-09-10; the resulting source was re-read and later CI runs verified it.
 - [ ] Live Linode activation/capacity/model-pinning verification is complete before claiming BGE profiles are production-active.
 
 ---
@@ -497,7 +499,7 @@ Do not build federation before single-repository P4–P8 quality is proven. Repo
 
 # Current execution order
 
-After PR #29 merges and `main` verification is complete, the practical sequence is:
+Following PR #29's 2026-09-10 merge and subsequent `main` verification, the practical sequence is:
 
 1. **P0:** run full before/after P4 model-quality, latency and cost benchmarks; pin production-ready model revisions.
 2. **P6:** operationalize memory↔code graph traversal and provenance.
@@ -528,6 +530,6 @@ For each phase:
 
 ## Immediate milestone
 
-**Merge and verify P4, then run its full P0 acceptance programme and validate explicit model activation on the Linode.**
+**P4 source is merged. Complete its full P0 reproducible acceptance programme, qualify current live BGE endpoints/performance and then advance the cross-domain P5–P8 acceptance cases.**
 
 DeepSeek remains SCOS's reasoning/synthesis layer. BGE remains the specialist retrieval layer beneath it. They are complementary parts of the same stack.
