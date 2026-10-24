@@ -147,3 +147,116 @@ func TestPGMemoryCodeRevalidation(t *testing.T) {
 	}
 
 }
+
+// A memory linked to S0 must be reconsidered after S2 even when S1 left the
+// symbol unchanged; otherwise an unrelated intermediate commit hides damage.
+func TestPGRevalidationTraversesHistoricalSnapshotLinks(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	var principal, namespace string
+	if err := db.QueryRowContext(ctx, "INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES ($1,'human',$2,$2) RETURNING id", tenant, t.Name()).Scan(&principal); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, "INSERT INTO namespaces(tenant_id,owner_principal_id,canonical_name) VALUES ($1,$2,$3) RETURNING id", tenant, principal, t.Name()).Scan(&namespace); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := store.EnsureRepository(ctx, tenant, "/p7-history/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.CreateSnapshot(ctx, repo, tenant, "main", "first", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := hashContent("first bytes")
+	if err := store.IndexSnapshot(ctx, first, repo, []PGFileInput{{Path: "stable.txt", Language: "text", ContentHash: content}}); err != nil {
+		t.Fatal(err)
+	}
+	var version, fact string
+	if err := db.QueryRowContext(ctx, "SELECT id FROM code_symbol_versions WHERE snapshot_id=$1 AND path='stable.txt' AND kind='file'", first).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, "INSERT INTO memory_items(tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,authority_level,confidence_score,sensitivity) VALUES($1,$2,$3,'semantic','active','first','first',50,0.9,'internal') RETURNING id", tenant, namespace, principal).Scan(&fact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO memory_code_links(tenant_id,fact_id,code_symbol_version_id,link_type,source) VALUES($1,$2,$3,'evidences','explicit')", tenant, fact, version); err != nil {
+		t.Fatal(err)
+	}
+	middle, err := store.CreateSnapshot(ctx, repo, tenant, "main", "middle", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, middle, repo, []PGFileInput{{Path: "stable.txt", Language: "text", ContentHash: content}}); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := store.CreateSnapshot(ctx, repo, tenant, "main", "latest", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, latest, repo, []PGFileInput{{Path: "stable.txt", Language: "text", ContentHash: hashContent("second bytes")}}); err != nil {
+		t.Fatal(err)
+	}
+	var continuity, status string
+	if err := db.QueryRowContext(ctx, "SELECT continuity,review_status FROM memory_revalidation_events WHERE new_snapshot_id=$1 AND fact_id=$2", latest, fact).Scan(&continuity, &status); err != nil {
+		t.Fatalf("missing historical-link revalidation: %v", err)
+	}
+	if continuity != "changed" || status != "needs_review" {
+		t.Fatalf("historical link = %s:%s", continuity, status)
+	}
+}
+
+func TestPGDuplicateContentDoesNotMasqueradeAsSafeRename(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	var principal, namespace string
+	if err := db.QueryRowContext(ctx, "INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES($1,'human',$2,$2) RETURNING id", tenant, t.Name()).Scan(&principal); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, "INSERT INTO namespaces(tenant_id,owner_principal_id,canonical_name) VALUES($1,$2,$3) RETURNING id", tenant, principal, t.Name()).Scan(&namespace); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := store.EnsureRepository(ctx, tenant, "/p7-duplicate/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.CreateSnapshot(ctx, repo, tenant, "main", "before", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identical := hashContent("identical")
+	if err := store.IndexSnapshot(ctx, old, repo, []PGFileInput{
+		{Path: "a.txt", Language: "text", ContentHash: identical},
+		{Path: "b.txt", Language: "text", ContentHash: identical},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var version, fact string
+	if err := db.QueryRowContext(ctx, "SELECT id FROM code_symbol_versions WHERE snapshot_id=$1 AND path='a.txt' AND kind='file'", old).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, "INSERT INTO memory_items(tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,authority_level,confidence_score,sensitivity) VALUES($1,$2,$3,'semantic','active','a','a',50,0.9,'internal') RETURNING id", tenant, namespace, principal).Scan(&fact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO memory_code_links(tenant_id,fact_id,code_symbol_version_id,link_type,source) VALUES($1,$2,$3,'evidences','explicit')", tenant, fact, version); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := store.CreateSnapshot(ctx, repo, tenant, "main", "after", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, latest, repo, []PGFileInput{
+		{Path: "a.txt", Language: "text", ContentHash: hashContent("changed")},
+		{Path: "b.txt", Language: "text", ContentHash: identical},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var continuity, status string
+	if err := db.QueryRowContext(ctx, "SELECT continuity,review_status FROM memory_revalidation_events WHERE new_snapshot_id=$1 AND fact_id=$2", latest, fact).Scan(&continuity, &status); err != nil {
+		t.Fatal(err)
+	}
+	if continuity == "renamed" || status != "needs_review" {
+		t.Fatalf("a.txt modification incorrectly cleared as %s:%s", continuity, status)
+	}
+}
