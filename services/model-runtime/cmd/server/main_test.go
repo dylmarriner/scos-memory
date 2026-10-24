@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -210,5 +211,74 @@ func TestConfigRejectsUnknownProtocol(t *testing.T) {
 	cfg, err := configFromEnvironment()
 	if err != nil || cfg.Text.Protocol != protocolLlamaCPP || cfg.Rerank.Protocol != protocolTEI {
 		t.Fatalf("cfg = %+v, %v", cfg, err)
+	}
+}
+
+// An input longer than a llama.cpp backend's context is cut to fit, counted
+// by the backend's own tokenizer, instead of being refused; a short one is
+// sent as it is without a tokenizer round trip.
+func TestLlamaCPPEmbeddingIsCutToTheBackendContext(t *testing.T) {
+	var paths []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch r.URL.Path {
+		case "/tokenize":
+			// One token per word.
+			words := strings.Fields(req["content"].(string))
+			tokens := make([]int, len(words))
+			for i := range tokens {
+				tokens[i] = i
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"tokens": tokens})
+		case "/detokenize":
+			n := len(req["tokens"].([]any))
+			_ = json.NewEncoder(w).Encode(map[string]any{"content": strings.TrimSpace(strings.Repeat("word ", n))})
+		case "/v1/embeddings":
+			if words := len(strings.Fields(req["input"].(string))); words > 32-llamaCPPSpecialTokens {
+				http.Error(w, "input is too large to process", http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float64{0.1, 0.2, 0.3}}}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+	h := newRuntimeHandler(runtimeConfig{
+		Text: backendConfig{URL: backend.URL, Model: "BAAI/bge-m3", Revision: "gguf-q8_0", Dimensions: 3, Protocol: protocolLlamaCPP, MaxTokens: 32},
+	}, &http.Client{Timeout: time.Second})
+
+	long, _ := json.Marshal(map[string]string{"input": strings.Repeat("word ", 100)})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/embed/text", bytes.NewReader(long)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("long input = %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Join(paths, ",") != "/tokenize,/detokenize,/v1/embeddings" {
+		t.Fatalf("calls = %v", paths)
+	}
+
+	paths = nil
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/embed/text", strings.NewReader(`{"input":"short"}`)))
+	if rec.Code != http.StatusOK || strings.Join(paths, ",") != "/v1/embeddings" {
+		t.Fatalf("short input = %d, calls = %v", rec.Code, paths)
+	}
+}
+
+// A token limit that leaves no room beside the special tokens is refused at
+// start-up rather than failing every long input at request time.
+func TestConfigRejectsATokenLimitWithNoRoomForInput(t *testing.T) {
+	for _, value := range []string{"8", "-1", "2O48", "2048 tokens"} {
+		t.Setenv("SCOS_MODEL_TEXT_MAX_TOKENS", value)
+		if _, err := configFromEnvironment(); err == nil {
+			t.Errorf("SCOS_MODEL_TEXT_MAX_TOKENS=%s was accepted", value)
+		}
+	}
+	t.Setenv("SCOS_MODEL_TEXT_MAX_TOKENS", "2048")
+	if cfg, err := configFromEnvironment(); err != nil || cfg.Text.MaxTokens != 2048 {
+		t.Fatalf("2048 = %+v, %v", cfg.Text, err)
 	}
 }

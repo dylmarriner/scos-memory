@@ -202,6 +202,7 @@ var errGraphBuilding = errors.New("graph is being built")
 
 // graphBuild is one in-flight or recently failed extraction for a cache key.
 type graphBuild struct {
+	workDir  string
 	done     chan struct{}
 	err      error
 	finished time.Time
@@ -252,7 +253,7 @@ func (s *graphifyServer) ensureCachedGraph(ctx context.Context, workDir string) 
 		build = nil
 	}
 	if build == nil {
-		build = &graphBuild{done: make(chan struct{})}
+		build = &graphBuild{workDir: workDir, done: make(chan struct{})}
 		s.builds[outDir] = build
 		go s.runBuild(build, workDir, outDir)
 	}
@@ -313,6 +314,12 @@ func (s *graphifyServer) buildInto(ctx context.Context, workDir, outDir string) 
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "graphify-out", "graph.json")); err != nil {
 		return fmt.Errorf("graphify extract produced no graph.json: %w", err)
+	}
+	if _, err := writeGraphMeta(tmp, graphMeta{
+		RepoPath: filepath.Clean(workDir), BuiltAt: time.Now().UTC(),
+		ExtractorVersion: s.extractorVersion(ctx), Backend: s.backend,
+	}); err != nil {
+		return fmt.Errorf("record graph: %w", err)
 	}
 	if err := os.Rename(tmp, outDir); err != nil {
 		if _, statErr := os.Stat(filepath.Join(outDir, "graphify-out", "graph.json")); statErr == nil {

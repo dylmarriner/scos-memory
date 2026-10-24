@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func TestModelRuntimeEmbedTextSendsGovernedAuthAndValidatesSpace(t *testing.T) {
@@ -136,5 +139,42 @@ func TestApplyRerankScoresOrdersByModelBeforeGovernance(t *testing.T) {
 	}
 	if final[0].RerankerScore != 0.95 {
 		t.Fatalf("reranker score not preserved: %#v", final[0])
+	}
+}
+
+// A reranker slower than the configured budget is given up on within the
+// budget, so retrieval answers from RRF + governance in time.
+func TestRerankStageGivesUpAtItsBudget(t *testing.T) {
+	release := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer backend.Close()
+	defer close(release)
+	s := &server{
+		modelRuntime: &modelRuntimeClient{baseURL: backend.URL, httpClient: backend.Client(), serviceToken: "svc", controlPlaneToken: "cp"},
+		rerankLimit:  10,
+		rerankBudget: 100 * time.Millisecond,
+	}
+	started := time.Now()
+	_, _, _, err := s.rerankWithModel(context.Background(), "q", []RetrievalResult{{Content: "a"}, {Content: "b"}})
+	if err == nil {
+		t.Fatal("a reranker past its budget did not fail the stage")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("rerank stage took %v, budget 100ms", elapsed)
+	}
+}
+
+func TestRerankDocumentIsCappedWithoutSplittingACharacter(t *testing.T) {
+	doc := rerankDocument(RetrievalResult{Title: "t", Content: strings.Repeat("é", 50)}, 10)
+	if len(doc) > 10 || !utf8.ValidString(doc) {
+		t.Fatalf("document = %q (%d bytes)", doc, len(doc))
+	}
+	if got := rerankDocument(RetrievalResult{Content: strings.Repeat("x", 20000)}, 0); len(got) != defaultRerankDocumentChars {
+		t.Fatalf("default cap = %d", len(got))
 	}
 }

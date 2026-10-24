@@ -65,6 +65,9 @@ services:
       SCOS_MODEL_TEXT_MODEL: BAAI/bge-m3
       SCOS_MODEL_TEXT_REVISION: ${SCOS_MODEL_TEXT_GGUF_REVISION:-gguf-q8_0}
       SCOS_MODEL_TEXT_DIMENSIONS: "1024"
+      # The servers above run with -c/-b/-ub 2048: a longer input is cut to
+      # fit instead of being refused.
+      SCOS_MODEL_TEXT_MAX_TOKENS: "2048"
       SCOS_MODEL_RERANK_URL: http://bge-reranker-gpu:8080
       SCOS_MODEL_RERANK_PROTOCOL: llamacpp
       SCOS_MODEL_RERANK_MODEL: BAAI/bge-reranker-v2-m3
@@ -82,6 +85,13 @@ services:
       SCOS_MODEL_TEXT_DIMENSIONS: "1024"
       SCOS_MODEL_RERANK_MODEL: BAAI/bge-reranker-v2-m3
       SCOS_MODEL_RERANK_REVISION: ${SCOS_MODEL_RERANK_GGUF_REVISION:-gguf-q8_0}
+      # llama.cpp scores one document at a time in a 2048-token context, so
+      # interactive recall reranks a short head of the candidates, each cut
+      # to fit beside the query, and falls back to RRF + governance rather
+      # than outlast its caller's deadline.
+      SCOS_MODEL_RERANK_CANDIDATES: ${SCOS_MODEL_RERANK_CANDIDATES:-12}
+      SCOS_MODEL_RERANK_DOCUMENT_CHARS: ${SCOS_MODEL_RERANK_DOCUMENT_CHARS:-1500}
+      SCOS_MODEL_RERANK_BUDGET_MS: ${SCOS_MODEL_RERANK_BUDGET_MS:-5000}
 
   embeddings-worker:
     environment:

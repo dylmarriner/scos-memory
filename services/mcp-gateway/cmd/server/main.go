@@ -483,6 +483,12 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			u += "?cascade=true"
 		}
 		return s.forwardDELETE(ctx, r, u)
+	case "scos_redact_history":
+		memoryID := stringArg(args, "memory_id")
+		if memoryID == "" {
+			return nil, fmt.Errorf("memory_id is required")
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/"+url.PathEscape(memoryID)+"/redact", map[string]any{})
 	case "scos_correct_batch":
 		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/facts/batch-correct", map[string]any{
 			"corrections": args["corrections"],
@@ -1709,6 +1715,17 @@ func governedTools() []map[string]any {
 			},
 		},
 		{
+			"name":        "scos_redact_history",
+			"description": "Remove every secret the scanner finds from a memory's stored history, in place: each version, its title and summary, and the diary entries quoting it. Secrets become [REDACTED:kind] markers; nothing else changes. Works on current, superseded and forgotten memories",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_id": map[string]any{"type": "string", "description": "Memory ID whose history to redact"},
+				},
+				"required": []string{"memory_id"},
+			},
+		},
+		{
 			"name":        "scos_forget",
 			"description": "Request removal of a specific memory. cascade=true also forgets the fact's superseded predecessor chain",
 			"inputSchema": map[string]any{
@@ -1849,7 +1866,7 @@ func governedTools() []map[string]any {
 		tool("scos_control_route", "Route an interaction through the autonomous control plane. A decision that requires confirmation returns status awaiting_confirmation and runs nothing until scos_control_confirm", map[string]any{
 			"interaction_id":      strField("Interaction ID"),
 			"actor_id":            strField("Actor ID"),
-			"agent_id":            strField("Agent ID"),
+			"agent_id":            strField("Agent that answers (defaults to, and must match, the caller's agent claim when it has one; required otherwise)"),
 			"session_id":          strField("Session ID"),
 			"turn_id":             strField("Turn ID"),
 			"project_id":          strField("Project ID"),
@@ -1862,7 +1879,7 @@ func governedTools() []map[string]any {
 		tool("scos_control_ingest", "Ingest and route an interaction (alias of scos_control_route)", map[string]any{
 			"interaction_id":      strField("Interaction ID"),
 			"actor_id":            strField("Actor ID"),
-			"agent_id":            strField("Agent ID"),
+			"agent_id":            strField("Agent that answers (defaults to, and must match, the caller's agent claim when it has one; required otherwise)"),
 			"session_id":          strField("Session ID"),
 			"turn_id":             strField("Turn ID"),
 			"project_id":          strField("Project ID"),

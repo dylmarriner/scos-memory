@@ -270,3 +270,46 @@ func TestReplayHoldsAtMostTwiceTheRing(t *testing.T) {
 		t.Fatalf("ring after replay %v, want the last 3", metricValues(s))
 	}
 }
+
+// A request's records are journaled together (one write, one fsync) under
+// consecutive sequence numbers, and a restart replays every one of them.
+func TestIngestJournalsARequestAsOneBatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "observability.jsonl")
+	s, err := newObservabilityServerAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingest(t, s, []MetricPoint{{Name: "a", Value: 1}, {Name: "b", Value: 2}, {Name: "c", Value: 3}})
+	ingestLogs(t, s, `[{"level":"info","service":"svc","message":"one"},{"level":"info","service":"svc","message":"two"}]`)
+	var seqs []uint64
+	if err := s.store.scan(func(r journalRecord) {
+		if r.Kind != "journal" {
+			seqs = append(seqs, r.Seq)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seqs) != 5 {
+		t.Fatalf("journaled %d records, want 5: %v", len(seqs), seqs)
+	}
+	for i, seq := range seqs {
+		if seq != uint64(i+1) {
+			t.Fatalf("sequence numbers %v are not consecutive from 1", seqs)
+		}
+	}
+	if _, seq := s.store.position(); seq != 5 {
+		t.Fatalf("journal position %d, want 5", seq)
+	}
+	_ = s.store.close()
+
+	reopened := restart(t, path, &fakeHistory{})
+	if got := metricValues(reopened); len(got) != 3 {
+		t.Fatalf("restart replayed metrics %v, want three", got)
+	}
+	reopened.mu.RLock()
+	logs := len(reopened.logs)
+	reopened.mu.RUnlock()
+	if logs != 2 {
+		t.Fatalf("restart replayed %d logs, want 2", logs)
+	}
+}

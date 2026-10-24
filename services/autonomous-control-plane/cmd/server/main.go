@@ -930,6 +930,22 @@ func (c *controlPlane) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.TenantID, req.ActorID = tenantID, actorID
+	// Every plan ends in agent dispatch, so a route with no agent can only
+	// degrade after its memory and context stages have run. A caller whose
+	// credential names an agent routes as that agent; any other caller must
+	// name one.
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok && claims.AgentID != "" {
+		if req.AgentID == "" {
+			req.AgentID = claims.AgentID
+		} else if req.AgentID != claims.AgentID {
+			writeControlError(w, http.StatusForbidden, "agent_id does not match the authenticated agent")
+			return
+		}
+	}
+	if strings.TrimSpace(req.AgentID) == "" {
+		writeControlError(w, http.StatusBadRequest, "agent_id is required: every route dispatches an agent")
+		return
+	}
 	planningStarted := time.Now()
 	decision, err := buildRoute(req)
 	if err != nil {
@@ -1387,6 +1403,9 @@ func main() {
 		os.Exit(1)
 	}
 	plane := &controlPlane{db: db, store: store, client: commitClient, committer: memoryGatewayCommitter{endpoint: commitEndpoint, client: commitClient}}
+	// Keep capability health fresh: selection rejects a capability whose
+	// last health check is older than the staleness window.
+	go runCapabilityHealth(context.Background(), commitClient, routingRegistry, capabilityHealthInterval)
 	restoreCtx, cancelRestore := context.WithTimeout(context.Background(), 15*time.Second)
 	if err := plane.restoreCapabilityObservations(restoreCtx, "autonomous-control-plane"); err != nil {
 		cancelRestore()

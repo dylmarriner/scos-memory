@@ -752,19 +752,26 @@ func healthOK(w http.ResponseWriter, _ *http.Request) {
 
 // ── plan endpoint ────────────────────────────────────────────────────────
 
-func validateExecutionRequest(r *http.Request, req ExecuteRequest) error {
+// validateExecutionRequest checks req and fills in the caller's identity:
+// tenant_id and principal_id are optional in the body and default to the
+// authenticated identity (the governed MCP tools document them as optional);
+// when given they must match it.
+func validateExecutionRequest(r *http.Request, req *ExecuteRequest) error {
 	if strings.TrimSpace(req.Command) == "" {
 		return fmt.Errorf("command is required")
 	}
 	if len(req.Command) > 64<<10 {
 		return fmt.Errorf("command exceeds 64 KiB limit")
 	}
-	if req.TenantID == "" || req.PrincipalID == "" {
-		return fmt.Errorf("tenant_id and principal_id are required")
-	}
 	tenant, principal := callerIdentity(r)
 	if tenant == "" || principal == "" {
 		return fmt.Errorf("authenticated tenant and principal headers are required")
+	}
+	if req.TenantID == "" {
+		req.TenantID = tenant
+	}
+	if req.PrincipalID == "" {
+		req.PrincipalID = principal
 	}
 	if tenant != req.TenantID || principal != req.PrincipalID {
 		return fmt.Errorf("request identity does not match authenticated identity")
@@ -796,7 +803,7 @@ func (s *proxyServer) handlePlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateExecutionRequest(r, req); err != nil {
+	if err := validateExecutionRequest(r, &req); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "authenticated") || strings.Contains(err.Error(), "identity") {
 			status = http.StatusUnauthorized
@@ -845,7 +852,7 @@ func (s *proxyServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateExecutionRequest(r, req); err != nil {
+	if err := validateExecutionRequest(r, &req); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "authenticated") || strings.Contains(err.Error(), "identity") {
 			status = http.StatusUnauthorized
@@ -1089,7 +1096,7 @@ func (s *proxyServer) handleExplain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateExecutionRequest(r, req); err != nil {
+	if err := validateExecutionRequest(r, &req); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "authenticated") || strings.Contains(err.Error(), "identity") {
 			status = http.StatusUnauthorized

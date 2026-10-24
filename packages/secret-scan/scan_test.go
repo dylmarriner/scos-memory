@@ -82,6 +82,29 @@ func TestCredentialsInText(t *testing.T) {
 	}
 }
 
+// Paths and compound names are not tokens; encoded tokens still are.
+func TestHighEntropyIgnoresPaths(t *testing.T) {
+	for _, path := range []string{
+		"claude-code@kubuntux:~/.claude/projects/-media-kubuntux-DEVELOPMENT1-Mealify/memory/pref.md",
+		"see run/media/kubuntux/backup_dev_ext4/scos/Data2026/models",
+	} {
+		if f := Scan(path); len(f) != 0 {
+			t.Errorf("Scan(%q) = %+v, want no findings", path, f)
+		}
+	}
+	for _, token := range []string{
+		"blob wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY2 here",
+		"blob wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY2 here",
+		"blob Zx9_kQ3mVb7Lw2Rt-Yp4Hn8Jc6Df1Gs5Ae0 here",
+		// Standard base64 with several slashes is still a token.
+		"blob 75WPD7PS1NEcpT/qJcx7qQP4SIJ7hCY5T1VKF7O4TP0r0LT8FcV+bM/IW/KQJ5lx here",
+	} {
+		if f := Scan(token); len(f) != 1 || f[0].Kind != KindHighEntropy {
+			t.Errorf("Scan(%q) = %+v, want one high_entropy_token", token, f)
+		}
+	}
+}
+
 // A marker elsewhere in the text does not hide a secret beside it, even one
 // made only of punctuation.
 func TestMarkerDoesNotHideANeighbouringSecret(t *testing.T) {

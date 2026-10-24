@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dylmarriner/scos-memory/packages/auth"
 )
 
 type testGovernance struct {
@@ -277,8 +279,35 @@ func TestModeRejectedWhenInvalid(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/execute", nil)
 	r.Header.Set("X-SCOS-Tenant-ID", "t")
 	r.Header.Set("X-SCOS-Principal-ID", "p")
-	if err := validateExecutionRequest(r, req); err == nil {
+	if err := validateExecutionRequest(r, &req); err == nil {
 		t.Fatal("expected invalid mode to be rejected")
+	}
+}
+
+// The governed MCP tools (scos_exec_plan, scos_exec_execute,
+// scos_exec_explain) document tenant_id and principal_id as optional: a
+// request without them takes the authenticated identity, and one that names
+// a different identity is still refused.
+func TestExecutionIdentityDefaultsToTheAuthenticatedCaller(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/plan", nil)
+	r = r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "tenant-a", PrincipalID: "principal-a"}))
+
+	req := ExecuteRequest{Command: "echo hi"}
+	if err := validateExecutionRequest(r, &req); err != nil {
+		t.Fatalf("request without identity fields: %v", err)
+	}
+	if req.TenantID != "tenant-a" || req.PrincipalID != "principal-a" {
+		t.Fatalf("identity not defaulted from the caller: %q/%q", req.TenantID, req.PrincipalID)
+	}
+
+	other := ExecuteRequest{Command: "echo hi", TenantID: "tenant-b", PrincipalID: "principal-a"}
+	if err := validateExecutionRequest(r, &other); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("a different tenant must be refused, got %v", err)
+	}
+
+	anonymous := httptest.NewRequest(http.MethodPost, "/v1/plan", nil)
+	if err := validateExecutionRequest(anonymous, &ExecuteRequest{Command: "echo hi"}); err == nil {
+		t.Fatal("an unauthenticated request must be refused")
 	}
 }
 

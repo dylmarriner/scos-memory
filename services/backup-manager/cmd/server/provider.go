@@ -38,6 +38,10 @@ type BackupProvider interface {
 	// Load reads a backup, verifies it against its manifest, and returns
 	// the manifest and the plain archive.
 	Load(ctx context.Context, id string) (backupManifest, []byte, string, error)
+	// Manifest reads a backup's manifest alone, authenticated where the
+	// provider authenticates manifests, without reading or decrypting the
+	// archive. Load is what proves the archive.
+	Manifest(ctx context.Context, id string) (backupManifest, error)
 	// List returns the ids of every stored backup, verified or not.
 	List(ctx context.Context) ([]string, error)
 	// Remove deletes a backup's archive and manifest.
@@ -186,6 +190,24 @@ func (p *localProvider) Load(_ context.Context, id string) (backupManifest, []by
 	return m, archive, p.archivePath(id), nil
 }
 
+func (p *localProvider) Manifest(_ context.Context, id string) (backupManifest, error) {
+	if err := validBackupID(id); err != nil {
+		return backupManifest{}, err
+	}
+	data, err := os.ReadFile(p.manifestPath(id))
+	if err != nil {
+		return backupManifest{}, err
+	}
+	var artifact backupArtifact
+	if err := json.Unmarshal(data, &artifact); err != nil {
+		return backupManifest{}, err
+	}
+	if artifact.Manifest.ID != id {
+		return backupManifest{}, fmt.Errorf("manifest of %s names %s", id, artifact.Manifest.ID)
+	}
+	return artifact.Manifest, nil
+}
+
 func (p *localProvider) List(context.Context) ([]string, error) {
 	return listIDs(p.dir, ".backup.json")
 }
@@ -295,6 +317,25 @@ func verifyEncrypted(key []byte, id string, manifest, artifact []byte) (backupMa
 		return m, nil, fmt.Errorf("decrypted content hash mismatch")
 	}
 	return m, plain, nil
+}
+
+func (p *filesystemProvider) Manifest(_ context.Context, id string) (backupManifest, error) {
+	if err := validBackupID(id); err != nil {
+		return backupManifest{}, err
+	}
+	data, err := os.ReadFile(p.manifestPath(id))
+	if err != nil {
+		return backupManifest{}, err
+	}
+	var m backupManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return backupManifest{}, err
+	}
+	expected, err := manifestMAC(m, p.key)
+	if err != nil || !hmac.Equal([]byte(expected), []byte(m.ManifestMAC)) || m.ID != id {
+		return backupManifest{}, fmt.Errorf("manifest of %s does not authenticate", id)
+	}
+	return m, nil
 }
 
 func (p *filesystemProvider) List(context.Context) ([]string, error) {

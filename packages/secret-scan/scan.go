@@ -101,7 +101,7 @@ func Scan(content string) []Finding {
 			if p.kind == KindHighEntropy && overlapsAny(loc, claimed) {
 				continue
 			}
-			if p.kind == KindHighEntropy && !mixedCaseAndDigits(content[loc[0]:loc[1]]) {
+			if p.kind == KindHighEntropy && (!mixedCaseAndDigits(content[loc[0]:loc[1]]) || pathLike(content[loc[0]:loc[1]])) {
 				continue
 			}
 			findings = append(findings, Finding{
@@ -196,6 +196,15 @@ func overlapsAny(span [2]int, spans [][2]int) bool {
 		}
 	}
 	return false
+}
+
+// pathLike reports whether a high-entropy candidate is a path or compound
+// name rather than an encoded token: it mixes the standard base64
+// alphabet's '/' or '+' with the URL-safe alphabet's '-' or '_', which no
+// single encoding does ("projects/-media-kubuntux-DEVELOPMENT1-app/memory").
+// Slashes alone are no evidence: standard base64 is full of them.
+func pathLike(s string) bool {
+	return strings.ContainsAny(s, "/+") && strings.ContainsAny(s, "-_")
 }
 
 func mixedCaseAndDigits(s string) bool {

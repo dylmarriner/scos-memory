@@ -239,7 +239,7 @@ class RunCycleTests(unittest.TestCase):
         with patch.object(worker, "_ensure_embedding_space", return_value="space-1"):
             with patch.object(worker, "_activate_embedding_space", side_effect=lambda *_: order.append("activate")):
                 with patch.object(worker, "_unembedded_batch", return_value=[{"id": "v1", "content": "x"}]):
-                    with patch.object(worker, "embed_texts", return_value=None):
+                    with patch.object(worker, "embed_texts_prefix", return_value=([], "backend down")):
                         with self.assertRaises(worker.EmbeddingUnavailable):
                             worker.run_cycle(conn)
         self.assertEqual(order, ["activate", "commit", "rollback"])
@@ -250,12 +250,44 @@ class RunCycleTests(unittest.TestCase):
         with patch.object(worker, "_ensure_embedding_space", return_value="space-1"):
             with patch.object(worker, "_activate_embedding_space"):
                 with patch.object(worker, "_unembedded_batch", return_value=[{"id": "v1", "content": "x"}, {"id": "v2", "content": "y"}]):
-                    with patch.object(worker, "embed_texts", return_value=[[0.0] * worker.MODEL_DIMENSIONS, [0.0] * 3]):
+                    with patch.object(worker, "embed_texts_prefix", return_value=([[0.0] * worker.MODEL_DIMENSIONS, [0.0] * 3], None)):
                         with patch.object(worker, "_replace_embedding", side_effect=lambda *a, **k: stored.append(k)):
                             with self.assertRaises(worker.EmbeddingUnavailable):
                                 worker.run_cycle(conn)
         self.assertEqual(stored, [])
         self.assertEqual(conn.rollbacks, 1)
+
+    def test_versions_before_a_failing_one_are_kept_and_the_failure_is_reported(self):
+        conn = self.FakeConn()
+        stored = []
+        batch = [{"id": "v1", "content": "x"}, {"id": "v2", "content": "too long"}, {"id": "v3", "content": "z"}]
+        with patch.object(worker, "_ensure_embedding_space", return_value="space-1"):
+            with patch.object(worker, "_activate_embedding_space"):
+                with patch.object(worker, "_unembedded_batch", return_value=batch):
+                    with patch.object(worker, "embed_texts_prefix", return_value=([[0.0] * worker.MODEL_DIMENSIONS], "HTTP Error 502")):
+                        with patch.object(worker, "_replace_embedding", side_effect=lambda *a, **k: stored.append(k["version_id"])):
+                            with self.assertRaises(worker.EmbeddingUnavailable) as raised:
+                                worker.run_cycle(conn)
+        self.assertEqual(stored, ["v1"])
+        self.assertEqual(conn.commits, 2)
+        self.assertIn("v2", str(raised.exception))
+
+    def test_prefix_stops_at_the_first_failing_text(self):
+        calls = []
+
+        def fake(text):
+            calls.append(text)
+            if text == "bad":
+                raise RuntimeError("model runtime unavailable: HTTP Error 502")
+            return [0.0] * worker.MODEL_DIMENSIONS
+
+        with patch.object(worker, "MODEL_RUNTIME_URL", "https://model-runtime:8103"):
+            with patch.object(worker, "_runtime_embed_text", side_effect=fake):
+                vectors, failure = worker.embed_texts_prefix(["a", "bad", "c"])
+                self.assertIsNone(worker.embed_texts(["a", "bad"]))
+        self.assertEqual(len(vectors), 1)
+        self.assertIn("502", failure)
+        self.assertEqual(calls, ["a", "bad", "a", "bad"])
 
 
 class ActivationTests(unittest.TestCase):
