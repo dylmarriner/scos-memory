@@ -14,11 +14,11 @@ import (
 
 func TestGovernedToolsListsAllGovernedTools(t *testing.T) {
 	tools := governedTools()
-	if len(tools) != 158 {
-		t.Fatalf("expected 158 governed tools, got %d", len(tools))
+	if len(tools) != 159 {
+		t.Fatalf("expected 159 governed tools, got %d", len(tools))
 	}
 	names := governedToolNames()
-	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_remember", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain"} {
+	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_remember", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain", "scos_code_revalidations"} {
 		if !names[want] {
 			t.Fatalf("expected governed tool %q to be present", want)
 		}
@@ -48,8 +48,8 @@ func TestHandleMCPToolsList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(resp.Result.Tools) != 158 {
-		t.Fatalf("expected 158 tools in tools/list response, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 159 {
+		t.Fatalf("expected 159 tools in tools/list response, got %d", len(resp.Result.Tools))
 	}
 }
 
@@ -587,6 +587,52 @@ func TestDispatchExecExecuteRefusesSelfAssertedConfirmation(t *testing.T) {
 		properties := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
 		if _, ok := properties["confirmed"]; ok {
 			t.Fatal("scos_exec_execute still advertises a confirmed argument")
+		}
+	}
+}
+
+// TestCodeRevalidationToolForwardsOnlyTheVerifiedIdentity ensures this new
+// read-only tool cannot use caller-injected headers to widen review scope.
+func TestCodeRevalidationToolForwardsOnlyTheVerifiedIdentity(t *testing.T) {
+	var gotPath, gotTenant, gotPrincipal string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		gotTenant = r.Header.Get("X-SCOS-Tenant-ID")
+		gotPrincipal = r.Header.Get("X-SCOS-Principal-ID")
+		if r.Method != http.MethodGet {
+			t.Errorf("upstream method %s, want GET", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{codeIntelligenceURL: upstream.URL, client: upstream.Client()}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	r.Header.Set("X-SCOS-Tenant-ID", "forged-tenant")
+	r.Header.Set("X-SCOS-Principal-ID", "forged-principal")
+	got, err := s.dispatchTool(r.Context(), r,
+		requestIdentity{TenantID: "real-tenant", PrincipalID: "real-principal"},
+		"scos_code_revalidations",
+		map[string]any{"repository_id": "11111111-1111-1111-1111-111111111111", "limit": float64(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.([]any); !ok {
+		t.Fatalf("unexpected event payload %T: %v", got, got)
+	}
+	if gotPath != "/v2/code/revalidations?limit=3&repository_id=11111111-1111-1111-1111-111111111111" {
+		t.Errorf("unexpected forwarded route %q", gotPath)
+	}
+	if gotTenant != "real-tenant" || gotPrincipal != "real-principal" {
+		t.Fatalf("identity spoofing: forwarded tenant=%q principal=%q", gotTenant, gotPrincipal)
+	}
+	for _, input := range []any{float64(0), float64(101), float64(1.5), "100"} {
+		if _, err := s.dispatchTool(r.Context(), r,
+			requestIdentity{TenantID: "real-tenant", PrincipalID: "real-principal"},
+			"scos_code_revalidations", map[string]any{
+				"repository_id": "11111111-1111-1111-1111-111111111111", "limit": input,
+			}); err == nil {
+			t.Errorf("invalid limit %v was accepted", input)
 		}
 	}
 }
