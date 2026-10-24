@@ -1,6 +1,7 @@
 package benchmarkharness
 
 import (
+	"math"
 	"testing"
 )
 
@@ -26,5 +27,41 @@ func TestMetrics(t *testing.T) {
 	ndcg := ComputeNDCGAtK(expected, retrieved, 3)
 	if ndcg <= 0.0 || ndcg > 1.0 {
 		t.Fatalf("expected nDCG to be between 0 and 1, got %f", ndcg)
+	}
+}
+
+func TestMetricsCountEachRelevantDocumentOnlyOnce(t *testing.T) {
+	expected := []string{"a", "b"}
+	retrieved := []string{"a", "a", "a"}
+	if got := ComputeRecallAtK(expected, retrieved, 3); got != 0.5 {
+		t.Errorf("duplicate Recall@3 = %v, want 0.5", got)
+	}
+	if got := ComputePrecisionAtK(expected, retrieved, 3); math.Abs(got-1.0/3.0) > 1e-12 {
+		t.Errorf("duplicate Precision@3 = %v, want 1/3", got)
+	}
+	wantNDCG := 1 / (1 + 1/math.Log2(3))
+	if got := ComputeNDCGAtK(expected, retrieved, 3); math.Abs(got-wantNDCG) > 1e-12 {
+		t.Errorf("duplicate nDCG@3 = %v, want %v", got, wantNDCG)
+	}
+}
+func TestMetricsDeduplicateGroundTruthAndBoundK(t *testing.T) {
+	expected := []string{"a", "a"}
+	retrieved := []string{"a", "b"}
+	if got := ComputeRecallAtK(expected, retrieved, 2); got != 1 {
+		t.Errorf("duplicated ground truth Recall@2 = %v, want 1", got)
+	}
+	if got := ComputeNDCGAtK(expected, retrieved, 2); got != 1 {
+		t.Errorf("duplicated ground truth nDCG@2 = %v, want 1", got)
+	}
+	for _, k := range []int{-100, 0} {
+		if got := ComputeNDCGAtK(expected, retrieved, k); got != 0 {
+			t.Errorf("nDCG@%d = %v, want 0", k, got)
+		}
+		if got := ComputeRecallAtK(expected, retrieved, k); got != 0 {
+			t.Errorf("Recall@%d = %v, want 0", k, got)
+		}
+		if got := ComputePrecisionAtK(expected, retrieved, k); got != 0 {
+			t.Errorf("Precision@%d = %v, want 0", k, got)
+		}
 	}
 }
