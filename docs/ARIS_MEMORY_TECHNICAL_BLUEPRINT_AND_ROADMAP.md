@@ -348,6 +348,16 @@ Candidate scoring may consider:
 
 Promotion thresholds can vary by memory type. A harmless preference and a security-sensitive machine fact need not share identical policy.
 
+## Owner-Governed Evolution evidence contract (2026-10-25)
+
+[ARIS Owner-Governed Evolution Engine](https://github.com/dylmarriner/ARIS/blob/main/docs/architecture/owner-governed-evolution.md) makes real self-modification an explicit product capability. SCOS Memory is the **durable evidence/provenance plane**, not the authority that approves an experiment or deploys a change.
+
+Memory may retain and retrieve revision-linked proposals, experiments, baseline-versus-candidate scores, resource/API costs, verified outcomes, failed attempts, regressions, owner decision references, adopted skills, and rollback/lineage. Candidate improvements may target any ARIS subsystem, including Memory itself. Do not impose arbitrary idea-level proposal denials through memory retrieval or consolidation.
+
+**Default design preference:** owner approval for **testing only**, followed by test-result review and a **separate** approval for deployment. An owner preference or a memory record is **never** itself an executable TEST or DEPLOY grant. SCOS cannot forge, mutate or issue owner proof. Authoritative authentication/grants belong to ARIS's independent decision/enforcement path; Memory stores references/hashes/audit evidence only.
+
+Memory consolidation may learn from approved, rejected and failed proposals as evidence, but must not independently apply candidate source changes, activate skills, overwrite active model weights or install updates. Provenance must bind candidate hash, origin trace, experiment and evaluator versions, result artifacts, decision reference and supersession/rollback records. Sensitive diffs, credentials and logs remain scoped/redacted.
+
 ## 16. User correction and deletion
 
 Memory must support correction/supersession workflows with audit history.
@@ -509,8 +519,9 @@ It should not maintain divergent durable truth.
 - semantic candidate proposals.
 - repeated-pattern detection.
 - skill-lesson/procedure candidate support for Harness.
+- evolution experiment/proposal/result provenance, including rejected and failed candidates without treating them as permission to execute.
 
-**Exit:** long histories become useful candidates while promotion remains governed.
+**Exit:** long histories become useful candidates while promotion remains governed; Memory never automatically deploys learned self-modifications.
 
 ### M8 - Governance and transparency
 
@@ -518,8 +529,9 @@ It should not maintain divergent durable truth.
 - promotion/provenance inspection.
 - correction/supersession workflows.
 - governance audit gates.
+- owner-decision references and exact evaluated candidate versions are inspectable, but approvals remain independently enforced outside Memory.
 
-**Exit:** important durable memories can be inspected, traced and corrected.
+**Exit:** important durable memories and evolution experiments can be inspected, traced and corrected without becoming a second Executive.
 
 ### M9 - Production resilience
 
