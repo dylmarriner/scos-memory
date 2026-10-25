@@ -765,6 +765,19 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 // ErrSymbolNotFound is returned when a query matches no symbol in the
 // active snapshot for the requested branch.
 var ErrSymbolNotFound = errors.New("symbol not found")
+var errHistoricalImpactTooBroad = errors.New("too many matching historical symbols; use an exact fully-qualified name")
+
+// Depth and total unique-node limits are independent: a one-hop star can
+// exceed the resource budget even when its requested depth is only one.
+const (
+	maxImpactDepth = 8
+	maxImpactNodes = 512
+	maxImpactEdges = 4096
+)
+
+var errImpactDepthTooLarge = errors.New("impact max_depth exceeds supported limit of 8")
+var errImpactNodeBudgetExceeded = errors.New("impact node budget exceeded; narrow the symbol query")
+var errImpactEdgeBudgetExceeded = errors.New("impact edge budget exceeded; narrow the symbol query")
 
 // QueryByPathOrFQN resolves query against the *active* snapshot for
 // (repositoryID, branch) only -- never a superseded one, so a stale
@@ -1170,14 +1183,22 @@ type PGImpact struct {
 	TransitiveDependents []PGSymbolVersion
 	MaxDepth             int
 	KnowledgeDependents  []PGKnowledgeImpact
+	// CodeEvidencePaths contains shortest deterministic reverse-CALLS chains
+	// from matched seeds to each reached symbol version (inclusive).
+	CodeEvidencePaths map[string][]string `json:"code_evidence_paths,omitempty"`
+	// Historical impact is pinned to a concrete immutable code snapshot.
+	// Linked memory facts are evaluated under current authorization/validity.
+	SnapshotID     string `json:"snapshot_id,omitempty"`
+	CommitID       string `json:"commit_id,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	Historical     bool   `json:"historical,omitempty"`
+	KnowledgeScope string `json:"knowledge_scope,omitempty"`
 }
 
 // pageRankDamping and pageRankIterations are ChangeImpact's fixed
 // PageRank parameters (P0-A). 0.85 is the standard PageRank damping
-// factor; 30 power iterations is comfortably past convergence for the
-// bounded-size subgraphs ChangeImpact ever ranks (visited is capped by
-// MaxDepth hops from a handful of matched symbols, not the whole
-// repository graph).
+// factor; 30 power iterations run only on the at-most-512-node impact
+// subgraph, not the full repository graph.
 const (
 	pageRankDamping    = 0.85
 	pageRankIterations = 30
@@ -1191,6 +1212,9 @@ const (
 // central symbol (a logging helper called from everywhere) can't turn one
 // request into a full-graph traversal.
 func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
+	if maxDepth > maxImpactDepth {
+		return nil, errImpactDepthTooLarge
+	}
 	if maxDepth <= 0 {
 		maxDepth = 3
 	}
@@ -1206,11 +1230,71 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 			return nil, fmt.Errorf("resolve name: %w", err)
 		}
 	}
+	return s.changeImpactFromMatches(ctx, matched, maxDepth)
+}
+
+// ChangeImpactHistorical traverses code edges only in the explicitly selected
+// immutable generation. It reuses the historical query's tenant, branch,
+// snapshot-status and ambiguous-commit checks, but requires an exact symbol
+// anchor rather than treating arbitrary lexical candidates as blast-radius seeds.
+func (s *pgCodeStore) ChangeImpactHistorical(
+	ctx context.Context, tenant, repository, branch, commit, snapshot, query string, maxDepth int,
+) (*PGImpact, error) {
+	if maxDepth > maxImpactDepth {
+		return nil, errImpactDepthTooLarge
+	}
+	historical, err := s.QueryHistoricalCode(ctx, tenant, repository, branch, commit, snapshot, query, 100)
+	if err != nil {
+		return nil, err
+	}
+	matched, ok := historical["results"].([]PGSymbolVersion)
+	if !ok || len(matched) == 0 || historical["retrieval_mode"] != "historical_exact" {
+		return nil, ErrSymbolNotFound
+	}
+	// QueryHistoricalCode caps results at 100. Hitting that limit means
+	// the actual match count is unknown, so fail instead of hiding affected
+	// symbols behind a deceptively complete blast-radius response.
+	if len(matched) >= 100 {
+		return nil, errHistoricalImpactTooBroad
+	}
+	impact, err := s.changeImpactFromMatches(ctx, matched, maxDepth)
+	if err != nil {
+		return nil, err
+	}
+	impact.Historical = true
+	// Matched versions already carry the resolved immutable generation's
+	// identity; avoid unchecked assertions on the generic response map.
+	impact.SnapshotID = matched[0].SnapshotID
+	impact.CommitID = matched[0].CommitID
+	impact.Branch = matched[0].Branch
+	return impact, nil
+}
+
+func (s *pgCodeStore) changeImpactFromMatches(
+	ctx context.Context, matched []PGSymbolVersion, maxDepth int,
+) (*PGImpact, error) {
+	if maxDepth > maxImpactDepth {
+		return nil, errImpactDepthTooLarge
+	}
 	if len(matched) == 0 {
 		return nil, ErrSymbolNotFound
 	}
-
-	impact := &PGImpact{MatchedSymbols: matched, MaxDepth: maxDepth}
+	if len(matched) > maxImpactNodes {
+		return nil, errImpactNodeBudgetExceeded
+	}
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
+	impact := &PGImpact{
+		MatchedSymbols: matched, MaxDepth: maxDepth,
+		SnapshotID: matched[0].SnapshotID, CommitID: matched[0].CommitID,
+		Branch: matched[0].Branch, KnowledgeScope: "current_visible_facts",
+	}
+	for _, item := range matched {
+		if item.SnapshotID != impact.SnapshotID {
+			return nil, fmt.Errorf("impact seeds span multiple snapshots")
+		}
+	}
 	visited := make(map[string]bool, len(matched))
 	seeds := make([]string, 0, len(matched))
 	frontier := make([]string, 0, len(matched))
@@ -1220,15 +1304,27 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 		frontier = append(frontier, m.SymbolVersionID)
 	}
 
+	impact.CodeEvidencePaths = codeImpactEvidencePaths(seeds, nil)
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
-		next, err := s.callersOf(ctx, frontier)
+		next, err := s.callersOf(ctx, frontier, impact.SnapshotID)
 		if err != nil {
 			return nil, fmt.Errorf("callers at depth %d: %w", depth, err)
 		}
+		if len(next) > maxImpactNodes {
+			return nil, errImpactNodeBudgetExceeded
+		}
 		var newFrontier []string
 		for _, n := range next {
+			// Never let an inconsistent cross-generation edge expand an
+			// immutable historical (or current) snapshot's blast radius.
+			if n.SnapshotID != impact.SnapshotID {
+				continue
+			}
 			if visited[n.SymbolVersionID] {
 				continue
+			}
+			if len(visited) >= maxImpactNodes {
+				return nil, errImpactNodeBudgetExceeded
 			}
 			visited[n.SymbolVersionID] = true
 			newFrontier = append(newFrontier, n.SymbolVersionID)
@@ -1250,6 +1346,13 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 		if err != nil {
 			return nil, fmt.Errorf("load ranking edges: %w", err)
 		}
+		paths := codeImpactEvidencePaths(seeds, edges)
+		for id := range visited {
+			if _, exists := paths[id]; !exists {
+				return nil, fmt.Errorf("impact evidence path missing for visited symbol %s", id)
+			}
+		}
+		impact.CodeEvidencePaths = paths
 		ranks := personalizedPageRank(nodes, edges, seeds, pageRankDamping, pageRankIterations)
 		idOf := func(v PGSymbolVersion) string { return v.SymbolVersionID }
 		fqnOf := func(v PGSymbolVersion) string { return v.FullyQualifiedName }
@@ -1269,9 +1372,9 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 // edgesAmong returns the CALLS adjacency (source -> targets) restricted to
 // edges whose source and target are both in symbolVersionIDs -- the
 // subgraph ChangeImpact's BFS already visited, not the whole repository
-// graph. Ranking only this bounded set is what keeps personalizedPageRank
-// cheap: it scales with one change's blast radius, not with repository
-// size.
+// graph. Even 512 nodes can contain hundreds of thousands of edges, so
+// fail closed beyond 4096 CALLS rows rather than silently ranking a partial
+// graph. The SQL LIMIT bounds rows transferred before Go enforces the cap.
 func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string) (map[string][]string, error) {
 	edges := make(map[string][]string, len(symbolVersionIDs))
 	if len(symbolVersionIDs) == 0 {
@@ -1289,15 +1392,21 @@ func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string)
 		FROM code_edges
 		WHERE relation = 'CALLS'
 		  AND source_symbol_version_id IN (%s)
-		  AND target_symbol_version_id IN (%s)`,
-		inList, inList)
+		  AND target_symbol_version_id IN (%s)
+		LIMIT %d`,
+		inList, inList, maxImpactEdges+1)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query edges among visited: %w", err)
 	}
 	defer rows.Close()
 
+	count := 0
 	for rows.Next() {
+		count++
+		if count > maxImpactEdges {
+			return nil, errImpactEdgeBudgetExceeded
+		}
 		var source, target string
 		if err := rows.Scan(&source, &target); err != nil {
 			return nil, fmt.Errorf("scan edge row: %w", err)
@@ -1311,10 +1420,10 @@ func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string)
 // of targetSymbolVersionIDs. Built with individual placeholders rather
 // than passing a Go slice as a single array parameter: whether the
 // database/sql driver in use accepts a slice for `= ANY($1)` is a
-// driver-specific behavior this doesn't want to depend on, and the
-// per-layer fan-in a change-impact BFS deals with is never large enough
-// for this to matter.
-func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []string) ([]PGSymbolVersion, error) {
+// driver-specific behavior this doesn't want to depend on. The result is
+// capped at maxImpactNodes+1, with a snapshot filter, so a wide fan-in
+// is rejected rather than silently truncated or polluted by other snapshots.
+func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []string, snapshotID string) ([]PGSymbolVersion, error) {
 	if len(targetSymbolVersionIDs) == 0 {
 		return nil, nil
 	}
@@ -1329,8 +1438,11 @@ func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []st
 		FROM code_edges e
 		JOIN code_symbol_versions sv ON sv.id = e.source_symbol_version_id
 		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
-		WHERE e.relation = 'CALLS' AND e.target_symbol_version_id IN (%s)`,
-		strings.Join(placeholders, ","))
+		WHERE e.relation = 'CALLS' AND e.target_symbol_version_id IN (%s)
+		  AND sv.snapshot_id = $%d
+		LIMIT %d`,
+		strings.Join(placeholders, ","), len(args)+1, maxImpactNodes+1)
+	args = append(args, snapshotID)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query callers: %w", err)
