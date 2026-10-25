@@ -13,7 +13,35 @@ intent, and mixed memory/code evidence.
 BGE-Code rather than lexical coincidence. `forbidden_ids` records evidence
 that must not be surfaced as current truth.
 
-CI validates structural integrity only. Measured Recall@K, MRR, nDCG and
-latency require a benchmark runner against a configured retrieval deployment;
-those measurements belong to P0 and must include the git SHA and model-space
-identity used for the run.
+CI validates structural integrity and the offline lexical regression gate below.
+Actual deployed Recall@K, MRR, nDCG and latency still require a benchmark
+runner against a configured retrieval deployment with git SHA and model-space
+identity recorded.
+
+## Deterministic offline quality gate (P0 partial)
+
+Run from the repository root:
+
+```bash
+python3 -m unittest benchmarks.p4.test_fixture benchmarks.p4.test_offline_gate -v
+python3 -m benchmarks.p4.offline_gate --check benchmarks/p4/lexical_baseline.json
+```
+
+This invokes the actual dependency-free `DeterministicLexicalBaseline` from
+`benchmarks/harness.py` against every case in the frozen fixture. The
+committed `lexical_baseline.json` records observed per-case rankings,
+Recall@5/10/20, Precision@5/10/20, MRR, nDCG@5/10/20 and forbidden-at-5
+exposure, with fixture SHA-256, engine version, base Git SHA, generator digest and deployment
+class. CI rejects missing/extra cases, corpus changes, decreased per-case
+quality, increased forbidden exposure, and mismatched engine identity. It
+never auto-updates the baseline. Explicitly re-record after review with
+`python3 -m benchmarks.p4.offline_gate --record-baseline benchmarks/p4/lexical_baseline.json`.
+
+**Scope:** This is a regression gate for a deliberately tiny *lexical smoke*
+corpus, not a test of FTS, vector, RRF, BGE, tenant isolation, live latency,
+or production retrieval quality. It does not claim P0 completion or model
+superiority. The 7 cases are easy for lexical overlap, so even 100% Recall@5
+here is not meaningful superiority evidence. Full/live runs require an
+explicitly configured deployment, frozen realistic corpora, model-space and
+schema provenance, latency/cost measurements, and human-reviewed thresholds.
+No live service is contacted by this gate.

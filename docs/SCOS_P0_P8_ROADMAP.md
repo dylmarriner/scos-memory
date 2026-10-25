@@ -130,8 +130,22 @@ Operational rules:
 - `benchmarks/p4/retrieval_fixture.json`
 - `benchmarks/p4/test_fixture.py`
 - `benchmarks/p4/README.md`
+- `benchmarks/p4/offline_gate.py`, `lexical_baseline.json`, and CI regression tests (isolated lexical smoke only; not full P0 qualification)
 
 The P4 fixture is deliberately a deterministic smoke/regression corpus. It is not presented as proof that one model stack is superior.
+
+**P0 offline quality-gate evidence (2026-10-26, review branch):**
+An isolated runner executes the existing real deterministic lexical retriever
+against all seven frozen P4 fixture queries, records ranked IDs, per-case
+Recall@5/10/20, Precision@5/10/20, MRR, nDCG@5/10/20, and forbidden-at-5
+exposure, and compares against a checked-in measured baseline. Six initial
+subprocess/integration tests were RED before implementation and GREEN after.
+CI now fails closed on corpus drift, missing cases, quality regression and
+increased forbidden exposure; the baseline records fixture digest, engine,
+version, checked-out base Git SHA, generator digest and deployment class. This is *only* an offline lexical smoke
+regression gate. It is not BGE, FTS, RRF, tenant-isolation or live P0 quality
+qualification. Full/live model baselines, realistic corpora, latency/cost,
+and independent approval remain outstanding. Do not count this as P0 complete.
 
 ## Remaining
 

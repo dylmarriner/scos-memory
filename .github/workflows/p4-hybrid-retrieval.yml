@@ -187,8 +187,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Validate frozen P4 fixture
-        run: python -m unittest benchmarks.p4.test_fixture -v
+      - name: Validate frozen P4 fixture and offline benchmark gate
+        run: python -m unittest benchmarks.p4.test_fixture benchmarks.p4.test_offline_gate -v
+      - name: Enforce measured lexical retrieval regression thresholds
+        run: python -m benchmarks.p4.offline_gate --check benchmarks/p4/lexical_baseline.json
 
   hosted-deployment:
     name: Hosted model-overlay syntax
