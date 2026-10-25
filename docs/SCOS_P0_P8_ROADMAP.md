@@ -283,6 +283,18 @@ gap, **not** edge-density/SQL-work budgets, graph completeness, or cross-domain
 impact qualification. Review, merge, deployed acceptance and recovery gates
 remain outstanding.
 
+**P8 impact edge-budget regression (2026-10-26; PR #58 review branch):**
+A PostgreSQL 17 integration fixture with 65/66 visited nodes and 4096/4225
+real CALLS edges demonstrated that depth and node budgets alone still allow
+dense graphs to overwhelm the PageRank adjacency load (RED). Ranking adjacency
+now uses SQL LIMIT 4097 and rejects any result exceeding 4096 CALLS edges
+without returning a partial graph (GREEN). Current and immutable historical
+queries both enforce the limit; HTTP returns 422. Exact-boundary and overflow
+fixtures assert their persisted edge counts and verify the behavior. This
+closes the unbounded ranking-edge transfer gap, **not** database query-work
+budgets, latency/scale qualification, or full P8 acceptance. No production
+deployment is authorized by this evidence.
+
 **Not P1/P5/P8 completion:**
 other active-only APIs, temporal memory semantics, retention/GC acceptance, production
 deployment/recovery, independent review and merge remain open.

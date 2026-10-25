@@ -772,10 +772,12 @@ var errHistoricalImpactTooBroad = errors.New("too many matching historical symbo
 const (
 	maxImpactDepth = 8
 	maxImpactNodes = 512
+	maxImpactEdges = 4096
 )
 
 var errImpactDepthTooLarge = errors.New("impact max_depth exceeds supported limit of 8")
 var errImpactNodeBudgetExceeded = errors.New("impact node budget exceeded; narrow the symbol query")
+var errImpactEdgeBudgetExceeded = errors.New("impact edge budget exceeded; narrow the symbol query")
 
 // QueryByPathOrFQN resolves query against the *active* snapshot for
 // (repositoryID, branch) only -- never a superseded one, so a stale
@@ -1359,9 +1361,9 @@ func (s *pgCodeStore) changeImpactFromMatches(
 // edgesAmong returns the CALLS adjacency (source -> targets) restricted to
 // edges whose source and target are both in symbolVersionIDs -- the
 // subgraph ChangeImpact's BFS already visited, not the whole repository
-// graph. Ranking only this bounded set is what keeps personalizedPageRank
-// cheap: it scales with one change's blast radius, not with repository
-// size.
+// graph. Even 512 nodes can contain hundreds of thousands of edges, so
+// fail closed beyond 4096 CALLS rows rather than silently ranking a partial
+// graph. The SQL LIMIT bounds rows transferred before Go enforces the cap.
 func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string) (map[string][]string, error) {
 	edges := make(map[string][]string, len(symbolVersionIDs))
 	if len(symbolVersionIDs) == 0 {
@@ -1379,15 +1381,21 @@ func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string)
 		FROM code_edges
 		WHERE relation = 'CALLS'
 		  AND source_symbol_version_id IN (%s)
-		  AND target_symbol_version_id IN (%s)`,
-		inList, inList)
+		  AND target_symbol_version_id IN (%s)
+		LIMIT %d`,
+		inList, inList, maxImpactEdges+1)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query edges among visited: %w", err)
 	}
 	defer rows.Close()
 
+	count := 0
 	for rows.Next() {
+		count++
+		if count > maxImpactEdges {
+			return nil, errImpactEdgeBudgetExceeded
+		}
 		var source, target string
 		if err := rows.Scan(&source, &target); err != nil {
 			return nil, fmt.Errorf("scan edge row: %w", err)
