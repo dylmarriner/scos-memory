@@ -98,6 +98,7 @@ func (s *pgCodeStore) KnowledgeImpact(
 			" JOIN code_repositories repo ON repo.id=snap.repository_id AND repo.tenant_id=$1" +
 			" WHERE l.tenant_id=$1 AND l.code_symbol_version_id IN (" + strings.Join(placeholders, ",") + ")" +
 			" AND mi.status='active' AND mi.sensitivity<=ns.sensitivity_ceiling" +
+			" AND (mi.valid_from IS NULL OR mi.valid_from<=now())" +
 			" AND (mi.valid_until IS NULL OR mi.valid_until>now())" +
 			" AND (mi.expires_at IS NULL OR mi.expires_at>now())" +
 			" ORDER BY mi.id,l.id LIMIT 201"

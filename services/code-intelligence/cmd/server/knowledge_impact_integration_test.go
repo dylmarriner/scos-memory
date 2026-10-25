@@ -80,6 +80,11 @@ func TestPGKnowledgeImpactHonoursScopeAndCodeProvenance(t *testing.T) {
 		return id
 	}
 	visibleFact := fact(tenant, namespace, owner, "visible core", core)
+	futureFact := fact(tenant, namespace, owner, "not yet effective", core)
+	if _, err := db.ExecContext(ctx, "UPDATE memory_items SET valid_from=now()+interval '2 days' WHERE id=$1", futureFact); err != nil {
+		t.Fatal(err)
+	}
+
 	privateFact := fact(tenant, private, outsider, "private caller", caller)
 	// A legitimate foreign-tenant evidence graph must not be visible when
 	// a caller tries to reuse this repository's affected-symbol IDs.
