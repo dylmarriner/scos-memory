@@ -1227,7 +1227,7 @@ func (s *pgCodeStore) ReactivateSnapshot(ctx context.Context, snapshotID string)
 func (s *pgCodeStore) SetSnapshotStatus(ctx context.Context, snapshotID, status, failure string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE code_repository_snapshots SET status = $2::code_snapshot_status, error = NULLIF($3, '')
-		 WHERE id = $1 AND status <> 'ready' AND status <> 'active'`, snapshotID, status, failure)
+		 WHERE id = $1 AND status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')`, snapshotID, status, failure)
 	return err
 }
 

@@ -200,6 +200,15 @@ These checks protect one-generation ownership and immutability but **do not**
 establish cross-generation activation serialization, forced process termination,
 full recovery, production readiness or completion of the P1 gate.
 
+**P1 late-worker status race regression (2026-10-25; PR #55, pending review/merge):**
+CodeRabbit identified a race where a late indexing/diff error could overwrite a
+superseded, reactivatable generation as failed. A real PostgreSQL 17 test first
+reproduced this corruption (RED), then passed (GREEN) after constraining
+`SetSnapshotStatus` to pending states only. A second regression confirms
+queued generations can still transition to failed for recovery. All 63
+migrations applied to an isolated disposable database. This does not establish
+process-kill or production recovery acceptance.
+
 ---
 
 # P2 — SCIP + AST / Tree-sitter Extraction
