@@ -78,3 +78,53 @@ func TestPGHistoricalCodeQueryUsesImmutableCommit(t *testing.T) {
 	check(map[string]any{"repository_id": repo, "branch": "main", "query": "pkg/legacy.txt", "as_of_commit": "commit-old"}, tenant, 409)
 	check(map[string]any{"repository_id": repo, "branch": "main", "query": "pkg/legacy.txt", "snapshot_id": old, "as_of_commit": "commit-old"}, tenant, 200)
 }
+
+func TestPGHistoricalCodeLexicalUsesEnglishStemming(t *testing.T) {
+	store, db := testPGStore(t)
+	tenant := testTenant(t, db)
+	ctx := t.Context()
+	repo, err := store.EnsureRepository(ctx, tenant, "/historical-lexical/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.CreateSnapshot(ctx, repo, tenant, "main", "old-doc", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "package gateway\n\n// resolveIdentity authenticates a caller from its bearer token.\nfunc resolveIdentity(token string) string { return token }\n"
+	if err := store.IndexSnapshot(ctx, before, repo, []PGFileInput{{Path: "gateway/identity.go", Language: "go", ContentHash: hashContent(source), Content: source}}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.CreateSnapshot(ctx, repo, tenant, "main", "current-doc", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, after, repo, []PGFileInput{{Path: "gateway/page.go", Language: "go", ContentHash: hashContent("package gateway\nfunc renderPage() {}\n"), Content: "package gateway\nfunc renderPage() {}\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	resp := pgRequest(t, &server{pgStore: store}, http.MethodPost, "/v2/code/query", tenant, map[string]any{
+		"repository_id": repo, "branch": "main", "query": "bearer tokens", "as_of_commit": "old-doc",
+	})
+	if resp.Code != 200 {
+		t.Fatalf("historical lexical status %d: %s", resp.Code, resp.Body.String())
+	}
+	var result struct {
+		Results       []PGSymbolVersion `json:"results"`
+		RetrievalMode string            `json:"retrieval_mode"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.RetrievalMode != "historical_lexical" {
+		t.Fatalf("mode: %s", result.RetrievalMode)
+	}
+	found := false
+	for _, symbol := range result.Results {
+		if symbol.FullyQualifiedName == "gateway.resolveIdentity" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("historical lexical stemming failed: %+v", result.Results)
+	}
+}

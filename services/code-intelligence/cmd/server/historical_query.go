@@ -54,19 +54,38 @@ func (s *pgCodeStore) QueryHistoricalCode(
 	output := map[string]any{"snapshot_id": ids[0], "commit_id": commits[0], "branch": branch}
 	for pass := 0; pass < 2; pass++ {
 		filter := "(sv.path=$2 OR sv.fully_qualified_name=$2)"
+		rank := "0::double precision"
 		mode := "historical_exact"
 		match := "exact"
+		simple, english := "", ""
 		if pass == 1 {
-			filter = "sv.search_vector @@ plainto_tsquery('simple', regexp_replace($2, '[/._-]', ' ', 'g'))"
+			simple, english = codeSearchTerms(query)
 			mode = "historical_lexical"
 			match = "lexical"
+			if simple == "" {
+				output["results"] = []PGSymbolVersion{}
+				output["retrieval_mode"] = mode
+				output["degraded_models"] = []string{}
+				output["historical"] = true
+				return output, nil
+			}
+			filter = "NULLIF($2::text, '') IS NOT NULL AND sv.search_vector @@ (to_tsquery('simple',$4) || to_tsquery('english',$5))"
+			rank = "ts_rank(sv.search_vector,(to_tsquery('simple',$4) || to_tsquery('english',$5)))"
 		}
 		sqlText := "SELECT sv.id::text,sv.symbol_id::text,sv.fully_qualified_name,sv.path,sv.content_hash," +
-			"sv.snapshot_id::text,snap.commit_id,snap.branch FROM code_symbol_versions sv " +
+			"sv.snapshot_id::text,snap.commit_id,snap.branch," + rank + " AS rank FROM code_symbol_versions sv " +
 			"JOIN code_repository_snapshots snap ON snap.id=sv.snapshot_id " +
-			"WHERE sv.snapshot_id=$1::uuid AND sv.status='active' AND " + filter +
-			" ORDER BY sv.fully_qualified_name,sv.path,sv.id LIMIT $3"
-		results, err := s.db.QueryContext(ctx, sqlText, ids[0], query, limit)
+			"WHERE sv.snapshot_id=$1::uuid AND sv.status='active' AND " + filter
+		if pass == 1 {
+			sqlText += " ORDER BY rank DESC,sv.fully_qualified_name,sv.path,sv.id LIMIT $3"
+		} else {
+			sqlText += " ORDER BY sv.fully_qualified_name,sv.path,sv.id LIMIT $3"
+		}
+		args := []any{ids[0], query, limit}
+		if pass == 1 {
+			args = append(args, simple, english)
+		}
+		results, err := s.db.QueryContext(ctx, sqlText, args...)
 		if err != nil {
 			return nil, fmt.Errorf("historical code query: %w", err)
 		}
@@ -74,7 +93,7 @@ func (s *pgCodeStore) QueryHistoricalCode(
 		for results.Next() {
 			var item PGSymbolVersion
 			if err := results.Scan(&item.SymbolVersionID, &item.SymbolID, &item.FullyQualifiedName, &item.Path,
-				&item.ContentHash, &item.SnapshotID, &item.CommitID, &item.Branch); err != nil {
+				&item.ContentHash, &item.SnapshotID, &item.CommitID, &item.Branch, &item.Relevance); err != nil {
 				results.Close()
 				return nil, err
 			}

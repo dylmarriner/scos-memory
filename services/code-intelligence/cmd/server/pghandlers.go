@@ -14,6 +14,8 @@ import (
 
 // declarationName matches a declaration name, bare ("SignClaims") or
 // qualified by its enclosing type or module ("OutputReducer.reduce_output").
+var snapshotIDUUID = regexp.MustCompile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
 var declarationName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 
 // declarationKeyword is a leading language keyword a query may name a
@@ -431,7 +433,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.AsOfCommit != "" || req.SnapshotID != "" {
-		if req.SnapshotID != "" && !regexp.MustCompile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$").MatchString(req.SnapshotID) {
+		if req.SnapshotID != "" && !snapshotIDUUID.MatchString(req.SnapshotID) {
 			http.Error(w, "snapshot_id must be a UUID", http.StatusBadRequest)
 			return
 		}
@@ -445,6 +447,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
+			log.Printf("historical code query: %v", err)
 			http.Error(w, "historical query unavailable", http.StatusInternalServerError)
 			return
 		}
