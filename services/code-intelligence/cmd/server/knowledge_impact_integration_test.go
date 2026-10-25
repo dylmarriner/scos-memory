@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
+	"os"
 	"testing"
 )
 
@@ -161,6 +163,32 @@ func TestPGKnowledgeImpactHonoursScopeAndCodeProvenance(t *testing.T) {
 	}
 	if len(published.KnowledgeDependents) != 1 || published.KnowledgeDependents[0].FactID != privateFact {
 		t.Fatalf("HTTP impact leaks someone else's memory: %+v", published.KnowledgeDependents)
+	}
+
+	// When CI supplies a restricted runtime role, repeat the core
+	// authorization checks under forced RLS rather than relying on the
+	// migration owner's unrestricted SQL connection.
+	if appDSN := os.Getenv("SCOS_APP_TEST_DATABASE_URL"); appDSN != "" {
+		app, err := sql.Open("pgx", appDSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer app.Close()
+		restricted := newPGCodeStore(app)
+		readable, err := restricted.KnowledgeImpact(ctx, tenant, owner, repo, impact)
+		if err != nil {
+			t.Fatalf("restricted role lookup: %v", err)
+		}
+		if len(readable) != 1 || readable[0].FactID != visibleFact {
+			t.Fatalf("restricted role failed owner scope: %+v", readable)
+		}
+		hidden, err := restricted.KnowledgeImpact(ctx, tenant, outsider, repo, impact)
+		if err != nil {
+			t.Fatalf("restricted role outsider: %v", err)
+		}
+		if len(hidden) != 1 || hidden[0].FactID != privateFact {
+			t.Fatalf("restricted role escaped namespace scope: %+v", hidden)
+		}
 	}
 
 }
