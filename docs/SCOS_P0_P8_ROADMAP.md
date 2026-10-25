@@ -185,6 +185,21 @@ These are isolated integration results, **not** proof of process-kill,
 concurrent-index, deployed recovery or production rollback readiness; the
 P1 acceptance gate remains open pending those checks and review/merge.
 
+**Additional P1 ownership/immutability hardening (2026-10-25; PR #55, pending review/merge):**
+Real PostgreSQL 17 tests reproduced four independent failures before fixes:
+`IndexSnapshot` accepted a different tenant's repository ID and persisted
+foreign-owned file/symbol versions under the target snapshot; an already-active
+snapshot could be indexed again with an empty file list, corrupting its stored
+file count; a failed snapshot could be indexed and promoted to active; and
+`CreateSnapshot` accepted a tenant ID that did not own its repository.
+`IndexSnapshot` now locks and verifies the snapshot's repository and pending
+status before any writes, and `CreateSnapshot` derives the tenant from an
+ownership-constrained repository lookup. Additional concurrent-writer tests
+exercise two index attempts on the same generation against real PostgreSQL.
+These checks protect one-generation ownership and immutability but **do not**
+establish cross-generation activation serialization, forced process termination,
+full recovery, production readiness or completion of the P1 gate.
+
 ---
 
 # P2 — SCIP + AST / Tree-sitter Extraction

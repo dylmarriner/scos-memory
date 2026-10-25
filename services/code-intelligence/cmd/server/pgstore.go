@@ -213,7 +213,9 @@ func (s *pgCodeStore) CreateSnapshot(ctx context.Context, repositoryID, tenantID
 	var id string
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO code_repository_snapshots (repository_id, tenant_id, branch, commit_id, extractor_version, configuration_hash, parent_snapshot_id)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::uuid)
+		SELECT r.id, r.tenant_id, $3, $4, $5, $6, NULLIF($7, '')::uuid
+		  FROM code_repositories r
+		 WHERE r.id = $1 AND r.tenant_id = $2
 		ON CONFLICT (repository_id, branch, commit_id, extractor_version, configuration_hash)
 		DO UPDATE SET branch = EXCLUDED.branch
 		RETURNING id`,
@@ -240,6 +242,27 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		return fmt.Errorf("begin index transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// A snapshot is owned by exactly one repository and becomes immutable
+	// after successful activation. Validate both facts under a row lock
+	// before writing even the first file. The lock also serializes duplicate
+	// index attempts against the same generation.
+	var ownedRepositoryID, snapshotStatus string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT repository_id::text, status::text
+		  FROM code_repository_snapshots WHERE id = $1 FOR UPDATE`, snapshotID).
+		Scan(&ownedRepositoryID, &snapshotStatus); err != nil {
+		return fmt.Errorf("load snapshot for indexing: %w", err)
+	}
+	if ownedRepositoryID != repositoryID {
+		return fmt.Errorf("snapshot %s does not belong to repository %s", snapshotID, repositoryID)
+	}
+	switch snapshotStatus {
+	case "queued", "scanning", "parsing", "indexing", "validating":
+		// Incomplete generation may be indexed and atomically activated.
+	default:
+		return fmt.Errorf("snapshot %s cannot be indexed from status %s", snapshotID, snapshotStatus)
+	}
 
 	// P1-D: resolved once per snapshot, not per file -- a file whose
 	// content_hash matches its parent snapshot's row for the same path
