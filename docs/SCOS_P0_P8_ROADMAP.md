@@ -656,6 +656,8 @@ P4 additionally allows repo-aware retrieval to return code evidence beside memor
 **P7 governed review decision TDD (2026-10-26; isolated AMD):**
 A real PostgreSQL 17 integration test failed RED with HTTP 405 for the missing review operation. The implementation passed GREEN for authorized decision creation, read-only/outsider denial, invalid outcome/rationale rejection, duplicate-decision conflict, immutable source-event/fact preservation, and restricted `scos_app` role read/write and update denial. Codex review identified a valid Unicode JSON body-limit defect: a 2000-character escaped non-BMP rationale was RED (HTTP 400), then GREEN after increasing the bounded request limit to 32 KiB (enough for 2000 JSON-escaped surrogate pairs). Migration `000070_memory_revalidation_review_decisions.sql` and the role-grant policy protect the append-only evidence. This is branch-local evidence only until CI, independent review and merge.
 
+**Open review blocker (2026-10-26):** CodeRabbit identified that append-only review decisions can obstruct privileged tenant offboarding because their foreign keys prohibit parent deletion. A narrowly scoped, auditable privileged purge path and its isolated integration tests are required before this PR is merge-ready. Ordinary runtime principals must never gain a deletion capability. The reviewer also requested distinct validation cases for unsupported outcomes, short rationales, and >2000-character rationales; those test cases were added. No tenant data was purged.
+
 ## Remaining
 
 - [ ] Resolve the remaining continuity edge cases and qualify deterministic classification against labelled corpora.

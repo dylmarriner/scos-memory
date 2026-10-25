@@ -89,7 +89,7 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 	if resp := post(reviewer, `{"event_id":"`+event+`","outcome":"still_valid","reason":"   "}`); resp.Code != http.StatusBadRequest {
 		t.Fatalf("blank rationale accepted: %d %s", resp.Code, resp.Body.String())
 	}
-	if resp := post(reviewer, `{"event_id":"`+event+`","outcome":"erase","reason":"invalid"}`); resp.Code != http.StatusBadRequest {
+	if resp := post(reviewer, `{"event_id":"`+event+`","outcome":"erase","reason":"Reviewed evidence is sufficient."}`); resp.Code != http.StatusBadRequest {
 		t.Fatalf("unsupported outcome accepted: %d %s", resp.Code, resp.Body.String())
 	}
 	otherTenant := testTenant(t, db)
@@ -102,6 +102,15 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 	} {
 		if resp := post(reviewer, body); resp.Code != http.StatusBadRequest {
 			t.Fatalf("%s JSON accepted: %d %s", label, resp.Code, resp.Body.String())
+		}
+	}
+	for label, reason := range map[string]string{
+		"short":               "too short",
+		"too many characters": strings.Repeat("x", 2001),
+	} {
+		body := `{"event_id":"` + event + `","outcome":"still_valid","reason":"` + reason + `"}`
+		if resp := post(reviewer, body); resp.Code != http.StatusBadRequest {
+			t.Fatalf("%s rationale accepted: %d %s", label, resp.Code, resp.Body.String())
 		}
 	}
 	// Valid 2000-character non-BMP rationale, encoded using JSON surrogate
