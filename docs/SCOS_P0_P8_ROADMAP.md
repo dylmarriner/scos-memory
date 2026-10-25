@@ -482,6 +482,20 @@ GitHub Actions has also experienced runner-launch failures where jobs are create
 - [ ] Ensure memory↔code evidence references concrete historical symbol versions.
 - [ ] Add temporal contradiction/supersession tests and P0 cases.
 
+**P5 review evidence (2026-10-26, PR #60, unmerged):** Corrected the
+successful empty-result path in `POST /v1/retrieve` so principals with no
+readable namespaces still receive a durable retrieval-run audit with query hash,
+identity, `as_of_valid_time`, and `temporal_scope`. The pre-fix real PostgreSQL
+integration test failed with an empty `retrieval_run_id`; after the fix it
+passes and checks the stored `retrieval_runs.filters` and empty evidence.
+Verified on isolated AMD using disposable PostgreSQL 17/pgvector with 65
+migrations: full uncached Go suite (51 packages), `go vet` for the retrieval
+service, ten repeated focused integration runs, focused race detector and
+diff validation passed. The migration-owner integration test did not assert
+restricted-role behavior on this specific empty-result branch. Independent
+review, merge, main-branch CI, historical system-time semantics and deployment
+verification remain open; this evidence is **not** full P5 acceptance.
+
 ---
 
 # P6 — Unified Memory + Code Graph

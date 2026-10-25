@@ -421,10 +421,8 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		// code evidence. Disable memory lanes and continue when code was asked for.
 		plan.ExactLimit, plan.FullTextLimit, plan.VectorLimit = 0, 0, 0
 		plan.RelationLimit, plan.SessionLimit = 0, 0
-		if codeResponse == nil {
-			writeJSON(w, RetrieveResponse{Sections: []ContextSection{}, TotalTokens: 0, LatencyMs: int(time.Since(start).Milliseconds()), AsOfValidTime: req.AsOfValidTime, TemporalScope: temporalScopeFor(req.AsOfValidTime)})
-			return
-		}
+		// Even an empty successful result must pass through the normal
+		// retrieval-run audit path, including the valid-time selector.
 	}
 
 	// ── 2. Parse query ──────────────────────────────────────────────

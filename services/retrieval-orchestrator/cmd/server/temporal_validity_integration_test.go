@@ -219,3 +219,63 @@ func TestP5ValidTimeFiltersAcrossLexicalLanes(t *testing.T) {
 	}
 
 }
+
+// A successful valid-time request must leave a durable audit even when the
+// principal cannot read any memory namespaces and no code lane is requested.
+// This is the empty-result path, not an authorization error.
+func TestP5EmptyValidTimeRetrievalIsAudited(t *testing.T) {
+	ctx := context.Background()
+	pool := testRetrievalPool(t)
+
+	var tenant, principal string
+	if err := pool.QueryRow(ctx, "INSERT INTO tenants(name) VALUES($1) RETURNING id", t.Name()).Scan(&tenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES($1,'human',$2,$2) RETURNING id",
+		tenant, t.Name()).Scan(&principal); err != nil {
+		t.Fatal(err)
+	}
+
+	req := RetrieveRequest{
+		TenantID: tenant, PrincipalID: principal, Query: "nothing visible",
+		AsOfValidTime: "2021-07-01T00:00:00Z",
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	(&server{db: pool}).handleRetrieve(rec, httptest.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected empty successful retrieval, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got RetrieveResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sections) != 0 || got.TotalTokens != 0 || got.Code != nil {
+		t.Fatalf("expected empty retrieval response, got %+v", got)
+	}
+	if got.RetrievalRunID == "" || got.QueryHash != hashQuery(req.Query) {
+		t.Fatalf("successful empty retrieval must have an audit ID and query hash: %+v", got)
+	}
+	if got.AsOfValidTime != req.AsOfValidTime || got.TemporalScope != "current_system_belief_valid_at" {
+		t.Fatalf("missing temporal scope on empty retrieval: %+v", got)
+	}
+	var recordedTenant, recordedPrincipal, recordedTime, recordedScope string
+	var namespaces, selectedIDs string
+	if err := pool.QueryRow(ctx, `SELECT tenant_id::text, principal_id::text,
+		filters->>'as_of_valid_time', filters->>'temporal_scope',
+		namespaces::text, selected_memory_ids::text
+		FROM retrieval_runs WHERE id=$1`, got.RetrievalRunID).
+		Scan(&recordedTenant, &recordedPrincipal, &recordedTime, &recordedScope, &namespaces, &selectedIDs); err != nil {
+		t.Fatal(err)
+	}
+	if recordedTenant != tenant || recordedPrincipal != principal ||
+		recordedTime != req.AsOfValidTime || recordedScope != got.TemporalScope ||
+		namespaces != "null" || selectedIDs != "null" {
+		t.Fatalf("incorrect persisted audit identity or time: tenant=%s principal=%s valid=%s scope=%s",
+			recordedTenant, recordedPrincipal, recordedTime, recordedScope)
+	}
+}
