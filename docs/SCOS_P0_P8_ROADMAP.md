@@ -209,6 +209,22 @@ queued generations can still transition to failed for recovery. All 63
 migrations applied to an isolated disposable database. This does not establish
 process-kill or production recovery acceptance.
 
+**P1 cross-generation activation race (2026-10-25; PR #55, pending review/merge):**
+A deterministic real-PostgreSQL 17 integration test held the shared repository
+row lock until two independent same-branch indexing transactions were
+simultaneously blocked in `activate_code_snapshot`. Before the fix, both
+committed as `active` (RED), violating the immutable snapshot/branch
+activation invariant. Append-only migration
+`database/migrations/000066_serialize_code_snapshot_activation.sql`
+locks the shared repository row *before* superseding old generations, so
+concurrent activations serialize and observe the previous commit (GREEN).
+The test verifies exactly one active snapshot, pointer consistency, and
+historical reactivation of the superseded generation. Migration number 000065
+is reserved by open PR #52 and was not reused. This evidence covers
+cross-generation activation concurrency only; forced process termination,
+full release/recovery drills, independent review, merge, and remaining P1
+hardening are still required.
+
 ---
 
 # P2 — SCIP + AST / Tree-sitter Extraction
