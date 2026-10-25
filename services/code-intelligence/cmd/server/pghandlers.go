@@ -673,6 +673,8 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "symbol or historical snapshot not found", http.StatusNotFound)
 		case errors.Is(err, errImpactDepthTooLarge):
 			http.Error(w, "max_depth must be <= 8", http.StatusUnprocessableEntity)
+		case errors.Is(err, errImpactNodeBudgetExceeded):
+			http.Error(w, "impact node budget exceeded; narrow the symbol query", http.StatusUnprocessableEntity)
 		case errors.Is(err, errHistoricalImpactTooBroad):
 			http.Error(w, "too many matching symbols; specify a fully-qualified name", http.StatusUnprocessableEntity)
 		default:

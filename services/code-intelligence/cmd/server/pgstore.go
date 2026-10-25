@@ -767,11 +767,15 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 var ErrSymbolNotFound = errors.New("symbol not found")
 var errHistoricalImpactTooBroad = errors.New("too many matching historical symbols; use an exact fully-qualified name")
 
-// A depth bound is required independently of the number of nodes in the
-// current fixture. An untrusted caller must not request arbitrary graph walks.
-const maxImpactDepth = 8
+// Depth and total unique-node limits are independent: a one-hop star can
+// exceed the resource budget even when its requested depth is only one.
+const (
+	maxImpactDepth = 8
+	maxImpactNodes = 512
+)
 
 var errImpactDepthTooLarge = errors.New("impact max_depth exceeds supported limit of 8")
+var errImpactNodeBudgetExceeded = errors.New("impact node budget exceeded; narrow the symbol query")
 
 // QueryByPathOrFQN resolves query against the *active* snapshot for
 // (repositoryID, branch) only -- never a superseded one, so a stale
@@ -1188,10 +1192,8 @@ type PGImpact struct {
 
 // pageRankDamping and pageRankIterations are ChangeImpact's fixed
 // PageRank parameters (P0-A). 0.85 is the standard PageRank damping
-// factor; 30 power iterations is comfortably past convergence for the
-// bounded-size subgraphs ChangeImpact ever ranks (visited is capped by
-// MaxDepth hops from a handful of matched symbols, not the whole
-// repository graph).
+// factor; 30 power iterations run only on the at-most-512-node impact
+// subgraph, not the full repository graph.
 const (
 	pageRankDamping    = 0.85
 	pageRankIterations = 30
@@ -1272,6 +1274,9 @@ func (s *pgCodeStore) changeImpactFromMatches(
 	if len(matched) == 0 {
 		return nil, ErrSymbolNotFound
 	}
+	if len(matched) > maxImpactNodes {
+		return nil, errImpactNodeBudgetExceeded
+	}
 	if maxDepth <= 0 {
 		maxDepth = 3
 	}
@@ -1295,9 +1300,12 @@ func (s *pgCodeStore) changeImpactFromMatches(
 	}
 
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
-		next, err := s.callersOf(ctx, frontier)
+		next, err := s.callersOf(ctx, frontier, impact.SnapshotID)
 		if err != nil {
 			return nil, fmt.Errorf("callers at depth %d: %w", depth, err)
+		}
+		if len(next) > maxImpactNodes {
+			return nil, errImpactNodeBudgetExceeded
 		}
 		var newFrontier []string
 		for _, n := range next {
@@ -1308,6 +1316,9 @@ func (s *pgCodeStore) changeImpactFromMatches(
 			}
 			if visited[n.SymbolVersionID] {
 				continue
+			}
+			if len(visited) >= maxImpactNodes {
+				return nil, errImpactNodeBudgetExceeded
 			}
 			visited[n.SymbolVersionID] = true
 			newFrontier = append(newFrontier, n.SymbolVersionID)
@@ -1390,10 +1401,10 @@ func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string)
 // of targetSymbolVersionIDs. Built with individual placeholders rather
 // than passing a Go slice as a single array parameter: whether the
 // database/sql driver in use accepts a slice for `= ANY($1)` is a
-// driver-specific behavior this doesn't want to depend on, and the
-// per-layer fan-in a change-impact BFS deals with is never large enough
-// for this to matter.
-func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []string) ([]PGSymbolVersion, error) {
+// driver-specific behavior this doesn't want to depend on. The result is
+// capped at maxImpactNodes+1, with a snapshot filter, so a wide fan-in
+// is rejected rather than silently truncated or polluted by other snapshots.
+func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []string, snapshotID string) ([]PGSymbolVersion, error) {
 	if len(targetSymbolVersionIDs) == 0 {
 		return nil, nil
 	}
@@ -1408,8 +1419,11 @@ func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []st
 		FROM code_edges e
 		JOIN code_symbol_versions sv ON sv.id = e.source_symbol_version_id
 		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
-		WHERE e.relation = 'CALLS' AND e.target_symbol_version_id IN (%s)`,
-		strings.Join(placeholders, ","))
+		WHERE e.relation = 'CALLS' AND e.target_symbol_version_id IN (%s)
+		  AND sv.snapshot_id = $%d
+		LIMIT %d`,
+		strings.Join(placeholders, ","), len(args)+1, maxImpactNodes+1)
+	args = append(args, snapshotID)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query callers: %w", err)

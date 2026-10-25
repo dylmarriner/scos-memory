@@ -267,9 +267,21 @@ A real PostgreSQL regression reproduced an active impact request accepting
 `max_depth=9` and returning HTTP 200 despite the API lacking a hard traversal
 limit. Both current and historical impact now reject depth above 8 with
 HTTP 422, and store entry points reject excessive depth even without HTTP.
-The test checks the 8-hop boundary remains accepted. This closes only the
-unbounded-depth input gap; width/node budgets, graph completeness and
-cross-domain impact qualification remain outstanding.
+The test checks the 8-hop boundary remains accepted.
+
+**P8 impact node-budget regression (2026-10-26; PR #58 review branch):**
+A real PostgreSQL test first reproduced current and historical one-hop impact
+queries returning a 521-node graph without a total-node budget (RED). The
+datastore now caps each snapshot-scoped caller query at 513 distinct rows and
+fails closed when the full traversal exceeds 512 unique nodes, including seed
+matches and cumulative two-hop expansion. HTTP returns 422 instead of a
+silently partial blast radius. The test covers current and historical impact,
+wide seed sets, one-hop and two-hop overflow, HTTP 422, and the exact 512-node
+success boundary. Ten consecutive PostgreSQL regression runs, the uncached
+full Go suite, and go vet passed locally. This closes the unbounded node-count
+gap, **not** edge-density/SQL-work budgets, graph completeness, or cross-domain
+impact qualification. Review, merge, deployed acceptance and recovery gates
+remain outstanding.
 
 **Not P1/P5/P8 completion:**
 other active-only APIs, temporal memory semantics, retention/GC acceptance, production
