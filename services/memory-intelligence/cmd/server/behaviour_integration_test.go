@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -647,5 +649,57 @@ func TestEvidenceLinkToUnknownTargetsIsNotFound(t *testing.T) {
 		if code, out, _ := f.call(f.srv.handleEvidenceLinks, http.MethodPost, "/v1/evidence-links", body); code != http.StatusNotFound {
 			t.Fatalf("%s -> %d %v, want 404", body, code, out)
 		}
+	}
+}
+
+func TestEvidenceLinksRejectForeignTenantCodeSymbols(t *testing.T) {
+	f := newBehaviourFixture(t)
+	fact := f.remember("The explicit evidence tenant boundary must be enforced.", 0.9)
+	createSymbol := func(tenant string) string {
+		f.t.Helper()
+		repo := f.scalar("INSERT INTO code_repositories(tenant_id,canonical_path) VALUES($1,$2) RETURNING id::text", tenant, "/tenant-isolation/"+tenant)
+		snap := f.scalar("INSERT INTO code_repository_snapshots(repository_id,tenant_id,branch,commit_id,status) VALUES($1,$2,'main','init','active') RETURNING id::text", repo, tenant)
+		symbol := f.scalar("INSERT INTO code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,'unique','file',$2) RETURNING id::text", repo, snap)
+		return f.scalar("INSERT INTO code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,kind,content_hash) VALUES($1,$2,'pkg/entry.go','pkg/entry.go','file','abcd') RETURNING id::text", symbol, snap)
+	}
+	foreign := createSymbol(f.otherTenant)
+	local := createSymbol(f.tenant)
+	link := func(symbol string) (int, map[string]any) {
+		payload, _ := json.Marshal(map[string]any{"fact_id": fact, "code_symbol_version_id": symbol, "link_type": "evidences"})
+		code, out, _ := f.call(f.srv.handleEvidenceLinks, http.MethodPost, "/v1/evidence-links", string(payload))
+		return code, out
+	}
+	if code, body := link(foreign); code != http.StatusNotFound {
+		t.Fatalf("foreign tenant code symbol linked: status=%d response=%v", code, body)
+	}
+	if count := f.scalar("SELECT count(*)::text FROM memory_code_links WHERE fact_id=$1", fact); count != "0" {
+		t.Fatalf("foreign code link persisted %s rows", count)
+	}
+	// An authenticated service with direct SQL access must not bypass the
+	// tenant boundary by skipping the endpoint's ownership query.
+	tx, err := f.srv.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("SELECT set_config('scos.tenant_id', $1, true)", f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("SELECT set_config('scos.principal_id', $1, true)", f.owner); err != nil {
+		t.Fatal(err)
+	}
+	_, err = tx.Exec("INSERT INTO memory_code_links(tenant_id,fact_id,code_symbol_version_id,link_type,source) VALUES($1,$2,$3,'evidences','explicit')", f.tenant, fact, foreign)
+	if err == nil {
+		t.Fatal("direct SQL allowed cross-tenant evidence link")
+	}
+	var checkError *pgconn.PgError
+	if !errors.As(err, &checkError) || checkError.Code != "23514" {
+		t.Fatalf("expected tenant-guard check violation 23514, got %v", err)
+	}
+	if code, body := link(local); code != http.StatusOK {
+		t.Fatalf("same-tenant evidence rejected: status=%d response=%v", code, body)
+	}
+	if count := f.scalar("SELECT count(*)::text FROM memory_code_links WHERE fact_id=$1", fact); count != "1" {
+		t.Fatalf("expected exactly 1 authorised link, got %s", count)
 	}
 }
