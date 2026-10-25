@@ -130,8 +130,82 @@ Operational rules:
 - `benchmarks/p4/retrieval_fixture.json`
 - `benchmarks/p4/test_fixture.py`
 - `benchmarks/p4/README.md`
+- `benchmarks/p4/offline_gate.py`, `lexical_baseline.json`, and CI regression tests (isolated lexical smoke only; not full P0 qualification)
 
 The P4 fixture is deliberately a deterministic smoke/regression corpus. It is not presented as proof that one model stack is superior.
+
+**P0 offline quality-gate evidence (2026-10-26, review branch):**
+An isolated runner executes the existing real deterministic lexical retriever
+against all seven frozen P4 fixture queries, records ranked IDs, per-case
+Recall@5/10/20, Precision@5/10/20, MRR, nDCG@5/10/20, and forbidden-at-5
+exposure, and compares against a checked-in measured baseline. Six initial
+subprocess/integration tests were RED before implementation and GREEN after.
+CI now fails closed on corpus drift, missing cases, quality regression and
+increased forbidden exposure; the baseline records fixture digest, engine,
+version, checked-out base Git SHA, generator digest and deployment class. This is *only* an offline lexical smoke
+regression gate. It is not BGE, FTS, RRF, tenant-isolation or live P0 quality
+qualification. Full/live model baselines, realistic corpora, latency/cost,
+and independent approval remain outstanding. Do not count this as P0 complete.
+
+**P0 forbidden-evidence hardening (2026-10-26; PR #57):**
+Three new RED-before-fix regression tests demonstrated that the lexical gate
+could accept a nonzero forbidden-at-5 baseline, accept an equally contaminated
+current result after rebaselining, and record a contaminated baseline outright.
+The gate now rejects nonzero forbidden exposure in both current and baseline
+results and refuses unsafe baseline recording; the measured seven-case corpus
+remains zero-exposure. This protects only explicitly forbidden IDs in the
+isolated smoke fixture, not tenant authorization, full temporal filtering,
+realistic corpora or live retrieval. Review, merge and deployment gates remain.
+
+**P0 measured-baseline integrity regression (2026-10-26; PR #57 review branch):**
+Five new subprocess tests reproduced (RED) acceptance of corrupted baseline
+evidence: lowered per-case scores, altered ranked IDs, out-of-corpus IDs,
+altered aggregate quality and altered forbidden totals. The offline gate now
+recomputes stored metrics from frozen relevance labels and the recorded ranking,
+validates document IDs and duplicates, and verifies aggregate/forbidden totals
+before any quality comparison. The five cases pass (GREEN), with measured
+rankings, retrieval metrics, and forbidden exposure unchanged. This is only
+integrity checking of the seven-case lexical smoke baseline; realistic P0
+benchmarks, model comparisons, tenant isolation and live qualification remain
+unverified. No production changes or authorization to merge/deploy.
+
+**P0 forbidden-depth regression (2026-10-26; PR #57 review branch):**
+The isolated lexical smoke gate previously checked forbidden evidence only in
+the top five despite measuring retrieval at k=10 and k=20. A synthetic
+six-document fixture demonstrated RED: a forbidden document ranked sixth and
+baseline recording incorrectly succeeded. Four new tests cover rank-six
+exposure, measured counts at k=5/10/20, contaminated rebaselining, and
+inconsistent baseline counts. The gate now records and validates per-case and
+aggregate forbidden exposure at all three depths, refuses to record any
+nonzero exposure, and rejects contaminated current or baseline results.
+Existing seven-case rankings and quality metrics are unchanged; the baseline
+adds the two deeper-depth counters and refreshes generator provenance.
+This remains isolated lexical smoke evidence, not live tenant/temporal
+authorization, P0 qualification, or owner authorization to merge/deploy.
+
+
+**P0 deterministic ranking-integrity regression (2026-10-26; PR #57 review branch):**
+Two new regression tests reproduced (RED) a baseline-integrity gap: swapping
+non-relevant retrieved IDs left all recorded quality metrics unchanged and
+passed the gate, including when the changed baseline was loaded from disk.
+The gate now requires exact ranked-ID equality for every deterministic lexical
+case (GREEN). An intentional engine/ranking change therefore requires an
+explicitly reviewed new baseline; no automatic rebaselining occurs. The
+fixture, measured rankings, metrics and forbidden counts are unchanged;
+only generator/base-commit provenance is refreshed. This remains a seven-case
+offline lexical smoke check, not a deployed retrieval, tenant-isolation,
+performance, or P0 completion claim. No merge or deployment authorized.
+
+**P0 shared-harness provenance verification (2026-10-26; PR #57 review branch):**
+Three RED-before-fix regression tests demonstrated that the lexical benchmark
+omitted its imported `benchmarks/harness.py` implementation from provenance,
+and accepted missing/forged harness digests when rankings were unchanged.
+The measured baseline now records the shared-harness SHA-256, and the gate
+rejects missing or mismatched fingerprints (GREEN). Existing seven-case
+rankings, quality metrics, and forbidden-at-5/10/20 totals are unchanged.
+This closes a narrow offline reproducibility gap only; deployed BGE/FTS/RRF,
+latency/cost, tenant/temporal correctness, independent approval and deployment
+gates remain outstanding. No merge or deployment authorized.
 
 ## Remaining
 

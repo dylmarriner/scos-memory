@@ -1,0 +1,187 @@
+{
+  "average_metrics": {
+    "mrr": 0.9285714285714286,
+    "ndcg@10": 0.9472756790816368,
+    "ndcg@20": 0.9472756790816368,
+    "ndcg@5": 0.9472756790816368,
+    "precision@10": 0.5452380952380952,
+    "precision@20": 0.5452380952380952,
+    "precision@5": 0.5452380952380952,
+    "recall@10": 1.0,
+    "recall@20": 1.0,
+    "recall@5": 1.0
+  },
+  "cases": {
+    "code_exact": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
+      "forbidden_at_5": 0,
+      "metrics": {
+        "mrr": 1.0,
+        "ndcg@10": 1.0,
+        "ndcg@20": 1.0,
+        "ndcg@5": 1.0,
+        "precision@10": 1.0,
+        "precision@20": 1.0,
+        "precision@5": 1.0,
+        "recall@10": 1.0,
+        "recall@20": 1.0,
+        "recall@5": 1.0
+      },
+      "requires_semantic": false,
+      "retrieved_ids": [
+        "code_auth_handler"
+      ]
+    },
+    "code_planner": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
+      "forbidden_at_5": 0,
+      "metrics": {
+        "mrr": 1.0,
+        "ndcg@10": 1.0,
+        "ndcg@20": 1.0,
+        "ndcg@5": 1.0,
+        "precision@10": 0.3333333333333333,
+        "precision@20": 0.3333333333333333,
+        "precision@5": 0.3333333333333333,
+        "recall@10": 1.0,
+        "recall@20": 1.0,
+        "recall@5": 1.0
+      },
+      "requires_semantic": true,
+      "retrieved_ids": [
+        "code_retrieval_planner",
+        "mem_old_deploy",
+        "mem_live_deploy"
+      ]
+    },
+    "code_semantic": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
+      "forbidden_at_5": 0,
+      "metrics": {
+        "mrr": 1.0,
+        "ndcg@10": 1.0,
+        "ndcg@20": 1.0,
+        "ndcg@5": 1.0,
+        "precision@10": 0.25,
+        "precision@20": 0.25,
+        "precision@5": 0.25,
+        "recall@10": 1.0,
+        "recall@20": 1.0,
+        "recall@5": 1.0
+      },
+      "requires_semantic": true,
+      "retrieved_ids": [
+        "code_dense_store",
+        "mem_semantic_auth",
+        "mem_exact_db",
+        "mem_live_deploy"
+      ]
+    },
+    "memory_exact": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
+      "forbidden_at_5": 0,
+      "metrics": {
+        "mrr": 1.0,
+        "ndcg@10": 1.0,
+        "ndcg@20": 1.0,
+        "ndcg@5": 1.0,
+        "precision@10": 1.0,
+        "precision@20": 1.0,
+        "precision@5": 1.0,
+        "recall@10": 1.0,
+        "recall@20": 1.0,
+        "recall@5": 1.0
+      },
+      "requires_semantic": false,
+      "retrieved_ids": [
+        "mem_exact_db"
+      ]
+    },
+    "memory_semantic": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
+      "forbidden_at_5": 0,
+      "metrics": {
+        "mrr": 1.0,
+        "ndcg@10": 1.0,
+        "ndcg@20": 1.0,
+        "ndcg@5": 1.0,
+        "precision@10": 0.5,
+        "precision@20": 0.5,
+        "precision@5": 0.5,
+        "recall@10": 1.0,
+        "recall@20": 1.0,
+        "recall@5": 1.0
+      },
+      "requires_semantic": true,
+      "retrieved_ids": [
+        "mem_semantic_auth",
+        "code_auth_handler"
+      ]
+    },
+    "memory_temporal": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
+      "forbidden_at_5": 0,
+      "metrics": {
+        "mrr": 0.5,
+        "ndcg@10": 0.6309297535714575,
+        "ndcg@20": 0.6309297535714575,
+        "ndcg@5": 0.6309297535714575,
+        "precision@10": 0.3333333333333333,
+        "precision@20": 0.3333333333333333,
+        "precision@5": 0.3333333333333333,
+        "recall@10": 1.0,
+        "recall@20": 1.0,
+        "recall@5": 1.0
+      },
+      "requires_semantic": false,
+      "retrieved_ids": [
+        "mem_exact_db",
+        "mem_live_deploy",
+        "mem_semantic_auth"
+      ]
+    },
+    "mixed": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
+      "forbidden_at_5": 0,
+      "metrics": {
+        "mrr": 1.0,
+        "ndcg@10": 1.0,
+        "ndcg@20": 1.0,
+        "ndcg@5": 1.0,
+        "precision@10": 0.4,
+        "precision@20": 0.4,
+        "precision@5": 0.4,
+        "recall@10": 1.0,
+        "recall@20": 1.0,
+        "recall@5": 1.0
+      },
+      "requires_semantic": true,
+      "retrieved_ids": [
+        "mem_semantic_auth",
+        "code_auth_handler",
+        "mem_exact_db",
+        "mem_live_deploy",
+        "code_dense_store"
+      ]
+    }
+  },
+  "deployment_class": "isolated-offline-lexical-smoke",
+  "engine": "deterministic_lexical_baseline",
+  "engine_version": "1.0.0",
+  "fixture_name": "p4-hybrid-retrieval-smoke",
+  "fixture_sha256": "73e67b2876b9500f5a67676faa1878e987e6561d701433435f14eb470e1e7fe6",
+  "generator_sha256": "f49114684e602964c02918254129247827cc1bf42975691738bd16c062a9a474",
+  "git_base_sha": "965feec5f6021186aff6aad56f5006210b5b5647",
+  "harness_sha256": "3f930cbbcbe450b754f2ecc6b093073ee328350981930466cec2545314ba3da8",
+  "schema_version": 1,
+  "total_forbidden_at_10": 0,
+  "total_forbidden_at_20": 0,
+  "total_forbidden_at_5": 0
+}
