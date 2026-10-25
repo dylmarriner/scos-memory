@@ -596,6 +596,8 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 		Branch       string `json:"branch"`
 		Query        string `json:"query"`
 		MaxDepth     int    `json:"max_depth,omitempty"`
+		AsOfCommit   string `json:"as_of_commit,omitempty"`
+		SnapshotID   string `json:"snapshot_id,omitempty"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
 	dec.DisallowUnknownFields()
@@ -605,6 +607,14 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RepositoryID == "" || req.Query == "" {
 		http.Error(w, "repository_id and query are required", http.StatusBadRequest)
+		return
+	}
+	if (req.AsOfCommit != "" || req.SnapshotID != "") && req.Branch == "" {
+		http.Error(w, "branch is required for historical impact", http.StatusBadRequest)
+		return
+	}
+	if req.SnapshotID != "" && !snapshotIDUUID.MatchString(req.SnapshotID) {
+		http.Error(w, "snapshot_id must be a UUID", http.StatusBadRequest)
 		return
 	}
 	if req.Branch == "" {
@@ -642,13 +652,27 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	impact, err := s.pgStore.ChangeImpact(r.Context(), req.RepositoryID, req.Branch, req.Query, req.MaxDepth)
+	var impact *PGImpact
+	var err error
+	if req.AsOfCommit != "" || req.SnapshotID != "" {
+		impact, err = s.pgStore.ChangeImpactHistorical(
+			r.Context(), tenant, req.RepositoryID, req.Branch,
+			req.AsOfCommit, req.SnapshotID, req.Query, req.MaxDepth)
+	} else {
+		impact, err = s.pgStore.ChangeImpact(r.Context(), req.RepositoryID, req.Branch, req.Query, req.MaxDepth)
+	}
 	if err != nil {
-		if errors.Is(err, ErrSymbolNotFound) {
-			http.Error(w, "no symbol matches query in the active snapshot", http.StatusNotFound)
-			return
+		switch {
+		case errors.Is(err, errHistoricalAmbiguous):
+			http.Error(w, "commit has multiple indexed snapshots; specify snapshot_id", http.StatusConflict)
+		case errors.Is(err, errHistoricalNotFound), errors.Is(err, ErrSymbolNotFound):
+			http.Error(w, "symbol or historical snapshot not found", http.StatusNotFound)
+		case errors.Is(err, errHistoricalImpactTooBroad):
+			http.Error(w, "too many matching symbols; specify a fully-qualified name", http.StatusUnprocessableEntity)
+		default:
+			log.Printf("change impact: %v", err)
+			http.Error(w, "change impact unavailable", http.StatusInternalServerError)
 		}
-		http.Error(w, "change impact: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	knowledge, err := s.pgStore.KnowledgeImpact(r.Context(), tenant, principal, req.RepositoryID, impact)

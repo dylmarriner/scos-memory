@@ -765,6 +765,7 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 // ErrSymbolNotFound is returned when a query matches no symbol in the
 // active snapshot for the requested branch.
 var ErrSymbolNotFound = errors.New("symbol not found")
+var errHistoricalImpactTooBroad = errors.New("too many matching historical symbols; use an exact fully-qualified name")
 
 // QueryByPathOrFQN resolves query against the *active* snapshot for
 // (repositoryID, branch) only -- never a superseded one, so a stale
@@ -1170,6 +1171,13 @@ type PGImpact struct {
 	TransitiveDependents []PGSymbolVersion
 	MaxDepth             int
 	KnowledgeDependents  []PGKnowledgeImpact
+	// Historical impact is pinned to a concrete immutable code snapshot.
+	// Linked memory facts are evaluated under current authorization/validity.
+	SnapshotID     string `json:"snapshot_id,omitempty"`
+	CommitID       string `json:"commit_id,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	Historical     bool   `json:"historical,omitempty"`
+	KnowledgeScope string `json:"knowledge_scope,omitempty"`
 }
 
 // pageRankDamping and pageRankIterations are ChangeImpact's fixed
@@ -1206,11 +1214,62 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 			return nil, fmt.Errorf("resolve name: %w", err)
 		}
 	}
+	return s.changeImpactFromMatches(ctx, matched, maxDepth)
+}
+
+// ChangeImpactHistorical traverses code edges only in the explicitly selected
+// immutable generation. It reuses the historical query's tenant, branch,
+// snapshot-status and ambiguous-commit checks, but requires an exact symbol
+// anchor rather than treating arbitrary lexical candidates as blast-radius seeds.
+func (s *pgCodeStore) ChangeImpactHistorical(
+	ctx context.Context, tenant, repository, branch, commit, snapshot, query string, maxDepth int,
+) (*PGImpact, error) {
+	historical, err := s.QueryHistoricalCode(ctx, tenant, repository, branch, commit, snapshot, query, 100)
+	if err != nil {
+		return nil, err
+	}
+	matched, ok := historical["results"].([]PGSymbolVersion)
+	if !ok || len(matched) == 0 || historical["retrieval_mode"] != "historical_exact" {
+		return nil, ErrSymbolNotFound
+	}
+	// QueryHistoricalCode caps results at 100. Hitting that limit means
+	// the actual match count is unknown, so fail instead of hiding affected
+	// symbols behind a deceptively complete blast-radius response.
+	if len(matched) >= 100 {
+		return nil, errHistoricalImpactTooBroad
+	}
+	impact, err := s.changeImpactFromMatches(ctx, matched, maxDepth)
+	if err != nil {
+		return nil, err
+	}
+	impact.Historical = true
+	// Matched versions already carry the resolved immutable generation's
+	// identity; avoid unchecked assertions on the generic response map.
+	impact.SnapshotID = matched[0].SnapshotID
+	impact.CommitID = matched[0].CommitID
+	impact.Branch = matched[0].Branch
+	return impact, nil
+}
+
+func (s *pgCodeStore) changeImpactFromMatches(
+	ctx context.Context, matched []PGSymbolVersion, maxDepth int,
+) (*PGImpact, error) {
 	if len(matched) == 0 {
 		return nil, ErrSymbolNotFound
 	}
-
-	impact := &PGImpact{MatchedSymbols: matched, MaxDepth: maxDepth}
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
+	impact := &PGImpact{
+		MatchedSymbols: matched, MaxDepth: maxDepth,
+		SnapshotID: matched[0].SnapshotID, CommitID: matched[0].CommitID,
+		Branch: matched[0].Branch, KnowledgeScope: "current_visible_facts",
+	}
+	for _, item := range matched {
+		if item.SnapshotID != impact.SnapshotID {
+			return nil, fmt.Errorf("impact seeds span multiple snapshots")
+		}
+	}
 	visited := make(map[string]bool, len(matched))
 	seeds := make([]string, 0, len(matched))
 	frontier := make([]string, 0, len(matched))
@@ -1227,6 +1286,11 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 		}
 		var newFrontier []string
 		for _, n := range next {
+			// Never let an inconsistent cross-generation edge expand an
+			// immutable historical (or current) snapshot's blast radius.
+			if n.SnapshotID != impact.SnapshotID {
+				continue
+			}
 			if visited[n.SymbolVersionID] {
 				continue
 			}

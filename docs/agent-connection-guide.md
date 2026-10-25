@@ -125,7 +125,7 @@ whichever service actually owns it:
 | `scos_code_index` | `code-intelligence` `POST /v2/code/scan` (workspace repository) or `POST /v2/code/index` (uploaded files) — index a repository into a durable snapshot |
 | `scos_code_index_status` | `code-intelligence` `GET /v2/code/snapshots/{id}` — a snapshot's indexing status |
 | `scos_code_query` | `code-intelligence` `POST /v2/code/query` — exact path/name match, then lexical, dense and structural retrieval over the active snapshot |
-| `scos_code_impact` | `code-intelligence` `POST /v2/code/impact` — direct and transitive callers of a symbol from the snapshot's call graph |
+| `scos_code_impact` | `code-intelligence` `POST /v2/code/impact` — direct/transitive callers and governed linked facts. Optional `as_of_commit` or `snapshot_id` requires `branch` and selects an immutable historical code graph; `knowledge_scope=current_visible_facts` means memory authorization/validity is evaluated **now**, not at the historical commit. Historical responses include concrete snapshot/commit provenance; overly broad exact-path matches fail with HTTP 422 rather than silently truncate impact. |
 
 Deployed locally at `https://100.93.75.87:8098/mcp` (kubuntux, container
 `compose-mcp-gateway-1`) — this is the **full** governed tool surface (136

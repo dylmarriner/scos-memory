@@ -245,8 +245,28 @@ No superiority/performance claim for P4+ is accepted without reproducible before
 - [ ] Verify retention/GC cannot remove code evidence referenced by memory-code links or audit records.
 - [x] Add interrupted-index/activation recovery tests around real PostgreSQL transactions (including OS-process termination during file indexing, snapshot activation and historical reactivation; see evidence below).
 
-**P1 recovery hardening evidence (2026-10-25; merged via PR #55):**
-A new real-PostgreSQL regression suite exercises atomic rollback when indexing
+**P1/P5/P8 historical impact selection (2026-10-26; review branch, not merged):**
+The governed `POST /v2/code/impact` and `scos_code_impact` MCP surfaces
+now accept `as_of_commit` or `snapshot_id` with an explicit `branch`.
+The selected immutable generation is returned as `snapshot_id`, `commit_id`,
+`branch` and `historical`. A shared bounded impact traversal rejects
+cross-generation caller edges. Historical lookup rejects queued/failed,
+cross-repository/tenant and mismatched-branch snapshots, and requires
+`snapshot_id` when a commit has multiple extractor generations.
+The historical impact still joins **currently visible and valid** governed
+memory facts, explicitly labelled `knowledge_scope=current_visible_facts`;
+this is not historical memory as-of-time filtering. A real PostgreSQL
+integration test covers superseded-versus-current caller graphs, forged
+cross-generation edges, memory namespace authorization, ambiguous commits,
+invalid selection and queued generations. A separate RED→GREEN PostgreSQL
+test proves that path queries matching at least 100 symbols fail closed
+(HTTP 422) rather than returning a silently truncated impact graph. A gateway
+forwarding test checks historical selectors and authenticated identity.
+**Not P1/P5/P8 completion:**
+other active-only APIs, temporal memory semantics, retention/GC acceptance, production
+deployment/recovery, independent review and merge remain open.
+
+**P1 recovery hardening evidence (2026-10-25; merged via PR #55):**A new real-PostgreSQL regression suite exercises atomic rollback when indexing
 fails after an earlier file insert, verifies that no partial file/symbol rows
 or active-pointer changes survive, and retries the same immutable key after
 explicitly marking/deleting the failed generation. It also covers startup
