@@ -609,6 +609,10 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repository_id and query are required", http.StatusBadRequest)
 		return
 	}
+	if req.MaxDepth > maxImpactDepth {
+		http.Error(w, "max_depth must be <= 8", http.StatusUnprocessableEntity)
+		return
+	}
 	if (req.AsOfCommit != "" || req.SnapshotID != "") && req.Branch == "" {
 		http.Error(w, "branch is required for historical impact", http.StatusBadRequest)
 		return
@@ -667,6 +671,8 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "commit has multiple indexed snapshots; specify snapshot_id", http.StatusConflict)
 		case errors.Is(err, errHistoricalNotFound), errors.Is(err, ErrSymbolNotFound):
 			http.Error(w, "symbol or historical snapshot not found", http.StatusNotFound)
+		case errors.Is(err, errImpactDepthTooLarge):
+			http.Error(w, "max_depth must be <= 8", http.StatusUnprocessableEntity)
 		case errors.Is(err, errHistoricalImpactTooBroad):
 			http.Error(w, "too many matching symbols; specify a fully-qualified name", http.StatusUnprocessableEntity)
 		default:

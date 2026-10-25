@@ -262,6 +262,15 @@ invalid selection and queued generations. A separate RED→GREEN PostgreSQL
 test proves that path queries matching at least 100 symbols fail closed
 (HTTP 422) rather than returning a silently truncated impact graph. A gateway
 forwarding test checks historical selectors and authenticated identity.
+**P8 impact depth-budget regression (2026-10-26; PR #58 review branch):**
+A real PostgreSQL regression reproduced an active impact request accepting
+`max_depth=9` and returning HTTP 200 despite the API lacking a hard traversal
+limit. Both current and historical impact now reject depth above 8 with
+HTTP 422, and store entry points reject excessive depth even without HTTP.
+The test checks the 8-hop boundary remains accepted. This closes only the
+unbounded-depth input gap; width/node budgets, graph completeness and
+cross-domain impact qualification remain outstanding.
+
 **Not P1/P5/P8 completion:**
 other active-only APIs, temporal memory semantics, retention/GC acceptance, production
 deployment/recovery, independent review and merge remain open.

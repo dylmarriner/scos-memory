@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -115,6 +116,24 @@ func TestPGHistoricalImpactSnapshotSelection(t *testing.T) {
 		t.Fatalf("current impact leaked historical caller: %+v", active)
 	}
 	byCommit := map[string]any{"repository_id": repo, "branch": "main", "query": "history.core", "as_of_commit": "before"}
+	// A caller-controlled traversal depth must have a hard upper bound for
+	// both current and historical impact; a small graph must not mask the
+	// unbounded-work defect by finishing quickly.
+	if _, err := store.ChangeImpact(ctx, repo, "main", "history.core", 9); !errors.Is(err, errImpactDepthTooLarge) {
+		t.Fatalf("direct current impact must reject excessive depth, got %v", err)
+	}
+	if _, err := store.ChangeImpactHistorical(ctx, tenant, repo, "main", "before", "", "history.core", 9); !errors.Is(err, errImpactDepthTooLarge) {
+		t.Fatalf("direct historical impact must reject excessive depth, got %v", err)
+	}
+	for _, selector := range []map[string]any{
+		{"repository_id": repo, "branch": "main", "query": "history.core", "max_depth": 9},
+		{"repository_id": repo, "branch": "main", "query": "history.core", "as_of_commit": "before", "max_depth": 9},
+	} {
+		query(tenant, selector, http.StatusUnprocessableEntity)
+	}
+	// The documented maximum remains usable, including for historical data.
+	query(tenant, map[string]any{"repository_id": repo, "branch": "main", "query": "history.core", "max_depth": 8}, http.StatusOK)
+	query(tenant, map[string]any{"repository_id": repo, "branch": "main", "query": "history.core", "as_of_commit": "before", "max_depth": 8}, http.StatusOK)
 	oldImpact := query(tenant, byCommit, http.StatusOK)
 	if !oldImpact.Historical || oldImpact.SnapshotID != old || oldImpact.CommitID != "before" ||
 		len(oldImpact.MatchedSymbols) != 1 || oldImpact.MatchedSymbols[0].SnapshotID != old ||

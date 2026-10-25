@@ -767,6 +767,12 @@ func (s *pgCodeStore) indexGoDeclarationsLocked(ctx context.Context, tx *sql.Tx,
 var ErrSymbolNotFound = errors.New("symbol not found")
 var errHistoricalImpactTooBroad = errors.New("too many matching historical symbols; use an exact fully-qualified name")
 
+// A depth bound is required independently of the number of nodes in the
+// current fixture. An untrusted caller must not request arbitrary graph walks.
+const maxImpactDepth = 8
+
+var errImpactDepthTooLarge = errors.New("impact max_depth exceeds supported limit of 8")
+
 // QueryByPathOrFQN resolves query against the *active* snapshot for
 // (repositoryID, branch) only -- never a superseded one, so a stale
 // generation can never be served as current (blueprint §29's "serving a
@@ -1199,6 +1205,9 @@ const (
 // central symbol (a logging helper called from everywhere) can't turn one
 // request into a full-graph traversal.
 func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
+	if maxDepth > maxImpactDepth {
+		return nil, errImpactDepthTooLarge
+	}
 	if maxDepth <= 0 {
 		maxDepth = 3
 	}
@@ -1224,6 +1233,9 @@ func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, qu
 func (s *pgCodeStore) ChangeImpactHistorical(
 	ctx context.Context, tenant, repository, branch, commit, snapshot, query string, maxDepth int,
 ) (*PGImpact, error) {
+	if maxDepth > maxImpactDepth {
+		return nil, errImpactDepthTooLarge
+	}
 	historical, err := s.QueryHistoricalCode(ctx, tenant, repository, branch, commit, snapshot, query, 100)
 	if err != nil {
 		return nil, err
@@ -1254,6 +1266,9 @@ func (s *pgCodeStore) ChangeImpactHistorical(
 func (s *pgCodeStore) changeImpactFromMatches(
 	ctx context.Context, matched []PGSymbolVersion, maxDepth int,
 ) (*PGImpact, error) {
+	if maxDepth > maxImpactDepth {
+		return nil, errImpactDepthTooLarge
+	}
 	if len(matched) == 0 {
 		return nil, ErrSymbolNotFound
 	}
