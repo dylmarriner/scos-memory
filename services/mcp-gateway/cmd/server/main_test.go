@@ -465,6 +465,9 @@ func TestSCOSRetrieveSchemaExposesDurableRepositoryContext(t *testing.T) {
 		if _, ok := props["branch"]; !ok {
 			t.Fatal("scos_retrieve missing branch")
 		}
+		if _, ok := props["as_of_valid_time"]; !ok {
+			t.Fatal("scos_retrieve missing valid-time selector")
+		}
 		return
 	}
 	t.Fatal("scos_retrieve not found")
