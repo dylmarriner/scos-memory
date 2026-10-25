@@ -930,6 +930,7 @@ type PGImpact struct {
 	DirectDependents     []PGSymbolVersion
 	TransitiveDependents []PGSymbolVersion
 	MaxDepth             int
+	KnowledgeDependents  []PGKnowledgeImpact
 }
 
 // pageRankDamping and pageRankIterations are ChangeImpact's fixed

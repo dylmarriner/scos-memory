@@ -651,5 +651,11 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "change impact: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	knowledge, err := s.pgStore.KnowledgeImpact(r.Context(), tenant, principal, req.RepositoryID, impact)
+	if err != nil {
+		http.Error(w, "knowledge impact unavailable", http.StatusInternalServerError)
+		return
+	}
+	impact.KnowledgeDependents = knowledge
 	writeJSON(w, impact)
 }
