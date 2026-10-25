@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -777,6 +778,7 @@ type SnapshotDiff struct {
 	Modified         []SnapshotDiffEntry
 	Removed          []SnapshotDiffEntry
 	Renamed          []SnapshotDiffEntry
+	Copied           []SnapshotDiffEntry
 }
 
 type snapshotSymbolRow struct {
@@ -787,7 +789,8 @@ type snapshotSymbolRow struct {
 
 func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT symbol_id, path, content_hash FROM code_symbol_versions WHERE snapshot_id = $1`, snapshotID)
+		SELECT symbol_id, path, content_hash FROM code_symbol_versions
+		WHERE snapshot_id = $1 AND kind = 'file' ORDER BY path, id`, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("load snapshot symbols: %w", err)
 	}
@@ -835,35 +838,72 @@ func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (Snap
 	if err != nil {
 		return diff, err
 	}
-	oldByPath := make(map[string]snapshotSymbolRow, len(oldRows))
-	oldBySymbol := make(map[string]snapshotSymbolRow, len(oldRows))
-	for _, r := range oldRows {
-		oldByPath[r.Path] = r
-		oldBySymbol[r.SymbolID] = r
-	}
 
-	consumedOldPaths := make(map[string]bool, len(oldRows))
-	for _, r := range newRows {
-		if old, ok := oldByPath[r.Path]; ok {
-			consumedOldPaths[r.Path] = true
-			if old.ContentHash != r.ContentHash {
-				diff.Modified = append(diff.Modified, SnapshotDiffEntry{Path: r.Path, SymbolID: r.SymbolID})
+	// File paths take priority over content-derived symbol identity. Two
+	// distinct files with equal bytes may share a stable-key candidate but
+	// must not be mistaken for the same physical file.
+	oldByPath := make(map[string]snapshotSymbolRow, len(oldRows))
+	newByPath := make(map[string]snapshotSymbolRow, len(newRows))
+	oldByHash := make(map[string][]snapshotSymbolRow)
+	newByHash := make(map[string][]snapshotSymbolRow)
+	for _, row := range oldRows {
+		oldByPath[row.Path] = row
+		oldByHash[row.ContentHash] = append(oldByHash[row.ContentHash], row)
+	}
+	for _, row := range newRows {
+		newByPath[row.Path] = row
+		newByHash[row.ContentHash] = append(newByHash[row.ContentHash], row)
+	}
+	consumedOld := make(map[string]bool, len(oldRows))
+	unresolved := make([]snapshotSymbolRow, 0)
+	for _, row := range newRows {
+		if old, found := oldByPath[row.Path]; found {
+			consumedOld[row.Path] = true
+			if old.ContentHash != row.ContentHash {
+				diff.Modified = append(diff.Modified, SnapshotDiffEntry{Path: row.Path, SymbolID: row.SymbolID})
 			}
 			continue
 		}
-		if old, ok := oldBySymbol[r.SymbolID]; ok {
-			consumedOldPaths[old.Path] = true
-			diff.Renamed = append(diff.Renamed, SnapshotDiffEntry{Path: r.Path, PreviousPath: old.Path, SymbolID: r.SymbolID})
-			continue
-		}
-		diff.Added = append(diff.Added, SnapshotDiffEntry{Path: r.Path, SymbolID: r.SymbolID})
+		unresolved = append(unresolved, row)
 	}
-	for _, r := range oldRows {
-		if consumedOldPaths[r.Path] {
-			continue
+	for _, row := range unresolved {
+		candidate := oldByHash[row.ContentHash]
+		if len(candidate) == 1 {
+			prior := candidate[0]
+			surviving, exists := newByPath[prior.Path]
+			switch {
+			case exists && surviving.ContentHash == row.ContentHash:
+				// The source file still exists unchanged. This is a copy,
+				// not a rename and not a removal of the original.
+				diff.Copied = append(diff.Copied, SnapshotDiffEntry{
+					Path: row.Path, PreviousPath: prior.Path, SymbolID: row.SymbolID,
+				})
+				continue
+			case !exists && len(newByHash[row.ContentHash]) == 1 && !consumedOld[prior.Path]:
+				// Exactly one removed origin and one new destination
+				// supports a deterministic rename without a hash collision.
+				consumedOld[prior.Path] = true
+				diff.Renamed = append(diff.Renamed, SnapshotDiffEntry{
+					Path: row.Path, PreviousPath: prior.Path, SymbolID: row.SymbolID,
+				})
+				continue
+			}
 		}
-		diff.Removed = append(diff.Removed, SnapshotDiffEntry{Path: r.Path, SymbolID: r.SymbolID})
+		// Ambiguous duplicate-content candidates do not justify claiming
+		// rename/copy provenance. Report a conservative addition instead.
+		diff.Added = append(diff.Added, SnapshotDiffEntry{Path: row.Path, SymbolID: row.SymbolID})
 	}
+	for _, row := range oldRows {
+		if !consumedOld[row.Path] {
+			diff.Removed = append(diff.Removed, SnapshotDiffEntry{Path: row.Path, SymbolID: row.SymbolID})
+		}
+	}
+	for _, entries := range [][]SnapshotDiffEntry{
+		diff.Added, diff.Modified, diff.Removed, diff.Renamed, diff.Copied,
+	} {
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	}
+
 	return diff, nil
 }
 

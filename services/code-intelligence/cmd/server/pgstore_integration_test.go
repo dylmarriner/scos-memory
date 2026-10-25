@@ -1687,3 +1687,93 @@ func renderPage() string { return "" }
 		t.Fatalf("stop words and operators must yield no query and no error, got %v %v", results, err)
 	}
 }
+
+// Copying a file leaves its original path intact. A content-hash keyed symbol
+// identity must not make the copy look like the source was renamed away.
+func TestPGDiffSnapshotSeparatesCopyFromRename(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repo, err := store.EnsureRepository(ctx, tenant, "/diff-copy/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.CreateSnapshot(ctx, repo, tenant, "main", "old", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, old, repo, []PGFileInput{
+		{Path: "stable.go", ContentHash: hashContent("stable")},
+		{Path: "source.go", ContentHash: hashContent("copied")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := store.CreateSnapshot(ctx, repo, tenant, "main", "next", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, next, repo, []PGFileInput{
+		{Path: "stable.go", ContentHash: hashContent("stable")},
+		{Path: "source.go", ContentHash: hashContent("copied")},
+		{Path: "copy.go", ContentHash: hashContent("copied")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := store.DiffSnapshot(ctx, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.Copied) != 1 || diff.Copied[0].Path != "copy.go" || diff.Copied[0].PreviousPath != "source.go" {
+		t.Fatalf("expected source.go to remain and copy.go recorded as copy: %+v", diff)
+	}
+	if len(diff.Renamed) != 0 || len(diff.Removed) != 0 || len(diff.Modified) != 0 || len(diff.Added) != 0 {
+		t.Fatalf("copy corrupted snapshot delta: %+v", diff)
+	}
+}
+
+func TestPGDiffSnapshotPrefersStablePathsOverDuplicateHashes(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repo, err := store.EnsureRepository(ctx, tenant, "/diff-collision/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.CreateSnapshot(ctx, repo, tenant, "main", "old", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := hashContent("same old bytes")
+	if err := store.IndexSnapshot(ctx, old, repo, []PGFileInput{
+		{Path: "a.go", ContentHash: duplicate},
+		{Path: "b.go", ContentHash: duplicate},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := store.CreateSnapshot(ctx, repo, tenant, "main", "next", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, next, repo, []PGFileInput{
+		{Path: "a.go", ContentHash: hashContent("new bytes")},
+		{Path: "b.go", ContentHash: duplicate},
+		{Path: "copy.go", ContentHash: duplicate},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := store.DiffSnapshot(ctx, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.Modified) != 1 || diff.Modified[0].Path != "a.go" {
+		t.Fatalf("stable path modification went missing: %+v", diff)
+	}
+	if len(diff.Renamed) != 0 || len(diff.Removed) != 0 {
+		t.Fatalf("reused hash produced bogus rename/removal: %+v", diff)
+	}
+	// With duplicate possible origins, no certainty about copy provenance:
+	// conservatively report a new file rather than invent a source edge.
+	if len(diff.Added) != 1 || diff.Added[0].Path != "copy.go" {
+		t.Fatalf("ambiguous duplicate-hash copy must be reported as Added: %+v", diff)
+	}
+}
