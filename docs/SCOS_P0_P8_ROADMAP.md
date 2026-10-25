@@ -112,7 +112,7 @@ Operational rules:
 | **P4** | Hybrid memory + code retrieval | **MERGED TO MAIN (PR #29 on 2026-09-10); frozen P0/live performance qualification still pending** |
 | **P5** | Temporal evidence | **PARTIAL** |
 | **P6** | Unified memory + code graph | **PARTIAL** |
-| **P7** | Stale-memory revalidation | **EARLY / MOSTLY UNBUILT** |
+| **P7** | Stale-memory revalidation | **PARTIAL; event detection implemented, governed review-decision slice in PR (unmerged)** |
 | **P8** | Impact intelligence | **CODE SIDE PARTIAL; CROSS-DOMAIN UNBUILT** |
 
 ---
@@ -647,11 +647,18 @@ P4 additionally allows repo-aware retrieval to return code evidence beside memor
 - memory version/supersession system
 - `memory_code_links`
 
+## Implemented / review evidence (not final acceptance)
+
+- [x] Emit durable snapshot-activation revalidation events for linked changed/deleted code.
+- [x] Deterministic continuity classification with changed/deleted/ambiguous and safe-rename evidence (PR #63 additionally guards ambiguous copied successors; not yet merged).
+- [ ] Governed human review decisions: **review branch only, unmerged.** The P7 decision slice adds an append-only, one-decision-per-event review record, namespace reviewer authorization (read + promote/administer), a rationale requirement, a restricted-role RLS policy, and a POST decision endpoint. It projects review outcomes separately from the original event status. **This is an assessment record only:** no fact, version, standing answer or OKF knowledge is automatically changed. A future correction/reopen mechanism remains necessary.
+
+**P7 governed review decision TDD (2026-10-26; isolated AMD):**
+A real PostgreSQL 17 integration test failed RED with HTTP 405 for the missing review operation. The implementation passed GREEN for authorized decision creation, read-only/outsider denial, invalid outcome/rationale rejection, duplicate-decision conflict, immutable source-event/fact preservation, and restricted `scos_app` role read/write and update denial. Migration `000070_memory_revalidation_review_decisions.sql` and the role-grant policy protect the append-only evidence. This is branch-local evidence only until CI, independent review and merge.
+
 ## Remaining
 
-- [ ] Emit durable revalidation events when linked symbols change/delete.
-- [ ] Resolve continuity into unchanged / renamed / changed / deleted / ambiguous states.
-- [ ] Use deterministic classification first.
+- [ ] Resolve the remaining continuity edge cases and qualify deterministic classification against labelled corpora.
 - [ ] For changed/ambiguous cases, use existing reasoning models to create a proposal, not an authoritative mutation.
 - [ ] Outcomes: still-valid, needs-review, superseded, invalidated, unresolved.
 - [ ] Create governed memory versions/supersession relations only when approved.
