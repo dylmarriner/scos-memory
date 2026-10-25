@@ -391,6 +391,21 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			payload["max_results"] = maxResults
 		}
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/query", payload)
+	case "scos_code_revalidations":
+		repositoryID := stringArg(args, "repository_id")
+		if repositoryID == "" {
+			return nil, fmt.Errorf("repository_id is required")
+		}
+		values := url.Values{}
+		values.Set("repository_id", repositoryID)
+		if raw, ok := args["limit"]; ok {
+			limit, valid := raw.(float64)
+			if !valid || limit < 1 || limit > 100 || math.Trunc(limit) != limit {
+				return nil, fmt.Errorf("limit must be an integer in 1..100")
+			}
+			values.Set("limit", strconv.Itoa(int(limit)))
+		}
+		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v2/code/revalidations?"+values.Encode())
 	case "scos_code_impact":
 		repositoryID, err := s.durableRepositoryID(ctx, r, args)
 		if err != nil {
@@ -1611,6 +1626,18 @@ func governedTools() []map[string]any {
 					"snapshot_id":   map[string]any{"type": "string", "description": "Immutable historical code snapshot UUID; selects one indexed generation"},
 				},
 				"required": []string{"repository_id", "query"},
+			},
+		},
+		{
+			"name":        "scos_code_revalidations",
+			"description": "List immutable code-change review events for linked memory facts. Returns old/new code snapshot provenance, change classification and review state. Does not change memories or self-approve outcomes.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"repository_id": map[string]any{"type": "string", "description": "Durable repository UUID"},
+					"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum review events (default 25)"},
+				},
+				"required": []string{"repository_id"},
 			},
 		},
 		{

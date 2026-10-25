@@ -269,6 +269,7 @@ func main() {
 	mux.HandleFunc("/v2/code/snapshots/diff", srv.handlePGSnapshotDiff)
 	mux.HandleFunc("/v2/code/settings", srv.handlePGSettings)
 	mux.HandleFunc("/v2/code/impact", srv.handlePGImpact)
+	mux.HandleFunc("/v2/code/revalidations", srv.handlePGRevalidations)
 	mux.HandleFunc("/v2/code/index/scip", srv.handlePGIndexSCIP)
 
 	addr := os.Getenv("SCOS_CODE_INTELLIGENCE_HTTP_ADDR")
