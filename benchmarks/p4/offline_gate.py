@@ -54,6 +54,14 @@ def load_fixture(path: pathlib.Path) -> tuple[dict, str]:
     return fixture, hashlib.sha256(content).hexdigest()
 
 
+def score_ranking(expected: set[str], ranked: list[str]) -> dict[str, float]:
+    metrics = {f"recall@{k}": recall_at_k(expected, ranked, k) for k in (5, 10, 20)}
+    metrics.update({f"precision@{k}": precision_at_k(expected, ranked, k) for k in (5, 10, 20)})
+    metrics["mrr"] = mean_reciprocal_rank(expected, ranked)
+    metrics.update({f"ndcg@{k}": ndcg(expected, ranked, k) for k in (5, 10, 20)})
+    return metrics
+
+
 def run_retrieval(fixture: dict, fixture_sha: str) -> dict:
     corpus = {
         d["id"]: " ".join(str(d.get(k, "")) for k in ("fqn", "path", "text"))
@@ -64,16 +72,7 @@ def run_retrieval(fixture: dict, fixture_sha: str) -> dict:
     for case in fixture["cases"]:
         retrieved = retriever(case["query"], {})
         expected = set(case["expected_ids"])
-        metrics = {
-            f"recall@{k}": recall_at_k(expected, retrieved, k)
-            for k in (5, 10, 20)
-        }
-        metrics.update({
-            f"precision@{k}": precision_at_k(expected, retrieved, k)
-            for k in (5, 10, 20)
-        })
-        metrics["mrr"] = mean_reciprocal_rank(expected, retrieved)
-        metrics.update({f"ndcg@{k}": ndcg(expected, retrieved, k) for k in (5, 10, 20)})
+        metrics = score_ranking(expected, retrieved)
         results[case["id"]] = {
             "retrieved_ids": retrieved,
             "metrics": metrics,
@@ -102,6 +101,71 @@ def run_retrieval(fixture: dict, fixture_sha: str) -> dict:
         },
         "total_forbidden_at_5": sum(c["forbidden_at_5"] for c in results.values()),
     }
+
+
+def validate_baseline(fixture: dict, baseline: dict) -> list[str]:
+    """Reject inconsistent measured baselines before comparing quality.
+
+    A baseline is evidence, not a configurable quality threshold: stored scores
+    must agree with the recorded ranking and frozen fixture labels.
+    """
+    errors = []
+    cases = baseline.get("cases")
+    if not isinstance(cases, dict):
+        return ["baseline cases must be an object"]
+    labels = {case["id"]: case for case in fixture["cases"]}
+    if set(cases) != set(labels):
+        return ["baseline case set differs from frozen fixture"]
+    known_ids = {doc["id"] for doc in fixture["corpus"]}
+    for case_id, label in labels.items():
+        result = cases[case_id]
+        if not isinstance(result, dict):
+            errors.append(f"{case_id}: baseline case must be an object")
+            continue
+        ranked = result.get("retrieved_ids")
+        if not isinstance(ranked, list) or any(not isinstance(item, str) for item in ranked):
+            errors.append(f"{case_id}: invalid ranked ids")
+            continue
+        unknown = set(ranked) - known_ids
+        if unknown:
+            errors.append(f"{case_id}: unknown ranked ids {sorted(unknown)}")
+            continue
+        if len(ranked) != len(set(ranked)):
+            errors.append(f"{case_id}: duplicate ranked ids")
+            continue
+        measured = score_ranking(set(label["expected_ids"]), ranked)
+        stored = result.get("metrics")
+        if not isinstance(stored, dict) or set(stored) != set(METRICS):
+            errors.append(f"{case_id}: incomplete baseline metrics")
+            continue
+        for metric in METRICS:
+            value = stored[metric]
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not math.isclose(
+                        value, measured[metric], rel_tol=0, abs_tol=1e-12)):
+                errors.append(f"{case_id}: inconsistent baseline {metric}")
+        forbidden = len(set(ranked[:5]) & set(label.get("forbidden_ids", [])))
+        if result.get("forbidden_at_5") != forbidden:
+            errors.append(f"{case_id}: inconsistent forbidden_at_5")
+        if result.get("requires_semantic") is not bool(label.get("requires_semantic", False)):
+            errors.append(f"{case_id}: inconsistent requires_semantic")
+    if errors:
+        return errors
+    aggregates = baseline.get("average_metrics")
+    if not isinstance(aggregates, dict) or set(aggregates) != set(METRICS):
+        errors.append("invalid average_metrics")
+    else:
+        for metric in METRICS:
+            measured = statistics.fmean(cases[c]["metrics"][metric] for c in cases)
+            value = aggregates[metric]
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not math.isclose(
+                        value, measured, rel_tol=0, abs_tol=1e-12)):
+                errors.append(f"inconsistent average_metrics {metric}")
+    total = sum(cases[c]["forbidden_at_5"] for c in cases)
+    if baseline.get("total_forbidden_at_5") != total:
+        errors.append("inconsistent total_forbidden_at_5")
+    return errors
 
 
 def compare(current: dict, baseline: dict) -> list[str]:
@@ -148,7 +212,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"RECORDED {len(current['cases'])} real lexical retrieval cases to {args.record_baseline}")
             return 0
         baseline = json.loads(args.check.read_text())
-        errors = compare(current, baseline)
+        errors = validate_baseline(fixture, baseline)
+        if not errors:
+            errors = compare(current, baseline)
         if errors:
             for error in errors:
                 print(f"FAIL: {error}", file=sys.stderr)

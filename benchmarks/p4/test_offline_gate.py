@@ -132,5 +132,49 @@ class OfflineGateTests(unittest.TestCase):
         self.assertTrue(any("forbidden" in issue for issue in compare(current, baseline)))
 
 
+    def _check_mutated_baseline(self, mutate):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = pathlib.Path(directory) / "baseline.json"
+            recorded = run_gate("--record-baseline", baseline)
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            data = json.loads(baseline.read_text())
+            mutate(data)
+            baseline.write_text(json.dumps(data))
+            result = run_gate("--check", baseline)
+            self.assertNotEqual(result.returncode, 0, "corrupt baseline passed: " + result.stdout)
+            return result
+
+    def test_rejects_baseline_metric_lowering_without_rank_change(self):
+        def mutate(data):
+            data["cases"]["memory_exact"]["metrics"]["recall@5"] = 0.0
+        result = self._check_mutated_baseline(mutate)
+        self.assertIn("inconsistent", result.stderr)
+
+    def test_rejects_baseline_ranked_ids_tampering(self):
+        def mutate(data):
+            case = data["cases"]["memory_exact"]
+            case["retrieved_ids"][0] = "mem_live_deploy"
+        result = self._check_mutated_baseline(mutate)
+        self.assertIn("inconsistent", result.stderr)
+
+    def test_rejects_baseline_out_of_corpus_ranked_id(self):
+        def mutate(data):
+            data["cases"]["memory_exact"]["retrieved_ids"] = ["invented_document"]
+        result = self._check_mutated_baseline(mutate)
+        self.assertIn("unknown", result.stderr)
+
+    def test_rejects_baseline_aggregate_metric_tampering(self):
+        def mutate(data):
+            data["average_metrics"]["recall@5"] = 0.0
+        result = self._check_mutated_baseline(mutate)
+        self.assertIn("average_metrics", result.stderr)
+
+    def test_rejects_baseline_forbidden_total_tampering(self):
+        def mutate(data):
+            data["total_forbidden_at_5"] = 99
+        result = self._check_mutated_baseline(mutate)
+        self.assertIn("total_forbidden_at_5", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

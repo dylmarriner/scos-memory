@@ -157,6 +157,18 @@ remains zero-exposure. This protects only explicitly forbidden IDs in the
 isolated smoke fixture, not tenant authorization, full temporal filtering,
 realistic corpora or live retrieval. Review, merge and deployment gates remain.
 
+**P0 measured-baseline integrity regression (2026-10-26; PR #57 review branch):**
+Five new subprocess tests reproduced (RED) acceptance of corrupted baseline
+evidence: lowered per-case scores, altered ranked IDs, out-of-corpus IDs,
+altered aggregate quality and altered forbidden totals. The offline gate now
+recomputes stored metrics from frozen relevance labels and the recorded ranking,
+validates document IDs and duplicates, and verifies aggregate/forbidden totals
+before any quality comparison. The five cases pass (GREEN), with measured
+rankings, retrieval metrics, and forbidden exposure unchanged. This is only
+integrity checking of the seven-case lexical smoke baseline; realistic P0
+benchmarks, model comparisons, tenant isolation and live qualification remain
+unverified. No production changes or authorization to merge/deploy.
+
 ## Remaining
 
 - [ ] Expand the versioned memory-retrieval corpus for paraphrase, long-history noise, conflicts, supersession, temporal queries and scope isolation.
