@@ -13,20 +13,28 @@ DECLARE
     v_repository_id uuid;
     v_branch text;
 BEGIN
-    SELECT repository_id, branch INTO v_repository_id, v_branch
+    -- The repository ID is immutable. Read it without locking the snapshot
+    -- so every activation path can lock repository -> snapshot consistently.
+    SELECT repository_id INTO v_repository_id
       FROM code_repository_snapshots
-     WHERE id = p_snapshot_id FOR UPDATE;
+     WHERE id = p_snapshot_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'snapshot % does not exist', p_snapshot_id;
     END IF;
 
-    -- Acquire the shared lock *before* changing any snapshot statuses.
-    -- Under READ COMMITTED the next UPDATE then observes the previous
+    -- Under READ COMMITTED the next UPDATE observes the previous
     -- activator's committed active generation after waiting on this lock.
     PERFORM 1 FROM code_repositories
      WHERE id = v_repository_id FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'repository % does not exist', v_repository_id;
+    END IF;
+
+    SELECT branch INTO v_branch
+      FROM code_repository_snapshots
+     WHERE id = p_snapshot_id AND repository_id = v_repository_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'snapshot % moved or vanished', p_snapshot_id;
     END IF;
 
     UPDATE code_repository_snapshots

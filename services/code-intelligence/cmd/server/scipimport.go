@@ -273,6 +273,19 @@ func (s *pgCodeStore) IndexSnapshotFromSCIP(ctx context.Context, snapshotID, rep
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	ownedRepositoryID, status, err := lockSnapshotForMutation(ctx, tx, snapshotID)
+	if err != nil {
+		return 0, fmt.Errorf("load SCIP snapshot for indexing: %w", err)
+	}
+	if ownedRepositoryID != repositoryID {
+		return 0, fmt.Errorf("snapshot %s does not belong to repository %s", snapshotID, repositoryID)
+	}
+	switch status {
+	case "queued", "scanning", "parsing", "indexing", "validating":
+	default:
+		return 0, fmt.Errorf("snapshot %s cannot be SCIP-indexed from status %s", snapshotID, status)
+	}
+
 	count, err := s.IndexSCIP(ctx, tx, snapshotID, repositoryID, index)
 	if err != nil {
 		return 0, err

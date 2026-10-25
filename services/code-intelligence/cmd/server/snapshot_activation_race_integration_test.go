@@ -60,7 +60,8 @@ func TestPGConcurrentGenerationsHaveSingleActiveSnapshot(t *testing.T) {
              WHERE datname = current_database()
                AND pid <> pg_backend_pid()
                AND wait_event_type = 'Lock'
-               AND query ILIKE '%activate_code_snapshot%'`).Scan(&blocked); err != nil {
+               AND (query ILIKE '%activate_code_snapshot%'
+                    OR query ILIKE '%code_repositories%')`).Scan(&blocked); err != nil {
 			t.Fatal(err)
 		}
 		if blocked == 2 {

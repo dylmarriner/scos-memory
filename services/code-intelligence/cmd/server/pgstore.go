@@ -226,6 +226,33 @@ func (s *pgCodeStore) CreateSnapshot(ctx context.Context, repositoryID, tenantID
 	return id, nil
 }
 
+// lockSnapshotForMutation serializes activation and indexing at repository
+// scope. Reading the immutable repository_id without a row lock lets us
+// acquire repository -> snapshot in a single order across all callers.
+// Revalidate ownership under the snapshot lock before proceeding.
+func lockSnapshotForMutation(ctx context.Context, tx *sql.Tx, snapshotID string) (string, string, error) {
+	var repositoryID string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT repository_id::text FROM code_repository_snapshots WHERE id = $1`, snapshotID).Scan(&repositoryID); err != nil {
+		return "", "", err
+	}
+	var lockedRepositoryID string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id::text FROM code_repositories WHERE id = $1 FOR UPDATE`, repositoryID).Scan(&lockedRepositoryID); err != nil {
+		return "", "", fmt.Errorf("lock snapshot repository: %w", err)
+	}
+	var currentRepositoryID, status string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT repository_id::text, status::text FROM code_repository_snapshots WHERE id = $1 FOR UPDATE`, snapshotID).
+		Scan(&currentRepositoryID, &status); err != nil {
+		return "", "", fmt.Errorf("lock snapshot: %w", err)
+	}
+	if currentRepositoryID != repositoryID {
+		return "", "", fmt.Errorf("snapshot %s changed repository while locking", snapshotID)
+	}
+	return repositoryID, status, nil
+}
+
 // IndexSnapshot ingests files into snapshotID as tier-0 (file-level)
 // symbols and activates the snapshot atomically. Each file's stable
 // identity is its content hash: a file whose content is byte-identical to
@@ -243,15 +270,10 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// A snapshot is owned by exactly one repository and becomes immutable
-	// after successful activation. Validate both facts under a row lock
-	// before writing even the first file. The lock also serializes duplicate
-	// index attempts against the same generation.
-	var ownedRepositoryID, snapshotStatus string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT repository_id::text, status::text
-		  FROM code_repository_snapshots WHERE id = $1 FOR UPDATE`, snapshotID).
-		Scan(&ownedRepositoryID, &snapshotStatus); err != nil {
+	// Lock the repository before the snapshot. Activation and all indexing
+	// paths use this order to avoid a repository/snapshot deadlock.
+	ownedRepositoryID, snapshotStatus, err := lockSnapshotForMutation(ctx, tx, snapshotID)
+	if err != nil {
 		return fmt.Errorf("load snapshot for indexing: %w", err)
 	}
 	if ownedRepositoryID != repositoryID {
@@ -1204,8 +1226,8 @@ func (s *pgCodeStore) ReactivateSnapshot(ctx context.Context, snapshotID string)
 		return fmt.Errorf("begin snapshot reactivation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status::text FROM code_repository_snapshots WHERE id = $1 FOR UPDATE`, snapshotID).Scan(&status); err != nil {
+	_, status, err := lockSnapshotForMutation(ctx, tx, snapshotID)
+	if err != nil {
 		return fmt.Errorf("load snapshot for reactivation: %w", err)
 	}
 	switch status {

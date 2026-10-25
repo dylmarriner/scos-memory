@@ -225,6 +225,24 @@ cross-generation activation concurrency only; forced process termination,
 full release/recovery drills, independent review, merge, and remaining P1
 hardening are still required.
 
+**P1 activation lock-order review regression (2026-10-25; PR #55, pending review/merge):**
+A subsequent CodeRabbit major finding identified a repository/snapshot lock
+inversion: the migration acquired the snapshot lock before the repository
+lock, and file indexing, SCIP indexing and historical reactivation did the
+same. A deterministic PostgreSQL 17 test held the repository row while
+each of those three real application paths waited, then attempted to lock
+the target snapshot. All three failed RED with PostgreSQL deadlock SQLSTATE
+`40P01`. The migration now reads immutable repository ownership without a
+snapshot lock, locks the repository first, and then revalidates the snapshot
+under its row lock. The three Go paths share this same lock order before
+any snapshot writes. All three contention scenarios now pass GREEN.
+The existing cross-generation activation test was updated to observe the
+earlier repository-lock wait as well as the activation-function wait.
+A separate real-PostgreSQL SCIP regression verifies that foreign repository
+IDs cannot inject symbols and active SCIP generations cannot be reindexed.
+These tests do not substitute for forced process-termination, release/recovery
+drills, independent approval, merge, or production deployment validation.
+
 ---
 
 # P2 — SCIP + AST / Tree-sitter Extraction
