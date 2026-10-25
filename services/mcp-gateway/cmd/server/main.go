@@ -381,6 +381,12 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		if branch := stringArg(args, "branch"); branch != "" {
 			payload["branch"] = branch
 		}
+		if commit := stringArg(args, "as_of_commit"); commit != "" {
+			payload["as_of_commit"] = commit
+		}
+		if snapshot := stringArg(args, "snapshot_id"); snapshot != "" {
+			payload["snapshot_id"] = snapshot
+		}
 		if maxResults, ok := args["max_results"]; ok {
 			payload["max_results"] = maxResults
 		}
@@ -1601,6 +1607,8 @@ func governedTools() []map[string]any {
 					"query":         map[string]any{"type": "string", "description": "Symbol, path or description to search for"},
 					"branch":        map[string]any{"type": "string", "description": "Defaults to the most recently indexed branch"},
 					"max_results":   map[string]any{"type": "integer", "description": "Max results"},
+					"as_of_commit":  map[string]any{"type": "string", "description": "Historical commit ID; use snapshot_id if more than one generation exists"},
+					"snapshot_id":   map[string]any{"type": "string", "description": "Immutable historical code snapshot UUID; selects one indexed generation"},
 				},
 				"required": []string{"repository_id", "query"},
 			},
