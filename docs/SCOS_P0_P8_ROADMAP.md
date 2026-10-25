@@ -171,6 +171,92 @@ No superiority/performance claim for P4+ is accepted without reproducible before
 - [ ] Verify retention/GC cannot remove code evidence referenced by memory-code links or audit records.
 - [ ] Add interrupted-index/activation recovery tests around real PostgreSQL transactions.
 
+**P1 recovery hardening evidence (2026-10-25, PR pending review/merge):**
+A new real-PostgreSQL regression suite exercises atomic rollback when indexing
+fails after an earlier file insert, verifies that no partial file/symbol rows
+or active-pointer changes survive, and retries the same immutable key after
+explicitly marking/deleting the failed generation. It also covers startup
+cleanup of aged queued generations without touching active state, refuses
+reactivation of queued/failed/nonexistent snapshots, preserves idempotence
+for already-active branches, and requires the workspace scan API to return
+HTTP 202 (not a misleading HTTP 200 `unchanged=true`) for queued/indexing
+snapshots. Both faulty responses were observed RED before implementation.
+These are isolated integration results, **not** proof of process-kill,
+concurrent-index, deployed recovery or production rollback readiness; the
+P1 acceptance gate remains open pending those checks and review/merge.
+
+**Additional P1 ownership/immutability hardening (2026-10-25; PR #55, pending review/merge):**
+Real PostgreSQL 17 tests reproduced four independent failures before fixes:
+`IndexSnapshot` accepted a different tenant's repository ID and persisted
+foreign-owned file/symbol versions under the target snapshot; an already-active
+snapshot could be indexed again with an empty file list, corrupting its stored
+file count; a failed snapshot could be indexed and promoted to active; and
+`CreateSnapshot` accepted a tenant ID that did not own its repository.
+`IndexSnapshot` now locks and verifies the snapshot's repository and pending
+status before any writes, and `CreateSnapshot` derives the tenant from an
+ownership-constrained repository lookup. Additional concurrent-writer tests
+exercise two index attempts on the same generation against real PostgreSQL.
+These checks protect one-generation ownership and immutability but **do not**
+establish cross-generation activation serialization, forced process termination,
+full recovery, production readiness or completion of the P1 gate.
+
+**P1 late-worker status race regression (2026-10-25; PR #55, pending review/merge):**
+CodeRabbit identified a race where a late indexing/diff error could overwrite a
+superseded, reactivatable generation as failed. A real PostgreSQL 17 test first
+reproduced this corruption (RED), then passed (GREEN) after constraining
+`SetSnapshotStatus` to pending states only. A second regression confirms
+queued generations can still transition to failed for recovery. All 63
+migrations applied to an isolated disposable database. This does not establish
+process-kill or production recovery acceptance.
+
+**P1 cross-generation activation race (2026-10-25; PR #55, pending review/merge):**
+A deterministic real-PostgreSQL 17 integration test held the shared repository
+row lock until two independent same-branch indexing transactions were
+simultaneously blocked in `activate_code_snapshot`. Before the fix, both
+committed as `active` (RED), violating the immutable snapshot/branch
+activation invariant. Append-only migration
+`database/migrations/000066_serialize_code_snapshot_activation.sql`
+locks the shared repository row *before* superseding old generations, so
+concurrent activations serialize and observe the previous commit (GREEN).
+The test verifies exactly one active snapshot, pointer consistency, and
+historical reactivation of the superseded generation. Migration number 000065
+is reserved by open PR #52 and was not reused. This evidence covers
+cross-generation activation concurrency only; forced process termination,
+full release/recovery drills, independent review, merge, and remaining P1
+hardening are still required.
+
+**P1 activation lock-order review regression (2026-10-25; PR #55, pending review/merge):**
+A subsequent CodeRabbit major finding identified a repository/snapshot lock
+inversion: the migration acquired the snapshot lock before the repository
+lock, and file indexing, SCIP indexing and historical reactivation did the
+same. A deterministic PostgreSQL 17 test held the repository row while
+each of those three real application paths waited, then attempted to lock
+the target snapshot. All three failed RED with PostgreSQL deadlock SQLSTATE
+`40P01`. The migration now reads immutable repository ownership without a
+snapshot lock, locks the repository first, and then revalidates the snapshot
+under its row lock. The three Go paths share this same lock order before
+any snapshot writes. All three contention scenarios now pass GREEN.
+The existing cross-generation activation test was updated to observe the
+earlier repository-lock wait as well as the activation-function wait.
+A separate real-PostgreSQL SCIP regression verifies that foreign repository
+IDs cannot inject symbols and active SCIP generations cannot be reindexed.
+These tests do not substitute for forced process-termination, release/recovery
+drills, independent approval, merge, or production deployment validation.
+
+**P1 actual process-termination recovery regression (2026-10-25; PR #55, pending review/merge):**
+The new `TestPGSnapshotProcessTerminationRollbackAndRecovery` launches the real
+Go `IndexSnapshot` path in a separate operating-system process against disposable
+PostgreSQL 17. A test-owned symbol row lock deterministically pauses the worker
+*after* it has inserted the first file in its uncommitted transaction; the
+parent confirms the exact blocked PostgreSQL backend via `pg_blocking_pids`,
+then forcibly kills the worker. The test verifies that neither file nor symbol
+versions from the killed transaction persist, the previously active snapshot
+remains active, stale-generation startup recovery marks the queued generation
+failed, and a replacement generation can index and activate both files. This
+is a real process kill and database rollback, not a simulated indexing error.
+It does **not** prove interruption during the activation function itself,
+production restart behavior, restore/rollback drills, or complete P1 acceptance.
+
 ---
 
 # P2 — SCIP + AST / Tree-sitter Extraction
