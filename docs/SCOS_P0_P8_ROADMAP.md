@@ -496,6 +496,20 @@ restricted-role behavior on this specific empty-result branch. Independent
 review, merge, main-branch CI, historical system-time semantics and deployment
 verification remain open; this evidence is **not** full P5 acceptance.
 
+**P5 restricted-role acceptance expansion (2026-10-26, PR #60, unmerged):**
+Added a real PostgreSQL integration test for the empty valid-time HTTP path
+using the non-superuser, non-BYPASSRLS `scos_app` runtime role. It checks
+successful audit creation, persisted tenant/principal/valid-time/scope, own
+principal visibility, cross-principal and cross-tenant denial, and absence of
+session-context leakage after connection reuse. The P4 PostgreSQL CI job now
+applies the repository RLS policies after all migrations, provisions the
+restricted role, and **requires** its DSN so the acceptance test cannot silently
+skip. A RED test with the required role DSN absent failed as intended; the
+GREEN test passed against an isolated PostgreSQL 17/pgvector instance after
+65 migrations and 20 policies. This is branch-local test evidence; CI and
+independent review of the new commit remain required, as do system-time history,
+temporal contradiction/supersession cases, merge, and deployment verification.
+
 ---
 
 # P6 — Unified Memory + Code Graph

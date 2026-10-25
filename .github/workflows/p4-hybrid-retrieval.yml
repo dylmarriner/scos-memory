@@ -130,6 +130,8 @@ jobs:
       PGPASSWORD: scos-ci
       SCOS_CODE_STORE_TEST_DSN: postgresql://scos:scos-ci@127.0.0.1:5432/scos_memory?sslmode=disable
       SCOS_RETRIEVAL_TEST_DSN: postgresql://scos:scos-ci@127.0.0.1:5432/scos_memory?sslmode=disable
+      SCOS_APP_TEST_DATABASE_URL: postgresql://scos_app:scos-app-ci@127.0.0.1:5432/scos_memory?sslmode=disable
+      SCOS_REQUIRE_APP_RLS_TESTS: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -142,6 +144,11 @@ jobs:
         run: |
           for migration in database/migrations/*.sql; do
             psql -h 127.0.0.1 -U scos -d scos_memory -v ON_ERROR_STOP=1 -f "$migration"
+          done
+      - name: Apply RLS policies and provision restricted runtime role
+        run: |
+          for policy in database/policies/*.sql; do
+            psql -h 127.0.0.1 -U scos -d scos_memory -v ON_ERROR_STOP=1 -v app_password=scos-app-ci -f "$policy"
           done
       - name: Run code-intelligence integration tests
         run: go test -count=1 ./services/code-intelligence/cmd/server
