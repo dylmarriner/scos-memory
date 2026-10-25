@@ -243,6 +243,20 @@ IDs cannot inject symbols and active SCIP generations cannot be reindexed.
 These tests do not substitute for forced process-termination, release/recovery
 drills, independent approval, merge, or production deployment validation.
 
+**P1 actual process-termination recovery regression (2026-10-25; PR #55, pending review/merge):**
+The new `TestPGSnapshotProcessTerminationRollbackAndRecovery` launches the real
+Go `IndexSnapshot` path in a separate operating-system process against disposable
+PostgreSQL 17. A test-owned symbol row lock deterministically pauses the worker
+*after* it has inserted the first file in its uncommitted transaction; the
+parent confirms the exact blocked PostgreSQL backend via `pg_blocking_pids`,
+then forcibly kills the worker. The test verifies that neither file nor symbol
+versions from the killed transaction persist, the previously active snapshot
+remains active, stale-generation startup recovery marks the queued generation
+failed, and a replacement generation can index and activate both files. This
+is a real process kill and database rollback, not a simulated indexing error.
+It does **not** prove interruption during the activation function itself,
+production restart behavior, restore/rollback drills, or complete P1 acceptance.
+
 ---
 
 # P2 — SCIP + AST / Tree-sitter Extraction
