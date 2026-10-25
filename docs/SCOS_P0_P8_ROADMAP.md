@@ -171,6 +171,20 @@ No superiority/performance claim for P4+ is accepted without reproducible before
 - [ ] Verify retention/GC cannot remove code evidence referenced by memory-code links or audit records.
 - [ ] Add interrupted-index/activation recovery tests around real PostgreSQL transactions.
 
+**P1 recovery hardening evidence (2026-10-25, PR pending review/merge):**
+A new real-PostgreSQL regression suite exercises atomic rollback when indexing
+fails after an earlier file insert, verifies that no partial file/symbol rows
+or active-pointer changes survive, and retries the same immutable key after
+explicitly marking/deleting the failed generation. It also covers startup
+cleanup of aged queued generations without touching active state, refuses
+reactivation of queued/failed/nonexistent snapshots, preserves idempotence
+for already-active branches, and requires the workspace scan API to return
+HTTP 202 (not a misleading HTTP 200 `unchanged=true`) for queued/indexing
+snapshots. Both faulty responses were observed RED before implementation.
+These are isolated integration results, **not** proof of process-kill,
+concurrent-index, deployed recovery or production rollback readiness; the
+P1 acceptance gate remains open pending those checks and review/merge.
+
 ---
 
 # P2 — SCIP + AST / Tree-sitter Extraction

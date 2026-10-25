@@ -250,6 +250,24 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "look up snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	} else if existing != "" && status != "failed" {
+		// A queued/in-progress snapshot is not a completed unchanged scan.
+		// Return its existing job identity so callers can poll it, without
+		// starting a second worker or claiming that its symbols are queryable.
+		switch status {
+		case "queued", "scanning", "parsing", "indexing", "validating":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"snapshot_id": existing, "status": status, "unchanged": false,
+				"branch": branch, "commit_id": commit, "git_commit": head, "file_count": len(files),
+			})
+			return
+		case "ready", "active", "superseded":
+			// A fully indexed generation can be reused below.
+		default:
+			http.Error(w, "unexpected snapshot status: "+status, http.StatusConflict)
+			return
+		}
 		if status == "superseded" {
 			if err := s.pgStore.ReactivateSnapshot(r.Context(), existing); err != nil {
 				http.Error(w, "reactivate snapshot: "+err.Error(), http.StatusInternalServerError)
