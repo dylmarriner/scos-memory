@@ -177,7 +177,10 @@ func (s *server) handlePGRevalidations(w http.ResponseWriter, r *http.Request) {
 			Outcome string `json:"outcome"`
 			Reason  string `json:"reason"`
 		}
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		// 2000 Unicode characters can occupy 24 KiB when non-BMP runes
+		// are serialized as JSON surrogate escapes (12 bytes each).
+		// Keep a finite bound without rejecting valid international text.
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil {
 			http.Error(w, "invalid review JSON", http.StatusBadRequest)

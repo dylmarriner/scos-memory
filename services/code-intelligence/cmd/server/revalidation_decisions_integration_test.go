@@ -104,7 +104,14 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 			t.Fatalf("%s JSON accepted: %d %s", label, resp.Code, resp.Body.String())
 		}
 	}
-	accepted := post(reviewer, valid)
+	// Valid 2000-character non-BMP rationale, encoded using JSON surrogate
+	// escapes (24 KiB), must not be rejected by the byte-size guard.
+	unicodeValid := `{"event_id":"` + event + `","outcome":"still_valid","reason":"` +
+		strings.Repeat(`\ud83d\ude80`, 2000) + `"}`
+	if resp := post(reviewer, `{"event_id":"`+event+`","outcome":"still_valid","reason":"`+strings.Repeat("x", 33<<10)+`"}`); resp.Code != http.StatusBadRequest {
+		t.Fatalf("oversized review body accepted: %d", resp.Code)
+	}
+	accepted := post(reviewer, unicodeValid)
 	if accepted.Code != http.StatusCreated {
 		t.Fatalf("review status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
