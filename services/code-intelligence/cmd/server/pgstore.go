@@ -812,13 +812,18 @@ func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	if len(out) > 0 {
-		return out, nil
+	// A SCIP index may include a SymbolInformation_File declaration. Its
+	// kind is "file", but its hash is still only the SCIP symbol identity,
+	// not source bytes. Prefer the complete SCIP document fingerprint whenever
+	// SCIP declarations exist, even if the index contains File-kind symbols.
+	scipRows, err := s.loadSCIPSnapshotDocuments(ctx, snapshotID)
+	if err != nil {
+		return nil, err
 	}
-	// SCIP indexes store declarations but no synthetic kind='file' versions.
-	// Fall back to a deterministic document-level fingerprint so those
-	// snapshots remain visible to the diff API.
-	return s.loadSCIPSnapshotDocuments(ctx, snapshotID)
+	if len(scipRows) > 0 {
+		return scipRows, nil
+	}
+	return out, nil
 }
 
 // loadSCIPSnapshotDocuments groups SCIP declarations by document path. SCIP
