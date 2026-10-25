@@ -238,7 +238,15 @@ func insertEvidenceLink(ctx context.Context, tx *sql.Tx, tenantID, factID, codeS
 	var id string
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO memory_code_links (tenant_id, fact_id, code_symbol_version_id, link_type, confidence, source)
-		VALUES ($1,$2,$3,$4,$5,$6)
+		SELECT $1, mi.id, sv.id, $4, $5, $6
+		FROM memory_items mi
+		JOIN code_symbol_versions sv ON sv.id = $3
+		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
+		JOIN code_repositories repo ON repo.id = snap.repository_id
+		WHERE mi.id = $2
+		  AND mi.tenant_id = $1
+		  AND snap.tenant_id = $1
+		  AND repo.tenant_id = $1
 		ON CONFLICT (fact_id, code_symbol_version_id, link_type) DO UPDATE SET confidence = EXCLUDED.confidence
 		RETURNING id`,
 		tenantID, factID, codeSymbolVersionID, linkType, confidence, source).Scan(&id)

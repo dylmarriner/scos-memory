@@ -1292,6 +1292,10 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id, err := insertEvidenceLink(ctx, tx, identity.TenantID, req.FactID, req.CodeSymbolVersionID, req.LinkType, "explicit", confidence)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "code symbol version not found", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		// The fact was checked above, so a foreign-key refusal names a code
 		// symbol version that does not exist: the caller's input, not a
