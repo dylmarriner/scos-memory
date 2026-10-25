@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // encodeCalledNames/decodeCalledNames marshal indexedDecl.CalledNames to/from
@@ -266,6 +267,7 @@ func lockSnapshotForMutation(ctx context.Context, tx *sql.Tx, snapshotID string)
 // partway through never leaves activate_code_snapshot to promote an
 // incomplete generation.
 func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryID string, files []PGFileInput) error {
+	started := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin index transaction: %w", err)
@@ -297,11 +299,53 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		return fmt.Errorf("resolve parent snapshot: %w", err)
 	}
 
+	// Exactly the same path+hash criterion used by indexFileLocked's
+	// real unchanged-file reuse path. Read under the indexing transaction,
+	// so failed/incomplete generations never create committed metrics.
+	parentHashes := map[string]string{}
+	if parentSnapshotID != "" {
+		rows, err := tx.QueryContext(ctx, "SELECT path,content_hash FROM code_file_versions WHERE snapshot_id=$1", parentSnapshotID)
+		if err != nil {
+			return fmt.Errorf("load parent hashes for metrics: %w", err)
+		}
+		for rows.Next() {
+			var path, hash string
+			if err := rows.Scan(&path, &hash); err != nil {
+				rows.Close()
+				return err
+			}
+			parentHashes[path] = hash
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
 	var allDecls []indexedDecl
+	parsedFiles, reusedFiles, unparsedFiles := 0, 0, 0
+	parsedDecls, reusedDecls := 0, 0
+	extractorTiers := map[string]int{}
 	for _, f := range files {
 		decls, err := s.indexFileLocked(ctx, tx, snapshotID, repositoryID, parentSnapshotID, f)
 		if err != nil {
 			return fmt.Errorf("index %s: %w", f.Path, err)
+		}
+		hash, exists := parentHashes[f.Path]
+		switch {
+		case exists && hash == f.ContentHash:
+			reusedFiles++
+			reusedDecls += len(decls)
+		case f.Content != "":
+			parsedFiles++
+			parsedDecls += len(decls)
+		default:
+			unparsedFiles++
+		}
+		for _, d := range decls {
+			extractorTiers[d.Extractor]++
 		}
 		allDecls = append(allDecls, decls...)
 	}
@@ -309,14 +353,27 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		return fmt.Errorf("index call edges: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE code_repository_snapshots
-		   SET file_count = $2,
-		       symbol_count = (SELECT count(*) FROM code_symbol_versions WHERE snapshot_id = $1),
-		       status = 'ready'
-		WHERE id = $1`, snapshotID, len(files)); err != nil {
-		return fmt.Errorf("mark snapshot ready: %w", err)
+	cacheHitRatio := 0.0
+	if len(files) > 0 {
+		cacheHitRatio = float64(reusedFiles) / float64(len(files))
 	}
+	tiersJSON, err := json.Marshal(extractorTiers)
+	if err != nil {
+		return fmt.Errorf("serialize extraction metrics: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE code_repository_snapshots
+       SET file_count=$2,
+           symbol_count=(SELECT count(*) FROM code_symbol_versions WHERE snapshot_id=$1),
+           status='ready',parsed_file_count=$3,reused_file_count=$4,unparsed_file_count=$5,
+           parsed_declaration_count=$6,reused_declaration_count=$7,
+           cache_hit_ratio=$8,index_elapsed_ms=$9,extractor_tier_counts=$10::jsonb
+       WHERE id=$1`,
+		snapshotID, len(files), parsedFiles, reusedFiles, unparsedFiles,
+		parsedDecls, reusedDecls, cacheHitRatio, time.Since(started).Milliseconds(),
+		string(tiersJSON)); err != nil {
+		return fmt.Errorf("mark snapshot ready with indexing metrics: %w", err)
+	}
+
 	if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1)`, snapshotID); err != nil {
 		return fmt.Errorf("activate snapshot: %w", err)
 	}
