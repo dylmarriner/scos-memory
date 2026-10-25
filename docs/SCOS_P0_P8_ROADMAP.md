@@ -113,7 +113,7 @@ Operational rules:
 | **P5** | Temporal evidence | **PARTIAL** |
 | **P6** | Unified memory + code graph | **PARTIAL** |
 | **P7** | Stale-memory revalidation | **EARLY / MOSTLY UNBUILT** |
-| **P8** | Impact intelligence | **CODE SIDE PARTIAL; CROSS-DOMAIN UNBUILT** |
+| **P8** | Impact intelligence | **CODE IMPACT + GOVERNED MEMORY LINKS PARTIAL; FULL CROSS-DOMAIN ACCEPTANCE OPEN** |
 
 ---
 
@@ -721,6 +721,21 @@ P4 additionally allows repo-aware retrieval to return code evidence beside memor
 ## Already present
 
 Code-side `ChangeImpact` already provides reverse call traversal, direct/transitive dependents, bounded depth and personalized PageRank. P4 code search now also consumes persisted structural/SCIP graph signal during retrieval.
+
+**P8 explainable reverse-CALLS evidence (2026-10-26; PR #58 review branch, not merged):**
+A new real-PostgreSQL regression reproduced the missing multi-hop provenance:
+linked memory facts on transitive callers exposed only a direct symbol-to-memory
+link, with no proof of the caller chain from the queried seed. The implementation
+now publishes `code_evidence_paths` keyed by immutable symbol-version ID and
+builds each path from actual snapshot-bounded CALLS edges in reverse traversal
+order (matched callee → caller → ...). `KnowledgeDependents[].EvidencePath`
+appends the governed memory link to the same concrete chain. Shortest paths
+are deterministic across edge-row/map ordering and cycles; missing paths fail
+closed, and the existing 512-node/4096-edge caps still apply. Real PostgreSQL
+tests cover current and historical code snapshots, 3-hop memory links and HTTP
+serialization; unit tests cover tie-breaking, cycles and unreachable symbols.
+This is **partial P8 path evidence only**, not P7 revalidation, relation-type
+coverage, production qualification, or permission to merge/deploy.
 
 ## Remaining
 

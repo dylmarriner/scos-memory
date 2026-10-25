@@ -1183,6 +1183,9 @@ type PGImpact struct {
 	TransitiveDependents []PGSymbolVersion
 	MaxDepth             int
 	KnowledgeDependents  []PGKnowledgeImpact
+	// CodeEvidencePaths contains shortest deterministic reverse-CALLS chains
+	// from matched seeds to each reached symbol version (inclusive).
+	CodeEvidencePaths map[string][]string `json:"code_evidence_paths,omitempty"`
 	// Historical impact is pinned to a concrete immutable code snapshot.
 	// Linked memory facts are evaluated under current authorization/validity.
 	SnapshotID     string `json:"snapshot_id,omitempty"`
@@ -1301,6 +1304,7 @@ func (s *pgCodeStore) changeImpactFromMatches(
 		frontier = append(frontier, m.SymbolVersionID)
 	}
 
+	impact.CodeEvidencePaths = codeImpactEvidencePaths(seeds, nil)
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
 		next, err := s.callersOf(ctx, frontier, impact.SnapshotID)
 		if err != nil {
@@ -1342,6 +1346,13 @@ func (s *pgCodeStore) changeImpactFromMatches(
 		if err != nil {
 			return nil, fmt.Errorf("load ranking edges: %w", err)
 		}
+		paths := codeImpactEvidencePaths(seeds, edges)
+		for id := range visited {
+			if _, exists := paths[id]; !exists {
+				return nil, fmt.Errorf("impact evidence path missing for visited symbol %s", id)
+			}
+		}
+		impact.CodeEvidencePaths = paths
 		ranks := personalizedPageRank(nodes, edges, seeds, pageRankDamping, pageRankIterations)
 		idOf := func(v PGSymbolVersion) string { return v.SymbolVersionID }
 		fqnOf := func(v PGSymbolVersion) string { return v.FullyQualifiedName }

@@ -34,9 +34,9 @@ type PGKnowledgeImpact struct {
 // into memory_code_links. Tenant, principal namespace read access, sensitivity
 // ceiling and active fact status are enforced inside the same RLS transaction.
 //
-// Every evidence path describes the *direct stored edge* from the indicated
-// symbol version to the fact. Scope distinguishes matched code from caller
-// reachability; it does not fabricate individual transitive call edges.
+// Every evidence path starts at a matched seed and follows actual stored
+// CALLS edges in reverse (callee to caller) within the selected snapshot,
+// ending with the explicit memory-code link. No transitive hop is invented.
 func (s *pgCodeStore) KnowledgeImpact(
 	ctx context.Context, tenant, principal, repository string, code *PGImpact,
 ) ([]PGKnowledgeImpact, error) {
@@ -117,7 +117,11 @@ func (s *pgCodeStore) KnowledgeImpact(
 				return fmt.Errorf("knowledge impact exceeds 200 evidence links")
 			}
 			record.Scope = scopeByID[record.SymbolVersionID]
-			record.EvidencePath = []string{"code:" + record.SymbolVersionID, "memory:" + record.FactID}
+			codePath, exists := code.CodeEvidencePaths[record.SymbolVersionID]
+			if !exists || len(codePath) == 0 {
+				return fmt.Errorf("missing code evidence path for linked symbol %s", record.SymbolVersionID)
+			}
+			record.EvidencePath = append(append([]string(nil), codePath...), "memory:"+record.FactID)
 			out = append(out, record)
 		}
 		return rows.Err()
