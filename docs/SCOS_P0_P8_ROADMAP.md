@@ -169,9 +169,9 @@ No superiority/performance claim for P4+ is accepted without reproducible before
 - [ ] Return explicit snapshot identity/provenance from every historical code query/impact surface.
 - [ ] Add explicit snapshot selection where callers still imply the active branch snapshot.
 - [ ] Verify retention/GC cannot remove code evidence referenced by memory-code links or audit records.
-- [ ] Add interrupted-index/activation recovery tests around real PostgreSQL transactions.
+- [x] Add interrupted-index/activation recovery tests around real PostgreSQL transactions (including OS-process termination during file indexing, snapshot activation and historical reactivation; see evidence below).
 
-**P1 recovery hardening evidence (2026-10-25, PR pending review/merge):**
+**P1 recovery hardening evidence (2026-10-25; merged via PR #55):**
 A new real-PostgreSQL regression suite exercises atomic rollback when indexing
 fails after an earlier file insert, verifies that no partial file/symbol rows
 or active-pointer changes survive, and retries the same immutable key after
@@ -185,7 +185,7 @@ These are isolated integration results, **not** proof of process-kill,
 concurrent-index, deployed recovery or production rollback readiness; the
 P1 acceptance gate remains open pending those checks and review/merge.
 
-**Additional P1 ownership/immutability hardening (2026-10-25; PR #55, pending review/merge):**
+**Additional P1 ownership/immutability hardening (2026-10-25; merged via PR #55):**
 Real PostgreSQL 17 tests reproduced four independent failures before fixes:
 `IndexSnapshot` accepted a different tenant's repository ID and persisted
 foreign-owned file/symbol versions under the target snapshot; an already-active
@@ -200,7 +200,7 @@ These checks protect one-generation ownership and immutability but **do not**
 establish cross-generation activation serialization, forced process termination,
 full recovery, production readiness or completion of the P1 gate.
 
-**P1 late-worker status race regression (2026-10-25; PR #55, pending review/merge):**
+**P1 late-worker status race regression (2026-10-25; merged via PR #55):**
 CodeRabbit identified a race where a late indexing/diff error could overwrite a
 superseded, reactivatable generation as failed. A real PostgreSQL 17 test first
 reproduced this corruption (RED), then passed (GREEN) after constraining
@@ -209,7 +209,7 @@ queued generations can still transition to failed for recovery. All 63
 migrations applied to an isolated disposable database. This does not establish
 process-kill or production recovery acceptance.
 
-**P1 cross-generation activation race (2026-10-25; PR #55, pending review/merge):**
+**P1 cross-generation activation race (2026-10-25; merged via PR #55):**
 A deterministic real-PostgreSQL 17 integration test held the shared repository
 row lock until two independent same-branch indexing transactions were
 simultaneously blocked in `activate_code_snapshot`. Before the fix, both
@@ -220,12 +220,12 @@ locks the shared repository row *before* superseding old generations, so
 concurrent activations serialize and observe the previous commit (GREEN).
 The test verifies exactly one active snapshot, pointer consistency, and
 historical reactivation of the superseded generation. Migration number 000065
-is reserved by open PR #52 and was not reused. This evidence covers
-cross-generation activation concurrency only; forced process termination,
+was introduced by PR #52, which merged on 2026-10-25; 000066 remains
+distinct. This evidence covers cross-generation activation concurrency only; forced process termination,
 full release/recovery drills, independent review, merge, and remaining P1
 hardening are still required.
 
-**P1 activation lock-order review regression (2026-10-25; PR #55, pending review/merge):**
+**P1 activation lock-order review regression (2026-10-25; merged via PR #55):**
 A subsequent CodeRabbit major finding identified a repository/snapshot lock
 inversion: the migration acquired the snapshot lock before the repository
 lock, and file indexing, SCIP indexing and historical reactivation did the
@@ -243,7 +243,7 @@ IDs cannot inject symbols and active SCIP generations cannot be reindexed.
 These tests do not substitute for forced process-termination, release/recovery
 drills, independent approval, merge, or production deployment validation.
 
-**P1 actual process-termination recovery regression (2026-10-25; PR #55, pending review/merge):**
+**P1 actual process-termination recovery regression (2026-10-25; merged via PR #55):**
 The new `TestPGSnapshotProcessTerminationRollbackAndRecovery` launches the real
 Go `IndexSnapshot` path in a separate operating-system process against disposable
 PostgreSQL 17. A test-owned symbol row lock deterministically pauses the worker
@@ -256,6 +256,32 @@ failed, and a replacement generation can index and activate both files. This
 is a real process kill and database rollback, not a simulated indexing error.
 It does **not** prove interruption during the activation function itself,
 production restart behavior, restore/rollback drills, or complete P1 acceptance.
+
+**P1 activation-boundary SIGKILL acceptance (2026-10-26; isolated AMD review branch):**
+Two additional real PostgreSQL 17 integration tests launch the actual Go
+indexing or historical-reactivation path in a separate OS process. A
+test-owned row lock on the *previously active* generation forces the worker
+to wait **inside** `activate_code_snapshot`, after the indexer has written
+its files and marked the new generation ready within its uncommitted
+transaction. `pg_stat_activity` and `pg_blocking_pids` identify the exact
+blocked backend and owning lock before the worker is forcibly killed.
+The tests verify that no partial versions, ready/active status, or repository
+pointer changes survive the killed transaction; the historical reactivation
+case verifies that neither old nor current immutable generation changes.
+Startup stale-generation recovery, replacement indexing and a clean
+historical reactivation retry are exercised. Both tests passed 20 consecutive
+runs against disposable PostgreSQL 17. This completes the *isolated
+PostgreSQL interruption-test* checklist item, **not** P1 release acceptance.
+No live restart/rollback or production deployment is implied.
+
+**Merge/CI reconciliation (verified 2026-10-26):** PRs #52, #53, #54 and
+#55 are merged on GitHub, and `main` at `9969f8d` passed CI and P4 Hybrid
+Retrieval on 2026-10-25 (runs 40187523312 and 40187523364). Earlier
+paragraphs' merge/review caveats record the limitations at the time each
+test was first introduced, not the present PR state. Independent approval
+for this new test-only change and a separately owner-authorized deployment
+remain outstanding. P1 provenance, retention/GC, deployed recovery and
+the P0–P8 acceptance gates remain open.
 
 ---
 
