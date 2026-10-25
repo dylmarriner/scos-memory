@@ -1,13 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"database/sql"
-	"errors"
-	"net/url"
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -41,96 +35,14 @@ func TestPGSnapshotActivationProcessTerminationRollbackAndRecovery(t *testing.T)
 		t.Fatal(err)
 	}
 
-	// Only the old active snapshot is locked. The worker can acquire the
-	// repository and pending-snapshot locks, insert all its files, and mark
-	// pending ready. It then blocks INSIDE activate_code_snapshot while
-	// attempting to supersede the old active generation.
-	blocker, err := db.BeginTx(ctx, &sql.TxOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = blocker.Rollback() })
-	var blockerPID int
-	if err := blocker.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&blockerPID); err != nil {
-		t.Fatal(err)
-	}
-	var locked string
-	if err := blocker.QueryRowContext(ctx,
-		"SELECT id::text FROM code_repository_snapshots WHERE id=$1 FOR UPDATE", original).Scan(&locked); err != nil {
-		t.Fatal(err)
-	}
-
-	dsn, err := url.Parse(os.Getenv("SCOS_CODE_STORE_TEST_DSN"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Only the previous active snapshot is locked, so the worker must reach
+	// activate_code_snapshot after inserting files and marking pending ready.
 	appName := "scos_p1_activate_kill_" + strings.ReplaceAll(pending[:8], "-", "")
-	query := dsn.Query()
-	query.Set("application_name", appName)
-	dsn.RawQuery = query.Encode()
-
-	// Reuse the real IndexSnapshot subprocess from the ingestion-kill test.
-	worker := exec.Command(os.Args[0], "-test.run=^TestPGSnapshotProcessKillChild$", "-test.v")
-	worker.Env = append(os.Environ(),
+	killWorkerBlockedInActivation(t, ctx, db, original, appName, "TestPGSnapshotProcessKillChild",
 		"SCOS_P1_INDEX_KILL_CHILD=1",
 		"SCOS_P1_KILL_SNAPSHOT="+pending,
 		"SCOS_P1_KILL_REPOSITORY="+repo,
-		"SCOS_CODE_STORE_TEST_DSN="+dsn.String(),
 	)
-	var output bytes.Buffer
-	worker.Stdout = &output
-	worker.Stderr = &output
-	if err := worker.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waited := false
-	t.Cleanup(func() {
-		if !waited {
-			_ = worker.Process.Kill()
-			_ = worker.Wait()
-		}
-	})
-
-	// Confirm the exact PostgreSQL backend is waiting on OUR snapshot row
-	// from within the activation function, rather than assuming a timing
-	// window. This proves the worker reached activation after file writes.
-	observed := false
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := db.QueryRowContext(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM pg_stat_activity a
-				 WHERE a.application_name=$1
-				   AND a.wait_event_type='Lock'
-				   AND a.query ILIKE '%activate_code_snapshot%'
-				   AND $2=ANY(pg_blocking_pids(a.pid))
-			)`, appName, blockerPID).Scan(&observed); err != nil {
-			t.Fatal(err)
-		}
-		if observed {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if !observed {
-		_ = worker.Process.Kill()
-		_ = worker.Wait()
-		waited = true
-		t.Fatalf("worker did not reach the blocked activation function: %s", output.String())
-	}
-
-	if err := worker.Process.Kill(); err != nil {
-		t.Fatalf("kill worker inside activation: %v", err)
-	}
-	waitErr := worker.Wait()
-	waited = true
-	var exitErr *exec.ExitError
-	if !errors.As(waitErr, &exitErr) {
-		t.Fatalf("worker was not forcibly terminated: %v", waitErr)
-	}
-	if err := blocker.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-		t.Fatal(err)
-	}
 
 	var status string
 	var activated bool
