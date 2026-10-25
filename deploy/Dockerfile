@@ -18,10 +18,9 @@
 # Adding a service means adding its name to SERVICES below and giving it a
 # `command:` in compose -- nothing else.
 
-# Pinned to a specific patch, not a floating "1.26-alpine" tag: go.mod pins
-# `toolchain go1.26.6`, and the build should always reproduce with the same
-# toolchain rather than whatever patch Docker Hub resolves the tag to on a
-# given day.
+# Security-patched Go 1.27.3 build image (2026-10-19 crypto/x509 fix).
+# The module's minimum preferred toolchain is Go 1.26.10; the build stage
+# intentionally uses a newer, patched Go 1.27 release.
 FROM golang:1.27.3-alpine AS build
 # CGO_ENABLED=1: code-intelligence's Tree-sitter parsers (tree-sitter-go,
 # -javascript, -python, -rust, -typescript) are cgo bindings around the C
