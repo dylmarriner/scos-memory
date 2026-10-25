@@ -38,7 +38,14 @@ its baseline**, and mismatched engine identity. Baseline recording also refuses
 to write when forbidden evidence is retrieved in the top twenty; re-recording
 cannot normalize a known-bad result. This is a narrow fixture-level safety
 invariant, **not** tenant authorization, full temporal validity enforcement,
-or production isolation. The gate also recomputes every stored baseline metric from its recorded ranked IDs and frozen relevance labels, rejects unknown/duplicate document IDs, and validates aggregate scores and forbidden totals at all three depths. Lowering a stored score cannot silently weaken the regression threshold. The gate never auto-updates the baseline. Explicitly
+or production isolation. The gate also recomputes every stored baseline metric
+from its recorded ranked IDs and frozen relevance labels, rejects unknown or
+duplicate document IDs, and validates aggregate scores and forbidden totals at
+all three depths. Lowering a stored score cannot silently weaken the regression
+threshold. It requires the **exact deterministic ranking** to match the recorded
+baseline, even when swapping irrelevant results would leave Recall/MRR/nDCG
+unchanged. Intentional ranking changes require explicit review and
+requalification. The gate never auto-updates the baseline. Explicitly
 re-record after review with
 `python3 -m benchmarks.p4.offline_gate --record-baseline benchmarks/p4/lexical_baseline.json`.
 

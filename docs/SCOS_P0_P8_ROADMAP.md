@@ -183,6 +183,19 @@ adds the two deeper-depth counters and refreshes generator provenance.
 This remains isolated lexical smoke evidence, not live tenant/temporal
 authorization, P0 qualification, or owner authorization to merge/deploy.
 
+
+**P0 deterministic ranking-integrity regression (2026-10-26; PR #57 review branch):**
+Two new regression tests reproduced (RED) a baseline-integrity gap: swapping
+non-relevant retrieved IDs left all recorded quality metrics unchanged and
+passed the gate, including when the changed baseline was loaded from disk.
+The gate now requires exact ranked-ID equality for every deterministic lexical
+case (GREEN). An intentional engine/ranking change therefore requires an
+explicitly reviewed new baseline; no automatic rebaselining occurs. The
+fixture, measured rankings, metrics and forbidden counts are unchanged;
+only generator/base-commit provenance is refreshed. This remains a seven-case
+offline lexical smoke check, not a deployed retrieval, tenant-isolation,
+performance, or P0 completion claim. No merge or deployment authorized.
+
 ## Remaining
 
 - [ ] Expand the versioned memory-retrieval corpus for paraphrase, long-history noise, conflicts, supersession, temporal queries and scope isolation.

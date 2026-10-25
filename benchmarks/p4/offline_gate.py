@@ -190,6 +190,11 @@ def compare(current: dict, baseline: dict) -> list[str]:
         return errors
     for case_id, result in current["cases"].items():
         previous = baseline["cases"][case_id]
+        # Quality metrics can be identical after swapping irrelevant evidence.
+        # This deterministic engine must preserve its full measured ranking;
+        # intentional changes require an explicitly reviewed new baseline.
+        if result["retrieved_ids"] != previous.get("retrieved_ids"):
+            errors.append(f"{case_id}: deterministic ranking drifted from baseline")
         for metric in METRICS:
             old = previous.get("metrics", {}).get(metric)
             if not isinstance(old, (int, float)) or not math.isfinite(old):

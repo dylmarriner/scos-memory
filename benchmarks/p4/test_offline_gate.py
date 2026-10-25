@@ -1,4 +1,5 @@
 """Integration/regression tests for the real deterministic lexical benchmark gate."""
+import copy
 import json
 import pathlib
 import subprocess
@@ -156,6 +157,29 @@ class OfflineGateTests(unittest.TestCase):
             case["retrieved_ids"][0] = "mem_live_deploy"
         result = self._check_mutated_baseline(mutate)
         self.assertIn("inconsistent", result.stderr)
+
+    def test_rejects_ranking_drift_with_identical_quality_scores(self):
+        # Deterministic retrieval must not silently change the evidence order
+        # just because the changed candidates happen to be non-relevant.
+        from benchmarks.p4.offline_gate import compare, load_fixture, run_retrieval, validate_baseline
+        fixture, digest = load_fixture(FIXTURE)
+        current = run_retrieval(fixture, digest)
+        baseline = copy.deepcopy(current)
+        ranked = baseline["cases"]["mixed"]["retrieved_ids"]
+        ranked[2], ranked[3] = ranked[3], ranked[2]
+        self.assertEqual(validate_baseline(fixture, baseline), [])
+        self.assertEqual(
+            current["cases"]["mixed"]["metrics"],
+            baseline["cases"]["mixed"]["metrics"],
+        )
+        self.assertTrue(any("ranking" in issue for issue in compare(current, baseline)))
+
+    def test_rejects_ranking_drift_from_modified_baseline_file(self):
+        def mutate(data):
+            ranked = data["cases"]["mixed"]["retrieved_ids"]
+            ranked[2], ranked[3] = ranked[3], ranked[2]
+        result = self._check_mutated_baseline(mutate)
+        self.assertIn("ranking", result.stderr)
 
     def test_rejects_baseline_out_of_corpus_ranked_id(self):
         def mutate(data):
