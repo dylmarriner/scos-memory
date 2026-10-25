@@ -169,6 +169,20 @@ integrity checking of the seven-case lexical smoke baseline; realistic P0
 benchmarks, model comparisons, tenant isolation and live qualification remain
 unverified. No production changes or authorization to merge/deploy.
 
+**P0 forbidden-depth regression (2026-10-26; PR #57 review branch):**
+The isolated lexical smoke gate previously checked forbidden evidence only in
+the top five despite measuring retrieval at k=10 and k=20. A synthetic
+six-document fixture demonstrated RED: a forbidden document ranked sixth and
+baseline recording incorrectly succeeded. Four new tests cover rank-six
+exposure, measured counts at k=5/10/20, contaminated rebaselining, and
+inconsistent baseline counts. The gate now records and validates per-case and
+aggregate forbidden exposure at all three depths, refuses to record any
+nonzero exposure, and rejects contaminated current or baseline results.
+Existing seven-case rankings and quality metrics are unchanged; the baseline
+adds the two deeper-depth counters and refreshes generator provenance.
+This remains isolated lexical smoke evidence, not live tenant/temporal
+authorization, P0 qualification, or owner authorization to merge/deploy.
+
 ## Remaining
 
 - [ ] Expand the versioned memory-retrieval corpus for paraphrase, long-history noise, conflicts, supersession, temporal queries and scope isolation.

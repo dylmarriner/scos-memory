@@ -28,6 +28,7 @@ DEFAULT_BASELINE = pathlib.Path(__file__).with_name("lexical_baseline.json")
 METRICS = ("recall@5", "recall@10", "recall@20",
            "precision@5", "precision@10", "precision@20",
            "mrr", "ndcg@5", "ndcg@10", "ndcg@20")
+FORBIDDEN_DEPTHS = (5, 10, 20)
 
 
 def load_fixture(path: pathlib.Path) -> tuple[dict, str]:
@@ -76,8 +77,11 @@ def run_retrieval(fixture: dict, fixture_sha: str) -> dict:
         results[case["id"]] = {
             "retrieved_ids": retrieved,
             "metrics": metrics,
-            "forbidden_at_5": len(set(retrieved[:5]) & set(case.get("forbidden_ids", []))),
             "requires_semantic": bool(case.get("requires_semantic", False)),
+            **{
+                f"forbidden_at_{k}": len(set(retrieved[:k]) & set(case.get("forbidden_ids", [])))
+                for k in FORBIDDEN_DEPTHS
+            },
         }
     git_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=False,
@@ -99,7 +103,10 @@ def run_retrieval(fixture: dict, fixture_sha: str) -> dict:
             metric: statistics.fmean(c["metrics"][metric] for c in results.values())
             for metric in METRICS
         },
-        "total_forbidden_at_5": sum(c["forbidden_at_5"] for c in results.values()),
+        **{
+            f"total_forbidden_at_{k}": sum(c[f"forbidden_at_{k}"] for c in results.values())
+            for k in FORBIDDEN_DEPTHS
+        },
     }
 
 
@@ -144,9 +151,11 @@ def validate_baseline(fixture: dict, baseline: dict) -> list[str]:
                     or not math.isfinite(value) or not math.isclose(
                         value, measured[metric], rel_tol=0, abs_tol=1e-12)):
                 errors.append(f"{case_id}: inconsistent baseline {metric}")
-        forbidden = len(set(ranked[:5]) & set(label.get("forbidden_ids", [])))
-        if result.get("forbidden_at_5") != forbidden:
-            errors.append(f"{case_id}: inconsistent forbidden_at_5")
+        for k in FORBIDDEN_DEPTHS:
+            forbidden = len(set(ranked[:k]) & set(label.get("forbidden_ids", [])))
+            stored_forbidden = result.get(f"forbidden_at_{k}")
+            if (type(stored_forbidden) is not int or stored_forbidden != forbidden):
+                errors.append(f"{case_id}: inconsistent forbidden_at_{k}")
         if result.get("requires_semantic") is not bool(label.get("requires_semantic", False)):
             errors.append(f"{case_id}: inconsistent requires_semantic")
     if errors:
@@ -162,9 +171,11 @@ def validate_baseline(fixture: dict, baseline: dict) -> list[str]:
                     or not math.isfinite(value) or not math.isclose(
                         value, measured, rel_tol=0, abs_tol=1e-12)):
                 errors.append(f"inconsistent average_metrics {metric}")
-    total = sum(cases[c]["forbidden_at_5"] for c in cases)
-    if baseline.get("total_forbidden_at_5") != total:
-        errors.append("inconsistent total_forbidden_at_5")
+    for k in FORBIDDEN_DEPTHS:
+        total = sum(cases[c][f"forbidden_at_{k}"] for c in cases)
+        stored_total = baseline.get(f"total_forbidden_at_{k}")
+        if type(stored_total) is not int or stored_total != total:
+            errors.append(f"inconsistent total_forbidden_at_{k}")
     return errors
 
 
@@ -185,13 +196,14 @@ def compare(current: dict, baseline: dict) -> list[str]:
                 errors.append(f"{case_id}: missing or invalid baseline {metric}")
             elif result["metrics"][metric] + 1e-12 < old:
                 errors.append(f"{case_id}: {metric} regressed from {old} to {result['metrics'][metric]}")
-        forbidden = previous.get("forbidden_at_5")
-        if not isinstance(forbidden, int) or forbidden < 0:
-            errors.append(f"{case_id}: invalid forbidden exposure threshold")
-        elif forbidden != 0:
-            errors.append(f"{case_id}: forbidden exposure in baseline is {forbidden}; zero is mandatory")
-        if result["forbidden_at_5"] != 0:
-            errors.append(f"{case_id}: forbidden exposure is {result['forbidden_at_5']}; zero is mandatory")
+        for k in FORBIDDEN_DEPTHS:
+            forbidden = previous.get(f"forbidden_at_{k}")
+            if type(forbidden) is not int or forbidden < 0:
+                errors.append(f"{case_id}: invalid forbidden_at_{k} exposure threshold")
+            elif forbidden != 0:
+                errors.append(f"{case_id}: forbidden_at_{k} in baseline is {forbidden}; zero is mandatory")
+            if result[f"forbidden_at_{k}"] != 0:
+                errors.append(f"{case_id}: forbidden_at_{k} is {result[f'forbidden_at_{k}']}; zero is mandatory")
     return errors
 
 
@@ -206,8 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         fixture, digest = load_fixture(args.fixture)
         current = run_retrieval(fixture, digest)
         if args.record_baseline:
-            if current["total_forbidden_at_5"] != 0:
-                raise ValueError("forbidden exposure detected; refusing to record an unsafe baseline")
+            if any(current[f"total_forbidden_at_{k}"] != 0 for k in FORBIDDEN_DEPTHS):
+                raise ValueError("forbidden exposure at k=5/10/20 detected; refusing to record an unsafe baseline")
             args.record_baseline.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
             print(f"RECORDED {len(current['cases'])} real lexical retrieval cases to {args.record_baseline}")
             return 0
@@ -221,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"PASS: {len(current['cases'])} lexical retrieval cases; "
               f"Recall@5={current['average_metrics']['recall@5']:.3f}; "
-              f"forbidden@5={current['total_forbidden_at_5']} (baseline-relative)")
+              f"forbidden@5/10/20={tuple(current[f'total_forbidden_at_{k}'] for k in FORBIDDEN_DEPTHS)} (fixture-labelled)")
         return 0
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         print(f"FAIL: {error}", file=sys.stderr)

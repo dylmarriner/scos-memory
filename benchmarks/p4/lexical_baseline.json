@@ -13,6 +13,8 @@
   },
   "cases": {
     "code_exact": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
       "forbidden_at_5": 0,
       "metrics": {
         "mrr": 1.0,
@@ -32,6 +34,8 @@
       ]
     },
     "code_planner": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
       "forbidden_at_5": 0,
       "metrics": {
         "mrr": 1.0,
@@ -53,6 +57,8 @@
       ]
     },
     "code_semantic": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
       "forbidden_at_5": 0,
       "metrics": {
         "mrr": 1.0,
@@ -75,6 +81,8 @@
       ]
     },
     "memory_exact": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
       "forbidden_at_5": 0,
       "metrics": {
         "mrr": 1.0,
@@ -94,6 +102,8 @@
       ]
     },
     "memory_semantic": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
       "forbidden_at_5": 0,
       "metrics": {
         "mrr": 1.0,
@@ -114,6 +124,8 @@
       ]
     },
     "memory_temporal": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
       "forbidden_at_5": 0,
       "metrics": {
         "mrr": 0.5,
@@ -135,6 +147,8 @@
       ]
     },
     "mixed": {
+      "forbidden_at_10": 0,
+      "forbidden_at_20": 0,
       "forbidden_at_5": 0,
       "metrics": {
         "mrr": 1.0,
@@ -163,8 +177,10 @@
   "engine_version": "1.0.0",
   "fixture_name": "p4-hybrid-retrieval-smoke",
   "fixture_sha256": "73e67b2876b9500f5a67676faa1878e987e6561d701433435f14eb470e1e7fe6",
-  "generator_sha256": "4bb31993cf2dbc16c10ea8922db8d2cd3dc40c1aef63dbce17d8725ea4799e6d",
-  "git_base_sha": "4e07fef983960ef064db0234719a01e55b1543e5",
+  "generator_sha256": "76646d749cee2456aceca9aa93a3852737a5a72b1a518c4f764707d94d5a8876",
+  "git_base_sha": "d9995579ee5217810f9438c06bc36218b69ba5ea",
   "schema_version": 1,
+  "total_forbidden_at_10": 0,
+  "total_forbidden_at_20": 0,
   "total_forbidden_at_5": 0
 }
