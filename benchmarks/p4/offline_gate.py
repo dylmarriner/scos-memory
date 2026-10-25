@@ -25,6 +25,7 @@ from benchmarks.harness import (
 
 DEFAULT_FIXTURE = pathlib.Path(__file__).with_name("retrieval_fixture.json")
 DEFAULT_BASELINE = pathlib.Path(__file__).with_name("lexical_baseline.json")
+HARNESS_PATH = pathlib.Path(__file__).resolve().parents[1] / "harness.py"
 METRICS = ("recall@5", "recall@10", "recall@20",
            "precision@5", "precision@10", "precision@20",
            "mrr", "ndcg@5", "ndcg@10", "ndcg@20")
@@ -97,6 +98,7 @@ def run_retrieval(fixture: dict, fixture_sha: str) -> dict:
         # benchmark changes already exist in that Git commit.
         "git_base_sha": git_sha,
         "generator_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+        "harness_sha256": hashlib.sha256(HARNESS_PATH.read_bytes()).hexdigest(),
         "deployment_class": "isolated-offline-lexical-smoke",
         "cases": results,
         "average_metrics": {
@@ -182,7 +184,8 @@ def validate_baseline(fixture: dict, baseline: dict) -> list[str]:
 def compare(current: dict, baseline: dict) -> list[str]:
     errors = []
     for key in ("schema_version", "fixture_sha256", "fixture_name",
-                "engine", "engine_version", "generator_sha256", "deployment_class"):
+                "engine", "engine_version", "generator_sha256",
+                "harness_sha256", "deployment_class"):
         if current[key] != baseline.get(key):
             errors.append(f"{key} mismatch (fixture/engine changed; requalify baseline)")
     if set(current["cases"]) != set(baseline.get("cases", {})):

@@ -196,6 +196,17 @@ only generator/base-commit provenance is refreshed. This remains a seven-case
 offline lexical smoke check, not a deployed retrieval, tenant-isolation,
 performance, or P0 completion claim. No merge or deployment authorized.
 
+**P0 shared-harness provenance verification (2026-10-26; PR #57 review branch):**
+Three RED-before-fix regression tests demonstrated that the lexical benchmark
+omitted its imported `benchmarks/harness.py` implementation from provenance,
+and accepted missing/forged harness digests when rankings were unchanged.
+The measured baseline now records the shared-harness SHA-256, and the gate
+rejects missing or mismatched fingerprints (GREEN). Existing seven-case
+rankings, quality metrics, and forbidden-at-5/10/20 totals are unchanged.
+This closes a narrow offline reproducibility gap only; deployed BGE/FTS/RRF,
+latency/cost, tenant/temporal correctness, independent approval and deployment
+gates remain outstanding. No merge or deployment authorized.
+
 ## Remaining
 
 - [ ] Expand the versioned memory-retrieval corpus for paraphrase, long-history noise, conflicts, supersession, temporal queries and scope isolation.

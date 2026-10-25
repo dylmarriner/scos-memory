@@ -145,6 +145,26 @@ class OfflineGateTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, "corrupt baseline passed: " + result.stdout)
             return result
 
+    def test_records_actual_shared_harness_digest(self):
+        import hashlib
+        from benchmarks.p4.offline_gate import load_fixture, run_retrieval
+        fixture, digest = load_fixture(FIXTURE)
+        measured = run_retrieval(fixture, digest)
+        expected = hashlib.sha256((ROOT / "benchmarks/harness.py").read_bytes()).hexdigest()
+        self.assertEqual(measured["harness_sha256"], expected)
+
+    def test_rejects_baseline_without_harness_provenance(self):
+        def mutate(data):
+            data.pop("harness_sha256", None)
+        result = self._check_mutated_baseline(mutate)
+        self.assertIn("harness_sha256", result.stderr)
+
+    def test_rejects_mismatched_harness_provenance_even_if_rankings_match(self):
+        def mutate(data):
+            data["harness_sha256"] = "0" * 64
+        result = self._check_mutated_baseline(mutate)
+        self.assertIn("harness_sha256", result.stderr)
+
     def test_rejects_baseline_metric_lowering_without_rank_change(self):
         def mutate(data):
             data["cases"]["memory_exact"]["metrics"]["recall@5"] = 0.0

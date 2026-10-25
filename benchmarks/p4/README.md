@@ -64,3 +64,14 @@ The gate now records and rejects forbidden evidence at k=5, 10 and 20,
 including baseline consistency checks. The synthetic rank-six case was RED
 before the change and GREEN afterward. This still does not enforce tenant
 authorization or temporal correctness in a deployed retrieval service.
+
+**P0 shared-harness provenance guard (2026-10-26; PR #57 review branch):**
+Three RED-before-fix tests established that the measured record lacked a digest
+of `benchmarks/harness.py` and that a baseline with missing or forged harness
+provenance passed even when its rankings and metrics were identical. The
+recorded baseline now contains `harness_sha256`, computed from the exact
+retrieval/scoring implementation, and `--check` requires it to match.
+This catches shared-engine source drift even when the tiny corpus happens to
+produce unchanged results. Re-recording requires explicit review. The
+seven-case fixture, measured rankings, metrics and forbidden counts are
+unchanged. This is not a live deployment or model-space qualification.
