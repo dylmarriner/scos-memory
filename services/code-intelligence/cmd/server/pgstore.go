@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -763,7 +764,7 @@ func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, te
 // SnapshotDiffEntry is one changed path in a SnapshotDiff.
 type SnapshotDiffEntry struct {
 	Path         string
-	PreviousPath string // set only for a Renamed entry
+	PreviousPath string // set for Renamed or Copied entries
 	SymbolID     string
 }
 
@@ -782,28 +783,92 @@ type SnapshotDiff struct {
 }
 
 type snapshotSymbolRow struct {
-	SymbolID    string
-	Path        string
-	ContentHash string
+	SymbolID     string
+	Path         string
+	ContentHash  string
+	SCIPDocument bool // declaration-derived path fingerprint, not file bytes
 }
 
 func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT symbol_id, path, content_hash FROM code_symbol_versions
-		WHERE snapshot_id = $1 AND kind = 'file' ORDER BY path, id`, snapshotID)
+        SELECT symbol_id, path, content_hash FROM code_symbol_versions
+        WHERE snapshot_id = $1 AND kind = 'file' ORDER BY path, id`, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("load snapshot symbols: %w", err)
 	}
-	defer rows.Close()
 	var out []snapshotSymbolRow
 	for rows.Next() {
 		var r snapshotSymbolRow
 		if err := rows.Scan(&r.SymbolID, &r.Path, &r.ContentHash); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("scan snapshot symbol: %w", err)
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(out) > 0 {
+		return out, nil
+	}
+	// SCIP indexes store declarations but no synthetic kind='file' versions.
+	// Fall back to a deterministic document-level fingerprint so those
+	// snapshots remain visible to the diff API.
+	return s.loadSCIPSnapshotDocuments(ctx, snapshotID)
+}
+
+// loadSCIPSnapshotDocuments groups SCIP declarations by document path. SCIP
+// content_hash is derived from symbol identity alone, so metadata must also
+// contribute to the fingerprint to detect changed declarations. This is a
+// semantic/index delta, not proof that every source-byte change was indexed.
+func (s *pgCodeStore) loadSCIPSnapshotDocuments(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT symbol_id::text, path, content_hash, fully_qualified_name, kind,
+               COALESCE(signature, ''), COALESCE(doc_comment, ''), COALESCE(extractor, '')
+        FROM code_symbol_versions
+        WHERE snapshot_id = $1 AND extractor LIKE 'scip:%'
+        ORDER BY path, symbol_id`, snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("load SCIP snapshot documents: %w", err)
+	}
+	defer rows.Close()
+	type declaration struct {
+		SymbolID, ContentHash, FQN, Kind, Signature, Documentation, Extractor string
+	}
+	byPath := make(map[string][]declaration)
+	for rows.Next() {
+		var d declaration
+		var path string
+		if err := rows.Scan(&d.SymbolID, &path, &d.ContentHash, &d.FQN, &d.Kind, &d.Signature, &d.Documentation, &d.Extractor); err != nil {
+			return nil, fmt.Errorf("scan SCIP snapshot document: %w", err)
+		}
+		byPath[path] = append(byPath[path], d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(byPath))
+	for path := range byPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	out := make([]snapshotSymbolRow, 0, len(paths))
+	for _, path := range paths {
+		payload, err := json.Marshal(byPath[path])
+		if err != nil {
+			return nil, fmt.Errorf("fingerprint SCIP document: %w", err)
+		}
+		sum := sha256.Sum256(payload)
+		out = append(out, snapshotSymbolRow{
+			SymbolID: byPath[path][0].SymbolID, Path: path,
+			ContentHash: fmt.Sprintf("scip:%x", sum), SCIPDocument: true,
+		})
+	}
+	return out, nil
 }
 
 // DiffSnapshot computes what changed between snapshotID and its parent
@@ -811,10 +876,10 @@ func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string
 // is unchanged and not reported at all -- this is the set the incremental
 // pipeline's "skip unchanged files" step (blueprint §35) would act on, made
 // inspectable rather than left implicit. A path present under a different
-// name but the *same* stable symbol identity (content-hash-keyed, see
-// pgCodeStore's doc comment) is Renamed rather than Removed+Added; same
-// path with a different content hash is Modified; everything else is
-// Added or Removed.
+// name with unambiguous matching file content is Renamed if the old
+// path disappeared, or Copied if the source survives unchanged. SCIP
+// snapshots lack file-byte hashes, so their document-level declaration
+// changes are reported by path without speculative rename/copy claims.
 func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (SnapshotDiff, error) {
 	var parentID sql.NullString
 	if err := s.db.QueryRowContext(ctx, `
@@ -837,6 +902,33 @@ func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (Snap
 	oldRows, err := s.loadSnapshotSymbols(ctx, parentID.String)
 	if err != nil {
 		return diff, err
+	}
+
+	// SCIP has declaration paths but no source-file hashes. A moved SCIP
+	// declaration does not establish a byte-identical file rename or copy.
+	// Compare paths and semantic fingerprints conservatively, including when
+	// a repository switches between SCIP and file-based extractor tiers.
+	if (len(oldRows) > 0 && oldRows[0].SCIPDocument) ||
+		(len(newRows) > 0 && newRows[0].SCIPDocument) {
+		oldByPath := make(map[string]snapshotSymbolRow, len(oldRows))
+		newByPath := make(map[string]snapshotSymbolRow, len(newRows))
+		for _, row := range oldRows {
+			oldByPath[row.Path] = row
+		}
+		for _, row := range newRows {
+			newByPath[row.Path] = row
+			if old, exists := oldByPath[row.Path]; !exists {
+				diff.Added = append(diff.Added, SnapshotDiffEntry{Path: row.Path, SymbolID: row.SymbolID})
+			} else if old.ContentHash != row.ContentHash {
+				diff.Modified = append(diff.Modified, SnapshotDiffEntry{Path: row.Path, SymbolID: row.SymbolID})
+			}
+		}
+		for _, row := range oldRows {
+			if _, exists := newByPath[row.Path]; !exists {
+				diff.Removed = append(diff.Removed, SnapshotDiffEntry{Path: row.Path, SymbolID: row.SymbolID})
+			}
+		}
+		return diff, nil
 	}
 
 	// File paths take priority over content-derived symbol identity. Two

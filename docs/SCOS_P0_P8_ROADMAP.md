@@ -221,6 +221,19 @@ No superiority/performance claim for P4+ is accepted without reproducible before
 - [ ] Persist parsed/reused files, changed/reused symbols, elapsed time, extractor tier and cache-hit telemetry.
 - [ ] Benchmark incremental indexing against clean rebuild equivalence and changed-content scaling.
 
+**Review hardening evidence (2026-10-25, PR #54, pending review/merge):**
+The snapshot delta now distinguishes unchanged-source copies from unambiguous
+renames and preserves same-path modifications when file hashes collide.
+A PostgreSQL 17 regression additionally covers SCIP-imported snapshots:
+first document ingestion, unchanged re-index, changed declaration documentation,
+and moved document paths. SCIP's persisted symbol hashes represent symbol
+identity rather than source bytes, so SCIP-only deltas use a deterministic
+per-document declaration fingerprint and report moves conservatively as
+additions/removals, not proven file renames. The regression was observed RED
+before the fix and GREEN against a disposable, fully migrated database.
+This closes a review finding, **not** the remaining P3 Git-diff driver,
+telemetry, equivalence, or scaling acceptance gates.
+
 ---
 
 # P4 — Hybrid Memory + Code Retrieval
