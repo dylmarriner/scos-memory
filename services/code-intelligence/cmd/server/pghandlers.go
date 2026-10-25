@@ -369,6 +369,8 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		RepositoryID string `json:"repository_id"`
 		Branch       string `json:"branch"`
 		Query        string `json:"query"`
+		AsOfCommit   string `json:"as_of_commit,omitempty"`
+		SnapshotID   string `json:"snapshot_id,omitempty"`
 		MaxResults   int    `json:"max_results,omitempty"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
@@ -379,6 +381,10 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RepositoryID == "" || req.Query == "" {
 		http.Error(w, "repository_id and query are required", http.StatusBadRequest)
+		return
+	}
+	if (req.AsOfCommit != "" || req.SnapshotID != "") && req.Branch == "" {
+		http.Error(w, "branch is required for historical queries", http.StatusBadRequest)
 		return
 	}
 	if req.Branch == "" {
@@ -421,6 +427,28 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if owningTenant != tenant {
 		writeJSON(w, map[string]any{"results": []PGSymbolVersion{}})
+		return
+	}
+
+	if req.AsOfCommit != "" || req.SnapshotID != "" {
+		if req.SnapshotID != "" && !regexp.MustCompile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$").MatchString(req.SnapshotID) {
+			http.Error(w, "snapshot_id must be a UUID", http.StatusBadRequest)
+			return
+		}
+		historical, err := s.pgStore.QueryHistoricalCode(r.Context(), tenant, req.RepositoryID, req.Branch, req.AsOfCommit, req.SnapshotID, req.Query, limit)
+		if errors.Is(err, errHistoricalNotFound) {
+			http.Error(w, "historical snapshot not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, errHistoricalAmbiguous) {
+			http.Error(w, "commit has multiple indexed snapshots; specify snapshot_id", http.StatusConflict)
+			return
+		}
+		if err != nil {
+			http.Error(w, "historical query unavailable", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, historical)
 		return
 	}
 
