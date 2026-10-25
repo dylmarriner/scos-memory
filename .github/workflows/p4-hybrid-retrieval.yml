@@ -14,6 +14,7 @@ on:
       - ".env.example"
       - ".github/workflows/p4-hybrid-retrieval.yml"
       - "benchmarks/p4/**"
+      - "benchmarks/harness.py"
       - "docs/SCOS_P0_P8_ROADMAP.md"
       - "docs/model-runtime.md"
   push:
@@ -32,6 +33,7 @@ on:
       - ".env.example"
       - ".github/workflows/p4-hybrid-retrieval.yml"
       - "benchmarks/p4/**"
+      - "benchmarks/harness.py"
       - "docs/SCOS_P0_P8_ROADMAP.md"
       - "docs/model-runtime.md"
 

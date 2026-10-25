@@ -18,6 +18,10 @@ def run_gate(*args):
 
 
 class OfflineGateTests(unittest.TestCase):
+    def test_ci_runs_when_shared_lexical_harness_changes(self):
+        workflow = (ROOT / ".github/workflows/p4-hybrid-retrieval.yml").read_text()
+        self.assertEqual(workflow.count('      - "benchmarks/harness.py"'), 2)
+
     def test_real_retrieval_record_then_check(self):
         with tempfile.TemporaryDirectory() as directory:
             baseline = pathlib.Path(directory) / "baseline.json"
