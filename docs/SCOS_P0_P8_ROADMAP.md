@@ -558,6 +558,18 @@ Code-side `ChangeImpact` already provides reverse call traversal, direct/transit
 
 ## Safety and secret handling
 
+**CI supply-chain gate hardening (2026-10-26; review branch, not merged):**
+A successful GitHub CI run on PR #58 still contained a `govulncheck`
+exit code 3: the CI runner used Go 1.26.9, affected by a `crypto/x509`
+certificate verification vulnerability fixed in Go 1.26.10. The security
+step's `continue-on-error` masked that finding. A separate review branch pins
+Go 1.26.10 across GitHub workflows and the module toolchain, removes the
+scan's false-green override, and adds CI regression tests for these contracts.
+The Docker build stage already uses patched Go 1.27.3. This is a pending
+security-gate correction, **not** evidence of an authorized production rebuild,
+merge or deployment.
+
+
 - Add write-time secret/PII scanning before conversational facts or broadly promoted OKF material persists sensitive values.
 - Keep credentials in security-gate/credential-vault boundaries rather than ordinary memory.
 
