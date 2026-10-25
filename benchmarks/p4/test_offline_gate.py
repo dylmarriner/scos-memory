@@ -81,6 +81,45 @@ class OfflineGateTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("missing_document", result.stderr)
 
+    def test_record_refuses_forbidden_exposure(self):
+        # Baseline creation itself must fail closed on known-bad evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory) / "contaminated.json"
+            fixture.write_text(json.dumps({
+                "name": "contaminated",
+                "corpus": [
+                    {"id": "forbidden", "text": "needle needle"},
+                    {"id": "expected", "text": "needle"},
+                ],
+                "cases": [{
+                    "id": "leak", "query": "needle",
+                    "expected_ids": ["expected"], "forbidden_ids": ["forbidden"],
+                }],
+            }))
+            baseline = pathlib.Path(directory) / "baseline.json"
+            result = run_gate("--fixture", fixture, "--record-baseline", baseline)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("forbidden", result.stderr.lower())
+            self.assertFalse(baseline.exists())
+
+    def test_rejects_contaminated_baseline_even_if_current_is_clean(self):
+        # A recorded exposure must never become an accepted security budget.
+        from benchmarks.p4.offline_gate import compare, load_fixture, run_retrieval
+        fixture, digest = load_fixture(FIXTURE)
+        current = run_retrieval(fixture, digest)
+        baseline = json.loads(json.dumps(current))
+        baseline["cases"]["memory_temporal"]["forbidden_at_5"] = 1
+        self.assertTrue(any("forbidden" in issue for issue in compare(current, baseline)))
+
+    def test_rejects_forbidden_exposure_even_when_rebaselined(self):
+        # An unchanged bad baseline must not silently permit stale evidence.
+        from benchmarks.p4.offline_gate import compare, load_fixture, run_retrieval
+        fixture, digest = load_fixture(FIXTURE)
+        current = run_retrieval(fixture, digest)
+        current["cases"]["memory_temporal"]["forbidden_at_5"] = 1
+        baseline = json.loads(json.dumps(current))
+        self.assertTrue(any("forbidden" in issue for issue in compare(current, baseline)))
+
     def test_rejects_increased_forbidden_exposure(self):
         # Exercise the comparison directly with an injected degraded result;
         # the real lexical fixture currently has zero forbidden hits.

@@ -147,6 +147,16 @@ regression gate. It is not BGE, FTS, RRF, tenant-isolation or live P0 quality
 qualification. Full/live model baselines, realistic corpora, latency/cost,
 and independent approval remain outstanding. Do not count this as P0 complete.
 
+**P0 forbidden-evidence hardening (2026-10-26; PR #57):**
+Three new RED-before-fix regression tests demonstrated that the lexical gate
+could accept a nonzero forbidden-at-5 baseline, accept an equally contaminated
+current result after rebaselining, and record a contaminated baseline outright.
+The gate now rejects nonzero forbidden exposure in both current and baseline
+results and refuses unsafe baseline recording; the measured seven-case corpus
+remains zero-exposure. This protects only explicitly forbidden IDs in the
+isolated smoke fixture, not tenant authorization, full temporal filtering,
+realistic corpora or live retrieval. Review, merge and deployment gates remain.
+
 ## Remaining
 
 - [ ] Expand the versioned memory-retrieval corpus for paraphrase, long-history noise, conflicts, supersession, temporal queries and scope isolation.

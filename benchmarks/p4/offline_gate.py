@@ -124,8 +124,10 @@ def compare(current: dict, baseline: dict) -> list[str]:
         forbidden = previous.get("forbidden_at_5")
         if not isinstance(forbidden, int) or forbidden < 0:
             errors.append(f"{case_id}: invalid forbidden exposure threshold")
-        elif result["forbidden_at_5"] > forbidden:
-            errors.append(f"{case_id}: forbidden exposure increased from {forbidden} to {result['forbidden_at_5']}")
+        elif forbidden != 0:
+            errors.append(f"{case_id}: forbidden exposure in baseline is {forbidden}; zero is mandatory")
+        if result["forbidden_at_5"] != 0:
+            errors.append(f"{case_id}: forbidden exposure is {result['forbidden_at_5']}; zero is mandatory")
     return errors
 
 
@@ -140,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         fixture, digest = load_fixture(args.fixture)
         current = run_retrieval(fixture, digest)
         if args.record_baseline:
+            if current["total_forbidden_at_5"] != 0:
+                raise ValueError("forbidden exposure detected; refusing to record an unsafe baseline")
             args.record_baseline.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
             print(f"RECORDED {len(current['cases'])} real lexical retrieval cases to {args.record_baseline}")
             return 0

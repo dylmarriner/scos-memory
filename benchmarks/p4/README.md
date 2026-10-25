@@ -33,8 +33,13 @@ committed `lexical_baseline.json` records observed per-case rankings,
 Recall@5/10/20, Precision@5/10/20, MRR, nDCG@5/10/20 and forbidden-at-5
 exposure, with fixture SHA-256, engine version, base Git SHA, generator digest and deployment
 class. CI rejects missing/extra cases, corpus changes, decreased per-case
-quality, increased forbidden exposure, and mismatched engine identity. It
-never auto-updates the baseline. Explicitly re-record after review with
+quality, **any nonzero forbidden-at-5 exposure in either the current run or
+its baseline**, and mismatched engine identity. Baseline recording also refuses
+to write when forbidden evidence is retrieved in the top five; re-recording
+cannot normalize a known-bad result. This is a narrow fixture-level safety
+invariant, **not** tenant authorization, full temporal validity enforcement,
+or production isolation. The gate never auto-updates the baseline. Explicitly
+re-record after review with
 `python3 -m benchmarks.p4.offline_gate --record-baseline benchmarks/p4/lexical_baseline.json`.
 
 **Scope:** This is a regression gate for a deliberately tiny *lexical smoke*
