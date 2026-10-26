@@ -33,10 +33,17 @@ For example:
 ```bash
 python3 scripts/scos_verify_snapshot_manifest.py \
   --git-dir /path/to/trusted/repository \
-  --commit '<target-commit-sha>' \
+  --commit '<target-commit-sha>' \  --parent '<trusted-parent-commit-sha>' \
   --snapshot-id '<server-snapshot-uuid>' \
   --pages-file /path/to/manifest-pages.ndjson
 ```
+
+When the snapshot has a parent, supply `--parent` using a **trusted** local
+Git revision. The verifier requires the server-recorded `parent_commit_id`
+to match the resolved parent object and confirms that parent is an ancestor
+of the target. Omit `--parent` for initial snapshots; without it, parent
+metadata is checked for cross-page consistency but not independently bound
+to a Git commit. This does not provide server-side Git attestation.
 
 The verifier independently resolves the target Git commit, enumerates every
 supported regular-file blob, hashes the actual Git blob bytes with a streaming

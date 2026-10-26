@@ -40,14 +40,14 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
             {"path": "b.go", "language": "go", "content_hash": hashlib.sha256(b"package b\n").hexdigest()},
         ]
 
-    def invoke(self, pages=None, env=None):
+    def invoke(self, pages=None, env=None, extra_args=()):
         if pages is None:
             pages = [self.page(self.files)]
         path = self.repo / "pages.ndjson"
         path.write_text("\n".join(json.dumps(page) for page in pages) + "\n")
         return subprocess.run([sys.executable, str(SCRIPT), "--git-dir", str(self.repo),
                                "--commit", self.commit, "--snapshot-id", SNAPSHOT,
-                               "--pages-file", str(path)], capture_output=True,
+                               "--pages-file", str(path), *extra_args], capture_output=True,
                               text=True, env=env)
 
     def page(self, files, **extra):
@@ -73,6 +73,45 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
         files[0]["content_hash"] = "  \t" + files[0]["content_hash"].upper() + " \n"
         result = self.invoke([self.page(files)])
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_explicit_trusted_parent_matches_recorded_snapshot_parent(self):
+        parent = self.commit
+        (self.repo / "a.py").write_text("a = 2\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "target")
+        self.commit = git(self.repo, "rev-parse", "HEAD")
+        files = [dict(x) for x in self.files]
+        files[0]["content_hash"] = hashlib.sha256(b"a = 2\n").hexdigest()
+        self.assertEqual(self.invoke([self.page(files, parent_commit_id=parent)],
+                                     extra_args=("--parent", parent)).returncode, 0)
+
+    def test_explicit_parent_rejects_forged_or_missing_recorded_binding(self):
+        parent = self.commit
+        (self.repo / "a.py").write_text("a = 2\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "target")
+        self.commit = git(self.repo, "rev-parse", "HEAD")
+        files = [dict(x) for x in self.files]
+        files[0]["content_hash"] = hashlib.sha256(b"a = 2\n").hexdigest()
+        for claimed in ("", "not-a-git-commit"):
+            with self.subTest(claimed=claimed):
+                result = self.invoke([self.page(files, parent_commit_id=claimed)],
+                                     extra_args=("--parent", parent))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_explicit_parent_must_be_target_ancestor(self):
+        unrelated = self.commit
+        git(self.repo, "checkout", "--orphan", "unrelated")
+        git(self.repo, "rm", "-rq", "--cached", ".")
+        (self.repo / "a.py").write_text("a = 1\n")
+        (self.repo / "b.go").write_text("package b\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "independent history")
+        self.commit = git(self.repo, "rev-parse", "HEAD")
+        result = self.invoke([self.page(self.files, parent_commit_id=unrelated)],
+                             extra_args=("--parent", unrelated))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("ancestor", result.stderr)
 
     def test_forged_file_bytes_under_true_commit_are_rejected(self):
         files = [dict(x) for x in self.files]
