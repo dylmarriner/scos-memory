@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -135,6 +136,9 @@ func TestPGKnowledgeImpactHonoursScopeAndCodeProvenance(t *testing.T) {
 	if len(otherView) != 1 || otherView[0].FactID != privateFact || otherView[0].Scope != "direct_caller" {
 		t.Fatalf("outsider saw unauthorised evidence: %+v", otherView)
 	}
+	if !reflect.DeepEqual(otherView[0].EvidencePath, []string{"code:" + core, "code:" + caller, "memory:" + privateFact}) {
+		t.Fatalf("direct caller must include the real reverse-CALLS hop: %v", otherView[0].EvidencePath)
+	}
 	foreignView, err := store.KnowledgeImpact(ctx, foreign, foreignOwner, repo, impact)
 	if err != nil {
 		t.Fatal(err)
@@ -193,6 +197,9 @@ func TestPGKnowledgeImpactHonoursScopeAndCodeProvenance(t *testing.T) {
 		}
 		if len(hidden) != 1 || hidden[0].FactID != privateFact {
 			t.Fatalf("restricted role escaped namespace scope: %+v", hidden)
+		}
+		if !reflect.DeepEqual(hidden[0].EvidencePath, []string{"code:" + core, "code:" + caller, "memory:" + privateFact}) {
+			t.Fatalf("restricted role lost governed reverse-CALLS path: %v", hidden[0].EvidencePath)
 		}
 	}
 

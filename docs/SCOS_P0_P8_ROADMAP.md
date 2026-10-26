@@ -112,8 +112,8 @@ Operational rules:
 | **P4** | Hybrid memory + code retrieval | **MERGED TO MAIN (PR #29 on 2026-09-10); frozen P0/live performance qualification still pending** |
 | **P5** | Temporal evidence | **PARTIAL** |
 | **P6** | Unified memory + code graph | **PARTIAL** |
-| **P7** | Stale-memory revalidation | **PARTIAL; event detection implemented, governed review-decision slice in PR (unmerged)** |
-| **P8** | Impact intelligence | **CODE SIDE PARTIAL; CROSS-DOMAIN UNBUILT** |
+| **P7** | Stale-memory revalidation | **PARTIAL: durable activation events and governed review listing merged; append-only review decisions remain in draft PR #64** |
+| **P8** | Impact intelligence | **CODE IMPACT + GOVERNED MEMORY LINKS PARTIAL; FULL CROSS-DOMAIN ACCEPTANCE OPEN** |
 
 ---
 
@@ -245,8 +245,61 @@ No superiority/performance claim for P4+ is accepted without reproducible before
 - [ ] Verify retention/GC cannot remove code evidence referenced by memory-code links or audit records.
 - [x] Add interrupted-index/activation recovery tests around real PostgreSQL transactions (including OS-process termination during file indexing, snapshot activation and historical reactivation; see evidence below).
 
-**P1 recovery hardening evidence (2026-10-25; merged via PR #55):**
-A new real-PostgreSQL regression suite exercises atomic rollback when indexing
+**P1/P5/P8 historical impact selection (2026-10-26; review branch, not merged):**
+The governed `POST /v2/code/impact` and `scos_code_impact` MCP surfaces
+now accept `as_of_commit` or `snapshot_id` with an explicit `branch`.
+The selected immutable generation is returned as `snapshot_id`, `commit_id`,
+`branch` and `historical`. A shared bounded impact traversal rejects
+cross-generation caller edges. Historical lookup rejects queued/failed,
+cross-repository/tenant and mismatched-branch snapshots, and requires
+`snapshot_id` when a commit has multiple extractor generations.
+The historical impact still joins **currently visible and valid** governed
+memory facts, explicitly labelled `knowledge_scope=current_visible_facts`;
+this is not historical memory as-of-time filtering. A real PostgreSQL
+integration test covers superseded-versus-current caller graphs, forged
+cross-generation edges, memory namespace authorization, ambiguous commits,
+invalid selection and queued generations. A separate RED→GREEN PostgreSQL
+test proves that path queries matching at least 100 symbols fail closed
+(HTTP 422) rather than returning a silently truncated impact graph. A gateway
+forwarding test checks historical selectors and authenticated identity.
+**P8 impact depth-budget regression (2026-10-26; PR #58 review branch):**
+A real PostgreSQL regression reproduced an active impact request accepting
+`max_depth=9` and returning HTTP 200 despite the API lacking a hard traversal
+limit. Both current and historical impact now reject depth above 8 with
+HTTP 422, and store entry points reject excessive depth even without HTTP.
+The test checks the 8-hop boundary remains accepted.
+
+**P8 impact node-budget regression (2026-10-26; PR #58 review branch):**
+A real PostgreSQL test first reproduced current and historical one-hop impact
+queries returning a 521-node graph without a total-node budget (RED). The
+datastore now caps each snapshot-scoped caller query at 513 distinct rows and
+fails closed when the full traversal exceeds 512 unique nodes, including seed
+matches and cumulative two-hop expansion. HTTP returns 422 instead of a
+silently partial blast radius. The test covers current and historical impact,
+wide seed sets, one-hop and two-hop overflow, HTTP 422, and the exact 512-node
+success boundary. Ten consecutive PostgreSQL regression runs, the uncached
+full Go suite, and go vet passed locally. This closes the unbounded node-count
+gap, **not** edge-density/SQL-work budgets, graph completeness, or cross-domain
+impact qualification. Review, merge, deployed acceptance and recovery gates
+remain outstanding.
+
+**P8 impact edge-budget regression (2026-10-26; PR #58 review branch):**
+A PostgreSQL 17 integration fixture with 65/66 visited nodes and 4096/4225
+real CALLS edges demonstrated that depth and node budgets alone still allow
+dense graphs to overwhelm the PageRank adjacency load (RED). Ranking adjacency
+now uses SQL LIMIT 4097 and rejects any result exceeding 4096 CALLS edges
+without returning a partial graph (GREEN). Current and immutable historical
+queries both enforce the limit; HTTP returns 422. Exact-boundary and overflow
+fixtures assert their persisted edge counts and verify the behavior. This
+closes the unbounded ranking-edge transfer gap, **not** database query-work
+budgets, latency/scale qualification, or full P8 acceptance. No production
+deployment is authorized by this evidence.
+
+**Not P1/P5/P8 completion:**
+other active-only APIs, temporal memory semantics, retention/GC acceptance, production
+deployment/recovery, independent review and merge remain open.
+
+**P1 recovery hardening evidence (2026-10-25; merged via PR #55):**A new real-PostgreSQL regression suite exercises atomic rollback when indexing
 fails after an earlier file insert, verifies that no partial file/symbol rows
 or active-pointer changes survive, and retries the same immutable key after
 explicitly marking/deleting the failed generation. It also covers startup
@@ -650,7 +703,7 @@ P4 additionally allows repo-aware retrieval to return code evidence beside memor
 ## Implemented / review evidence (not final acceptance)
 
 - [x] Emit durable snapshot-activation revalidation events for linked changed/deleted code.
-- [x] Deterministic continuity classification with changed/deleted/ambiguous and safe-rename evidence (PR #63 additionally guards ambiguous copied successors; not yet merged).
+- [x] Deterministic continuity classification with changed/deleted/ambiguous and safe-rename evidence (merged PR #63 additionally guards ambiguous copied successors).
 - [ ] Governed human review decisions: **review branch only, unmerged.** The P7 decision slice adds an append-only, one-decision-per-event review record, namespace reviewer authorization (read + promote/administer), a rationale requirement, a restricted-role RLS policy, and a POST decision endpoint. It projects review outcomes separately from the original event status. **This is an assessment record only:** no fact, version, standing answer or OKF knowledge is automatically changed. A future correction/reopen mechanism remains necessary.
 
 **P7 governed review decision TDD (2026-10-26; isolated AMD):**
@@ -658,15 +711,48 @@ A real PostgreSQL 17 integration test failed RED with HTTP 405 for the missing r
 
 **P7 review-finding remediation (2026-10-26; branch-only, unmerged):** CodeRabbit correctly identified that append-only review decisions obstruct parent event/tenant deletion. Migration `000071_revalidation_privileged_purge.sql` now adds a migration-owner-only, transactionally audited decision purge and an immutable tenant-independent ledger. The decision trigger rejects ordinary DELETE/UPDATE; `scos_app` cannot call the purge, delete decisions, or read the ledger. Real PostgreSQL tests first failed RED because the purge function was missing, then passed GREEN for restricted-role denial, transaction rollback, exact purge count and immutable audit evidence. `docs/P7_REVALIDATION_PURGE_RUNBOOK.md` documents the explicit-approval operator workflow. **Remaining review gate:** independent assessment of the privilege boundary, CI on the pushed commit, and validation of full tenant-offboarding dependencies outside P7; this function is not a general tenant-delete implementation. Distinct unsupported-outcome, short-rationale and >2000-character rationale cases were also added. No production tenant data was purged.
 
+**P7 draft PR #64 main-sync verification (2026-10-26; isolated AMD):**
+Reconciled the draft branch with main (including merged P7 ambiguous-copy guard
+and P8 graph impact changes), preserving both roadmap evidence streams.
+On a newly provisioned disposable PostgreSQL 17 database, all migrations
+000001–000071 and all RLS policies applied successfully. Three repetitions
+of focused governed-review/ambiguous-copy PostgreSQL tests passed with
+mandatory restricted-role checks; the full uncached Go suite passed
+(51 packages), as did `go vet ./...`. An earlier attempt against an older
+throwaway database failed the ambiguous-copy test because that database
+lacked migration 000069; fresh sequential migrations resolved the fixture
+mismatch. This is **review-branch evidence**, not merged-main or production
+qualification. PR #64 remains draft pending fresh CI and independent
+privilege-boundary review; no production purge is authorized.
+
 ## Remaining
 
-- [ ] Resolve the remaining continuity edge cases and qualify deterministic classification against labelled corpora.
+- [x] Emit durable revalidation events when linked symbols change/delete (migration 000064; snapshot activation).
+- [x] Resolve continuity into unchanged / renamed / changed / deleted / ambiguous states (unchanged produces no event; ambiguous requires review).
+- [x] Use deterministic classification first; see duplicate-copy hardening evidence below.
+- [ ] Qualify continuity classification against labelled corpora and remaining edge cases.
 - [ ] For changed/ambiguous cases, use existing reasoning models to create a proposal, not an authoritative mutation.
 - [ ] Outcomes: still-valid, needs-review, superseded, invalidated, unresolved.
 - [ ] Create governed memory versions/supersession relations only when approved.
 - [ ] Create OKF review proposals with old/new code evidence.
 - [ ] Invalidate standing answers depending on stale/superseded evidence.
 - [ ] Measure false-positive/false-negative outcomes.
+
+**P7 ambiguous-copy revalidation regression (2026-10-26; PR review branch,
+not merged):** A real PostgreSQL 17 integration fixture linked an active
+memory fact to a single original file, then replaced that file with two
+identical-content copies in a new immutable snapshot. RED: the activation
+trigger classified the transition as `renamed:still_valid`, even though
+two successors made continuity ambiguous. Migration
+`000069_revalidation_ambiguous_copy_guard.sql` adds a new-snapshot
+content-duplicate check before treating a stable-symbol reuse as a safe
+rename. GREEN: the event is `ambiguous:needs_review`; no memory fact is
+rewritten. The focused revalidation tests passed ten consecutive runs
+against a disposable migrated database, the full uncached Go suite and
+`go vet ./...` passed, and focused race-detector tests passed twice.
+This does not complete the human review/proposal lifecycle, standing-answer
+invalidation, false-positive measurement, independent review, merge, or
+deployment/recovery gates.
 
 ---
 
@@ -677,6 +763,21 @@ A real PostgreSQL 17 integration test failed RED with HTTP 405 for the missing r
 ## Already present
 
 Code-side `ChangeImpact` already provides reverse call traversal, direct/transitive dependents, bounded depth and personalized PageRank. P4 code search now also consumes persisted structural/SCIP graph signal during retrieval.
+
+**P8 explainable reverse-CALLS evidence (2026-10-26; PR #58 review branch, not merged):**
+A new real-PostgreSQL regression reproduced the missing multi-hop provenance:
+linked memory facts on transitive callers exposed only a direct symbol-to-memory
+link, with no proof of the caller chain from the queried seed. The implementation
+now publishes `code_evidence_paths` keyed by immutable symbol-version ID and
+builds each path from actual snapshot-bounded CALLS edges in reverse traversal
+order (matched callee → caller → ...). `KnowledgeDependents[].EvidencePath`
+appends the governed memory link to the same concrete chain. Shortest paths
+are deterministic across edge-row/map ordering and cycles; missing paths fail
+closed, and the existing 512-node/4096-edge caps still apply. Real PostgreSQL
+tests cover current and historical code snapshots, 3-hop memory links and HTTP
+serialization; unit tests cover tie-breaking, cycles and unreachable symbols.
+This is **partial P8 path evidence only**, not P7 revalidation, relation-type
+coverage, production qualification, or permission to merge/deploy.
 
 ## Remaining
 

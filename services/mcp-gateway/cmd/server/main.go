@@ -434,6 +434,12 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			if depth, ok := args["max_depth"]; ok {
 				payload["max_depth"] = depth
 			}
+			if commit := stringArg(args, "as_of_commit"); commit != "" {
+				payload["as_of_commit"] = commit
+			}
+			if snapshot := stringArg(args, "snapshot_id"); snapshot != "" {
+				payload["snapshot_id"] = snapshot
+			}
 			impact, err := s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/impact", payload)
 			if err != nil {
 				return nil, fmt.Errorf("impact of %s: %w", symbol, err)
@@ -1651,6 +1657,8 @@ func governedTools() []map[string]any {
 					"modified_symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Several symbols at once"},
 					"branch":           map[string]any{"type": "string", "description": "Defaults to the most recently indexed branch"},
 					"max_depth":        map[string]any{"type": "integer", "description": "How far to follow dependants"},
+					"as_of_commit":     map[string]any{"type": "string", "description": "Historical commit ID; requires branch; ambiguous generations require snapshot_id"},
+					"snapshot_id":      map[string]any{"type": "string", "description": "Immutable snapshot UUID; requires branch; knowledge links are checked against current fact validity"},
 				},
 				"required": []string{"repository_id"},
 			},
