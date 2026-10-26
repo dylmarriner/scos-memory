@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -122,7 +123,8 @@ func (s *engineServer) handleEvidenceLinksRead(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err != nil {
-		http.Error(w, "read evidence links: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("evidence-link read failed: %v", err)
+		http.Error(w, "internal evidence-link read failure", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, page)

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	"github.com/dylmarriner/scos-memory/packages/auth"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,5 +31,26 @@ func TestP6EvidenceLinkReadbackRejectsInvalidSelectors(t *testing.T) {
 				t.Fatalf("GET %s = %d (%s), want 400", path, w.Code, strings.TrimSpace(w.Body.String()))
 			}
 		})
+	}
+}
+
+func TestP6EvidenceLinkReadbackDoesNotLeakDatabaseErrors(t *testing.T) {
+	db, err := sql.Open("pgx", "postgresql://unused:unused@127.0.0.1:1/unused?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	srv := &engineServer{db: db}
+	req := httptest.NewRequest(http.MethodGet, "/v1/evidence-links?fact_id=4cbe32c6-891c-4155-a9ec-6aa39e66704a", nil)
+	req = req.WithContext(auth.ContextWithClaims(req.Context(), auth.Claims{
+		TenantID:    "4cbe32c6-891c-4155-a9ec-6aa39e66704a",
+		PrincipalID: "5cbe32c6-891c-4155-a9ec-6aa39e66704a",
+	}))
+	w := httptest.NewRecorder()
+	srv.handleEvidenceLinks(w, req)
+	if w.Code != http.StatusInternalServerError || w.Body.String() != "internal evidence-link read failure\n" {
+		t.Fatalf("internal DB error exposed: %d %q", w.Code, w.Body.String())
 	}
 }

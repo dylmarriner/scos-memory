@@ -43,6 +43,10 @@ headers and reject invalid selectors before network calls.
 TDD evidence: the new HTTP selector tests failed with 405 before the GET
 handler and passed afterward; the MCP forwarding test failed with
 `unhandled tool` before dispatch implementation and passed afterward.
+Code review identified an internal database error leaked through HTTP 500; a
+regression reproduced the raw `sql: database is closed` disclosure RED, and
+now requires a fixed public error while details are logged server-side.
+The MCP gateway also reuses its existing UUID validator.
 
 The focused and full memory-intelligence integration tests passed against a
 **disposable PostgreSQL 17/pgvector database**, with all 75 migration files,

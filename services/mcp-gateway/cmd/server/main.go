@@ -498,7 +498,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		return map[string]any{"repository_id": repositoryID, "impacts": impacts}, nil
 	case "scos_memory_code_links":
 		factID := stringArg(args, "fact_id")
-		if !isUUIDLike(factID) {
+		if !isUUID(factID) {
 			return nil, fmt.Errorf("fact_id must be a UUID")
 		}
 		query := url.Values{"fact_id": {factID}}
@@ -511,7 +511,7 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		}
 		if raw, ok := args["after"]; ok {
 			cursor, valid := raw.(string)
-			if !valid || !isUUIDLike(cursor) {
+			if !valid || !isUUID(cursor) {
 				return nil, fmt.Errorf("after must be a UUID")
 			}
 			query.Set("after", cursor)
