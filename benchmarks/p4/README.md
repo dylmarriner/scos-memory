@@ -41,7 +41,13 @@ invariant, **not** tenant authorization, full temporal validity enforcement,
 or production isolation. The gate also recomputes every stored baseline metric
 from its recorded ranked IDs and frozen relevance labels, rejects unknown or
 duplicate document IDs, and validates aggregate scores and forbidden totals at
-all three depths. Lowering a stored score cannot silently weaken the regression
+all three depths. Both the fixture and recorded baseline are parsed as strict JSON: duplicate
+keys at any depth (including relevance labels, forbidden IDs and rankings)
+and non-finite NaN/Infinity values are rejected before scoring. Regression
+tests reproduced acceptance of ambiguous evidence before the fix; rankings,
+metrics and forbidden counts remain unchanged after regenerating only the
+benchmark generator digest.
+Lowering a stored score cannot silently weaken the regression
 threshold. It requires the **exact deterministic ranking** to match the recorded
 baseline, even when swapping irrelevant results would leave Recall/MRR/nDCG
 unchanged. Intentional ranking changes require explicit review and
