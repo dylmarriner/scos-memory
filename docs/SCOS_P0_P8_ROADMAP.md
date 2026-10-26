@@ -774,7 +774,9 @@ A follow-up TDD integrity gate found two real cross-repository symbol-version
 failures (foreign symbol accepted at link creation; drifted foreign symbol
 returned by readback). Both failed on the prior branch and passed after
 repository-chain validation in the writer, reader and SQL link trigger
-(migration 000077). The direct-SQL guard is tested for SQLSTATE 23514.
+(migration 000077). The direct-SQL guard is tested for SQLSTATE 23514. A separate RED→GREEN
+regression also removed raw SQL-driver error disclosure from the existing
+evidence-link POST handler's HTTP 500 responses.
 **Open isolation gate:** legacy code repository, snapshot and symbol-version
 tables lack independent forced RLS; code-indexer/runtime tenant-context
 changes and real-PostgreSQL qualification are required before enabling it.

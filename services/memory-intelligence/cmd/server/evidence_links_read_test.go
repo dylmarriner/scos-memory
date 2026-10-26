@@ -54,3 +54,26 @@ func TestP6EvidenceLinkReadbackDoesNotLeakDatabaseErrors(t *testing.T) {
 		t.Fatalf("internal DB error exposed: %d %q", w.Code, w.Body.String())
 	}
 }
+
+// A broken database must not disclose driver errors through the POST path,
+// including the transaction-start failure before any RLS context is set.
+func TestP6EvidenceLinkWriteDoesNotLeakDatabaseErrors(t *testing.T) {
+	db, err := sql.Open("pgx", "postgresql://unused:unused@127.0.0.1:1/unused?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	srv := &engineServer{db: db}
+	req := httptest.NewRequest(http.MethodPost, "/v1/evidence-links", strings.NewReader(`{"fact_id":"4cbe32c6-891c-4155-a9ec-6aa39e66704a","code_symbol_version_id":"5cbe32c6-891c-4155-a9ec-6aa39e66704a"}`))
+	req = req.WithContext(auth.ContextWithClaims(req.Context(), auth.Claims{
+		TenantID:    "4cbe32c6-891c-4155-a9ec-6aa39e66704a",
+		PrincipalID: "5cbe32c6-891c-4155-a9ec-6aa39e66704a",
+	}))
+	w := httptest.NewRecorder()
+	srv.handleEvidenceLinks(w, req)
+	if w.Code != http.StatusInternalServerError || w.Body.String() != "internal evidence-link write failure\n" {
+		t.Fatalf("internal DB error exposed by POST: %d %q", w.Code, w.Body.String())
+	}
+}

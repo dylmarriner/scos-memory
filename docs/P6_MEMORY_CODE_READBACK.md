@@ -46,6 +46,11 @@ handler and passed afterward; the MCP forwarding test failed with
 Code review identified an internal database error leaked through HTTP 500; a
 regression reproduced the raw `sql: database is closed` disclosure RED, and
 now requires a fixed public error while details are logged server-side.
+The POST evidence-link writer was also found to expose raw SQL/driver errors
+on HTTP 500. A closed-database regression first failed with
+`begin transaction: sql: database is closed` in the response; it now passes
+with a fixed public error and server-side diagnostics. Transaction, principal
+context, fact lookup, insert and commit errors all use this sanitized path.
 The MCP gateway also reuses its existing UUID validator.
 
 A second RED-before-fix integrity regression exposed a mismatched code-symbol
