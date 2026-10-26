@@ -475,6 +475,42 @@ type resolvedCallEdge struct {
 	SourceID, TargetID, Extractor string
 }
 
+// indexQualifiedCallTargets avoids rescanning every function with a common
+// name for each qualified call. The directory suffix is still matched using
+// the same conservative importPathNamesDir boundary rules.
+func indexQualifiedCallTargets(decls []indexedDecl) map[string]map[string][]indexedDecl {
+	byNameDir := make(map[string]map[string][]indexedDecl)
+	for _, d := range decls {
+		if d.Kind != "function" || d.Dir == "" || d.Dir == "." {
+			continue
+		}
+		byDir := byNameDir[d.Name]
+		if byDir == nil {
+			byDir = make(map[string][]indexedDecl)
+			byNameDir[d.Name] = byDir
+		}
+		byDir[d.Dir] = append(byDir[d.Dir], d)
+	}
+	return byNameDir
+}
+
+// qualifiedCallCandidates enumerates import-path suffixes at slash boundaries.
+// This is equivalent to importPathNamesDir without O(all same-name functions)
+// work for every call; ambiguous matches remain ambiguous.
+func qualifiedCallCandidates(index map[string]map[string][]indexedDecl, importPath, name string) []indexedDecl {
+	byDir := index[name]
+	var candidates []indexedDecl
+	for suffix := importPath; ; {
+		candidates = append(candidates, byDir[suffix]...)
+		cut := strings.IndexByte(suffix, '/')
+		if cut < 0 {
+			break
+		}
+		suffix = suffix[cut+1:]
+	}
+	return candidates
+}
+
 // resolveCallEdges is pure: ambiguity checks are identical for full rebuilds
 // and incremental snapshots. No edge is inferred on ambiguity.
 func resolveCallEdges(decls []indexedDecl) []resolvedCallEdge {
@@ -487,14 +523,9 @@ func resolveCallEdges(decls []indexedDecl) []resolvedCallEdge {
 		targets[key] = append(targets[key], d)
 	}
 
-	// Package-level functions by name, for calls through an imported
-	// package ("auth.Sign()", recorded as "<import path>:Sign").
-	functions := make(map[string][]indexedDecl, len(decls))
-	for _, d := range decls {
-		if d.Kind == "function" {
-			functions[d.Name] = append(functions[d.Name], d)
-		}
-	}
+	// Index package-level functions by both name and repository directory.
+	// A qualified call can only resolve within matching import-path suffixes.
+	functions := indexQualifiedCallTargets(decls)
 
 	edges := make([]resolvedCallEdge, 0, len(decls))
 	for _, caller := range decls {
@@ -504,11 +535,7 @@ func resolveCallEdges(decls []indexedDecl) []resolvedCallEdge {
 		for _, calledName := range caller.CalledNames {
 			var candidates []indexedDecl
 			if importPath, name, qualified := strings.Cut(calledName, qualifiedCallSeparator); qualified {
-				for _, d := range functions[name] {
-					if importPathNamesDir(importPath, d.Dir) {
-						candidates = append(candidates, d)
-					}
-				}
+				candidates = qualifiedCallCandidates(functions, importPath, name)
 			} else {
 				candidates = targets[caller.Scope+"."+calledName]
 			}
