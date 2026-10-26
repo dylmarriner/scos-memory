@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"testing"
@@ -50,5 +51,70 @@ func BenchmarkResolveCallEdgesQualifiedSameNameFanout(b *testing.B) {
 		if got := len(resolveCallEdges(decls)); got != count {
 			b.Fatalf("resolved %d edges, want %d", got, count)
 		}
+	}
+}
+
+// Real PostgreSQL regression: import-path suffix matching must preserve
+// ambiguity when both a nested and a shorter repository directory match.
+func TestPGQualifiedCallIndexPreservesNestedPackageAmbiguity(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repo, err := store.EnsureRepository(ctx, tenant, "/qualified-index/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const auth = "package auth\nfunc Sign() {}\n"
+	const other = "package other\nfunc Sign() {}\n"
+	const gateway = `package gateway
+import (
+    a "example.com/org/auth"
+    b "example.com/org/packages/auth"
+    c "example.com/org/packages/other"
+)
+func valid() { a.Sign() }
+func ambiguous() { b.Sign() }
+func unrelated() { c.Sign() }
+`
+	snap, err := store.CreateSnapshot(ctx, repo, tenant, "main", "qualified-index-1", "go/parser-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []PGFileInput{
+		{Path: "auth/sign.go", Language: "go", Content: auth, ContentHash: hashContent(auth)},
+		{Path: "packages/auth/sign.go", Language: "go", Content: auth, ContentHash: hashContent(auth)},
+		{Path: "packages/other/sign.go", Language: "go", Content: other, ContentHash: hashContent(other)},
+		{Path: "cmd/gateway/main.go", Language: "go", Content: gateway, ContentHash: hashContent(gateway)},
+	}
+	if err := store.IndexSnapshot(ctx, snap, repo, files); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.QueryContext(ctx, `SELECT src.fully_qualified_name, dst.path
+        FROM code_edges e
+        JOIN code_symbol_versions src ON src.id=e.source_symbol_version_id
+        JOIN code_symbol_versions dst ON dst.id=e.target_symbol_version_id
+        WHERE e.snapshot_id=$1 AND e.relation='CALLS'
+        ORDER BY src.fully_qualified_name, dst.path`, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var edges []string
+	for rows.Next() {
+		var caller, target string
+		if err := rows.Scan(&caller, &target); err != nil {
+			t.Fatal(err)
+		}
+		edges = append(edges, caller+" -> "+target)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"gateway.unrelated -> packages/other/sign.go",
+		"gateway.valid -> auth/sign.go",
+	}
+	if fmt.Sprint(edges) != fmt.Sprint(want) {
+		t.Fatalf("qualified CALLS edges %v, want %v", edges, want)
 	}
 }

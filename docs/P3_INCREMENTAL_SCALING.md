@@ -131,10 +131,12 @@ packages, one qualified call per function, measured on AMD Ryzen 5 2600
 | Prior same-name scan (main 74df657) | 253,608,996 | 3,370,018 | 3,000 |
 | Name + directory suffix index | 4,031,684 | 2,349,602 | 3,000 |
 
-Six real PostgreSQL 17 integration regressions passed on a pre-existing disposable
+Seven real PostgreSQL 17 integration regressions passed on a pre-existing disposable
 P3 database (cross-batch edges, clean/incremental equivalence, unambiguous
-and ambiguous calls, unchanged-file cross-file edges, and cross-package
-resolution). The full uncached Go suite, Go vet and 29 Git Python fixtures
+and ambiguous calls, unchanged-file cross-file edges, cross-package
+resolution, and nested-directory suffix ambiguity). The nested-directory
+regression also ran inside the disposable PostgreSQL container against a
+compiled Go test binary using local socket authentication. The full uncached Go suite, Go vet and 29 Git Python fixtures
 also passed on AMD. No live migration or production deployment occurred.
 
 These are microbenchmarks, not representative indexing latency, not randomized
