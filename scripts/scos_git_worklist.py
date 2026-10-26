@@ -2,8 +2,9 @@
 """Build a bounded, deterministic SCOS /v2/code/index payload from Git objects.
 
 The full target *manifest* is necessary because omitting a file means deletion
-to the indexer. Always include committed source so a changed server
-extractor cannot turn a missing cache hit into an incomplete code index.
+to the indexer. An explicit reuse_parent flag requests omission of unchanged
+source, but the server must verify the exact active compatible parent before
+accepting the delta. --full-source provides a safe fallback after HTTP 409.
 
 This tool never reads uncommitted files, contacts services, or mutates Git.
 """
@@ -88,9 +89,8 @@ def tree_blobs(repo: Path, commit: str) -> dict[str, str]:
 def read_blob(repo: Path, oid: str, include_source: bool, cap: int) -> tuple[str, bytes]:
     """Hash committed bytes without materializing unbounded Git blobs.
 
-    All files are streamed and size-bounded: the server can reject
-    parent reuse after extractor changes, so even unchanged paths must
-    contain source sufficient for a complete rebuild.
+    Unchanged parent blobs are hashed streaming-only. Source-bearing files
+    are bounded by the API request cap before materializing bytes.
     """
     try:
         process = subprocess.Popen(
@@ -128,7 +128,7 @@ def read_blob(repo: Path, oid: str, include_source: bool, cap: int) -> tuple[str
 
 def build(
     repo: Path, repository_id: str, branch: str, target: str,
-    parent: str | None, initial: bool, max_bytes: int,
+    parent: str | None, initial: bool, max_bytes: int, full_source: bool = False,
 ) -> bytes:
     try:
         repository_id = str(uuid.UUID(repository_id))
@@ -151,22 +151,36 @@ def build(
         )
         if process.returncode != 0:
             raise WorklistError("parent must be an ancestor of target commit")
+    old = tree_blobs(repo, parent_oid) if parent_oid and not full_source else {}
     new = tree_blobs(repo, head_oid)
 
     files = []
     for path, blob in sorted(new.items()):
         language = LANGUAGE_SUFFIXES[Path(path).suffix.lower()]
-        # A Git parent does not prove compatible *server* extractor reuse.
-        # Always transmit source for safety. The server still skips parsing
-        # when a compatible same-path parent is actually available.
-        content_hash, source = read_blob(repo, blob, True, max_bytes)
-        try:
-            content = source.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise WorklistError(f"source is not UTF-8: {path!r}")
+        unchanged = parent_oid is not None and not full_source and old.get(path) == blob
+        # Git ancestry alone never authorizes omission: the server must
+        # independently validate parent commit, extractor, config and evidence.
+        content_hash, source = read_blob(repo, blob, not unchanged, max_bytes)
+        if unchanged and content_hash != hashlib.sha256(b"").hexdigest() and int(subprocess.check_output(["git", "cat-file", "-s", blob], cwd=repo)) <= max_bytes:
+            # Whitespace-only parents have no persisted source chunk.
+            # Read small unchanged blobs to avoid unsafe source-less reuse.
+            _, candidate = read_blob(repo, blob, True, max_bytes)
+            try:
+                whitespace_only = not candidate.decode("utf-8").strip()
+            except UnicodeDecodeError as exc:
+                raise WorklistError(f"source is not UTF-8: {path!r}") from exc
+            if whitespace_only:
+                unchanged = False
+                source = candidate
+        content = ""
+        if not unchanged:
+            try:
+                content = source.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise WorklistError(f"source is not UTF-8: {path!r}") from exc
         files.append({
             "path": path, "language": language, "content_hash": content_hash,
-            "content": content,
+            "content": content, "reuse_parent": unchanged,
         })
     if not files:
         raise WorklistError("no supported source files in target commit")
@@ -175,6 +189,7 @@ def build(
         "repository_id": repository_id,
         "branch": branch,
         "commit_id": head_oid,
+        **({"parent_commit_id": parent_oid} if parent_oid else {}),
         "files": files,
     }
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -199,12 +214,15 @@ def main() -> int:
                         help="Initial snapshot: transmit all supported code")
     source.add_argument("--parent",
                         help="Prior commit already indexed as the active SCOS snapshot")
+    parser.add_argument("--full-source", action="store_true",
+                        help="Send all source bytes even with --parent (retry after HTTP 409)")
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_LIMIT,
                         help="Fail atomically if request exceeds server's 4 MiB maximum")
     args = parser.parse_args()
     try:
         payload = build(args.git_dir.resolve(), args.repository_id, args.branch,
-                        args.commit, args.parent, args.initial, args.max_bytes)
+                        args.commit, args.parent, args.initial, args.max_bytes,
+                        args.full_source)
     except WorklistError as exc:
         print(f"scos_git_worklist: {exc}", file=sys.stderr)
         return 1

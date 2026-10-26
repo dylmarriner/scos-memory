@@ -27,7 +27,24 @@ python3 scripts/scos_git_worklist.py \
   --commit '<target-sha>' > /tmp/scos-incremental-index.json
 ```
 
-The output is a bounded full-source JSON body for the normal authenticated SCOS index API.
+The output is a bounded JSON body for the normal authenticated SCOS index API.
+An incremental request marks unchanged paths with `reuse_parent: true` and
+supplies the exact `parent_commit_id`. The server checks that the active parent
+uses the same extractor/configuration and has matching source evidence. If it
+returns HTTP 409, **do not retry the same delta unchanged**. Rebuild a
+full-source request instead:
+
+```bash
+python3 scripts/scos_git_worklist.py \
+  --git-dir /path/to/checkout \
+  --repository-id '<existing-repository-uuid>' \
+  --branch main --parent '<already-indexed-parent-sha>' \
+  --commit '<target-sha>' --full-source \
+  > /tmp/scos-full-source-retry.json
+```
+
+The full-source mode is also appropriate after changing the server extractor
+or configuration. Both modes retain the complete target manifest.
 Submit it through the existing trusted gateway, never to an untrusted host.
 Treat the generated JSON as source code with appropriate file permissions.
 
@@ -36,11 +53,23 @@ Treat the generated JSON as source code with appropriate file permissions.
 - Enumerates the **whole target Git tree**, not the working directory or a
   partial diff. Files absent from the target manifest are deleted.
 - Computes the true source SHA-256 for content_hash, not the Git object ID.
-- Transmits source bytes for **all** supported files, including unchanged
-  paths. The server only selects a reusable parent when the extractor version
-  matches. Git ancestry cannot establish that server-side compatibility;
-  sending full source allows safe re-extraction after an extractor upgrade.
-  Where eligible, the server still reuses unchanged declarations and chunks.
+- Default incremental mode sends changed source and marks unchanged same-path
+  blobs with `reuse_parent: true`, omitting their bytes. The server requires
+  the exact `parent_commit_id` to be active, matching extractor version,
+  configuration, file path, language, source SHA-256 and persisted file-level
+  source chunk before it may copy declarations and evidence. Otherwise the
+  entire delta fails with HTTP 409; no partial snapshot is activated.
+- `--full-source` sends all source bytes, including unchanged files. This is
+  the safe fallback after a 409 or an extractor upgrade, without trusting Git
+  ancestry as proof of server-side parent compatibility. Metadata-only legacy
+  clients without `reuse_parent` retain their existing Tier 0 behavior.
+  Empty files can reuse their exact SHA-256 zero-byte identity even though no
+  source chunk exists. Unchanged whitespace-only files that fit the request
+  cap are sent as source instead of attempting invalid chunk reuse. Files
+  exceeding the cap remain unsupported by the bounded endpoint; this is not
+  large-repository streaming.
+  Older servers reject the new `reuse_parent` field rather than silently
+  accepting a potentially incomplete source-omitting delta.
 - Never follows symlinks or submodules. Recognizes Go, Python, JavaScript,
   TypeScript and Rust extensions supported by the configured extractors.
   Unsupported grammars such as TSX are not represented as parsed code.
@@ -58,9 +87,10 @@ Treat the generated JSON as source code with appropriate file permissions.
 python3 -m unittest scripts/test_scos_git_worklist.py -v
 SCOS_CODE_STORE_TEST_DSN='<disposable-postgres-dsn>' \
   go test ./services/code-intelligence/cmd/server \
-    -run '^TestPG(GitRemovedSymbolAbsentFromTarget|IncrementalSnapshotEquivalentToCleanRebuild)$'
+    -run '^(TestPG(GitRemovedSymbolAbsentFromTarget|IncrementalSnapshotEquivalentToCleanRebuild|DeltaReuse)|TestHandlePGIndexDelta)'
 ```
 
 The tests verify source provenance, atomic size failures, safe paths, deletion,
-and clean versus incremental snapshot equivalence. These are small concrete
-fixtures, not throughput benchmarks on real large repositories.
+clean versus incremental snapshot equivalence, and fail-closed parent
+compatibility (extractor/configuration/commit/path/hash/language/source evidence).
+These are small concrete fixtures, not throughput benchmarks on real large repositories.
