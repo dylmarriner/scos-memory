@@ -221,4 +221,98 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 	if len(rows) != 1 || rows[0]["review_outcome"] != "still_valid" || rows[0]["reviewer_id"] != reviewer {
 		t.Fatalf("decision not projected with evidence: %+v", rows)
 	}
+
+	// A tenant purge must never become an ordinary app-role delete. The
+	// explicit privileged path must leave durable audit evidence behind.
+	if _, err := db.ExecContext(ctx, "DELETE FROM memory_revalidation_decisions WHERE tenant_id=$1", tenant); err == nil {
+		t.Fatal("direct deletion of authoritative review evidence unexpectedly succeeded")
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE memory_revalidation_decisions SET reason='tampered' WHERE tenant_id=$1", tenant); err == nil {
+		t.Fatal("migration owner unexpectedly rewrote authoritative review evidence")
+	}
+	var tenantFKs int
+	if err := db.QueryRowContext(ctx,
+		"SELECT count(*) FROM pg_constraint WHERE conrelid='memory_revalidation_decision_purge_audit'::regclass AND confrelid='tenants'::regclass",
+	).Scan(&tenantFKs); err != nil {
+		t.Fatal(err)
+	}
+	if tenantFKs != 0 {
+		t.Fatal("purge audit has tenant FK and would disappear or block tenant offboarding")
+	}
+	if appDSN != "" {
+		app, err := sql.Open("pgx", appDSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer app.Close()
+		if _, err := app.ExecContext(ctx, "SELECT purge_memory_revalidation_decisions_for_tenant($1,$2)", tenant, "Offboarding approved by a database administrator."); err == nil {
+			t.Fatal("restricted runtime role can invoke privileged decision purge")
+		}
+		if _, err := app.ExecContext(ctx, "DELETE FROM memory_revalidation_decisions WHERE tenant_id=$1", tenant); err == nil {
+			t.Fatal("restricted runtime role can directly delete review decisions")
+		}
+		var auditCount int
+		if err := app.QueryRowContext(ctx, "SELECT count(*) FROM memory_revalidation_decision_purge_audit").Scan(&auditCount); err == nil {
+			t.Fatal("restricted runtime role can read privileged purge ledger")
+		}
+	}
+
+	// A failed offboarding transaction must restore both decisions and the
+	// proposed audit row. No partial purge can escape a rollback.
+	purgeTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rolledBackCount int64
+	if err := purgeTx.QueryRowContext(ctx,
+		"SELECT purge_memory_revalidation_decisions_for_tenant($1,$2)",
+		tenant, "Offboarding cancelled during verification.").Scan(&rolledBackCount); err != nil {
+		_ = purgeTx.Rollback()
+		t.Fatalf("transactional purge: %v", err)
+	}
+	if rolledBackCount < 1 {
+		t.Fatal("transactional purge had no decisions to remove")
+	}
+	if err := purgeTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var restored, rolledBackAudits int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM memory_revalidation_decisions WHERE tenant_id=$1", tenant).Scan(&restored); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM memory_revalidation_decision_purge_audit WHERE tenant_id=$1", tenant).Scan(&rolledBackAudits); err != nil {
+		t.Fatal(err)
+	}
+	if int64(restored) != rolledBackCount || rolledBackAudits != 0 {
+		t.Fatalf("rollback leaked changes: restored=%d expected=%d audits=%d", restored, rolledBackCount, rolledBackAudits)
+	}
+	var purged int64
+	if err := db.QueryRowContext(ctx, "SELECT purge_memory_revalidation_decisions_for_tenant($1,$2)", tenant, "Offboarding approved by a database administrator.").Scan(&purged); err != nil {
+		t.Fatalf("privileged decision purge: %v", err)
+	}
+	if purged < 1 {
+		t.Fatalf("purged %d decisions, want at least one", purged)
+	}
+	var remaining int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM memory_revalidation_decisions WHERE tenant_id=$1", tenant).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("decisions still present after purge: %d", remaining)
+	}
+	var recorded int64
+	var operator, rationale string
+	if err := db.QueryRowContext(ctx, "SELECT decision_count, operator_name::text, reason FROM memory_revalidation_decision_purge_audit WHERE tenant_id=$1", tenant).Scan(&recorded, &operator, &rationale); err != nil {
+		t.Fatal(err)
+	}
+	if recorded != purged || operator == "" || rationale != "Offboarding approved by a database administrator." {
+		t.Fatalf("invalid durable purge audit: count=%d operator=%q reason=%q", recorded, operator, rationale)
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM memory_revalidation_decision_purge_audit WHERE tenant_id=$1", tenant); err == nil {
+		t.Fatal("purge audit was not append-only")
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE memory_revalidation_decision_purge_audit SET reason='tampered' WHERE tenant_id=$1", tenant); err == nil {
+		t.Fatal("purge audit allowed rewriting")
+	}
+
 }
