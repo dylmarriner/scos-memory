@@ -777,7 +777,7 @@ repository-chain validation in the writer, reader and SQL link trigger
 (migration 000077). The direct-SQL guard is tested for SQLSTATE 23514. A separate RED→GREEN
 regression also removed raw SQL-driver error disclosure from the existing
 evidence-link POST handler's HTTP 500 responses.
-**Open isolation gate:** legacy code repository, snapshot and symbol-version
+**Open isolation gate:** legacy code repository, snapshot, symbol and symbol-version
 tables lack independent forced RLS; code-indexer/runtime tenant-context
 changes and real-PostgreSQL qualification are required before enabling it.
 See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory

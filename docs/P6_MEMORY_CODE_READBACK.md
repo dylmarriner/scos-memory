@@ -66,8 +66,9 @@ invariant to direct SQL link writers. The direct-SQL regression checks for
 SQLSTATE 23514 rather than merely accepting an arbitrary database error.
 
 **Outstanding database isolation debt:** the pre-existing
-`code_repositories`, `code_repository_snapshots` and
-`code_symbol_versions` tables do not yet have independent forced RLS.
+`code_repositories`, `code_repository_snapshots`,
+`code_symbols` and `code_symbol_versions` tables do not yet have
+independent forced RLS.
 The new endpoint uses forced memory/link RLS plus explicit tenant/repository
 join predicates and has negative cross-scope tests, but this does not qualify
 those legacy code tables for unrestricted direct access by the runtime role.
