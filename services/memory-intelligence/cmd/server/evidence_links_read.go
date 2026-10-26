@@ -89,9 +89,11 @@ func (s *engineServer) handleEvidenceLinksRead(w http.ResponseWriter, r *http.Re
                    l.link_type, l.source, l.confidence, l.created_at
             FROM memory_code_links l
             JOIN code_symbol_versions sv ON sv.id=l.code_symbol_version_id
+            JOIN code_symbols sym ON sym.id=sv.symbol_id
             JOIN code_repository_snapshots snap ON snap.id=sv.snapshot_id
             JOIN code_repositories repo ON repo.id=snap.repository_id
             WHERE l.fact_id=$1 AND l.tenant_id=$2
+              AND sym.repository_id=repo.id
               AND snap.tenant_id=$2 AND repo.tenant_id=$2
               AND l.id > $3::uuid
             ORDER BY l.id

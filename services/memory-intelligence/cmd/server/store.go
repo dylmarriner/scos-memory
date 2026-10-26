@@ -241,9 +241,11 @@ func insertEvidenceLink(ctx context.Context, tx *sql.Tx, tenantID, factID, codeS
 		SELECT $1, mi.id, sv.id, $4, $5, $6
 		FROM memory_items mi
 		JOIN code_symbol_versions sv ON sv.id = $3
+		JOIN code_symbols sym ON sym.id = sv.symbol_id
 		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
 		JOIN code_repositories repo ON repo.id = snap.repository_id
 		WHERE mi.id = $2
+		  AND sym.repository_id = repo.id
 		  AND mi.tenant_id = $1
 		  AND snap.tenant_id = $1
 		  AND repo.tenant_id = $1

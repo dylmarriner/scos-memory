@@ -769,8 +769,16 @@ source and confidence. The governed `scos_memory_code_links` MCP tool exposes
 this readback without inventing transitive edges. RED-before-fix HTTP and
 MCP tests and real PostgreSQL 17/pgvector integration tests cover pagination,
 invalid selectors, zero links, tenant/namespace denial and provenance. The
-CI PostgreSQL job now exercises memory-intelligence integration tests. See
-`docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
+CI PostgreSQL job now exercises memory-intelligence integration tests.
+A follow-up TDD integrity gate found two real cross-repository symbol-version
+failures (foreign symbol accepted at link creation; drifted foreign symbol
+returned by readback). Both failed on the prior branch and passed after
+repository-chain validation in the writer, reader and SQL link trigger
+(migration 000076). The direct-SQL guard is tested for SQLSTATE 23514.
+**Open isolation gate:** legacy code repository, snapshot and symbol-version
+tables lack independent forced RLS; code-indexer/runtime tenant-context
+changes and real-PostgreSQL qualification are required before enabling it.
+See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
 expansion, multi-hop traversal, ranking, inference, server-attested Git
 provenance and production qualification remain open.
 

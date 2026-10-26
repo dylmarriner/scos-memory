@@ -48,8 +48,30 @@ regression reproduced the raw `sql: database is closed` disclosure RED, and
 now requires a fixed public error while details are logged server-side.
 The MCP gateway also reuses its existing UUID validator.
 
+A second RED-before-fix integrity regression exposed a mismatched code-symbol
+repository identity: the schema permits a symbol version to reference a
+snapshot in another repository, and the original link writer and reader
+checked only snapshot/repository tenant IDs. Two disposable-PostgreSQL tests
+failed before the fix: one accepted the forged cross-tenant symbol at link
+creation; another returned a previously valid link after its symbol identity
+drifted to a foreign repository. Both now pass. The writer and reader require
+`code_symbols.repository_id = code_repositories.id`, and migration
+`000076_memory_code_link_symbol_repository_guard.sql` applies the same
+invariant to direct SQL link writers. The direct-SQL regression checks for
+SQLSTATE 23514 rather than merely accepting an arbitrary database error.
+
+**Outstanding database isolation debt:** the pre-existing
+`code_repositories`, `code_repository_snapshots` and
+`code_symbol_versions` tables do not yet have independent forced RLS.
+The new endpoint uses forced memory/link RLS plus explicit tenant/repository
+join predicates and has negative cross-scope tests, but this does not qualify
+those legacy code tables for unrestricted direct access by the runtime role.
+Adding forced RLS to them requires a coordinated code-indexer/runtime
+transaction-context migration and integration acceptance; it is not silently
+treated as completed by this endpoint.
+
 The focused and full memory-intelligence integration tests passed against a
-**disposable PostgreSQL 17/pgvector database**, with all 75 migration files,
+**disposable PostgreSQL 17/pgvector database**, with 75 baseline migration files plus the new 000076 integrity migration,
 20 policy files and a non-BYPASSRLS `scos_app` role. The P4 CI PostgreSQL job
 now runs the memory-intelligence integration suite for future PRs and main.
 

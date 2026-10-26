@@ -3,10 +3,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestP6EvidenceLinkReadbackIsScopedAndPaginated(t *testing.T) {
@@ -86,5 +89,57 @@ func TestP6EvidenceLinkReadbackIsScopedAndPaginated(t *testing.T) {
 	}
 	if links, ok := out["links"].([]any); !ok || len(links) != 0 {
 		t.Fatalf("empty fact must return []: %v", out)
+	}
+}
+
+// A symbol version must belong to the same repository as its snapshot.
+// The legacy schema has separate FKs but does not enforce this relationship.
+func TestP6RejectsCrossTenantSymbolRepositoryMismatch(t *testing.T) {
+	f := newBehaviourFixture(t)
+	fact := f.remember("P6 code provenance cannot borrow another tenant's symbol.", 0.9)
+	localRepo := f.scalar("INSERT INTO code_repositories(tenant_id,canonical_path) VALUES($1,$2) RETURNING id::text", f.tenant, "/p6/local/"+fact)
+	localSnap := f.scalar("INSERT INTO code_repository_snapshots(repository_id,tenant_id,branch,commit_id,status) VALUES($1,$2,'main','local','active') RETURNING id::text", localRepo, f.tenant)
+	foreignRepo := f.scalar("INSERT INTO code_repositories(tenant_id,canonical_path) VALUES($1,$2) RETURNING id::text", f.otherTenant, "/p6/foreign/"+fact)
+	foreignSnap := f.scalar("INSERT INTO code_repository_snapshots(repository_id,tenant_id,branch,commit_id,status) VALUES($1,$2,'main','foreign','active') RETURNING id::text", foreignRepo, f.otherTenant)
+	foreignSymbol := f.scalar("INSERT INTO code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,$2,'file',$3) RETURNING id::text", foreignRepo, "foreign-"+fact, foreignSnap)
+	mismatchedVersion := f.scalar("INSERT INTO code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,kind,content_hash) VALUES($1,$2,'Foreign.secret','private/foreign.go','file','abcd') RETURNING id::text", foreignSymbol, localSnap)
+	code, out, _ := f.call(f.srv.handleEvidenceLinks, http.MethodPost, "/v1/evidence-links", fmt.Sprintf(`{"fact_id":%q,"code_symbol_version_id":%q}`, fact, mismatchedVersion))
+	if code != http.StatusNotFound {
+		t.Fatalf("cross-tenant symbol with local snapshot accepted: %d %v", code, out)
+	}
+	// Direct SQL writers must not bypass the HTTP tenant/repository guard.
+	_, err := f.admin.Exec("INSERT INTO memory_code_links(tenant_id,fact_id,code_symbol_version_id,link_type,source) VALUES($1,$2,$3,'evidences','explicit')", f.tenant, fact, mismatchedVersion)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("direct SQL cross-repository link should be rejected with 23514, got %v", err)
+	}
+}
+
+// A code symbol's repository may be corrupted after a legitimate link was
+// written. Readback must fail closed instead of trusting the snapshot alone.
+func TestP6ReadbackExcludesDriftedSymbolRepository(t *testing.T) {
+	f := newBehaviourFixture(t)
+	fact := f.remember("P6 code readback must reject provenance drift.", 0.9)
+	localRepo := f.scalar("INSERT INTO code_repositories(tenant_id,canonical_path) VALUES($1,$2) RETURNING id::text", f.tenant, "/p6/drift/local/"+fact)
+	localSnap := f.scalar("INSERT INTO code_repository_snapshots(repository_id,tenant_id,branch,commit_id,status) VALUES($1,$2,'main','local','active') RETURNING id::text", localRepo, f.tenant)
+	localSymbol := f.scalar("INSERT INTO code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,$2,'file',$3) RETURNING id::text", localRepo, "local-"+fact, localSnap)
+	localVersion := f.scalar("INSERT INTO code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,kind,content_hash) VALUES($1,$2,'Local.file','local/file.go','file','abcd') RETURNING id::text", localSymbol, localSnap)
+	code, out, _ := f.call(f.srv.handleEvidenceLinks, http.MethodPost, "/v1/evidence-links", fmt.Sprintf(`{"fact_id":%q,"code_symbol_version_id":%q}`, fact, localVersion))
+	if code != http.StatusOK {
+		t.Fatalf("valid evidence link = %d %v", code, out)
+	}
+	foreignRepo := f.scalar("INSERT INTO code_repositories(tenant_id,canonical_path) VALUES($1,$2) RETURNING id::text", f.otherTenant, "/p6/drift/foreign/"+fact)
+	foreignSnap := f.scalar("INSERT INTO code_repository_snapshots(repository_id,tenant_id,branch,commit_id,status) VALUES($1,$2,'main','foreign','active') RETURNING id::text", foreignRepo, f.otherTenant)
+	foreignSymbol := f.scalar("INSERT INTO code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,$2,'file',$3) RETURNING id::text", foreignRepo, "foreign-"+fact, foreignSnap)
+	if _, err := f.admin.Exec("UPDATE code_symbol_versions SET symbol_id=$1 WHERE id=$2", foreignSymbol, localVersion); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ = f.call(f.srv.handleEvidenceLinks, http.MethodGet, "/v1/evidence-links?fact_id="+fact, "")
+	if code != http.StatusOK {
+		t.Fatalf("read after symbol identity drift = %d %v", code, out)
+	}
+	links, ok := out["links"].([]any)
+	if !ok || len(links) != 0 {
+		t.Fatalf("cross-tenant symbol identity leaked in readback: %v", out)
 	}
 }
