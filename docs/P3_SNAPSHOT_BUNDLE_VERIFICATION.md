@@ -43,6 +43,12 @@ python3 -m unittest scripts/test_scos_verify_snapshot_manifest.py \
   scripts/test_scos_verify_snapshot_events.py -v
 ```
 
+**Git object integrity:** All Git subprocesses disable local replacement refs
+(`GIT_NO_REPLACE_OBJECTS=1`) as well as inherited `GIT_*` overrides.
+Otherwise, a malicious `refs/replace/*` entry can make a trusted commit SHA
+resolve to a different tree, allowing forged manifest bytes to pass an offline
+verification. A real-Git RED/GREEN regression covers this substitution.
+
 **Trust boundary:** Both readback APIs report server-stored metadata, and
 Git commit labels originally come from the indexing caller. A compromised
 server or malicious indexing client can still lie. This tool proves that
