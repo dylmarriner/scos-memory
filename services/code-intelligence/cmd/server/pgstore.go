@@ -656,68 +656,69 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 // declarations are present in this run's indexedDecl list exactly as if it
 // had been re-parsed.
 func (s *pgCodeStore) copyDeclarationsLocked(ctx context.Context, tx *sql.Tx, snapshotID, fileID, parentFileVersionID string) ([]indexedDecl, error) {
+	// Copy unchanged declarations in one SQL statement, retaining their
+	// conceptual symbol IDs and complete extraction provenance. This avoids
+	// a round trip per declaration in the common incremental path.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT sv.symbol_id, sv.fully_qualified_name, sv.path, sv.kind, sv.range, sv.signature, sv.content_hash,
-		       sv.doc_comment, sv.confidence_class, sv.extractor, COALESCE(sv.scope, ''), sv.called_names,
-		       COALESCE(cc.content, '')
-		FROM code_symbol_versions sv
-		LEFT JOIN code_chunks cc ON cc.symbol_version_id = sv.id
-		WHERE sv.file_version_id = $1 AND sv.kind != 'file'`, parentFileVersionID)
+        INSERT INTO code_symbol_versions
+            (symbol_id, snapshot_id, file_version_id, fully_qualified_name, path,
+             kind, range, signature, content_hash, doc_comment, confidence_class,
+             extractor, scope, called_names)
+        SELECT sv.symbol_id, $1,
+               (SELECT id FROM code_file_versions WHERE file_id=$2 AND snapshot_id=$1),
+               sv.fully_qualified_name, sv.path, sv.kind, sv.range, sv.signature,
+               sv.content_hash, sv.doc_comment, sv.confidence_class,
+               sv.extractor, sv.scope, sv.called_names
+        FROM code_symbol_versions sv
+        WHERE sv.file_version_id=$3 AND sv.kind != 'file'
+        RETURNING id::text, symbol_id::text, fully_qualified_name, path, kind,
+                  COALESCE(scope,''), COALESCE(called_names,''),
+                  COALESCE(extractor,'')`, snapshotID, fileID, parentFileVersionID)
 	if err != nil {
-		return nil, fmt.Errorf("load parent declarations: %w", err)
+		return nil, fmt.Errorf("bulk copy unchanged declaration versions: %w", err)
 	}
-	defer rows.Close()
-
-	type parentDecl struct {
-		symbolID, fqn, path, kind, rng, signature, contentHash, docComment, confidenceClass, extractor, scope, chunkContent string
-		calledNamesRaw                                                                                                      sql.NullString
-		calledNames                                                                                                         []string
-	}
-	var parents []parentDecl
+	out := make([]indexedDecl, 0)
 	for rows.Next() {
-		var d parentDecl
-		var rng, signature, docComment sql.NullString
-		if err := rows.Scan(&d.symbolID, &d.fqn, &d.path, &d.kind, &rng, &signature, &d.contentHash,
-			&docComment, &d.confidenceClass, &d.extractor, &d.scope, &d.calledNamesRaw, &d.chunkContent); err != nil {
-			return nil, fmt.Errorf("scan parent declaration: %w", err)
+		var d indexedDecl
+		var fqn, sourcePath, calledNames string
+		if err := rows.Scan(&d.SymbolVerID, &d.SymbolID, &fqn, &sourcePath,
+			&d.Kind, &d.Scope, &calledNames, &d.Extractor); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan copied declaration: %w", err)
 		}
-		d.rng, d.signature, d.docComment = rng.String, signature.String, docComment.String
-		d.calledNames = decodeCalledNames(d.calledNamesRaw.String)
-		parents = append(parents, d)
+		d.Name = fqn
+		if idx := strings.LastIndex(fqn, "."); idx >= 0 {
+			d.Name = fqn[idx+1:]
+		}
+		d.CalledNames = decodeCalledNames(calledNames)
+		d.Dir = path.Dir(sourcePath)
+		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		rows.Close()
+		return nil, fmt.Errorf("read copied declarations: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close copied declarations: %w", err)
 	}
 
-	out := make([]indexedDecl, 0, len(parents))
-	for _, d := range parents {
-		var symbolVersionID string
-		if err := tx.QueryRowContext(ctx, `
-			INSERT INTO code_symbol_versions
-				(symbol_id, snapshot_id, file_version_id, fully_qualified_name, path, kind, range, signature, content_hash, doc_comment, confidence_class, extractor, scope, called_names)
-			VALUES ($1, $2, (SELECT id FROM code_file_versions WHERE file_id = $3 AND snapshot_id = $2), $4, $5, $6, NULLIF($7,''), NULLIF($8,''), $9, NULLIF($10,''), $11, $12, $13, $14)
-			RETURNING id`,
-			d.symbolID, snapshotID, fileID, d.fqn, d.path, d.kind, d.rng, d.signature, d.contentHash,
-			d.docComment, d.confidenceClass, d.extractor, d.scope, encodeCalledNames(d.calledNames)).Scan(&symbolVersionID); err != nil {
-			return nil, fmt.Errorf("copy declaration version for %s: %w", d.fqn, err)
-		}
-		if err := insertCodeChunkLocked(ctx, tx, symbolVersionID, d.chunkContent, d.path, d.rng); err != nil {
-			return nil, err
-		}
-		name := d.fqn
-		if idx := strings.LastIndex(d.fqn, "."); idx >= 0 {
-			name = d.fqn[idx+1:]
-		}
-		out = append(out, indexedDecl{
-			SymbolID:    d.symbolID,
-			SymbolVerID: symbolVersionID,
-			Scope:       d.scope,
-			Name:        name,
-			Kind:        d.kind,
-			CalledNames: d.calledNames,
-			Extractor:   d.extractor,
-			Dir:         path.Dir(d.path),
-		})
+	// The source chunks are already normalized and hashed by the original
+	// extractor. Copy them byte-for-byte, including optional ranges, in a
+	// single statement. Joining on the unique per-snapshot symbol identity
+	// cannot cross files or copy a stale/deleted declaration.
+	if _, err := tx.ExecContext(ctx, `
+        INSERT INTO code_chunks (symbol_version_id, content, path, range, content_hash)
+        SELECT target.id, chunk.content, chunk.path, chunk.range, chunk.content_hash
+        FROM code_symbol_versions target
+        JOIN code_symbol_versions parent
+          ON parent.symbol_id=target.symbol_id AND parent.file_version_id=$3
+         AND parent.snapshot_id=(SELECT snapshot_id FROM code_file_versions WHERE id=$3)
+        JOIN code_chunks chunk ON chunk.symbol_version_id=parent.id
+        WHERE target.snapshot_id=$1
+          AND target.file_version_id=(
+              SELECT id FROM code_file_versions WHERE file_id=$2 AND snapshot_id=$1
+          ) AND target.kind != 'file'`, snapshotID, fileID, parentFileVersionID); err != nil {
+		return nil, fmt.Errorf("bulk copy unchanged declaration chunks: %w", err)
 	}
 	return out, nil
 }
