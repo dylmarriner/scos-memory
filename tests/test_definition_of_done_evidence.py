@@ -33,9 +33,18 @@ class DefinitionOfDoneEvidenceTests(unittest.TestCase):
         self.assertTrue(any("Search indexes rebuild" in f for f in failures))
         self.assertTrue(any("Backups have been restored" in f for f in failures))
 
-    def test_audit_stays_partial_despite_present_evidence(self):
-        # Presence of named tests must not be confused with all §41 gates passing.
-        self.assertTrue(dod.audit_doc_gate())
+    def test_audit_respects_documented_partial_and_future_pass(self):
+        # The gate must reject a partial audit but must not block a future,
+        # evidence-backed PASS simply because this test was written earlier.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            with patch.object(dod, "ROOT", root):
+                doc.write_text("| 41 | Definition of done | PARTIAL | still open |\n")
+                self.assertTrue(dod.audit_doc_gate())
+                doc.write_text("| 41 | Definition of done | PASS | verified |\n")
+                self.assertFalse(dod.audit_doc_gate())
 
     def test_a_comment_does_not_count_as_a_test_function(self):
         item = next(i for i in dod.ITEMS if i.bullet == "Backups have been restored successfully.")
