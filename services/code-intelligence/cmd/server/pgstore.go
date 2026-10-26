@@ -420,11 +420,24 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 			return fmt.Errorf("copy compatible parent call edges: %w", err)
 		}
 	}
-	if !copiedGraph {
-		resolvedEdges, err = insertCallEdgesLocked(ctx, tx, snapshotID, allDecls)
+	// For changed manifests, copy only proven unaffected call scopes. All
+	// qualified callers are conservatively invalidated, and identity or
+	// graph-provenance mismatches fall back to full resolution.
+	var dirtyCallScopes map[string]bool
+	if !copiedGraph && !unchangedManifest && parentSnapshotID != "" {
+		copiedGraph, copiedEdges, dirtyCallScopes, err = copyUnaffectedParentCallEdgesLocked(
+			ctx, tx, parentSnapshotID, snapshotID, oldManifest, newManifest, allDecls)
 		if err != nil {
-			return fmt.Errorf("index call edges: %w", err)
+			return fmt.Errorf("copy unaffected parent call scopes: %w", err)
 		}
+	}
+	if copiedGraph && dirtyCallScopes != nil {
+		resolvedEdges, err = insertCallEdgesForDirtyScopesLocked(ctx, tx, snapshotID, allDecls, dirtyCallScopes)
+	} else if !copiedGraph {
+		resolvedEdges, err = insertCallEdgesLocked(ctx, tx, snapshotID, allDecls)
+	}
+	if err != nil {
+		return fmt.Errorf("index call edges: %w", err)
 	}
 
 	cacheHitRatio := 0.0
