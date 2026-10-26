@@ -50,8 +50,16 @@ def parse_evidence_json(raw: str | bytes) -> dict:
     def reject_nonfinite(value: str) -> None:
         raise ValueError(f"non-finite JSON numeric constant: {value}")
 
+    def finite_float(value: str) -> float:
+        # RFC 8259 allows exponent notation, but extreme exponents overflow
+        # Python floats to infinity without invoking parse_constant.
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"non-finite JSON number: {value}")
+        return number
+
     return json.loads(raw, object_pairs_hook=unique_keys,
-                      parse_constant=reject_nonfinite)
+                      parse_constant=reject_nonfinite, parse_float=finite_float)
 
 
 def load_fixture(path: pathlib.Path) -> tuple[dict, str]:

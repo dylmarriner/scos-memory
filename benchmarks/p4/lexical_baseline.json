@@ -177,7 +177,7 @@
   "engine_version": "1.0.0",
   "fixture_name": "p4-hybrid-retrieval-smoke",
   "fixture_sha256": "73e67b2876b9500f5a67676faa1878e987e6561d701433435f14eb470e1e7fe6",
-  "generator_sha256": "7c39146e263b858809464735c2f9b9e1ee2b23eef3e147999ac566b3955e4613",
+  "generator_sha256": "f738d84bba38c9a017389e58898b0aa9d9c6c38963c87302db70127a65311b36",
   "git_base_sha": "b322716b52af0f26d446004d1f600038d0f5b165",
   "harness_sha256": "3f930cbbcbe450b754f2ecc6b093073ee328350981930466cec2545314ba3da8",
   "schema_version": 1,

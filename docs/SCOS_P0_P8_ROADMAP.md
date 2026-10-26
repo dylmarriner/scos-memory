@@ -117,6 +117,19 @@ Operational rules:
 
 ---
 
+## P0 exponent-overflow evidence regression (2026-10-27)
+
+Two subprocess regression tests (four cases) first reproduced acceptance of
+valid-JSON exponent-overflow numbers (`1e999` and `-1e999`) in otherwise
+unused nested fields of the frozen fixture and recorded baseline. Python's
+JSON parser converts these to non-finite floats unless `parse_float` is
+constrained. The shared P0 lexical smoke evidence decoder now rejects the
+non-finite results before baseline recording or verification. The generator
+SHA-256 in the checked-in measured baseline was refreshed; rankings, labels,
+quality metrics and zero forbidden exposure were not changed. This is only
+**offline P0/P4 evidence integrity**. Realistic live retrieval, model-space,
+latency, tenant isolation and production acceptance remain unverified.
+
 ## P0 frozen benchmark evidence integrity (2026-10-27)
 
 The isolated lexical smoke quality gate now rejects duplicate JSON keys at
