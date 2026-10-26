@@ -88,6 +88,31 @@ class SnapshotEventVerificationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["commit_id"], target)
 
+    def test_same_parent_and_target_cannot_be_claimed_as_delta(self):
+        parent, target, events = self.fixture()
+        result = self.invoke(target, [], parent=target)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("strict ancestor", result.stderr)
+
+    def test_malformed_rename_origin_is_rejected_as_input_error(self):
+        parent, target, events = self.fixture()
+        forged = [dict(event) for event in events]
+        rename = next(e for e in forged if e["change_kind"] == "rename")
+        rename["previous_path"] = ["before.py"]
+        result = self.invoke(target, forged, parent)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("invalid", result.stderr.lower())
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_terminal_cursor_must_be_a_string(self):
+        parent, target, events = self.fixture()
+        for cursor in (None, 0, False, []):
+            with self.subTest(cursor=cursor):
+                page = {"snapshot_id": SNAPSHOT, "events": events,
+                        "next_after_path": cursor}
+                result = self.invoke(target, events, parent, pages=[page])
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+
     def test_complete_multi_page_ledger_matches_committed_git_transition(self):
         parent, target, events = self.fixture()
         pages = [
