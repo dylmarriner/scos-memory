@@ -215,16 +215,27 @@ def git_events(repo: Path, parent: str | None, target: str) -> list[dict[str, st
         i += 1
         kind = {"A": "add", "M": "modify", "D": "delete",
                 "R": "rename", "C": "copy"}.get(status[:1])
-        if kind is None:
-            raise WorklistError(f"unsupported Git diff status: {status}")
         old_path = None
         if kind in ("rename", "copy"):
             old_path = parts[i].decode("utf-8")
             i += 1
         path = parts[i].decode("utf-8")
         i += 1
-        if Path(path).suffix.lower() not in LANGUAGE_SUFFIXES:
+        supported_new = Path(path).suffix.lower() in LANGUAGE_SUFFIXES
+        supported_old = old_path is not None and Path(old_path).suffix.lower() in LANGUAGE_SUFFIXES
+        if kind is None:
+            if supported_new:
+                raise WorklistError(f"unsupported Git diff status: {status}")
             continue
+        if kind in ("rename", "copy") and supported_old and not supported_new:
+            if kind == "rename":
+                events.append({"type": "delete", "path": old_path})
+            continue
+        if not supported_new:
+            continue
+        if kind in ("rename", "copy") and not supported_old:
+            kind = "add"
+            old_path = None
         event = {"type": kind, "path": path}
         if old_path is not None:
             event["old_path"] = old_path

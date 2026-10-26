@@ -71,6 +71,28 @@ class GitWorklistTests(unittest.TestCase):
         self.assertEqual(data["parent_commit_id"], parent)
         self.assertNotIn("events", data)
 
+    def test_supported_source_renamed_to_unsupported_is_deletion(self):
+        (self.repo / "a.py").write_text("print(1)\n")
+        parent = self.commit("parent")
+        (self.repo / "a.py").rename(self.repo / "a.txt")
+        head = self.commit("head")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["events"],
+                         [{"type": "delete", "path": "a.py"}])
+
+    def test_unsupported_type_change_does_not_block_supported_addition(self):
+        (self.repo / "README.md").write_text("readme")
+        parent = self.commit("parent")
+        (self.repo / "README.md").unlink()
+        (self.repo / "README.md").symlink_to("missing")
+        (self.repo / "new.py").write_text("print(1)\n")
+        head = self.commit("head")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["events"],
+                         [{"type": "add", "path": "new.py"}])
+
     def test_git_event_sidecar_reports_exact_paths_and_changes(self):
         (self.repo / "before.py").write_text("value = 1\n")
         (self.repo / "removed.py").write_text("old = True\n")
