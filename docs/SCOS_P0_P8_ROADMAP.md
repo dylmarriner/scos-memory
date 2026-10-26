@@ -799,7 +799,13 @@ context and rejects malformed tenant
 UUIDs. A disposable PostgreSQL 17 test with isolated forced-RLS shadow tables
 and the non-BYPASSRLS runtime role reproduced a SQLSTATE 42501 denial before
 the change and passed afterward, including foreign-tenant and connection-leak
-checks. This is **preparatory only**, not a four-table RLS rollout: remaining
+checks. A second scoped increment moves all five HTTP repository-ownership
+reads and the exact snapshot-key lookup into tenant-local transactions,
+with RED→GREEN forced-RLS regression for own/foreign tenants, invalid
+identity and connection-context isolation. Fresh disposable PostgreSQL
+17/pgvector (97 migration/policy scripts) passed the scoped test and the
+full code-intelligence integration package; uncached Go and vet passed.
+This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.
 See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory

@@ -1717,15 +1717,30 @@ func (s *pgCodeStore) LatestIndexedBranch(ctx context.Context, repositoryID, ten
 	return branch, err
 }
 
+// RepositoryPathForTenant checks repository ownership inside a transaction
+// whose tenant identity is local to that transaction. A missing or foreign
+// repository returns sql.ErrNoRows, without exposing which case occurred.
+func (s *pgCodeStore) RepositoryPathForTenant(ctx context.Context, tenantID, repositoryID string) (string, error) {
+	var path string
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            SELECT canonical_path FROM code_repositories
+             WHERE id = $1 AND tenant_id = $2`, repositoryID, tenantID).Scan(&path)
+	})
+	return path, err
+}
+
 // SnapshotByKey finds the snapshot already recorded for this exact tree,
 // returning its id and status, or "" when there is none.
-func (s *pgCodeStore) SnapshotByKey(ctx context.Context, repositoryID, branch, commitID, extractorVersion, configurationHash string) (string, string, error) {
+func (s *pgCodeStore) SnapshotByKey(ctx context.Context, tenantID, repositoryID, branch, commitID, extractorVersion, configurationHash string) (string, string, error) {
 	var id, status string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id::text, status::text FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND branch = $2 AND commit_id = $3
-		   AND extractor_version = $4 AND configuration_hash = $5`,
-		repositoryID, branch, commitID, extractorVersion, configurationHash).Scan(&id, &status)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            SELECT id::text, status::text FROM code_repository_snapshots
+             WHERE repository_id = $1 AND tenant_id = $2 AND branch = $3 AND commit_id = $4
+               AND extractor_version = $5 AND configuration_hash = $6`,
+			repositoryID, tenantID, branch, commitID, extractorVersion, configurationHash).Scan(&id, &status)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}

@@ -423,24 +423,18 @@ func (s *server) handlePGIndexSCIP(w http.ResponseWriter, r *http.Request) {
 	// Same tenant-ownership rule as handlePGIndex: a repository_id
 	// supplied by one tenant that happens to belong to another is
 	// rejected here rather than silently indexing into it.
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+	if _, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
-		http.Error(w, "repository not found", http.StatusNotFound)
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
 
 	// A SCIP index for a key that is already indexed cannot be compared
 	// with what was stored, so it is refused rather than written over it.
-	existing, status, err := s.pgStore.SnapshotByKey(r.Context(), req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)
+	existing, status, err := s.pgStore.SnapshotByKey(r.Context(), tenant, req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)
 	if err != nil {
 		http.Error(w, "look up snapshot: "+err.Error(), http.StatusInternalServerError)
 		return

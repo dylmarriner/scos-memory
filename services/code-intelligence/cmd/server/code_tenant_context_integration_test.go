@@ -91,6 +91,27 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	if err != nil || branch != "main" {
 		t.Fatalf("tenant-scoped latest branch = %q, %v; want main", branch, err)
 	}
+	// These are the HTTP handler's repository-ownership and idempotent
+	// snapshot lookups. They must work with forced RLS, and foreign
+	// repositories must be indistinguishable from missing ones.
+	path, err := store.RepositoryPathForTenant(ctx, tenantA, repo)
+	if err != nil || path != "/scope-test" {
+		t.Fatalf("scoped repository path = %q, %v", path, err)
+	}
+	if _, err := store.RepositoryPathForTenant(ctx, tenantB, repo); err != sql.ErrNoRows {
+		t.Fatalf("foreign repository path should be invisible: %v", err)
+	}
+	id, status, err := store.SnapshotByKey(ctx, tenantA, repo, "main", "commit1", "test-v1", "")
+	if err != nil || id != snap || status != "active" {
+		t.Fatalf("scoped snapshot lookup = %q, %q, %v", id, status, err)
+	}
+	id, status, err = store.SnapshotByKey(ctx, tenantB, repo, "main", "commit1", "test-v1", "")
+	if err != nil || id != "" || status != "" {
+		t.Fatalf("foreign snapshot lookup leaked: %q, %q, %v", id, status, err)
+	}
+	if _, err := store.RepositoryPathForTenant(ctx, "not-a-uuid", repo); err == nil {
+		t.Fatal("repository lookup accepted invalid tenant")
+	}
 	if branch, err := store.LatestIndexedBranch(ctx, repo, tenantB); err != nil || branch != "" {
 		t.Fatalf("foreign tenant latest branch = %q, %v; want empty", branch, err)
 	}

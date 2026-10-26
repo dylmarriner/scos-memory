@@ -114,7 +114,19 @@ context leaks into subsequent pooled-connection reads. The regression failed
 before the change with SQLSTATE 42501 on repository creation and passed after
 the change on disposable PostgreSQL 17. A second RED case found that
 unscoped `IndexingSnapshot` returned an empty result for an authorized
-tenant; both snapshot-discovery reads now pass under forced RLS. The full
+tenant; both snapshot-discovery reads now pass under forced RLS. A further RED→GREEN code-indexer increment moves the five HTTP
+repository-ownership checks (index, scan, SCIP import, query and impact) into
+transaction-local tenant context. The snapshot idempotency lookup now takes
+an explicit authenticated tenant ID and runs inside the same scoped
+transaction. The forced-RLS shadow-schema test proves own-tenant
+repository-path and snapshot-key visibility, foreign-tenant invisibility,
+invalid-tenant rejection and no connection-level context leakage. Before
+implementation the test failed compilation because these scoped APIs did not
+exist; after implementation it passed against a fresh disposable PostgreSQL
+17/pgvector instance with 97 migration/policy scripts applied. The full
+code-intelligence integration package also passed in that disposable database,
+as did the uncached Go suite, Go vet and diff validation.
+The full
 non-database Go suite and
 `go vet` passed. **This does not activate RLS on the four production code
 tables:** indexing, historical queries, activation, recovery, and symbol-version

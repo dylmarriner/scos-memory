@@ -206,20 +206,16 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repository_id is required", http.StatusBadRequest)
 		return
 	}
-	var owningTenant, canonical string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text, canonical_path FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant, &canonical); err != nil {
+	canonical, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
-	if owningTenant != tenant {
-		http.Error(w, "repository not found", http.StatusNotFound)
-		return
-	}
+
 	dir, err := workspace.Resolve(canonical)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
@@ -246,7 +242,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 	if head != "" {
 		commit = head + "+" + strings.TrimPrefix(tree, "worktree-")[:16]
 	}
-	if existing, status, err := s.pgStore.SnapshotByKey(r.Context(), req.RepositoryID, branch, commit, extractorVersion, ""); err != nil {
+	if existing, status, err := s.pgStore.SnapshotByKey(r.Context(), tenant, req.RepositoryID, branch, commit, extractorVersion, ""); err != nil {
 		http.Error(w, "look up snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	} else if existing != "" && status != "failed" {
@@ -443,7 +439,7 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 	// A snapshot's key names one tree. Sending the same tree again (a
 	// client retry) returns the snapshot already built; different files
 	// under a key that is already indexed are refused, never merged in.
-	existing, status, err := s.pgStore.SnapshotByKey(ctx, repositoryID, branch, commit, extractorVersion, configurationHash)
+	existing, status, err := s.pgStore.SnapshotByKey(ctx, tenant, repositoryID, branch, commit, extractorVersion, configurationHash)
 	if err != nil {
 		return nil, fmt.Errorf("look up snapshot: %w", err)
 	}

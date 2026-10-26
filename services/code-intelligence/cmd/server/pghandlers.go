@@ -259,18 +259,12 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 	// canonical_path), not on repository_id, so a repository_id supplied by
 	// one tenant that happens to belong to another is rejected here rather
 	// than silently indexing into it.
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+	if _, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
-		http.Error(w, "repository not found", http.StatusNotFound)
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -423,18 +417,12 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	// client-supplied field -- same rule as requireTenant (§19.10) -- so a
 	// query can never be widened to another tenant's repositories even if
 	// repository_id happens to collide.
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+	if _, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, map[string]any{"results": []PGSymbolVersion{}})
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
-		writeJSON(w, map[string]any{"results": []PGSymbolVersion{}})
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -647,18 +635,12 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 	// Same tenant-ownership rule as handlePGQuery: a repository belonging
 	// to another tenant behaves as if it doesn't exist (§19.10), not as an
 	// error that would confirm its existence.
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+	if _, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
-		http.Error(w, "repository not found", http.StatusNotFound)
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
 
