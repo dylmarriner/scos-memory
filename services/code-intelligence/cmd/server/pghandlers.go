@@ -182,7 +182,8 @@ type pgIndexFileRequest struct {
 	// what supplying it actually buys a caller today (real Go declaration
 	// extraction) versus every other language, which still only gets the
 	// Tier 0 file-level symbol regardless of whether Content is sent.
-	Content string `json:"content,omitempty"`
+	Content     string `json:"content,omitempty"`
+	ReuseParent bool   `json:"reuse_parent,omitempty"`
 }
 
 func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +211,7 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		RepositoryID      string               `json:"repository_id"`
 		Branch            string               `json:"branch"`
 		CommitID          string               `json:"commit_id"`
+		ParentCommitID    string               `json:"parent_commit_id,omitempty"`
 		ExtractorVersion  string               `json:"extractor_version,omitempty"`
 		ConfigurationHash string               `json:"configuration_hash,omitempty"`
 		Files             []pgIndexFileRequest `json:"files"`
@@ -232,6 +234,10 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 		// The hash is the file's identity across snapshots (rename and
 		// unchanged-file detection key on it), so one that does not match
 		// the content sent with it is refused rather than stored.
+		if f.ReuseParent && (f.Content != "" || req.ParentCommitID == "") {
+			http.Error(w, "reuse_parent requires omitted content and parent_commit_id", http.StatusBadRequest)
+			return
+		}
 		if f.Content != "" {
 			sum := sha256.Sum256([]byte(f.Content))
 			if !strings.EqualFold(hex.EncodeToString(sum[:]), strings.TrimSpace(f.ContentHash)) {
@@ -270,7 +276,7 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 
 	files := make([]PGFileInput, 0, len(req.Files))
 	for _, f := range req.Files {
-		files = append(files, PGFileInput{Path: f.Path, Language: f.Language, ContentHash: f.ContentHash, Content: f.Content})
+		files = append(files, PGFileInput{Path: f.Path, Language: f.Language, ContentHash: f.ContentHash, Content: f.Content, ReuseParent: f.ReuseParent, ExpectedParentCommit: req.ParentCommitID})
 	}
 
 	result, err := s.indexDurableSnapshot(r.Context(), tenant, req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash, files)

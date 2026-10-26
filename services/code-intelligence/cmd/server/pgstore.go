@@ -140,6 +140,11 @@ type PGFileInput struct {
 	// already have, e.g. from Git), a per-declaration hash requires
 	// actually parsing the file, which only this store can do.
 	Content string
+	// ReuseParent is an explicit request to omit unchanged Git source bytes.
+	// It must fail closed unless the expected commit, extractor, configuration,
+	// file path, language and hash all match an active parent snapshot.
+	ReuseParent          bool
+	ExpectedParentCommit string
 }
 
 // PGSymbolVersion is one row of what a query resolves to: the stable
@@ -208,8 +213,8 @@ func (s *pgCodeStore) CreateSnapshot(ctx context.Context, repositoryID, tenantID
 	var parentID string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND branch = $2 AND status = 'active' AND extractor_version = $3`,
-		repositoryID, branch, extractorVersion).Scan(&parentID)
+		 WHERE repository_id = $1 AND branch = $2 AND status = 'active' AND extractor_version = $3 AND configuration_hash = $4`,
+		repositoryID, branch, extractorVersion, configHash).Scan(&parentID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("resolve parent snapshot: %w", err)
 	}
@@ -302,19 +307,28 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	// Exactly the same path+hash criterion used by indexFileLocked's
 	// real unchanged-file reuse path. Read under the indexing transaction,
 	// so failed/incomplete generations never create committed metrics.
-	parentHashes := map[string]string{}
+	type parentFile struct {
+		hash, language string
+		hasSource      bool
+	}
+	parentHashes := map[string]parentFile{}
 	if parentSnapshotID != "" {
-		rows, err := tx.QueryContext(ctx, "SELECT path,content_hash FROM code_file_versions WHERE snapshot_id=$1", parentSnapshotID)
+		rows, err := tx.QueryContext(ctx, `SELECT fv.path, fv.content_hash, fv.language,
+            EXISTS (SELECT 1 FROM code_symbol_versions sv
+                JOIN code_chunks cc ON cc.symbol_version_id=sv.id
+                WHERE sv.file_version_id=fv.id AND sv.kind='file')
+            FROM code_file_versions fv WHERE fv.snapshot_id=$1`, parentSnapshotID)
 		if err != nil {
 			return fmt.Errorf("load parent hashes for metrics: %w", err)
 		}
 		for rows.Next() {
-			var path, hash string
-			if err := rows.Scan(&path, &hash); err != nil {
+			var path, hash, language string
+			var hasSource bool
+			if err := rows.Scan(&path, &hash, &language, &hasSource); err != nil {
 				rows.Close()
 				return err
 			}
-			parentHashes[path] = hash
+			parentHashes[path] = parentFile{hash: hash, language: language, hasSource: hasSource}
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -322,6 +336,26 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		}
 		if err := rows.Close(); err != nil {
 			return err
+		}
+	}
+	// A source-omitting delta is only safe against the exact active parent
+	// the caller indexed. Validate before inserting any file versions.
+	var parentCommit string
+	if parentSnapshotID != "" {
+		err := tx.QueryRowContext(ctx, `SELECT commit_id FROM code_repository_snapshots
+			WHERE id=$1 AND status='active'`, parentSnapshotID).Scan(&parentCommit)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("load active parent commit: %w", err)
+		}
+	}
+	for _, f := range files {
+		if !f.ReuseParent {
+			continue
+		}
+		parentFile, exists := parentHashes[f.Path]
+		if f.Content != "" || f.ExpectedParentCommit == "" || parentCommit != f.ExpectedParentCommit ||
+			!exists || parentFile.hash != f.ContentHash || parentFile.language != f.Language || !parentFile.hasSource {
+			return fmt.Errorf("%w: reusable active parent evidence unavailable for %s", errSnapshotConflict, f.Path)
 		}
 	}
 	var allDecls []indexedDecl
@@ -333,9 +367,9 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		if err != nil {
 			return fmt.Errorf("index %s: %w", f.Path, err)
 		}
-		hash, exists := parentHashes[f.Path]
+		parentFile, exists := parentHashes[f.Path]
 		switch {
-		case exists && hash == f.ContentHash:
+		case exists && parentFile.hash == f.ContentHash && parentFile.language == f.Language:
 			reusedFiles++
 			reusedDecls += len(decls)
 		case f.Content != "":
@@ -542,8 +576,8 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		var parentFileVersionID string
 		err := tx.QueryRowContext(ctx, `
 			SELECT id FROM code_file_versions
-			WHERE snapshot_id = $1 AND path = $2 AND content_hash = $3`,
-			parentSnapshotID, f.Path, f.ContentHash).Scan(&parentFileVersionID)
+			WHERE snapshot_id = $1 AND path = $2 AND content_hash = $3 AND language = $4`,
+			parentSnapshotID, f.Path, f.ContentHash, f.Language).Scan(&parentFileVersionID)
 		if err == nil {
 			fileContent := f.Content
 			if fileContent == "" {

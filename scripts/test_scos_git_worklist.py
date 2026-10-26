@@ -68,20 +68,41 @@ class GitWorklistTests(unittest.TestCase):
         self.assertNotIn("remove.rs", files)
         self.assertEqual(len(files), len(set(files)))
         self.assertEqual(data["repository_id"], REPO_ID)
-        self.assertNotIn("parent", data)
+        self.assertEqual(data["parent_commit_id"], parent)
         self.assertNotIn("events", data)
 
-    def test_unchanged_source_is_supplied_for_extractor_rebuild(self):
+    def test_unchanged_source_omitted_with_explicit_reuse_and_full_source_fallback(self):
         (self.repo / "stable.py").write_text("def stable():\n    pass\n")
         parent = self.commit("first")
         (self.repo / "other.go").write_text("package other\n")
         head = self.commit("second")
         result = self.invoke("--commit", head, "--parent", parent)
         self.assertEqual(result.returncode, 0, result.stderr)
-        by_path = {x["path"]: x for x in json.loads(result.stdout)["files"]}
-        self.assertEqual(by_path["stable.py"]["content"], "def stable():\n    pass\n")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["parent_commit_id"], parent)
+        by_path = {x["path"]: x for x in payload["files"]}
+        self.assertEqual(by_path["stable.py"]["content"], "")
+        self.assertTrue(by_path["stable.py"]["reuse_parent"])
         self.assertEqual(len(by_path["stable.py"]["content_hash"]), 64)
         self.assertTrue(by_path["other.go"]["content"])
+        self.assertFalse(by_path["other.go"]["reuse_parent"])
+        full = self.invoke("--commit", head, "--parent", parent, "--full-source")
+        self.assertEqual(full.returncode, 0, full.stderr)
+        full_by_path = {x["path"]: x for x in json.loads(full.stdout)["files"]}
+        self.assertEqual(full_by_path["stable.py"]["content"], "def stable():\n    pass\n")
+        self.assertFalse(full_by_path["stable.py"]["reuse_parent"])
+
+    def test_large_unchanged_source_fits_guarded_delta_but_not_full_source(self):
+        (self.repo / "stable.py").write_text("data = '" + "a" * 20000 + "'\n")
+        parent = self.commit("big parent")
+        (self.repo / "new.py").write_text("added = True\n")
+        head = self.commit("small delta")
+        incremental = self.invoke("--commit", head, "--parent", parent, "--max-bytes", "3000")
+        self.assertEqual(incremental.returncode, 0, incremental.stderr)
+        self.assertTrue(next(x for x in json.loads(incremental.stdout)["files"] if x["path"] == "stable.py")["reuse_parent"])
+        fallback = self.invoke("--commit", head, "--parent", parent, "--full-source", "--max-bytes", "3000")
+        self.assertNotEqual(fallback.returncode, 0)
+        self.assertEqual(fallback.stdout, "")
 
     def test_commit_snapshot_not_working_tree_and_safe_file_names(self):
         filename = "-weird\nname.py"
