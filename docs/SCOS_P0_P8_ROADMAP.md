@@ -759,6 +759,21 @@ temporal contradiction/supersession cases, merge, and deployment verification.
 
 P4 additionally allows repo-aware retrieval to return code evidence beside memory evidence without collapsing the two authority domains.
 
+## Partial P6 evidence: bounded memory → code readback (2026-10-27)
+
+The memory-intelligence service now supports tenant/namespace-RLS-scoped,
+keyset-paginated `GET /v1/evidence-links` for an accessible fact (max 100 links
+per page). Every returned edge identifies the concrete immutable symbol
+version, repository, snapshot, recorded commit label, path, relationship,
+source and confidence. The governed `scos_memory_code_links` MCP tool exposes
+this readback without inventing transitive edges. RED-before-fix HTTP and
+MCP tests and real PostgreSQL 17/pgvector integration tests cover pagination,
+invalid selectors, zero links, tenant/namespace denial and provenance. The
+CI PostgreSQL job now exercises memory-intelligence integration tests. See
+`docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
+expansion, multi-hop traversal, ranking, inference, server-attested Git
+provenance and production qualification remain open.
+
 ## Remaining
 
 - [ ] Complete governed API/MCP tooling for explicit memory↔symbol-version links.

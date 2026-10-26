@@ -1232,6 +1232,10 @@ If durable is false, category/slug/title/type/authority/tags/summary may be empt
 // P1-C write point (maybePromoteToOKF auto-linking on promotion) is
 // separate and unconditional on this endpoint existing.
 func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleEvidenceLinksRead(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
