@@ -71,6 +71,22 @@ class GitWorklistTests(unittest.TestCase):
         self.assertEqual(data["parent_commit_id"], parent)
         self.assertNotIn("events", data)
 
+    def test_git_event_sidecar_reports_exact_paths_and_changes(self):
+        (self.repo / "before.py").write_text("value = 1\n")
+        (self.repo / "removed.py").write_text("old = True\n")
+        parent = self.commit("parent")
+        (self.repo / "before.py").rename(self.repo / "after.py")
+        (self.repo / "removed.py").unlink()
+        (self.repo / "added.py").write_text("new = True\n")
+        head = self.commit("target")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = json.loads(result.stdout)["events"]
+        self.assertEqual({(e["type"], e["path"]) for e in events},
+                         {("rename", "after.py"), ("delete", "removed.py"),
+                          ("add", "added.py")})
+        self.assertEqual(next(e for e in events if e["type"] == "rename")["old_path"], "before.py")
+
     def test_unchanged_source_omitted_with_explicit_reuse_and_full_source_fallback(self):
         (self.repo / "stable.py").write_text("def stable():\n    pass\n")
         parent = self.commit("first")

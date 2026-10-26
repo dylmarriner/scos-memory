@@ -201,6 +201,37 @@ def build(
     return raw
 
 
+def git_events(repo: Path, parent: str | None, target: str) -> list[dict[str, str]]:
+    """Report Git changes without altering the index API contract."""
+    if parent is None:
+        return [{"type": "add", "path": path}
+                for path in sorted(tree_blobs(repo, target))]
+    raw = git(repo, "diff", "--name-status", "-z", "-M", "-C", parent, target)
+    parts = raw.split(b"\0")
+    events = []
+    i = 0
+    while i < len(parts) and parts[i]:
+        status = parts[i].decode("ascii")
+        i += 1
+        kind = {"A": "add", "M": "modify", "D": "delete",
+                "R": "rename", "C": "copy"}.get(status[:1])
+        if kind is None:
+            raise WorklistError(f"unsupported Git diff status: {status}")
+        old_path = None
+        if kind in ("rename", "copy"):
+            old_path = parts[i].decode("utf-8")
+            i += 1
+        path = parts[i].decode("utf-8")
+        i += 1
+        if Path(path).suffix.lower() not in LANGUAGE_SUFFIXES:
+            continue
+        event = {"type": kind, "path": path}
+        if old_path is not None:
+            event["old_path"] = old_path
+        events.append(event)
+    return sorted(events, key=lambda e: (e["path"], e["type"]))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--git-dir", type=Path, required=True,
@@ -218,8 +249,20 @@ def main() -> int:
                         help="Send all source bytes even with --parent (retry after HTTP 409)")
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_LIMIT,
                         help="Fail atomically if request exceeds server's 4 MiB maximum")
+    parser.add_argument("--events-only", action="store_true",
+                        help="Emit offline Git event sidecar; not accepted by index API")
     args = parser.parse_args()
     try:
+        if args.events_only:
+            target = commit_oid(args.git_dir.resolve(), args.commit)
+            parent = commit_oid(args.git_dir.resolve(), args.parent) if args.parent else None
+            if parent and subprocess.run(["git", "merge-base", "--is-ancestor", parent, target],
+                                         cwd=args.git_dir.resolve()).returncode:
+                raise WorklistError("parent must be an ancestor of target commit")
+            events = git_events(args.git_dir.resolve(), parent, target)
+            print(json.dumps({"parent_commit_id": parent, "commit_id": target,
+                              "events": events}, ensure_ascii=False))
+            return 0
         payload = build(args.git_dir.resolve(), args.repository_id, args.branch,
                         args.commit, args.parent, args.initial, args.max_bytes,
                         args.full_source)
