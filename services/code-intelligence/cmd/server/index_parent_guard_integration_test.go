@@ -92,6 +92,67 @@ func TestPGDeltaReuseRequiresCompatibleParent(t *testing.T) {
 	}
 }
 
+// Empty files have a provable zero-byte SHA-256 even without a persisted
+// source chunk. Nonempty whitespace-only files must not be treated as empty.
+func TestPGDeltaReuseEmptyFileWithoutChunk(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		allowReuse    bool
+	}{
+		{name: "empty", content: "", allowReuse: true},
+		{name: "whitespace", content: "  \n\t", allowReuse: false},
+		{name: "unicode whitespace", content: "\u00a0\u2003", allowReuse: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, db := testPGStore(t)
+			ctx := context.Background()
+			tenant := testTenant(t, db)
+			repo, err := store.EnsureRepository(ctx, tenant, "/p3-empty/"+t.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent, err := store.CreateSnapshot(ctx, repo, tenant, "main", "before", "go/parser-v1", "same-config")
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := PGFileInput{
+				Path: "package.py", Language: "python",
+				Content: tc.content, ContentHash: hashContent(tc.content),
+			}
+			if err := store.IndexSnapshot(ctx, parent, repo, []PGFileInput{input}); err != nil {
+				t.Fatal(err)
+			}
+			next, err := store.CreateSnapshot(ctx, repo, tenant, "main", "after", "go/parser-v1", "same-config")
+			if err != nil {
+				t.Fatal(err)
+			}
+			input.Content = ""
+			input.ReuseParent = true
+			input.ExpectedParentCommit = "before"
+			err = store.IndexSnapshot(ctx, next, repo, []PGFileInput{input})
+			if tc.allowReuse && err != nil {
+				t.Fatalf("empty source should reuse safely: %v", err)
+			}
+			if !tc.allowReuse && !errors.Is(err, errSnapshotConflict) {
+				t.Fatalf("nonempty source without persisted evidence must conflict: %v", err)
+			}
+			var active string
+			if err := db.QueryRowContext(ctx,
+				"SELECT commit_id FROM code_repository_snapshots WHERE repository_id=$1 AND branch='main' AND status='active'",
+				repo).Scan(&active); err != nil {
+				t.Fatal(err)
+			}
+			expected := "before"
+			if tc.allowReuse {
+				expected = "after"
+			}
+			if active != expected {
+				t.Fatalf("active commit=%s want %s", active, expected)
+			}
+		})
+	}
+}
+
 func TestPGDeltaReuseAcceptsMatchingParent(t *testing.T) {
 	store, db := testPGStore(t)
 	ctx := context.Background()

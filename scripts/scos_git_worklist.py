@@ -165,7 +165,11 @@ def build(
             # Whitespace-only parents have no persisted source chunk.
             # Read small unchanged blobs to avoid unsafe source-less reuse.
             _, candidate = read_blob(repo, blob, True, max_bytes)
-            if not candidate.strip():
+            try:
+                whitespace_only = not candidate.decode("utf-8").strip()
+            except UnicodeDecodeError as exc:
+                raise WorklistError(f"source is not UTF-8: {path!r}") from exc
+            if whitespace_only:
                 unchanged = False
                 source = candidate
         content = ""

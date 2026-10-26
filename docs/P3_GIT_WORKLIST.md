@@ -63,6 +63,11 @@ Treat the generated JSON as source code with appropriate file permissions.
   the safe fallback after a 409 or an extractor upgrade, without trusting Git
   ancestry as proof of server-side parent compatibility. Metadata-only legacy
   clients without `reuse_parent` retain their existing Tier 0 behavior.
+  Empty files can reuse their exact SHA-256 zero-byte identity even though no
+  source chunk exists. Unchanged whitespace-only files that fit the request
+  cap are sent as source instead of attempting invalid chunk reuse. Files
+  exceeding the cap remain unsupported by the bounded endpoint; this is not
+  large-repository streaming.
   Older servers reject the new `reuse_parent` field rather than silently
   accepting a potentially incomplete source-omitting delta.
 - Never follows symlinks or submodules. Recognizes Go, Python, JavaScript,
