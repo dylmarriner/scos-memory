@@ -29,7 +29,9 @@ source-omitting parent-reuse path. Clean mode indexes the complete target into
 a new repository. The timer measures `IndexSnapshot` only, not parent
 preparation, repository creation or snapshot allocation. One timed iteration
 per sub-benchmark, repeated three times. The integration test asserts 1
-parsed, 119 reused files and 119 resolved edges at N=120. The existing
+parsed, 119 reused files and 119 resolved edges at N=120. A separate
+40-declaration regression checks complete declaration/chunk provenance after
+bulk copy. The existing
 clean-versus-incremental integration test compares symbols, chunks and edges.
 
 ## Measured development results (2026-10-26)
