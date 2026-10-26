@@ -50,6 +50,46 @@ class GitWorklistTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["files"][0]["content"], "real = 1\n")
 
+    def test_graft_file_cannot_forge_trusted_parent_ancestry(self):
+        (self.repo / "source.py").write_text("real = 1\n")
+        self.commit("actual parent")
+        (self.repo / "source.py").write_text("real = 2\n")
+        target = self.commit("target")
+        git(self.repo, "checkout", "--orphan", "unrelated")
+        git(self.repo, "rm", "-rf", "-q", ".")
+        (self.repo / "source.py").write_text("real = 1\n")
+        unrelated = self.commit("unrelated root")
+        git(self.repo, "checkout", "-q", target)
+        # GIT_NO_REPLACE_OBJECTS does not disable the legacy graft file.
+        (self.repo / ".git" / "info" / "grafts").write_text(
+            f"{target} {unrelated}\n")
+        for extra in ((), ("--events-only",)):
+            with self.subTest(extra=extra):
+                result = self.invoke("--commit", target, "--parent", unrelated, *extra)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("graft", result.stderr.lower())
+
+    def test_linked_worktree_uses_common_git_directory_for_graft_check(self):
+        (self.repo / "source.py").write_text("trusted = True\n")
+        target = self.commit("trusted")
+        with tempfile.TemporaryDirectory() as temporary:
+            linked = Path(temporary) / "linked"
+            git(self.repo, "worktree", "add", "--detach", str(linked), target)
+            command = [
+                sys.executable, str(SCRIPT), "--git-dir", str(linked),
+                "--repository-id", REPO_ID, "--branch", "main",
+                "--commit", target, "--initial",
+            ]
+            # An empty graft file has no ancestry effect.
+            grafts = self.repo / ".git" / "info" / "grafts"
+            grafts.write_text("")
+            clean = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+            grafts.write_text(f"{target}\n")
+            tainted = subprocess.run(command, capture_output=True, text=True)
+            self.assertNotEqual(tainted.returncode, 0, tainted.stdout)
+            self.assertIn("graft", tainted.stderr.lower())
+
     def test_foreign_git_dir_environment_does_not_redirect_worklist(self):
         (self.repo / "source.py").write_text("value = 1\n")
         parent = self.commit("parent")

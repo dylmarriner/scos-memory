@@ -73,7 +73,42 @@ def git_env() -> dict[str, str]:
     return env
 
 
+def reject_legacy_grafts(repo: Path) -> None:
+    """Reject local ancestry rewrites that GIT_NO_REPLACE_OBJECTS cannot disable.
+
+    Git's deprecated info/grafts file can invent parent relationships without
+    modifying a commit object. Resolve it through Git itself because linked
+    worktrees store this file in the common Git directory, not necessarily
+    under repo/.git. A nonempty graft file makes trusted-parent checks unsafe.
+    """
+    try:
+        location = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/grafts"],
+            cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=git_env(),
+        )
+    except OSError as exc:
+        raise WorklistError(f"cannot inspect Git graft configuration: {exc}") from exc
+    if location.returncode != 0:
+        raise WorklistError("cannot locate Git graft configuration")
+    raw = location.stdout.decode("utf-8", errors="strict").strip()
+    if not raw:
+        raise WorklistError("cannot locate Git graft configuration")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = repo / path
+    try:
+        if path.exists() and (not path.is_file() or path.stat().st_size != 0):
+            raise WorklistError(
+                "Git graft file present: ancestry is not trustworthy; "
+                "remove or inspect info/grafts before verification"
+            )
+    except OSError as exc:
+        raise WorklistError(f"cannot inspect Git graft file: {exc}") from exc
+
+
 def git(repo: Path, *arguments: str) -> bytes:
+    reject_legacy_grafts(repo)
     try:
         process = subprocess.run(
             ["git", *arguments], cwd=repo, stdout=subprocess.PIPE,

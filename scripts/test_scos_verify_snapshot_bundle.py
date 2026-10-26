@@ -218,6 +218,28 @@ class SnapshotBundleTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("stored content hash mismatch", result.stderr)
 
+    def test_grafted_unrelated_parent_cannot_pass_trusted_bundle(self):
+        # Manufacture a distinct root with identical source to the real
+        # parent. Git's deprecated grafts file can forge ancestry without
+        # changing either tree, even with GIT_NO_REPLACE_OBJECTS enabled.
+        git(self.repo, "checkout", "--orphan", "unrelated")
+        git(self.repo, "rm", "-rf", "-q", ".")
+        (self.repo / "before.py").write_text("x = 1\n")
+        (self.repo / "stable.go").write_text("package stable\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "unrelated root")
+        unrelated = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", self.target)
+        (self.repo / ".git" / "info" / "grafts").write_text(
+            f"{self.target} {unrelated}\n")
+        result = self.invoke(
+            manifests=[self.page("files", self.manifest, parent_commit_id=unrelated)],
+            events=[self.page("events", self.events, parent_commit_id=unrelated)],
+            args=["--parent", unrelated],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("graft", result.stderr.lower())
+
     def test_forged_stored_hash_fails(self):
         forged = [dict(x) for x in self.manifest]
         forged[0]["content_hash"] = hashlib.sha256(b"forged").hexdigest()
