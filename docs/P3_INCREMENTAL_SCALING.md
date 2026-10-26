@@ -107,3 +107,36 @@ fractions, memory, extractor tiers and call-graph equivalence. Establish and
 enforce quantitative latency and throughput thresholds before claiming P3
 changed-content scaling. Profile the full-snapshot structural pass and
 implement dependency-bounded recomputation where correctness allows.
+
+
+## Qualified-call candidate index (2026-10-26, development)
+
+The syntax-derived call resolver now indexes package-level function
+candidates by **name and repository directory**, rather than scanning every
+same-name function for each qualified import-path call. It enumerates only
+slash-boundary suffixes of the import path, preserving the existing
+`importPathNamesDir` resolution and ambiguity rules. A deterministic
+regression checks nested directory suffixes, same-name ambiguity, root
+exclusion, method exclusion and trailing slashes against the original
+reference predicate. This is an algorithmic improvement to the structural
+pass, **not dependency-bounded incremental recomputation**.
+
+A synthetic 3,000-function fixture with the same function name in different
+packages, one qualified call per function, measured on AMD Ryzen 5 2600
+(`go test -run '^$' -bench '^BenchmarkResolveCallEdgesQualifiedSameNameFanout$'
+-benchtime=3x -count=1`):
+
+| Resolver | ns/op (3 iterations) | B/op | Resolved edges |
+| --- | ---: | ---: | ---: |
+| Prior same-name scan (main 74df657) | 253,608,996 | 3,370,018 | 3,000 |
+| Name + directory suffix index | 4,031,684 | 2,349,602 | 3,000 |
+
+Six real PostgreSQL 17 integration regressions passed on a pre-existing disposable
+P3 database (cross-batch edges, clean/incremental equivalence, unambiguous
+and ambiguous calls, unchanged-file cross-file edges, and cross-package
+resolution). The full uncached Go suite, Go vet and 29 Git Python fixtures
+also passed on AMD. No live migration or production deployment occurred.
+
+These are microbenchmarks, not representative indexing latency, not randomized
+and not a claim of full P3 scaling acceptance. Full snapshot graph construction
+and persistence still occur for each immutable snapshot.
