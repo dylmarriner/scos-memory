@@ -387,6 +387,27 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			payload["limit"] = int(limit)
 		}
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/snapshots/events", payload)
+	case "scos_code_snapshot_manifest":
+		snapshotID := stringArg(args, "snapshot_id")
+		if snapshotID == "" {
+			return nil, fmt.Errorf("snapshot_id is required")
+		}
+		payload := map[string]any{"snapshot_id": snapshotID}
+		if raw, exists := args["after_path"]; exists {
+			path, valid := raw.(string)
+			if !valid {
+				return nil, fmt.Errorf("after_path must be a string")
+			}
+			payload["after_path"] = path
+		}
+		if raw, exists := args["limit"]; exists {
+			limit, valid := raw.(float64)
+			if !valid || limit < 1 || limit > 1000 || math.Trunc(limit) != limit {
+				return nil, fmt.Errorf("limit must be an integer in 1..1000")
+			}
+			payload["limit"] = int(limit)
+		}
+		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/snapshots/manifest", payload)
 	case "scos_code_index_status":
 		snapshotID := stringArg(args, "snapshot_id")
 		if snapshotID == "" {
@@ -1644,6 +1665,19 @@ func governedTools() []map[string]any {
 					"snapshot_id": map[string]any{"type": "string", "description": "Indexed code snapshot UUID"},
 					"after_path":  map[string]any{"type": "string", "description": "Pagination cursor from next_after_path"},
 					"limit":       map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "description": "Events per page (default 100)"},
+				},
+				"required": []string{"snapshot_id"},
+			},
+		},
+		{
+			"name":        "scos_code_snapshot_manifest",
+			"description": "Read stored file SHA-256 identities and immutable snapshot commit labels with bounded pagination. This is tenant-authorized readback, not cryptographic Git attestation.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"snapshot_id": map[string]any{"type": "string", "description": "Indexed code snapshot UUID"},
+					"after_path":  map[string]any{"type": "string", "description": "Cursor from next_after_path"},
+					"limit":       map[string]any{"type": "integer", "minimum": 1, "maximum": 1000},
 				},
 				"required": []string{"snapshot_id"},
 			},

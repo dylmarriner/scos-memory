@@ -47,6 +47,8 @@ func pgRequestAs(t *testing.T, srv *server, method, path, tenant, principal stri
 		srv.handlePGSnapshotDiff(w, r)
 	case "/v2/code/snapshots/events":
 		srv.handlePGSnapshotEvents(w, r)
+	case "/v2/code/snapshots/manifest":
+		srv.handlePGSnapshotManifest(w, r)
 	case "/v2/code/settings":
 		srv.handlePGSettings(w, r)
 	case "/v2/code/impact":

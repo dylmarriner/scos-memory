@@ -268,6 +268,7 @@ func main() {
 	mux.HandleFunc("/v2/code/query", srv.handlePGQuery)
 	mux.HandleFunc("/v2/code/snapshots/diff", srv.handlePGSnapshotDiff)
 	mux.HandleFunc("/v2/code/snapshots/events", srv.handlePGSnapshotEvents)
+	mux.HandleFunc("/v2/code/snapshots/manifest", srv.handlePGSnapshotManifest)
 	mux.HandleFunc("/v2/code/settings", srv.handlePGSettings)
 	mux.HandleFunc("/v2/code/impact", srv.handlePGImpact)
 	mux.HandleFunc("/v2/code/revalidations", srv.handlePGRevalidations)
