@@ -84,6 +84,10 @@ Treat the generated JSON as source code with appropriate file permissions.
   end-to-end Git tree/source attestation and large-snapshot streaming remain
   outstanding P3 gates.
 
+Git subprocesses also force `GIT_NO_REPLACE_OBJECTS=1`: repository-local
+`refs/replace/*` must never substitute forged source under a trusted commit
+SHA. A real-Git regression reproduced that substitution before the fix.
+
 Git subprocesses clear inherited `GIT_*` environment overrides before reading the explicitly selected repository, including the verifier, worklist, object streaming and ancestry checks. Real-Git fixtures assert that an ambient foreign `GIT_DIR`/`GIT_WORK_TREE` cannot redirect the results.
 
 ## Verification

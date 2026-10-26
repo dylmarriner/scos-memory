@@ -130,6 +130,23 @@ class SnapshotBundleTests(unittest.TestCase):
         ], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_git_replace_cannot_forge_trusted_commit_tree(self):
+        # A local Git replacement ref can make the original SHA appear to
+        # contain different source bytes unless replacement lookup is disabled.
+        git(self.repo, "checkout", "-q", self.parent)
+        (self.repo / "before.py").write_text("x = 999\n")
+        (self.repo / "new.rs").write_text("fn new() {}\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "forged alternate tree")
+        forged_commit = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", self.target)
+        git(self.repo, "replace", self.target, forged_commit)
+        forged = [dict(item) for item in self.manifest]
+        forged[0]["content_hash"] = hashlib.sha256(b"x = 999\n").hexdigest()
+        result = self.invoke(manifests=[self.page("files", forged)])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("stored content hash mismatch", result.stderr)
+
     def test_forged_stored_hash_fails(self):
         forged = [dict(x) for x in self.manifest]
         forged[0]["content_hash"] = hashlib.sha256(b"forged").hexdigest()

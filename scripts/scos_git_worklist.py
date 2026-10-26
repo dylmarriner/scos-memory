@@ -45,8 +45,14 @@ def git_env() -> dict[str, str]:
     override is needed. This includes GIT_DIR, GIT_WORK_TREE, object stores,
     namespaces, and environment-supplied configuration.
     """
-    return {key: value for key, value in os.environ.items()
-            if not key.startswith("GIT_")}
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    # Git replacement refs transparently substitute a different commit/tree
+    # while retaining the caller's original commit SHA. That can make a forged
+    # snapshot manifest appear to match a trusted commit. Always read the
+    # original object graph, including in git cat-file and ancestry checks.
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
 
 
 def git(repo: Path, *arguments: str) -> bytes:

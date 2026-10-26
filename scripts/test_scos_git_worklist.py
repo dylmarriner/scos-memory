@@ -40,6 +40,16 @@ class GitWorklistTests(unittest.TestCase):
             capture_output=True, text=True, env=env,
         )
 
+    def test_git_replace_ref_does_not_substitute_committed_source(self):
+        (self.repo / "source.py").write_text("real = 1\n")
+        original = self.commit("trusted")
+        (self.repo / "source.py").write_text("forged = 1\n")
+        forged = self.commit("alternate")
+        git(self.repo, "replace", original, forged)
+        result = self.invoke("--commit", original, "--initial")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["files"][0]["content"], "real = 1\n")
+
     def test_foreign_git_dir_environment_does_not_redirect_worklist(self):
         (self.repo / "source.py").write_text("value = 1\n")
         parent = self.commit("parent")
