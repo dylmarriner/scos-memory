@@ -45,6 +45,8 @@ func pgRequestAs(t *testing.T, srv *server, method, path, tenant, principal stri
 		srv.handlePGQuery(w, r)
 	case "/v2/code/snapshots/diff":
 		srv.handlePGSnapshotDiff(w, r)
+	case "/v2/code/snapshots/events":
+		srv.handlePGSnapshotEvents(w, r)
 	case "/v2/code/settings":
 		srv.handlePGSettings(w, r)
 	case "/v2/code/impact":
@@ -59,7 +61,7 @@ func pgRequestAs(t *testing.T, srv *server, method, path, tenant, principal stri
 
 func TestHandlePGRoutesReturnUnavailableWithoutStoreConfigured(t *testing.T) {
 	srv := &server{}
-	for _, path := range []string{"/v2/code/repos", "/v2/code/index", "/v2/code/query", "/v2/code/snapshots/diff", "/v2/code/settings", "/v2/code/impact", "/v2/code/index/scip"} {
+	for _, path := range []string{"/v2/code/repos", "/v2/code/index", "/v2/code/query", "/v2/code/snapshots/diff", "/v2/code/snapshots/events", "/v2/code/settings", "/v2/code/impact", "/v2/code/index/scip"} {
 		w := pgRequest(t, srv, http.MethodPost, path, "tenant-a", map[string]any{})
 		if w.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s: expected 503 without a configured store, got %d: %s", path, w.Code, w.Body.String())
