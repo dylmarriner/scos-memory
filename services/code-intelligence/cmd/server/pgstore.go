@@ -471,7 +471,13 @@ type indexedDecl struct {
 // call graph. extractor is per-declaration provenance (e.g. "go/parser",
 // "tree-sitter:python") rather than a single hardcoded value, since decls
 // mixes both.
-func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, decls []indexedDecl) error {
+type resolvedCallEdge struct {
+	SourceID, TargetID, Extractor string
+}
+
+// resolveCallEdges is pure: ambiguity checks are identical for full rebuilds
+// and incremental snapshots. No edge is inferred on ambiguity.
+func resolveCallEdges(decls []indexedDecl) []resolvedCallEdge {
 	targets := make(map[string][]indexedDecl, len(decls))
 	for _, d := range decls {
 		if d.Kind != "function" && d.Kind != "method" {
@@ -490,6 +496,7 @@ func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, d
 		}
 	}
 
+	edges := make([]resolvedCallEdge, 0, len(decls))
 	for _, caller := range decls {
 		if caller.Kind != "function" && caller.Kind != "method" {
 			continue
@@ -509,12 +516,47 @@ func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, d
 				continue // unresolved (0) or ambiguous (2+): no edge, not a guess
 			}
 			target := candidates[0]
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO code_edges (snapshot_id, source_symbol_version_id, target_symbol_version_id, relation, confidence_class, extractor)
-				VALUES ($1, $2, $3, 'CALLS', 'static_analysis', $4)`,
-				snapshotID, caller.SymbolVerID, target.SymbolVerID, caller.Extractor); err != nil {
-				return fmt.Errorf("insert call edge %s -> %s: %w", caller.Name, target.Name, err)
-			}
+			edges = append(edges, resolvedCallEdge{
+				SourceID: caller.SymbolVerID, TargetID: target.SymbolVerID, Extractor: caller.Extractor,
+			})
+		}
+	}
+	return edges
+}
+
+// Bounded multi-row inserts remove one network round trip per call edge.
+// 200 rows use 601 bind arguments, well below PostgreSQL's parameter cap.
+const callEdgeBatchSize = 200
+
+func buildCallEdgeInsert(snapshotID string, edges []resolvedCallEdge) (string, []any) {
+	var sqlText strings.Builder
+	sqlText.WriteString(`INSERT INTO code_edges
+        (snapshot_id, source_symbol_version_id, target_symbol_version_id,
+         relation, confidence_class, extractor) VALUES `)
+	args := make([]any, 1, 1+len(edges)*3)
+	args[0] = snapshotID
+	for i, edge := range edges {
+		if i != 0 {
+			sqlText.WriteByte(',')
+		}
+		pos := 2 + 3*i
+		fmt.Fprintf(&sqlText, "($1,$%d,$%d,'CALLS','static_analysis',$%d)",
+			pos, pos+1, pos+2)
+		args = append(args, edge.SourceID, edge.TargetID, edge.Extractor)
+	}
+	return sqlText.String(), args
+}
+
+func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, decls []indexedDecl) error {
+	edges := resolveCallEdges(decls)
+	for i := 0; i < len(edges); i += callEdgeBatchSize {
+		end := i + callEdgeBatchSize
+		if end > len(edges) {
+			end = len(edges)
+		}
+		statement, args := buildCallEdgeInsert(snapshotID, edges[i:end])
+		if _, err := tx.ExecContext(ctx, statement, args...); err != nil {
+			return fmt.Errorf("insert call edges %d..%d: %w", i, end, err)
 		}
 	}
 	return nil
