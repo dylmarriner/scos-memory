@@ -102,3 +102,34 @@ Git add/modify/delete/rename/copy events without changing the existing index
 request schema. The sidecar is for local inspection and validation only. Git
 copy detection is heuristic and can report additions instead; it is not proof
 of persisted events or full P3 completion.
+
+
+## Verify exported snapshot events against trusted Git trees (offline)
+
+`scripts/scos_verify_snapshot_events.py` checks a **complete export** of the
+authenticated `POST /v2/code/snapshots/events` pages against the committed
+parent and target Git trees. Save each JSON response page as one NDJSON line
+in cursor order, following `next_after_path` until it is absent. Never put
+authentication tokens into this file. For example:
+
+```bash
+python3 scripts/scos_verify_snapshot_events.py \
+  --git-dir /path/to/checkout \
+  --parent '<already-indexed-parent-sha>' --commit '<target-sha>' \
+  --snapshot-id '<server-snapshot-uuid>' \
+  --pages-file /path/to/complete-export.ndjson
+```
+
+Use `--initial` instead of `--parent` for a first snapshot. The verifier
+checks exact supported-file path coverage, modifications, deletions, source
+fingerprint continuity for renames/copies, unique-source provenance, evidence
+classes, snapshot ID, ordered pages and complete cursor termination. It
+accepts conservative add/delete classification when Git rename heuristics
+and server-derived evidence disagree. It fails closed on missing or forged
+events and never contacts SCOS, modifies Git or deploys code.
+
+**Limit:** this is offline consistency checking, **not server-side Git
+attestation**. The current event API does not expose an authenticated binding
+between the snapshot UUID and its commit IDs or source hashes. A forged
+export from the wrong snapshot could be crafted to match a chosen Git tree;
+that gap and server-enforced provenance remain P3 acceptance work.
