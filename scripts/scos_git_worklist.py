@@ -84,6 +84,48 @@ def tree_blobs(repo: Path, commit: str) -> dict[str, str]:
     return result
 
 
+
+def read_blob(repo: Path, oid: str, include_source: bool, cap: int) -> tuple[str, bytes]:
+    """Hash committed bytes without materializing unbounded Git blobs.
+
+    Incremental unchanged files are hashed streaming-only. Changed files
+    cannot exceed the API's entire request budget, so stop before reading
+    more than cap bytes into memory.
+    """
+    try:
+        process = subprocess.Popen(
+            ["git", "cat-file", "blob", oid], cwd=repo,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise WorklistError(f"unable to open Git blob: {exc}") from exc
+    digest = hashlib.sha256()
+    fragments: list[bytes] = []
+    size = 0
+    try:
+        assert process.stdout is not None
+        while True:
+            chunk = process.stdout.read(64 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if include_source and size > cap:
+                raise WorklistError(
+                    f"single changed Git blob exceeds {cap}-byte index request limit"
+                )
+            digest.update(chunk)
+            if include_source:
+                fragments.append(chunk)
+        assert process.stderr is not None
+        details = process.stderr.read().decode("utf-8", errors="replace")
+        if process.wait() != 0:
+            raise WorklistError(f"git cat-file failed: {details.strip()}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    return digest.hexdigest(), b"".join(fragments) if include_source else b""
+
 def build(
     repo: Path, repository_id: str, branch: str, target: str,
     parent: str | None, initial: bool, max_bytes: int,
@@ -116,19 +158,15 @@ def build(
     for path, blob in sorted(new.items()):
         language = LANGUAGE_SUFFIXES[Path(path).suffix.lower()]
         unchanged = parent_oid is not None and old.get(path) == blob
+        # Git object IDs are not interchangeable with source SHA-256.
+        # Streaming avoids materializing arbitrarily large unchanged blobs.
+        content_hash, source = read_blob(repo, blob, not unchanged, max_bytes)
         content = ""
         if not unchanged:
-            source = git(repo, "cat-file", "blob", blob)
             try:
                 content = source.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise WorklistError(f"source is not UTF-8: {path!r}") from exc
-            content_hash = hashlib.sha256(source).hexdigest()
-        else:
-            # Git blob hashes are not SHA-256 of content in SHA-1 repos.
-            # Read the historical object to calculate the API's exact
-            # SHA-256 identity, without transferring unchanged source text.
-            content_hash = hashlib.sha256(git(repo, "cat-file", "blob", blob)).hexdigest()
         files.append({
             "path": path, "language": language, "content_hash": content_hash,
             "content": content,

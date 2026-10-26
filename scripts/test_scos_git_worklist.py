@@ -105,6 +105,14 @@ class GitWorklistTests(unittest.TestCase):
         self.assertNotEqual(too_big.returncode, 0)
         self.assertEqual(too_big.stdout, "")
 
+    def test_large_source_rejected_before_emitting_partial_json(self):
+        (self.repo / "huge.py").write_text("data = '" + "a" * (5 << 20) + "'\\n")
+        target = self.commit("large committed source")
+        response = self.invoke("--commit", target, "--initial")
+        self.assertNotEqual(response.returncode, 0)
+        self.assertEqual(response.stdout, "")
+        self.assertIn("index request limit", response.stderr)
+
     def test_unsupported_languages_and_symlinks_are_not_indexed(self):
         (self.repo / "known.go").write_text("package known\n")
         (self.repo / "unsupported.tsx").write_text("const JSX = () => <div />;\n")
