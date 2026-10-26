@@ -44,7 +44,18 @@ func TestPGIncrementalSnapshotEquivalentToCleanRebuild(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.IndexSnapshot(ctx, head, repo, changed); err != nil {
+		files := append([]PGFileInput(nil), changed...)
+		if initial {
+			// The Git worklist omits transfer of bytes identical to an
+			// indexed parent. The resulting snapshot must nevertheless be
+			// byte-for-byte equivalent to a clean snapshot.
+			for i := range files {
+				if i != 1 {
+					files[i].Content = ""
+				}
+			}
+		}
+		if err := store.IndexSnapshot(ctx, head, repo, files); err != nil {
 			t.Fatal(err)
 		}
 		return repo, head
@@ -110,5 +121,43 @@ func TestPGIncrementalSnapshotEquivalentToCleanRebuild(t *testing.T) {
 		if parsed != tc.wantParsed || reused != tc.wantReused {
 			t.Fatalf("wrong changed-content scaling for %s: parsed=%d reused=%d", tc.id, parsed, reused)
 		}
+	}
+}
+
+// Missing Git-tree files must not survive in an activated snapshot.
+func TestPGGitRemovedSymbolAbsentFromTarget(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repo, err := store.EnsureRepository(ctx, tenant, "/removed-git-file/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "package demo\nfunc removed(){}\n"
+	parent, err := store.CreateSnapshot(ctx, repo, tenant, "main", "before", "go/parser-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, parent, repo, []PGFileInput{{Path: "removed.go", Language: "go", Content: source, ContentHash: hashContent(source)}}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := store.CreateSnapshot(ctx, repo, tenant, "main", "after", "go/parser-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable := "package demo\nfunc stable(){}\n"
+	if err := store.IndexSnapshot(ctx, next, repo, []PGFileInput{{Path: "stable.go", Language: "go", Content: stable, ContentHash: hashContent(stable)}}); err != nil {
+		t.Fatal(err)
+	}
+	var oldCount, newCount int
+	q := "SELECT count(*) FROM code_symbol_versions WHERE snapshot_id=$1 AND path='removed.go'"
+	if err := db.QueryRowContext(ctx, q, parent).Scan(&oldCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, q, next).Scan(&newCount); err != nil {
+		t.Fatal(err)
+	}
+	if oldCount == 0 || newCount != 0 {
+		t.Fatalf("removed code present: old=%d new=%d", oldCount, newCount)
 	}
 }

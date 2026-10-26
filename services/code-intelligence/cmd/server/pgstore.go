@@ -538,10 +538,6 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		symbolID, snapshotID, fileID, f.Path, f.ContentHash).Scan(&fileSymbolVersionID); err != nil {
 		return nil, fmt.Errorf("create symbol version: %w", err)
 	}
-	if err := insertCodeChunkLocked(ctx, tx, fileSymbolVersionID, f.Content, f.Path, ""); err != nil {
-		return nil, err
-	}
-
 	if parentSnapshotID != "" {
 		var parentFileVersionID string
 		err := tx.QueryRowContext(ctx, `
@@ -549,6 +545,22 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 			WHERE snapshot_id = $1 AND path = $2 AND content_hash = $3`,
 			parentSnapshotID, f.Path, f.ContentHash).Scan(&parentFileVersionID)
 		if err == nil {
+			fileContent := f.Content
+			if fileContent == "" {
+				// A Git-aware client omits unchanged bytes. Preserve the
+				// immutable file-level chunk along with its declarations.
+				err := tx.QueryRowContext(ctx, `SELECT cc.content
+                    FROM code_symbol_versions sv
+                    JOIN code_chunks cc ON cc.symbol_version_id = sv.id
+                    WHERE sv.file_version_id=$1 AND sv.kind='file'`,
+					parentFileVersionID).Scan(&fileContent)
+				if err != nil && err != sql.ErrNoRows {
+					return nil, fmt.Errorf("copy unchanged file evidence for %s: %w", f.Path, err)
+				}
+			}
+			if err := insertCodeChunkLocked(ctx, tx, fileSymbolVersionID, fileContent, f.Path, ""); err != nil {
+				return nil, err
+			}
 			decls, copyErr := s.copyDeclarationsLocked(ctx, tx, snapshotID, fileID, parentFileVersionID)
 			if copyErr != nil {
 				return nil, fmt.Errorf("copy unchanged declarations for %s: %w", f.Path, copyErr)
@@ -561,6 +573,9 @@ func (s *pgCodeStore) indexFileLocked(ctx context.Context, tx *sql.Tx, snapshotI
 		// no matching unchanged parent row -- fall through to full extraction
 	}
 
+	if err := insertCodeChunkLocked(ctx, tx, fileSymbolVersionID, f.Content, f.Path, ""); err != nil {
+		return nil, err
+	}
 	if f.Language == "go" && f.Content != "" {
 		decls, err := s.indexGoDeclarationsLocked(ctx, tx, snapshotID, repositoryID, fileID, f)
 		if err != nil {

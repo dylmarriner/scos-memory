@@ -52,6 +52,7 @@ jobs:
           python3 -m unittest discover -s workers/consolidation/tests -v
           python3 -m unittest discover -s workers/embeddings/tests -v
           python3 -m unittest discover -s workers/index-maintenance -p "test_*.py" -v
+          python3 -m unittest scripts/test_scos_git_worklist.py -v
           python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
           python3 -m unittest discover -s integrations/hermes/plugins/scos -p "test_*.py" -v
           python3 tests/failure-injection/test_runner.py -v
