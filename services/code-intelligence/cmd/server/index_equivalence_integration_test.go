@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"reflect"
 	"testing"
 )
@@ -159,5 +160,47 @@ func TestPGGitRemovedSymbolAbsentFromTarget(t *testing.T) {
 	}
 	if oldCount == 0 || newCount != 0 {
 		t.Fatalf("removed code present: old=%d new=%d", oldCount, newCount)
+	}
+}
+
+// A valid Git ancestor does not imply the server can reuse its symbols:
+// switching extractors deliberately breaks the parent-cache relationship.
+func TestPGExtractorUpgradeIndexesCompleteTarget(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repo, err := store.EnsureRepository(ctx, tenant, "/extractor-upgrade/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "package demo\nfunc durable() {}\n"
+	file := PGFileInput{Path: "durable.go", Language: "go", Content: content, ContentHash: hashContent(content)}
+	before, err := store.CreateSnapshot(ctx, repo, tenant, "main", "old", "legacy-extractor", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, before, repo, []PGFileInput{file}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.CreateSnapshot(ctx, repo, tenant, "main", "new", "current-extractor", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parent sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT parent_snapshot_id::text FROM code_repository_snapshots WHERE id=$1", after).Scan(&parent); err != nil {
+		t.Fatal(err)
+	}
+	if parent.Valid {
+		t.Fatalf("cross-extractor parent reuse allowed: %s", parent.String)
+	}
+	if err := store.IndexSnapshot(ctx, after, repo, []PGFileInput{file}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM code_symbol_versions WHERE snapshot_id=$1 AND fully_qualified_name='demo.durable'", after).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("extractor upgrade silently lost target declaration: %d", count)
 	}
 }

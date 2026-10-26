@@ -2,8 +2,8 @@
 """Build a bounded, deterministic SCOS /v2/code/index payload from Git objects.
 
 The full target *manifest* is necessary because omitting a file means deletion
-to the indexer. Unchanged same-path blob objects omit source content to let the
-database reuse immutable declarations from its already-indexed parent snapshot.
+to the indexer. Always include committed source so a changed server
+extractor cannot turn a missing cache hit into an incomplete code index.
 
 This tool never reads uncommitted files, contacts services, or mutates Git.
 """
@@ -88,9 +88,9 @@ def tree_blobs(repo: Path, commit: str) -> dict[str, str]:
 def read_blob(repo: Path, oid: str, include_source: bool, cap: int) -> tuple[str, bytes]:
     """Hash committed bytes without materializing unbounded Git blobs.
 
-    Incremental unchanged files are hashed streaming-only. Changed files
-    cannot exceed the API's entire request budget, so stop before reading
-    more than cap bytes into memory.
+    All files are streamed and size-bounded: the server can reject
+    parent reuse after extractor changes, so even unchanged paths must
+    contain source sufficient for a complete rebuild.
     """
     try:
         process = subprocess.Popen(
@@ -111,7 +111,7 @@ def read_blob(repo: Path, oid: str, include_source: bool, cap: int) -> tuple[str
             size += len(chunk)
             if include_source and size > cap:
                 raise WorklistError(
-                    f"single changed Git blob exceeds {cap}-byte index request limit"
+                    f"single Git source blob exceeds {cap}-byte index request limit"
                 )
             digest.update(chunk)
             if include_source:
@@ -151,22 +151,19 @@ def build(
         )
         if process.returncode != 0:
             raise WorklistError("parent must be an ancestor of target commit")
-    old = tree_blobs(repo, parent_oid) if parent_oid else {}
     new = tree_blobs(repo, head_oid)
 
     files = []
     for path, blob in sorted(new.items()):
         language = LANGUAGE_SUFFIXES[Path(path).suffix.lower()]
-        unchanged = parent_oid is not None and old.get(path) == blob
-        # Git object IDs are not interchangeable with source SHA-256.
-        # Streaming avoids materializing arbitrarily large unchanged blobs.
-        content_hash, source = read_blob(repo, blob, not unchanged, max_bytes)
-        content = ""
-        if not unchanged:
-            try:
-                content = source.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise WorklistError(f"source is not UTF-8: {path!r}") from exc
+        # A Git parent does not prove compatible *server* extractor reuse.
+        # Always transmit source for safety. The server still skips parsing
+        # when a compatible same-path parent is actually available.
+        content_hash, source = read_blob(repo, blob, True, max_bytes)
+        try:
+            content = source.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise WorklistError(f"source is not UTF-8: {path!r}")
         files.append({
             "path": path, "language": language, "content_hash": content_hash,
             "content": content,

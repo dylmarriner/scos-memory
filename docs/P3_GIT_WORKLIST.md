@@ -27,7 +27,7 @@ python3 scripts/scos_git_worklist.py \
   --commit '<target-sha>' > /tmp/scos-incremental-index.json
 ```
 
-The output is a bounded JSON body for the normal authenticated SCOS index API.
+The output is a bounded full-source JSON body for the normal authenticated SCOS index API.
 Submit it through the existing trusted gateway, never to an untrusted host.
 Treat the generated JSON as source code with appropriate file permissions.
 
@@ -35,11 +35,12 @@ Treat the generated JSON as source code with appropriate file permissions.
 
 - Enumerates the **whole target Git tree**, not the working directory or a
   partial diff. Files absent from the target manifest are deleted.
-- Uses blob identity to detect same-path reuse, but calculates actual file
-  SHA-256 for `content_hash` rather than wrongly passing a Git object ID.
-- Includes source for added, modified and renamed paths, and only omits
-  redundant source bytes for identical same-path content. The indexer copies
-  both immutable declarations and original file-level chunks from its parent.
+- Computes the true source SHA-256 for content_hash, not the Git object ID.
+- Transmits source bytes for **all** supported files, including unchanged
+  paths. The server only selects a reusable parent when the extractor version
+  matches. Git ancestry cannot establish that server-side compatibility;
+  sending full source allows safe re-extraction after an extractor upgrade.
+  Where eligible, the server still reuses unchanged declarations and chunks.
 - Never follows symlinks or submodules. Recognizes Go, Python, JavaScript,
   TypeScript and Rust extensions supported by the configured extractors.
   Unsupported grammars such as TSX are not represented as parsed code.

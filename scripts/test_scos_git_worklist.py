@@ -71,7 +71,7 @@ class GitWorklistTests(unittest.TestCase):
         self.assertNotIn("parent", data)
         self.assertNotIn("events", data)
 
-    def test_unchanged_content_is_omitted_but_hash_still_present(self):
+    def test_unchanged_source_is_supplied_for_extractor_rebuild(self):
         (self.repo / "stable.py").write_text("def stable():\n    pass\n")
         parent = self.commit("first")
         (self.repo / "other.go").write_text("package other\n")
@@ -79,7 +79,7 @@ class GitWorklistTests(unittest.TestCase):
         result = self.invoke("--commit", head, "--parent", parent)
         self.assertEqual(result.returncode, 0, result.stderr)
         by_path = {x["path"]: x for x in json.loads(result.stdout)["files"]}
-        self.assertEqual(by_path["stable.py"]["content"], "")
+        self.assertEqual(by_path["stable.py"]["content"], "def stable():\n    pass\n")
         self.assertEqual(len(by_path["stable.py"]["content_hash"]), 64)
         self.assertTrue(by_path["other.go"]["content"])
 
