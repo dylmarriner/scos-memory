@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real-Git fixtures for offline snapshot-event ledger consistency checks."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -30,7 +31,7 @@ class SnapshotEventVerificationTests(unittest.TestCase):
         git(self.repo, "commit", "-qm", name)
         return git(self.repo, "rev-parse", "HEAD")
 
-    def invoke(self, target, events, parent=None, snapshot=SNAPSHOT, pages=None):
+    def invoke(self, target, events, parent=None, snapshot=SNAPSHOT, pages=None, env=None):
         page_data = pages if pages is not None else [
             {"snapshot_id": snapshot, "events": events}]
         path = self.repo / "exported-pages.ndjson"
@@ -39,7 +40,7 @@ class SnapshotEventVerificationTests(unittest.TestCase):
                 "--commit", target, "--snapshot-id", snapshot,
                 "--pages-file", str(path)]
         args += ["--parent", parent] if parent else ["--initial"]
-        return subprocess.run(args, text=True, capture_output=True)
+        return subprocess.run(args, text=True, capture_output=True, env=env)
 
     def fixture(self):
         (self.repo / "before.py").write_text("value = 1\n")
@@ -63,6 +64,23 @@ class SnapshotEventVerificationTests(unittest.TestCase):
             {"change_kind": "delete", "path": "remove.rs", "evidence_class": "snapshot_manifest"},
         ]
         return parent, target, events
+
+    def test_git_location_environment_cannot_redirect_verified_trees(self):
+        parent, target, events = self.fixture()
+        foreign = self.repo / "foreign"
+        foreign.mkdir()
+        git(foreign, "init", "-q")
+        git(foreign, "config", "user.name", "Foreign")
+        git(foreign, "config", "user.email", "foreign@example.invalid")
+        (foreign / "fake.py").write_text("wrong = True\n")
+        git(foreign, "add", "-A")
+        git(foreign, "commit", "-qm", "foreign")
+        env = os.environ.copy()
+        env.update({"GIT_DIR": str(foreign / ".git"),
+                    "GIT_WORK_TREE": str(foreign)})
+        result = self.invoke(target, events, parent, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["commit_id"], target)
 
     def test_complete_multi_page_ledger_matches_committed_git_transition(self):
         parent, target, events = self.fixture()

@@ -16,7 +16,7 @@ import subprocess
 import sys
 import uuid
 
-from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git, tree_blobs
+from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, tree_blobs
 
 
 def fingerprint_manifest(repo: Path, commit: str | None) -> dict[str, tuple[str, str]]:
@@ -135,7 +135,7 @@ def main() -> int:
         if parent and subprocess.run(
             ["git", "merge-base", "--is-ancestor", parent, target],
             cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            check=False,
+            check=False, env=git_env(),
         ).returncode != 0:
             raise WorklistError("parent must be an ancestor of target")
         old = fingerprint_manifest(repo, parent)

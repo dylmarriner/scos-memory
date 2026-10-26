@@ -81,6 +81,8 @@ Treat the generated JSON as source code with appropriate file permissions.
 - Typed add/modify/delete/rename/copy persistence and large-snapshot
   streaming are separate outstanding P3 gates.
 
+Git subprocesses clear inherited `GIT_*` environment overrides before reading the explicitly selected repository, including the verifier, worklist, object streaming and ancestry checks. Real-Git fixtures assert that an ambient foreign `GIT_DIR`/`GIT_WORK_TREE` cannot redirect the results.
+
 ## Verification
 
 ```bash
