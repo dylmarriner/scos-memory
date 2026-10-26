@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("scos_verify_snapshot_manifest.py")
 SNAPSHOT = "11111111-1111-4111-8111-111111111111"
@@ -15,7 +16,8 @@ REPO = "22222222-2222-4222-8222-222222222222"
 
 
 def git(repo, *args):
-    return subprocess.run(["git", *args], cwd=repo, check=True,
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["git", *args], cwd=repo, check=True, env=env,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
 
 
@@ -128,6 +130,16 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
         self.commit = git(self.repo, "rev-parse", "HEAD")
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fixture_git_helper_ignores_inherited_foreign_git_directory(self):
+        foreign = self.repo / "foreign-for-helper"
+        foreign.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=foreign, check=True,
+                       env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+        with patch.dict(os.environ, {"GIT_DIR": str(foreign / ".git"),
+                                     "GIT_WORK_TREE": str(foreign)}):
+            self.assertEqual(git(self.repo, "rev-parse", "--show-toplevel"),
+                             str(self.repo))
 
     def test_ambient_git_overrides_cannot_redirect_attestation(self):
         foreign = self.repo / "foreign"

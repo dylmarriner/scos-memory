@@ -18,6 +18,12 @@ Each file has `path`, `language`, `content_hash` (stored SHA-256 for
 native source uploads). Cursor ordering is bytewise C collation and pages
 contain at most 1000 files. Missing, foreign-tenant and incomplete snapshots
 return 404. Historical superseded generations remain readable. Migration 000076 adds a concurrent C-collated (snapshot_id,path) keyset index.
+If a concurrent index build is interrupted, PostgreSQL may leave an invalid
+index that `IF NOT EXISTS` cannot repair. Inspect `pg_index.indisvalid`
+(the integration test checks it). During a maintenance window, if the
+index is invalid, run `DROP INDEX CONCURRENTLY public.code_file_versions_snapshot_path_c_idx;`
+**outside any transaction**, then rerun the normal migration runner.
+Never drop an existing valid index merely to rerun this migration.
 
 Export **all pages** using the authenticated MCP tool or API, following
 `next_after_path` until absent. Save each entire JSON response on one line
