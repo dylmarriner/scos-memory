@@ -112,7 +112,7 @@ Operational rules:
 | **P4** | Hybrid memory + code retrieval | **MERGED TO MAIN (PR #29 on 2026-09-10); frozen P0/live performance qualification still pending** |
 | **P5** | Temporal evidence | **PARTIAL** |
 | **P6** | Unified memory + code graph | **PARTIAL** |
-| **P7** | Stale-memory revalidation | **EARLY / MOSTLY UNBUILT** |
+| **P7** | Stale-memory revalidation | **PARTIAL: durable activation events and governed review listing exist; review/approval lifecycle remains** |
 | **P8** | Impact intelligence | **CODE IMPACT + GOVERNED MEMORY LINKS PARTIAL; FULL CROSS-DOMAIN ACCEPTANCE OPEN** |
 
 ---
@@ -702,15 +702,31 @@ P4 additionally allows repo-aware retrieval to return code evidence beside memor
 
 ## Remaining
 
-- [ ] Emit durable revalidation events when linked symbols change/delete.
-- [ ] Resolve continuity into unchanged / renamed / changed / deleted / ambiguous states.
-- [ ] Use deterministic classification first.
+- [x] Emit durable revalidation events when linked symbols change/delete (migration 000064; snapshot activation).
+- [x] Resolve continuity into unchanged / renamed / changed / deleted / ambiguous states (unchanged produces no event; ambiguous requires review).
+- [x] Use deterministic classification first; see duplicate-copy hardening evidence below.
 - [ ] For changed/ambiguous cases, use existing reasoning models to create a proposal, not an authoritative mutation.
 - [ ] Outcomes: still-valid, needs-review, superseded, invalidated, unresolved.
 - [ ] Create governed memory versions/supersession relations only when approved.
 - [ ] Create OKF review proposals with old/new code evidence.
 - [ ] Invalidate standing answers depending on stale/superseded evidence.
 - [ ] Measure false-positive/false-negative outcomes.
+
+**P7 ambiguous-copy revalidation regression (2026-10-26; PR review branch,
+not merged):** A real PostgreSQL 17 integration fixture linked an active
+memory fact to a single original file, then replaced that file with two
+identical-content copies in a new immutable snapshot. RED: the activation
+trigger classified the transition as `renamed:still_valid`, even though
+two successors made continuity ambiguous. Migration
+`000069_revalidation_ambiguous_copy_guard.sql` adds a new-snapshot
+content-duplicate check before treating a stable-symbol reuse as a safe
+rename. GREEN: the event is `ambiguous:needs_review`; no memory fact is
+rewritten. The focused revalidation tests passed ten consecutive runs
+against a disposable migrated database, the full uncached Go suite and
+`go vet ./...` passed, and focused race-detector tests passed twice.
+This does not complete the human review/proposal lifecycle, standing-answer
+invalidation, false-positive measurement, independent review, merge, or
+deployment/recovery gates.
 
 ---
 
