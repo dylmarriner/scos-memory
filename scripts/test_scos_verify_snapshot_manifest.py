@@ -60,6 +60,12 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
         self.assertEqual(output["file_count"], 2)
         self.assertEqual(output["status"], "stored_manifest_matches_git_bytes")
 
+    def test_uppercase_sha256_hex_from_accepted_index_payload_is_supported(self):
+        files = [dict(x) for x in self.files]
+        files[0]["content_hash"] = files[0]["content_hash"].upper()
+        result = self.invoke([self.page(files)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_forged_file_bytes_under_true_commit_are_rejected(self):
         files = [dict(x) for x in self.files]
         files[0]["content_hash"] = hashlib.sha256(b"forged\n").hexdigest()
