@@ -142,3 +142,49 @@ also passed on AMD. No live migration or production deployment occurred.
 These are microbenchmarks, not representative indexing latency, not randomized
 and not a claim of full P3 scaling acceptance. Full snapshot graph construction
 and persistence still occur for each immutable snapshot.
+
+
+## Identical-manifest CALLS graph reuse (2026-10-26 development branch)
+
+A conservative incremental fast path now copies native CALLS edges from the
+compatible parent inside the new snapshot's indexing/activation transaction,
+**only** when the complete target path/hash/language manifest matches its
+parent. It additionally compares every declaration's stable symbol ID, path,
+FQN, kind, scope, called-name evidence, extractor, hash, signature and range.
+A duplicate-content reorder that swaps symbol identities, a changed file,
+or a parent containing non-native graph edges forces a fresh resolver pass.
+All copied edges are remapped to **target snapshot symbol-version UUIDs**,
+preserving immutable history and edge confidence/extractor metadata.
+Migration 000075 adds atomic `copied_call_edge_count` and
+`resolved_call_edge_count` metrics and a versioned `call_resolver_version`
+provenance column. Parent graphs indexed by an older resolver version
+(including pre-migration `legacy` rows) are never copied; they are
+re-resolved. The `nativeCallResolverVersion` constant must be incremented
+whenever call-resolution semantics change independently of the extractor.
+
+Two test-first PostgreSQL 17 regressions were observed RED before their
+implementations and GREEN afterward: missing resolved-edge telemetry and
+stale resolver-version provenance. Four integration test functions cover
+identical/reordered complete manifests, deletion of a call target followed
+by restoration, duplicate-content identity reassignment, non-native
+parent-edge rejection, and legacy resolver-version rejection. All 75 migrations
+also applied successfully to a fresh disposable PostgreSQL 17 database,
+followed by the four targeted integration tests. The full Go suite against an isolated,
+fully migrated PostgreSQL 17 database, `go vet ./...`, and 29 Git Python
+fixtures passed. No production service or paid cloud resources were used.
+
+Single-iteration `BenchmarkPGIndexSnapshotIdenticalManifest` on the same
+local disposable PostgreSQL 17 container, three sequential repeats per case:
+
+| Source files | Native CALLS edges copied | Elapsed times (ms) | Median (ms) |
+| ---: | ---: | --- | ---: |
+| 128 | 127 | 604.2, 422.1, 413.5 | 422.1 |
+| 1024 | 1023 | 3262.3, 3322.9, 3304.1 | 3304.1 |
+
+The benchmark excludes parent indexing and snapshot allocation, but includes
+immutable target file/declaration/chunk writes and call-edge copying. The
+1024-file case still takes approximately 3.3 seconds: **this is not an
+end-to-end proportional indexing speedup**. No randomized baseline A/B,
+multi-language workload, 5k–10k+ repository, resource budget or production
+p50/p95 evidence is available. The P3 changed-content dependency-bounded
+recomputation and performance acceptance gates remain open.
