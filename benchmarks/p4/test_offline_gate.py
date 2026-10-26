@@ -320,5 +320,30 @@ class OfflineGateTests(unittest.TestCase):
             self.assertIn("non-finite JSON", result.stderr)
 
 
+    def test_rejects_exponent_overflow_in_unused_nested_fixture_evidence(self):
+        # Valid JSON syntax, but Python silently converts 1e999 to infinity.
+        for numeric in ("1e999", "-1e999"):
+            with self.subTest(number=numeric), tempfile.TemporaryDirectory() as directory:
+                fixture = pathlib.Path(directory) / "fixture.json"
+                fixture.write_text(FIXTURE.read_text().replace(
+                    "{", '{"unused_metadata": {"evidence": [' + numeric + ']}, ', 1))
+                baseline = pathlib.Path(directory) / "baseline.json"
+                result = run_gate("--fixture", fixture, "--record-baseline", baseline)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("non-finite JSON", result.stderr)
+                self.assertFalse(baseline.exists())
+
+    def test_rejects_exponent_overflow_in_unused_nested_baseline_evidence(self):
+        for numeric in ("1e999", "-1e999"):
+            with self.subTest(number=numeric), tempfile.TemporaryDirectory() as directory:
+                baseline = pathlib.Path(directory) / "baseline.json"
+                self.assertEqual(run_gate("--record-baseline", baseline).returncode, 0)
+                baseline.write_text(baseline.read_text().replace(
+                    "{", '{"unused_metadata": {"evidence": [' + numeric + ']}, ', 1))
+                result = run_gate("--check", baseline)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("non-finite JSON", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
