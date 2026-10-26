@@ -127,8 +127,15 @@ rebuild vs incremental symbol/chunk/edge equivalence) and
 real archive inspection, key-table and full-schema restore drills). A
 regression suite checks both pointers and that absent evidence still fails.
 Three disposable PostgreSQL 17 code-index tests passed against all 95
-migration/policy SQL files. This is a **test evidence correction**, not a new
-index-rebuild capability, production backup recovery, or PITR validation.
+migration/policy SQL files. The backup integration test was also executed
+inside an isolated **TLS-enabled** PostgreSQL 17 container after applying all
+95 SQL files: encrypted backup integrity passed (1,045 archive entries and
+113 fingerprinted tables), monthly restore matched 12 key tables, and
+quarterly full restore matched all 113 tables plus the schema catalog.
+The test correctly reported that WAL archiving was off. The disposable
+container was stopped. This is a **test evidence correction**, not a new
+index-rebuild capability, production backup recovery, off-host redundancy,
+or PITR validation.
 The DoD gate still fails on §41 governance status, and the wider P0–P8
 acceptance gates remain open.
 

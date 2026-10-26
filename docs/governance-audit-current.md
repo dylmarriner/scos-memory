@@ -366,7 +366,9 @@ secret-reference access and updates.
   replaced by existing PostgreSQL clean-rebuild-equivalence and real
   encrypted-backup/restore-drill integration tests. The index test proves
   equivalence for its fixture, not arbitrary authoritative index replay;
-  the backup test is not a production/off-host recovery attestation. The
+  the backup test passed against disposable TLS-enabled PostgreSQL 17,
+  including 12-key-table and 113-table full restore comparisons, but is not
+  a production/off-host or WAL/PITR recovery attestation. The
   §41 status remains PARTIAL pending the other deployment and governance
   gates. Regression tests ensure missing evidence still fails.
 - §42 Prohibitions — **PASS (1 further fix)**: the stale-`agent-registry`
