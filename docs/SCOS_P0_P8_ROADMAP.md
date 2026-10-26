@@ -117,6 +117,21 @@ Operational rules:
 
 ---
 
+## Definition-of-done evidence pointer correction (2026-10-27)
+
+The §41 checker previously named two **nonexistent** test functions and reported
+missing code evidence despite existing real integration tests. It now points to
+`TestPGIncrementalSnapshotEquivalentToCleanRebuild` (live PostgreSQL clean
+rebuild vs incremental symbol/chunk/edge equivalence) and
+`TestBackupAndDrillsAgainstPostgreSQL` (integration-tagged encrypted backup,
+real archive inspection, key-table and full-schema restore drills). A
+regression suite checks both pointers and that absent evidence still fails.
+Three disposable PostgreSQL 17 code-index tests passed against all 95
+migration/policy SQL files. This is a **test evidence correction**, not a new
+index-rebuild capability, production backup recovery, or PITR validation.
+The DoD gate still fails on §41 governance status, and the wider P0–P8
+acceptance gates remain open.
+
 # P0 — Benchmark and Evidence Baseline
 
 **Objective:** make every retrieval/indexing/model change measurable.

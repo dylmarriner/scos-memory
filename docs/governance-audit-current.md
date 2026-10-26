@@ -361,6 +361,14 @@ secret-reference access and updates.
   corrections, governed promotion, Git-backed OKF, rebuildable indexes,
   mandatory ACP ingress, agent-without-memory continuity) and correctly
   refuses to pass while §22 production hook integration remains open.
+  **2026-10-27 evidence correction:** Two §41 test pointers had gone stale:
+  the nonexistent index-generation and backup lifecycle test names are now
+  replaced by existing PostgreSQL clean-rebuild-equivalence and real
+  encrypted-backup/restore-drill integration tests. The index test proves
+  equivalence for its fixture, not arbitrary authoritative index replay;
+  the backup test is not a production/off-host recovery attestation. The
+  §41 status remains PARTIAL pending the other deployment and governance
+  gates. Regression tests ensure missing evidence still fails.
 - §42 Prohibitions — **PASS (1 further fix)**: the stale-`agent-registry`
   status above was the only remaining fabricated-state instance found in
   scope.

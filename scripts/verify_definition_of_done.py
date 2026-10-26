@@ -130,17 +130,19 @@ ITEMS: list[DoDItem] = [
     ),
     DoDItem(
         bullet="Search indexes rebuild from authority.",
-        file="services/code-intelligence/cmd/server/main_test.go",
-        pattern=r"^func TestReindexReplacesPreviousGenerationForRepository\(",
-        note="code-intelligence replaces the previous index generation on reindex, "
-             "proving rebuild-from-authority rather than incremental drift.",
+        file="services/code-intelligence/cmd/server/index_equivalence_integration_test.go",
+        pattern=r"^func TestPGIncrementalSnapshotEquivalentToCleanRebuild\(",
+        note="live PostgreSQL test compares incremental and clean full-source indexing "
+             "of the same target for symbol versions, chunks and call edges; "
+             "this is not proof of a production authority-to-index replay.",
     ),
     DoDItem(
         bullet="Backups have been restored successfully.",
-        file="services/backup-manager/cmd/server/main_test.go",
-        pattern=r"^func TestRestoreTestLifecycle\(",
-        note="backup-manager exercises a full restore-test lifecycle; see also "
-             "TestTamperedArtifactFailsRestore for restore integrity checking.",
+        file="services/backup-manager/cmd/server/backup_integration_test.go",
+        pattern=r"^func TestBackupAndDrillsAgainstPostgreSQL\(",
+        note="integration-tagged PostgreSQL test takes an encrypted disposable "
+             "backup and exercises real archive, key-table and full schema "
+             "restore drills; it does not prove live/off-host recovery or PITR.",
     ),
     DoDItem(
         bullet="Failure injection passes.",
