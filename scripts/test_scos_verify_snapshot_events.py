@@ -10,6 +10,7 @@ import unittest
 
 SCRIPT = Path(__file__).with_name("scos_verify_snapshot_events.py")
 SNAPSHOT = "11111111-1111-4111-8111-111111111111"
+REPO = "22222222-2222-4222-8222-222222222222"
 
 
 def git(repo, *args):
@@ -34,6 +35,11 @@ class SnapshotEventVerificationTests(unittest.TestCase):
     def invoke(self, target, events, parent=None, snapshot=SNAPSHOT, pages=None, env=None):
         page_data = pages if pages is not None else [
             {"snapshot_id": snapshot, "events": events}]
+        for page in page_data:
+            page.setdefault("commit_id", target)
+            page.setdefault("parent_commit_id", parent or "")
+            page.setdefault("repository_id", REPO)
+            page.setdefault("branch", "main")
         path = self.repo / "exported-pages.ndjson"
         path.write_text("\n".join(json.dumps(page) for page in page_data) + "\n")
         args = [sys.executable, str(SCRIPT), "--git-dir", str(self.repo),
@@ -96,6 +102,54 @@ class SnapshotEventVerificationTests(unittest.TestCase):
         result = self.invoke(target, events, parent, pages=pages)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["event_count"], 5)
+
+    def test_forged_target_commit_binding_is_rejected(self):
+        parent, target, events = self.fixture()
+        pages = [{"snapshot_id": SNAPSHOT, "events": events,
+                  "commit_id": parent}]
+        result = self.invoke(target, events, parent, pages=pages)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("commit", result.stderr.lower())
+
+    def test_forged_parent_commit_binding_is_rejected(self):
+        parent, target, events = self.fixture()
+        pages = [{"snapshot_id": SNAPSHOT, "events": events,
+                  "parent_commit_id": target}]
+        result = self.invoke(target, events, parent, pages=pages)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("parent", result.stderr.lower())
+
+    def test_cross_page_repository_binding_is_rejected(self):
+        parent, target, events = self.fixture()
+        events.sort(key=lambda event: event["path"].encode())
+        pages = [
+            {"snapshot_id": SNAPSHOT, "events": events[:1],
+             "next_after_path": events[0]["path"]},
+            {"snapshot_id": SNAPSHOT, "events": events[1:],
+             "repository_id": "33333333-3333-4333-8333-333333333333"},
+        ]
+        result = self.invoke(target, events, parent, pages=pages)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("repository", result.stderr.lower())
+
+    def test_cross_page_branch_binding_is_rejected(self):
+        parent, target, events = self.fixture()
+        events.sort(key=lambda event: event["path"].encode())
+        pages = [
+            {"snapshot_id": SNAPSHOT, "events": events[:1],
+             "next_after_path": events[0]["path"]},
+            {"snapshot_id": SNAPSHOT, "events": events[1:], "branch": "forged"},
+        ]
+        result = self.invoke(target, events, parent, pages=pages)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("branch", result.stderr.lower())
+
+    def test_missing_server_commit_binding_is_rejected(self):
+        parent, target, events = self.fixture()
+        pages = [{"snapshot_id": SNAPSHOT, "events": events, "commit_id": None}]
+        result = self.invoke(target, events, parent, pages=pages)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("commit", result.stderr.lower())
 
     def test_missing_deletion_is_rejected(self):
         parent, target, events = self.fixture()

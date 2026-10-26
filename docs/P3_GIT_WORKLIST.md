@@ -78,8 +78,11 @@ Treat the generated JSON as source code with appropriate file permissions.
   activated the corresponding parent snapshot; the caller must verify this.
 - Refuses JSON bodies larger than the server's **4 MiB** request limit,
   including the final newline. It never emits an incomplete snapshot.
-- Typed add/modify/delete/rename/copy persistence and large-snapshot
-  streaming are separate outstanding P3 gates.
+- Native server-derived typed add/modify/delete/rename/copy persistence is
+  implemented (migration 000072) and exposed by the authenticated snapshot
+  event API. The offline Git sidecar is **not** trusted as server evidence;
+  end-to-end Git tree/source attestation and large-snapshot streaming remain
+  outstanding P3 gates.
 
 Git subprocesses clear inherited `GIT_*` environment overrides before reading the explicitly selected repository, including the verifier, worklist, object streaming and ancestry checks. Real-Git fixtures assert that an ambient foreign `GIT_DIR`/`GIT_WORK_TREE` cannot redirect the results.
 
@@ -131,7 +134,10 @@ and server-derived evidence disagree. It fails closed on missing or forged
 events and never contacts SCOS, modifies Git or deploys code.
 
 **Limit:** this is offline consistency checking, **not server-side Git
-attestation**. The current event API does not expose an authenticated binding
-between the snapshot UUID and its commit IDs or source hashes. A forged
-export from the wrong snapshot could be crafted to match a chosen Git tree;
-that gap and server-enforced provenance remain P3 acceptance work.
+attestation**. The event API now returns authenticated server-recorded
+repository, branch, target and parent commit identifiers; the verifier
+requires these to match the selected Git commits and stay identical on every
+page. The index caller originally supplied those commit identifiers, however,
+and no server-verified Git blob/source hash manifest is attested. A malicious
+index caller could claim the correct commit while supplying different source
+bytes. That integrity gap and server-enforced provenance remain P3 work.

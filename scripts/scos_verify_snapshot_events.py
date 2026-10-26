@@ -4,7 +4,8 @@
 This checks complete exported, authenticated event pages against a trusted local
 Git parent->target transition. It never contacts SCOS or modifies Git. It does
 NOT prove that the server snapshot actually indexes these Git commits: the
-event API currently exposes no attested commit/hash manifest.
+event API exposes server-recorded commit IDs, but no cryptographically
+attested content-hash manifest.
 """
 from __future__ import annotations
 
@@ -28,7 +29,9 @@ def fingerprint_manifest(repo: Path, commit: str | None) -> dict[str, tuple[str,
     }
 
 
-def read_complete_pages(path: Path, snapshot_id: str) -> list[dict]:
+def read_complete_pages(
+    path: Path, snapshot_id: str, target_commit: str, parent_commit: str | None,
+) -> list[dict]:
     pages = []
     with path.open(encoding="utf-8") as stream:
         for line in stream:
@@ -38,9 +41,29 @@ def read_complete_pages(path: Path, snapshot_id: str) -> list[dict]:
         raise WorklistError("no exported event pages supplied")
     events = []
     last_path = None
+    repository_id = None
+    branch = None
     for number, page in enumerate(pages):
         if not isinstance(page, dict) or page.get("snapshot_id") != snapshot_id:
             raise WorklistError(f"page {number+1} has a wrong snapshot_id")
+        if page.get("commit_id") != target_commit:
+            raise WorklistError(f"page {number+1} has a wrong or missing target commit binding")
+        if page.get("parent_commit_id") != (parent_commit or ""):
+            raise WorklistError(f"page {number+1} has a wrong or missing parent commit binding")
+        repo = page.get("repository_id")
+        try:
+            if not isinstance(repo, str) or str(uuid.UUID(repo)) != repo:
+                raise ValueError("not a canonical UUID")
+        except (ValueError, AttributeError):
+            raise WorklistError(f"page {number+1} has invalid repository_id")
+        page_branch = page.get("branch")
+        if not isinstance(page_branch, str) or not page_branch.strip():
+            raise WorklistError(f"page {number+1} has invalid branch")
+        if repository_id is not None and repo != repository_id:
+            raise WorklistError(f"page {number+1} has inconsistent repository binding")
+        if branch is not None and page_branch != branch:
+            raise WorklistError(f"page {number+1} has inconsistent branch binding")
+        repository_id, branch = repo, page_branch
         items = page.get("events")
         if not isinstance(items, list):
             raise WorklistError(f"page {number+1} is missing an events array")
@@ -140,7 +163,7 @@ def main() -> int:
             raise WorklistError("parent must be an ancestor of target")
         old = fingerprint_manifest(repo, parent)
         new = fingerprint_manifest(repo, target)
-        events = read_complete_pages(args.pages_file, args.snapshot_id)
+        events = read_complete_pages(args.pages_file, args.snapshot_id, target, parent)
         verify_events(old, new, events)
     except (WorklistError, ValueError, OSError, json.JSONDecodeError, UnicodeError) as exc:
         print(f"scos_verify_snapshot_events: {exc}", file=sys.stderr)
@@ -151,7 +174,7 @@ def main() -> int:
         "parent_commit_id": parent,
         "commit_id": target,
         "event_count": len(events),
-        "limitation": "does_not_attest_server_snapshot_commit_or_source_hashes",
+        "limitation": "server_commit_ids_are_caller_supplied_not_git_content_attestation",
     }))
     return 0
 
