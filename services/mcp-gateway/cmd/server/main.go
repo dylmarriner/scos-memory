@@ -366,6 +366,27 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			}
 		}
 		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/index", payload)
+	case "scos_code_snapshot_events":
+		snapshotID := stringArg(args, "snapshot_id")
+		if snapshotID == "" {
+			return nil, fmt.Errorf("snapshot_id is required")
+		}
+		payload := map[string]any{"snapshot_id": snapshotID}
+		if raw, exists := args["after_path"]; exists {
+			path, valid := raw.(string)
+			if !valid {
+				return nil, fmt.Errorf("after_path must be a string")
+			}
+			payload["after_path"] = path
+		}
+		if raw, exists := args["limit"]; exists {
+			limit, valid := raw.(float64)
+			if !valid || limit < 1 || limit > 1000 || math.Trunc(limit) != limit {
+				return nil, fmt.Errorf("limit must be an integer in 1..1000")
+			}
+			payload["limit"] = int(limit)
+		}
+		return s.forwardPOST(ctx, r, s.codeIntelligenceURL+"/v2/code/snapshots/events", payload)
 	case "scos_code_index_status":
 		snapshotID := stringArg(args, "snapshot_id")
 		if snapshotID == "" {
@@ -1612,6 +1633,19 @@ func governedTools() []map[string]any {
 					}, "required": []string{"path", "content_hash"}}, "description": "Upload mode only: files to index instead of reading the workspace"},
 				},
 				"required": []string{"repository_id"},
+			},
+		},
+		{
+			"name":        "scos_code_snapshot_events",
+			"description": "Read a paginated, immutable server-derived file-change ledger for an indexed code snapshot. Includes add, modify, delete, conservative rename/copy and evidence provenance. Requires an authorized snapshot; does not approve or execute changes.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"snapshot_id": map[string]any{"type": "string", "description": "Indexed code snapshot UUID"},
+					"after_path":  map[string]any{"type": "string", "description": "Pagination cursor from next_after_path"},
+					"limit":       map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "description": "Events per page (default 100)"},
+				},
+				"required": []string{"snapshot_id"},
 			},
 		},
 		{

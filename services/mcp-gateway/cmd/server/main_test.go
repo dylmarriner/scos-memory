@@ -14,11 +14,11 @@ import (
 
 func TestGovernedToolsListsAllGovernedTools(t *testing.T) {
 	tools := governedTools()
-	if len(tools) != 159 {
-		t.Fatalf("expected 159 governed tools, got %d", len(tools))
+	if len(tools) != 160 {
+		t.Fatalf("expected 160 governed tools, got %d", len(tools))
 	}
 	names := governedToolNames()
-	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_remember", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain", "scos_code_revalidations"} {
+	for _, want := range []string{"scos_recall", "scos_status", "scos_explain", "scos_user_model", "scos_memory_graph", "scos_remember", "scos_correct", "scos_forget", "scos_graphify_query", "scos_graphify_path", "scos_graphify_explain", "scos_code_revalidations", "scos_code_snapshot_events"} {
 		if !names[want] {
 			t.Fatalf("expected governed tool %q to be present", want)
 		}
@@ -48,8 +48,8 @@ func TestHandleMCPToolsList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(resp.Result.Tools) != 159 {
-		t.Fatalf("expected 159 tools in tools/list response, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 160 {
+		t.Fatalf("expected 160 tools in tools/list response, got %d", len(resp.Result.Tools))
 	}
 }
 
