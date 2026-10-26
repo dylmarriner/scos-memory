@@ -162,12 +162,14 @@ provenance column. Parent graphs indexed by an older resolver version
 re-resolved. The `nativeCallResolverVersion` constant must be incremented
 whenever call-resolution semantics change independently of the extractor.
 
-A test-first PostgreSQL 17 regression initially failed on the missing
-resolved-edge telemetry, then passed with the implementation. Three integration
-regressions cover identical/reordered complete manifests, deletion of a call
-target followed by restoration, duplicate-content identity reassignment,
-non-native parent-edge rejection, and a RED/GREEN regression for stale
-resolver-version provenance. The full Go suite against an isolated,
+Two test-first PostgreSQL 17 regressions were observed RED before their
+implementations and GREEN afterward: missing resolved-edge telemetry and
+stale resolver-version provenance. Four integration test functions cover
+identical/reordered complete manifests, deletion of a call target followed
+by restoration, duplicate-content identity reassignment, non-native
+parent-edge rejection, and legacy resolver-version rejection. All 75 migrations
+also applied successfully to a fresh disposable PostgreSQL 17 database,
+followed by the four targeted integration tests. The full Go suite against an isolated,
 fully migrated PostgreSQL 17 database, `go vet ./...`, and 29 Git Python
 fixtures passed. No production service or paid cloud resources were used.
 
