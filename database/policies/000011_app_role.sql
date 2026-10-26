@@ -38,6 +38,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO scos_app;
 -- This must follow the blanket grants on fresh installs; migration 000070
 -- also revokes these rights when upgrading an existing scos_app role.
 REVOKE UPDATE, DELETE ON memory_revalidation_decisions FROM scos_app;
+-- Snapshot-diff evidence is server-derived and append-only to runtime roles.
+REVOKE UPDATE, DELETE ON code_snapshot_change_events FROM scos_app;
 -- Privileged purge evidence and its entry point are never runtime APIs.
 REVOKE ALL ON memory_revalidation_decision_purge_audit FROM scos_app;
 REVOKE ALL ON FUNCTION purge_memory_revalidation_decisions_for_tenant(uuid,text) FROM PUBLIC, scos_app;
