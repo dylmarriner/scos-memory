@@ -162,3 +162,75 @@ func BenchmarkPGIndexSnapshotScaling(b *testing.B) {
 		}
 	}
 }
+
+// This measures the narrow, correctness-guarded P3 call-graph copy fast path
+// when an entire committed source manifest is byte-identical to its parent.
+// It does not measure changed-content indexing or production workloads.
+func BenchmarkPGIndexSnapshotIdenticalManifest(b *testing.B) {
+	dsn := os.Getenv("SCOS_CODE_STORE_TEST_DSN")
+	if dsn == "" {
+		b.Skip("requires disposable PostgreSQL DSN")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	store := newPGCodeStore(db)
+	ctx := context.Background()
+	var tenant string
+	if err := db.QueryRowContext(ctx, "INSERT INTO tenants(name) VALUES($1) RETURNING id",
+		fmt.Sprintf("identical-benchmark-%d", time.Now().UnixNano())).Scan(&tenant); err != nil {
+		b.Fatal(err)
+	}
+	for _, size := range []int{128, 1024} {
+		b.Run(fmt.Sprintf("identical/files_%d", size), func(b *testing.B) {
+			files := scalingGoFiles(size)
+			repo, err := store.EnsureRepository(ctx, tenant, fmt.Sprintf("/bench/identical/%d/%d", size, time.Now().UnixNano()))
+			if err != nil {
+				b.Fatal(err)
+			}
+			parentCommit := "baseline"
+			parent, err := store.CreateSnapshot(ctx, repo, tenant, "main", parentCommit, "go/parser-v1", "")
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := store.IndexSnapshot(ctx, parent, repo, files); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				commit := fmt.Sprintf("identical-%d", i)
+				target, err := store.CreateSnapshot(ctx, repo, tenant, "main", commit, "go/parser-v1", "")
+				if err != nil {
+					b.Fatal(err)
+				}
+				manifest := append([]PGFileInput(nil), files...)
+				for j := range manifest {
+					manifest[j].Content = ""
+					manifest[j].ReuseParent = true
+					manifest[j].ExpectedParentCommit = parentCommit
+				}
+				b.StartTimer()
+				err = store.IndexSnapshot(ctx, target, repo, manifest)
+				b.StopTimer()
+				if err != nil {
+					b.Fatal(err)
+				}
+				var copied, resolved int
+				if err := db.QueryRowContext(ctx, `SELECT copied_call_edge_count,resolved_call_edge_count
+                    FROM code_repository_snapshots WHERE id=$1`, target).Scan(&copied, &resolved); err != nil {
+					b.Fatal(err)
+				}
+				if copied != size-1 || resolved != 0 {
+					b.Fatalf("graph not reused: copied=%d resolved=%d", copied, resolved)
+				}
+				parentCommit = commit
+			}
+			b.ReportMetric(float64(size), "files/op")
+			b.ReportMetric(float64(size-1), "copied_edges/op")
+		})
+	}
+}

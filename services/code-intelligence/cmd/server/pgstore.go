@@ -398,8 +398,33 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		return fmt.Errorf("record indexed snapshot changes: %w", err)
 	}
 
-	if err := insertCallEdgesLocked(ctx, tx, snapshotID, allDecls); err != nil {
-		return fmt.Errorf("index call edges: %w", err)
+	// A byte-identical complete target manifest has the same call-resolution
+	// inputs as its compatible parent. Copy only after proving that every
+	// symbol identity still describes the same declaration and that the
+	// parent contains exclusively native CALLS edges. Otherwise rebuild.
+	unchangedManifest := parentSnapshotID != "" && len(files) == len(parentHashes)
+	if unchangedManifest {
+		for _, f := range files {
+			parent, ok := parentHashes[f.Path]
+			if !ok || parent.hash != f.ContentHash || parent.language != f.Language {
+				unchangedManifest = false
+				break
+			}
+		}
+	}
+	copiedEdges, resolvedEdges := 0, 0
+	copiedGraph := false
+	if unchangedManifest {
+		copiedGraph, copiedEdges, err = copyCompatibleParentCallEdgesLocked(ctx, tx, parentSnapshotID, snapshotID)
+		if err != nil {
+			return fmt.Errorf("copy compatible parent call edges: %w", err)
+		}
+	}
+	if !copiedGraph {
+		resolvedEdges, err = insertCallEdgesLocked(ctx, tx, snapshotID, allDecls)
+		if err != nil {
+			return fmt.Errorf("index call edges: %w", err)
+		}
 	}
 
 	cacheHitRatio := 0.0
@@ -415,11 +440,12 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
            symbol_count=(SELECT count(*) FROM code_symbol_versions WHERE snapshot_id=$1),
            status='ready',parsed_file_count=$3,reused_file_count=$4,unparsed_file_count=$5,
            parsed_declaration_count=$6,reused_declaration_count=$7,
-           cache_hit_ratio=$8,index_elapsed_ms=$9,extractor_tier_counts=$10::jsonb
+           cache_hit_ratio=$8,index_elapsed_ms=$9,extractor_tier_counts=$10::jsonb,
+           copied_call_edge_count=$11,resolved_call_edge_count=$12
        WHERE id=$1`,
 		snapshotID, len(files), parsedFiles, reusedFiles, unparsedFiles,
 		parsedDecls, reusedDecls, cacheHitRatio, time.Since(started).Milliseconds(),
-		string(tiersJSON)); err != nil {
+		string(tiersJSON), copiedEdges, resolvedEdges); err != nil {
 		return fmt.Errorf("mark snapshot ready with indexing metrics: %w", err)
 	}
 
@@ -574,7 +600,63 @@ func buildCallEdgeInsert(snapshotID string, edges []resolvedCallEdge) (string, [
 	return sqlText.String(), args
 }
 
-func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, decls []indexedDecl) error {
+// copyCompatibleParentCallEdgesLocked avoids whole-snapshot CALLS resolution
+// only when the parent and target have identical declaration identities and
+// graph-relevant evidence. The manifest guard in IndexSnapshot is necessary,
+// but not sufficient: duplicate-content files may assign stable symbol IDs in
+// a different order. A mismatch must fall back to a fresh graph resolution.
+func copyCompatibleParentCallEdgesLocked(ctx context.Context, tx *sql.Tx, parentID, snapshotID string) (bool, int, error) {
+	var compatible bool
+	err := tx.QueryRowContext(ctx, `SELECT
+        NOT EXISTS (
+            SELECT 1 FROM
+                (SELECT * FROM code_symbol_versions WHERE snapshot_id=$1) p
+                FULL JOIN
+                (SELECT * FROM code_symbol_versions WHERE snapshot_id=$2) n
+                USING (symbol_id)
+            WHERE p.id IS NULL OR n.id IS NULL
+               OR p.path IS DISTINCT FROM n.path
+               OR p.fully_qualified_name IS DISTINCT FROM n.fully_qualified_name
+               OR p.kind IS DISTINCT FROM n.kind
+               OR p.scope IS DISTINCT FROM n.scope
+               OR p.called_names IS DISTINCT FROM n.called_names
+               OR p.extractor IS DISTINCT FROM n.extractor
+               OR p.content_hash IS DISTINCT FROM n.content_hash
+               OR p.signature IS DISTINCT FROM n.signature
+               OR p.range IS DISTINCT FROM n.range
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM code_edges e
+            LEFT JOIN code_symbol_versions src
+                ON src.id=e.source_symbol_version_id AND src.snapshot_id=$1
+            LEFT JOIN code_symbol_versions dst
+                ON dst.id=e.target_symbol_version_id AND dst.snapshot_id=$1
+            WHERE e.snapshot_id=$1
+              AND (e.relation <> 'CALLS' OR e.confidence_class <> 'static_analysis'
+                   OR src.id IS NULL OR dst.id IS NULL)
+        )`, parentID, snapshotID).Scan(&compatible)
+	if err != nil || !compatible {
+		return false, 0, err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO code_edges
+        (snapshot_id,source_symbol_version_id,target_symbol_version_id,
+         relation,confidence_class,confidence_score,extractor,source_location)
+        SELECT $2, next_src.id, next_dst.id, e.relation,e.confidence_class,
+               e.confidence_score,e.extractor,e.source_location
+        FROM code_edges e
+        JOIN code_symbol_versions old_src ON old_src.id=e.source_symbol_version_id
+        JOIN code_symbol_versions old_dst ON old_dst.id=e.target_symbol_version_id
+        JOIN code_symbol_versions next_src ON next_src.snapshot_id=$2 AND next_src.symbol_id=old_src.symbol_id
+        JOIN code_symbol_versions next_dst ON next_dst.snapshot_id=$2 AND next_dst.symbol_id=old_dst.symbol_id
+        WHERE e.snapshot_id=$1`, parentID, snapshotID)
+	if err != nil {
+		return false, 0, err
+	}
+	copied, err := result.RowsAffected()
+	return true, int(copied), err
+}
+
+func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, decls []indexedDecl) (int, error) {
 	edges := resolveCallEdges(decls)
 	for i := 0; i < len(edges); i += callEdgeBatchSize {
 		end := i + callEdgeBatchSize
@@ -583,10 +665,10 @@ func insertCallEdgesLocked(ctx context.Context, tx *sql.Tx, snapshotID string, d
 		}
 		statement, args := buildCallEdgeInsert(snapshotID, edges[i:end])
 		if _, err := tx.ExecContext(ctx, statement, args...); err != nil {
-			return fmt.Errorf("insert call edges %d..%d: %w", i, end, err)
+			return 0, fmt.Errorf("insert call edges %d..%d: %w", i, end, err)
 		}
 	}
-	return nil
+	return len(edges), nil
 }
 
 // importPathNamesDir reports whether a Go import path refers to the
