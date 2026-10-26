@@ -33,7 +33,8 @@ For example:
 ```bash
 python3 scripts/scos_verify_snapshot_manifest.py \
   --git-dir /path/to/trusted/repository \
-  --commit '<target-commit-sha>' \  --parent '<trusted-parent-commit-sha>' \
+  --commit '<target-commit-sha>' \
+  --parent '<trusted-parent-commit-sha>' \
   --snapshot-id '<server-snapshot-uuid>' \
   --pages-file /path/to/manifest-pages.ndjson
 ```
