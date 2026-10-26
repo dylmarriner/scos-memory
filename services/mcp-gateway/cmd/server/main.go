@@ -405,6 +405,13 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			}
 			values.Set("limit", strconv.Itoa(int(limit)))
 		}
+		if raw, ok := args["pending_only"]; ok {
+			pending, valid := raw.(bool)
+			if !valid {
+				return nil, fmt.Errorf("pending_only must be boolean")
+			}
+			values.Set("pending_only", strconv.FormatBool(pending))
+		}
 		return s.forwardGET(ctx, r, s.codeIntelligenceURL+"/v2/code/revalidations?"+values.Encode())
 	case "scos_code_impact":
 		repositoryID, err := s.durableRepositoryID(ctx, r, args)
@@ -1642,6 +1649,7 @@ func governedTools() []map[string]any {
 				"properties": map[string]any{
 					"repository_id": map[string]any{"type": "string", "description": "Durable repository UUID"},
 					"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum review events (default 25)"},
+					"pending_only":  map[string]any{"type": "boolean", "description": "List only unresolved review-required events with no recorded decision"},
 				},
 				"required": []string{"repository_id"},
 			},
