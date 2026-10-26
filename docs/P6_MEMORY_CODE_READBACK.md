@@ -65,6 +65,16 @@ drifted to a foreign repository. Both now pass. The writer and reader require
 invariant to direct SQL link writers. The direct-SQL regression checks for
 SQLSTATE 23514 rather than merely accepting an arbitrary database error.
 
+**Additional database integrity evidence (2026-10-27):** a real PostgreSQL
+RED-before-fix regression showed that `code_repository_snapshots.tenant_id`
+could disagree with its owning `code_repositories.tenant_id`, even though
+both UUIDs had valid foreign keys. Migration `000078_code_snapshot_tenant_fk.sql`
+adds a composite repository/tenant foreign key, checks new writes and
+updates, and validates existing snapshots rather than grandfathering drift.
+It retains repository-deletion cascade semantics. This closes one structural
+tenant-provenance mismatch, **not** direct-access code-table RLS or the wider
+symbol/version lineage integrity work.
+
 **Outstanding database isolation debt:** the pre-existing
 `code_repositories`, `code_repository_snapshots`,
 `code_symbols` and `code_symbol_versions` tables do not yet have
@@ -72,6 +82,16 @@ independent forced RLS.
 The new endpoint uses forced memory/link RLS plus explicit tenant/repository
 join predicates and has negative cross-scope tests, but this does not qualify
 those legacy code tables for unrestricted direct access by the runtime role.
+A disposable PostgreSQL 17 check on the non-BYPASSRLS `scos_app`
+role confirmed this is an exploitable **direct SQL access boundary**, not
+merely a missing schema decoration: without any tenant context,
+`SELECT count(*), count(DISTINCT tenant_id) FROM code_repositories`
+returned 439 rows spanning 430 fixture tenants after integration tests.
+The four legacy provenance tables reported `relrowsecurity=false` and
+`relforcerowsecurity=false`. The composite snapshot FK does not mitigate
+this direct read exposure. **PR #92 must not merge while this review finding
+remains unresolved.**
+
 Adding forced RLS to them requires a coordinated code-indexer/runtime
 transaction-context migration and integration acceptance; it is not silently
 treated as completed by this endpoint.

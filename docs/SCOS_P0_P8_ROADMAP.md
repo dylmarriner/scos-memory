@@ -777,6 +777,16 @@ repository-chain validation in the writer, reader and SQL link trigger
 (migration 000077). The direct-SQL guard is tested for SQLSTATE 23514. A separate RED→GREEN
 regression also removed raw SQL-driver error disclosure from the existing
 evidence-link POST handler's HTTP 500 responses.
+A further real-PostgreSQL RED→GREEN regression (migration 000078) binds each
+snapshot's `tenant_id` to its repository using a validated composite foreign
+key, including protection against later snapshot/repository tenant updates.
+This guards one previously accepted cross-tenant provenance forgery but does
+not enable RLS or establish complete symbol-version chain consistency.
+A restricted-role direct-SQL check on disposable PostgreSQL 17 proved the
+outstanding exposure: `scos_app` with no tenant GUC read 439 repository rows
+across 430 test tenants; all four provenance tables still had RLS disabled.
+The P6 PR remains blocked on this security finding even though the narrower
+snapshot FK migration and HTTP endpoint tests pass.
 **Open isolation gate:** legacy code repository, snapshot, symbol and symbol-version
 tables lack independent forced RLS; code-indexer/runtime tenant-context
 changes and real-PostgreSQL qualification are required before enabling it.

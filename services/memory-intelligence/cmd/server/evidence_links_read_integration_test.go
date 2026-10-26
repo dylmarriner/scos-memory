@@ -143,3 +143,33 @@ func TestP6ReadbackExcludesDriftedSymbolRepository(t *testing.T) {
 		t.Fatalf("cross-tenant symbol identity leaked in readback: %v", out)
 	}
 }
+
+// A snapshot's tenant must be bound to its repository by the database, not
+// merely by HTTP handlers or joins. This also prevents later tenant drift.
+func TestP6SnapshotTenantRepositoryInvariant(t *testing.T) {
+	f := newBehaviourFixture(t)
+	repo := f.scalar("INSERT INTO code_repositories(tenant_id,canonical_path) VALUES($1,$2) RETURNING id::text", f.tenant, "/p6/tenant-invariant/"+f.tenant)
+	var pgErr *pgconn.PgError
+	_, err := f.admin.Exec(`INSERT INTO code_repository_snapshots(repository_id,tenant_id,branch,commit_id)
+		VALUES($1,$2,'main','forged')`, repo, f.otherTenant)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+		t.Fatalf("cross-tenant snapshot must violate composite FK (23503), got %v", err)
+	}
+	valid := f.scalar(`INSERT INTO code_repository_snapshots(repository_id,tenant_id,branch,commit_id)
+		VALUES($1,$2,'main','valid') RETURNING id::text`, repo, f.tenant)
+	_, err = f.admin.Exec("UPDATE code_repository_snapshots SET tenant_id=$1 WHERE id=$2", f.otherTenant, valid)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+		t.Fatalf("snapshot tenant drift must violate composite FK (23503), got %v", err)
+	}
+	_, err = f.admin.Exec("UPDATE code_repositories SET tenant_id=$1 WHERE id=$2", f.otherTenant, repo)
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+		t.Fatalf("repository tenant drift must violate composite FK (23503), got %v", err)
+	}
+	if _, err := f.admin.Exec("DELETE FROM code_repositories WHERE id=$1", repo); err != nil {
+		t.Fatalf("repository deletion must retain snapshot cascade: %v", err)
+	}
+	var remains bool
+	if err := f.admin.QueryRow("SELECT EXISTS(SELECT 1 FROM code_repository_snapshots WHERE id=$1)", valid).Scan(&remains); err != nil || remains {
+		t.Fatalf("deleted repository left snapshot behind: remains=%v err=%v", remains, err)
+	}
+}
