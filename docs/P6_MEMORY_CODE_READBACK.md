@@ -71,7 +71,12 @@ could disagree with its owning `code_repositories.tenant_id`, even though
 both UUIDs had valid foreign keys. Migration `000078_code_snapshot_tenant_fk.sql`
 adds a composite repository/tenant foreign key, checks new writes and
 updates, and validates existing snapshots rather than grandfathering drift.
-It retains repository-deletion cascade semantics. This closes one structural
+It retains repository-deletion cascade semantics. A second disposable
+PostgreSQL replay intentionally seeded one mismatched legacy snapshot: the
+migration refused to validate it, and after removing **only that synthetic
+test row**, a retry and a repeated apply succeeded with the composite FK
+marked validated. The migration is idempotent across this recovery path.
+This closes one structural
 tenant-provenance mismatch, **not** direct-access code-table RLS or the wider
 symbol/version lineage integrity work.
 

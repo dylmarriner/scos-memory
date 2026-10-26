@@ -780,7 +780,10 @@ evidence-link POST handler's HTTP 500 responses.
 A further real-PostgreSQL RED→GREEN regression (migration 000078) binds each
 snapshot's `tenant_id` to its repository using a validated composite foreign
 key, including protection against later snapshot/repository tenant updates.
-This guards one previously accepted cross-tenant provenance forgery but does
+The migration was also replayed against deliberately inconsistent disposable
+legacy data: validation failed closed, then succeeded after test-only cleanup,
+and reapplying it remained idempotent. This guards one previously accepted
+cross-tenant provenance forgery but does
 not enable RLS or establish complete symbol-version chain consistency.
 A restricted-role direct-SQL check on disposable PostgreSQL 17 proved the
 outstanding exposure: `scos_app` with no tenant GUC read 439 repository rows
