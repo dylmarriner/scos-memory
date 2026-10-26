@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
 )
@@ -124,6 +125,12 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 	if accepted.Code != http.StatusCreated {
 		t.Fatalf("review status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
+	var createdDecision struct {
+		DecisionID string `json:"decision_id"`
+	}
+	if err := json.Unmarshal(accepted.Body.Bytes(), &createdDecision); err != nil || createdDecision.DecisionID == "" {
+		t.Fatalf("missing created decision ID: %v %s", err, accepted.Body.String())
+	}
 	if resp := post(reviewer, valid); resp.Code != http.StatusConflict {
 		t.Fatalf("duplicate decision status=%d body=%s", resp.Code, resp.Body.String())
 	}
@@ -175,6 +182,14 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 		if len(visible) != 1 || visible[0]["review_outcome"] != "still_valid" {
 			t.Fatalf("restricted review visibility: %+v", visible)
 		}
+		if visible[0]["review_decision_id"] != createdDecision.DecisionID {
+			t.Fatalf("restricted review ID differs from creation receipt: got=%v", visible[0]["review_decision_id"])
+		}
+		if stamp, ok := visible[0]["review_decided_at"].(string); !ok {
+			t.Fatalf("restricted review omitted timestamp: got=%v", visible[0]["review_decided_at"])
+		} else if _, err := time.Parse(time.RFC3339Nano, stamp); err != nil {
+			t.Fatalf("restricted review timestamp invalid: %v", err)
+		}
 		hidden, err := restricted.ListRevalidationEvents(ctx, tenant, outsider, repo, 10)
 		if err != nil {
 			t.Fatalf("restricted outsider list: %v", err)
@@ -198,6 +213,26 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 		if err := db.QueryRowContext(ctx, "SELECT id FROM memory_revalidation_events WHERE fact_id=$1 AND new_snapshot_id=$2", fact, third).Scan(&pending); err != nil {
 			t.Fatal(err)
 		}
+		pendingEvents, err := restricted.ListRevalidationEvents(ctx, tenant, reviewer, repo, 10)
+		if err != nil {
+			t.Fatalf("restricted pending-event listing: %v", err)
+		}
+		var pendingFound bool
+		for _, row := range pendingEvents {
+			if row["id"] != pending {
+				continue
+			}
+			pendingFound = true
+			if _, present := row["review_decision_id"]; present {
+				t.Fatalf("undecided event has review ID: %v", row["review_decision_id"])
+			}
+			if _, present := row["review_decided_at"]; present {
+				t.Fatalf("undecided event has review timestamp: %v", row["review_decided_at"])
+			}
+		}
+		if !pendingFound {
+			t.Fatal("restricted reviewer cannot see undecided event")
+		}
 		if _, err := restricted.RecordRevalidationDecision(ctx, tenant, reviewer, pending, "unresolved", "Requires a deeper source review."); err != nil {
 			t.Fatalf("restricted reviewer insert: %v", err)
 		}
@@ -216,6 +251,18 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE memory_revalidation_decisions SET reason='tampered evidence' WHERE event_id=$1", pending); err == nil {
 			t.Fatal("restricted role unexpectedly updated immutable decision")
+		}
+	}
+	if len(rows) == 1 {
+		if rows[0]["review_decision_id"] != createdDecision.DecisionID {
+			t.Fatalf("review listing omitted immutable decision ID: got=%v", rows[0]["review_decision_id"])
+		}
+		stamp, ok := rows[0]["review_decided_at"].(string)
+		if !ok {
+			t.Fatalf("review listing omitted decision timestamp: got=%v", rows[0]["review_decided_at"])
+		}
+		if _, err := time.Parse(time.RFC3339Nano, stamp); err != nil {
+			t.Fatalf("invalid review decision timestamp %q: %v", stamp, err)
 		}
 	}
 	if len(rows) != 1 || rows[0]["review_outcome"] != "still_valid" || rows[0]["reviewer_id"] != reviewer {

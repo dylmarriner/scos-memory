@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -39,7 +40,8 @@ func (s *pgCodeStore) ListRevalidationEvents(ctx context.Context, tenant, princi
 			" e.old_snapshot_id::text,e.new_snapshot_id::text,e.old_symbol_version_id::text," +
 			" new_symbol.id::text,old_snapshot.commit_id,new_snapshot.commit_id," +
 			" old_symbol.path,new_symbol.path," +
-			" decision.outcome,decision.reviewer_id::text,decision.reason" +
+			" decision.outcome,decision.reviewer_id::text,decision.reason," +
+			" decision.id::text,decision.created_at" +
 			" FROM memory_revalidation_events e" +
 			" JOIN memory_items item ON item.id=e.fact_id AND item.tenant_id=$1" +
 			" JOIN namespaces ns ON ns.id=item.namespace_id" +
@@ -66,9 +68,10 @@ func (s *pgCodeStore) ListRevalidationEvents(ctx context.Context, tenant, princi
 		defer rows.Close()
 		for rows.Next() {
 			var id, fact, link, continuity, status, oldSnapshot, newSnapshot, oldVersion, oldCommit, newCommit, oldPath string
-			var newVersion, newPath, outcome, reviewer, reason sql.NullString
+			var newVersion, newPath, outcome, reviewer, reason, decisionID sql.NullString
+			var decisionAt sql.NullTime
 			if err := rows.Scan(&id, &fact, &link, &continuity, &status, &oldSnapshot, &newSnapshot, &oldVersion,
-				&newVersion, &oldCommit, &newCommit, &oldPath, &newPath, &outcome, &reviewer, &reason); err != nil {
+				&newVersion, &oldCommit, &newCommit, &oldPath, &newPath, &outcome, &reviewer, &reason, &decisionID, &decisionAt); err != nil {
 				return err
 			}
 			event := map[string]any{
@@ -86,6 +89,8 @@ func (s *pgCodeStore) ListRevalidationEvents(ctx context.Context, tenant, princi
 				event["review_outcome"] = outcome.String
 				event["reviewer_id"] = reviewer.String
 				event["review_reason"] = reason.String
+				event["review_decision_id"] = decisionID.String
+				event["review_decided_at"] = decisionAt.Time.UTC().Format(time.RFC3339Nano)
 			}
 			out = append(out, event)
 		}
