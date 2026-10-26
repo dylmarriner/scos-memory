@@ -52,10 +52,17 @@ func TestPGSnapshotEventsAPIAuthIsolationAndPagination(t *testing.T) {
 		return &page
 	}
 	first := request(owner, map[string]any{"snapshot_id": snap, "limit": 2})
+	if first.RepositoryID != repo || first.Branch != "main" || first.CommitID != "events-api-1" || first.ParentCommitID != "" {
+		t.Fatalf("initial page lost authenticated snapshot identity: %+v", first)
+	}
 	if len(first.Events) != 2 || first.Events[0].Path != "a.go" || first.Events[1].Path != "b.go" || first.NextAfterPath != "b.go" {
 		t.Fatalf("unexpected first page: %+v", first)
 	}
 	second := request(owner, map[string]any{"snapshot_id": snap, "limit": 2, "after_path": first.NextAfterPath})
+	if second.RepositoryID != first.RepositoryID || second.Branch != first.Branch ||
+		second.CommitID != first.CommitID || second.ParentCommitID != first.ParentCommitID {
+		t.Fatalf("pagination changed immutable snapshot commit binding: first=%+v second=%+v", first, second)
+	}
 	if len(second.Events) != 1 || second.Events[0].Path != "c.go" || second.NextAfterPath != "" {
 		t.Fatalf("unexpected second page: %+v", second)
 	}
@@ -107,6 +114,9 @@ func TestPGSnapshotEventsAPIAuthIsolationAndPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	changes := request(owner, map[string]any{"snapshot_id": target})
+	if changes.RepositoryID != repo || changes.Branch != "main" || changes.CommitID != "events-api-2" || changes.ParentCommitID != "events-api-1" {
+		t.Fatalf("target page lost parent/target commit binding: %+v", changes)
+	}
 	if len(changes.Events) != 2 ||
 		changes.Events[0].Path != "b.go" || changes.Events[0].Kind != "modify" ||
 		changes.Events[1].Path != "c.go" || changes.Events[1].Kind != "delete" {

@@ -35,7 +35,8 @@ rollback, and restricted application-role tenant isolation.
 
 `POST /v2/code/snapshots/events` accepts a JSON object with a required
 `snapshot_id` UUID, optional `limit` (1–1000, default 100), and optional
-`after_path` keyset cursor. The response contains `snapshot_id`, ordered
+`after_path` keyset cursor. The response contains `snapshot_id`, `repository_id`, `branch`,
+`commit_id`, `parent_commit_id` (empty for an initial snapshot), ordered
 `events` with immutable ID, change kind, path, previous path (when
 applicable), evidence class and timestamp, and `next_after_path` when another
 page exists. Paths are ordered using PostgreSQL's C collation, including the
@@ -64,3 +65,23 @@ on databases whose default collation is not C. The index is created
 CONCURRENTLY by the non-transactional migration runner to avoid blocking
 production writes during a future separately authorized deployment. The restricted-role HTTP
 regression establishes the verified tenant context within the read transaction.
+
+## Server-recorded commit binding (P3, 2026-10-26)
+
+The authenticated event page now includes immutable repository, branch,
+target commit and parent commit identifiers from the snapshot rows, not
+caller-supplied event metadata. Every page repeats those fields. The offline
+Git verifier rejects a wrong/missing target or parent commit, cross-page
+repository/branch changes, and incomplete exports. Real-Git Python fixtures
+and PostgreSQL 17 HTTP integration tests cover the failure cases, including
+tenant-scoped restricted-role reads. On the isolated development worktree,
+the uncached full Go suite passed against a disposable PostgreSQL 17 with
+all 74 migrations; go vet and 34 Python Git-worklist/verifier fixtures
+passed. These are source-level checks, not deployed-system evidence.
+
+**Trust boundary:** commit IDs were supplied by the index request. This
+binds the export to the server's *recorded* snapshot identity but does not
+attest that uploaded source bytes match the Git commit tree. A forged Git
+object or incorrect source payload can still carry the claimed commit ID.
+End-to-end Git tree/source attestation, authenticated export provenance,
+and large-repository acceptance remain open. No production deployment.

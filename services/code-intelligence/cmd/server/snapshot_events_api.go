@@ -23,9 +23,13 @@ type snapshotEvent struct {
 }
 
 type snapshotEventsPage struct {
-	SnapshotID    string          `json:"snapshot_id"`
-	Events        []snapshotEvent `json:"events"`
-	NextAfterPath string          `json:"next_after_path,omitempty"`
+	SnapshotID     string          `json:"snapshot_id"`
+	RepositoryID   string          `json:"repository_id"`
+	Branch         string          `json:"branch"`
+	CommitID       string          `json:"commit_id"`
+	ParentCommitID string          `json:"parent_commit_id"`
+	Events         []snapshotEvent `json:"events"`
+	NextAfterPath  string          `json:"next_after_path,omitempty"`
 }
 
 func (s *server) handlePGSnapshotEvents(w http.ResponseWriter, r *http.Request) {
@@ -75,24 +79,29 @@ func (s *server) handlePGSnapshotEvents(w http.ResponseWriter, r *http.Request) 
 	}
 	// Deliberately return 404 for foreign, missing, and incomplete snapshots.
 	// Do not expose the existence of another tenant's repository.
-	var exists bool
+	page := snapshotEventsPage{SnapshotID: req.SnapshotID, Events: make([]snapshotEvent, 0)}
+	// Commit IDs are immutable snapshot metadata supplied at index time.
+	// This is an authenticated server record, NOT cryptographic proof that
+	// the indexed bytes match the corresponding Git object tree.
 	err := s.pgStore.db.QueryRowContext(r.Context(), `
-        SELECT EXISTS (
-            SELECT 1 FROM code_repository_snapshots s
-            JOIN code_repositories r ON r.id=s.repository_id
-            WHERE s.id=$1 AND s.tenant_id=$2 AND r.tenant_id=$2
-              AND s.status IN ('active','superseded')
-        )`, req.SnapshotID, tenant).Scan(&exists)
+        SELECT s.repository_id::text, s.branch, s.commit_id,
+               COALESCE(p.commit_id, '')
+        FROM code_repository_snapshots s
+        JOIN code_repositories r ON r.id=s.repository_id
+        LEFT JOIN code_repository_snapshots p ON p.id=s.parent_snapshot_id
+        WHERE s.id=$1 AND s.tenant_id=$2 AND r.tenant_id=$2
+          AND s.status IN ('active','superseded')
+    `, req.SnapshotID, tenant).Scan(
+		&page.RepositoryID, &page.Branch, &page.CommitID, &page.ParentCommitID)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "snapshot not found", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		log.Printf("snapshot events access check: %v", err)
 		http.Error(w, "snapshot events unavailable", http.StatusInternalServerError)
 		return
 	}
-	if !exists {
-		http.Error(w, "snapshot not found", http.StatusNotFound)
-		return
-	}
-	page := snapshotEventsPage{SnapshotID: req.SnapshotID, Events: make([]snapshotEvent, 0)}
 	// The event ledger has FORCE ROW LEVEL SECURITY. Explicit tenant
 	// predicates are not enough: the restricted runtime role must establish
 	// scos.tenant_id transaction-locally on the very same connection.
