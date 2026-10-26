@@ -61,6 +61,16 @@ Otherwise, a malicious `refs/replace/*` entry can make a trusted commit SHA
 resolve to a different tree, allowing forged manifest bytes to pass an offline
 verification. A real-Git RED/GREEN regression covers this substitution.
 
+**Legacy graft ancestry hardening (2026-10-27):** Git's deprecated
+`info/grafts` file can invent commit parents even with
+`GIT_NO_REPLACE_OBJECTS=1`. The shared Git reader refuses any nonempty graft
+file, resolving its path through Git so linked worktrees cannot bypass the
+check. The worklist and joint bundle verifier both previously accepted an
+unrelated forged parent with a grafted target commit (real-Git RED/GREEN
+regressions); a linked-worktree regression verifies the common-directory
+check. Inspect any graft file manually before trusting ancestry. This remains
+local verification only, not server attestation.
+
 **Trust boundary:** Both readback APIs report server-stored metadata, and
 Git commit labels originally come from the indexing caller. A compromised
 server or malicious indexing client can still lie. Even externally bound
