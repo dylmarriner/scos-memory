@@ -92,6 +92,18 @@ class GitWorklistTests(unittest.TestCase):
         self.assertEqual(full_by_path["stable.py"]["content"], "def stable():\n    pass\n")
         self.assertFalse(full_by_path["stable.py"]["reuse_parent"])
 
+    def test_unchanged_whitespace_source_is_sent_without_parent_reuse(self):
+        (self.repo / "blank.py").write_text("  \n\t")
+        (self.repo / "empty.py").write_text("")
+        parent = self.commit("blank parent")
+        (self.repo / "new.py").write_text("answer = 42\n")
+        head = self.commit("new file")
+        result = self.invoke("--commit", head, "--parent", parent)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = {f["path"]: f for f in json.loads(result.stdout)["files"]}
+        self.assertFalse(files["blank.py"]["reuse_parent"])
+        self.assertEqual(files["blank.py"]["content"], "  \n\t")
+
     def test_large_unchanged_source_fits_guarded_delta_but_not_full_source(self):
         (self.repo / "stable.py").write_text("data = '" + "a" * 20000 + "'\n")
         parent = self.commit("big parent")

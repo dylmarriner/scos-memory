@@ -161,6 +161,13 @@ def build(
         # Git ancestry alone never authorizes omission: the server must
         # independently validate parent commit, extractor, config and evidence.
         content_hash, source = read_blob(repo, blob, not unchanged, max_bytes)
+        if unchanged and content_hash != hashlib.sha256(b"").hexdigest() and int(subprocess.check_output(["git", "cat-file", "-s", blob], cwd=repo)) <= max_bytes:
+            # Whitespace-only parents have no persisted source chunk.
+            # Read small unchanged blobs to avoid unsafe source-less reuse.
+            _, candidate = read_blob(repo, blob, True, max_bytes)
+            if not candidate.strip():
+                unchanged = False
+                source = candidate
         content = ""
         if not unchanged:
             try:

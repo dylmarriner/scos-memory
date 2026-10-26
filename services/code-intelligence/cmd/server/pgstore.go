@@ -354,7 +354,8 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		}
 		parentFile, exists := parentHashes[f.Path]
 		if f.Content != "" || f.ExpectedParentCommit == "" || parentCommit != f.ExpectedParentCommit ||
-			!exists || parentFile.hash != f.ContentHash || parentFile.language != f.Language || !parentFile.hasSource {
+			!exists || parentFile.hash != f.ContentHash || parentFile.language != f.Language ||
+			(!parentFile.hasSource && f.ContentHash != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") {
 			return fmt.Errorf("%w: reusable active parent evidence unavailable for %s", errSnapshotConflict, f.Path)
 		}
 	}
