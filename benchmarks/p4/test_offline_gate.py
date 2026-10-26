@@ -273,5 +273,52 @@ class OfflineGateTests(unittest.TestCase):
                 self.assertIn(f"forbidden_at_{k}", result.stderr)
 
 
+    def test_rejects_duplicate_nested_fixture_evidence_keys(self):
+        # A repeated forbidden_ids/expected_ids key can conceal contradictory labels.
+        for field in ("forbidden_ids", "expected_ids"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                raw = FIXTURE.read_text()
+                key = '"' + field + '":'
+                self.assertIn(key, raw)
+                raw = raw.replace(key, key + ' [], ' + key, 1)
+                fixture = pathlib.Path(directory) / "fixture.json"
+                fixture.write_text(raw)
+                baseline = pathlib.Path(directory) / "baseline.json"
+                result = run_gate("--fixture", fixture, "--record-baseline", baseline)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("duplicate JSON key", result.stderr)
+                self.assertFalse(baseline.exists())
+
+    def test_rejects_duplicate_nested_baseline_evidence_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = pathlib.Path(directory) / "baseline.json"
+            self.assertEqual(run_gate("--record-baseline", baseline).returncode, 0)
+            raw = baseline.read_text()
+            self.assertIn('"retrieved_ids":', raw)
+            baseline.write_text(raw.replace(
+                '"retrieved_ids":', '"retrieved_ids": [], "retrieved_ids":', 1))
+            result = run_gate("--check", baseline)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("duplicate JSON key", result.stderr)
+
+    def test_rejects_nonfinite_fixture_and_baseline_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory) / "fixture.json"
+            fixture.write_text(FIXTURE.read_text().replace(
+                "{", '{"unused_metadata": NaN, ', 1))
+            baseline = pathlib.Path(directory) / "baseline.json"
+            result = run_gate("--fixture", fixture, "--record-baseline", baseline)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("non-finite JSON", result.stderr)
+            self.assertFalse(baseline.exists())
+
+            self.assertEqual(run_gate("--record-baseline", baseline).returncode, 0)
+            baseline.write_text(baseline.read_text().replace(
+                "{", '{"unused_metadata": Infinity, ', 1))
+            result = run_gate("--check", baseline)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("non-finite JSON", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

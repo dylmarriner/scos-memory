@@ -32,9 +32,31 @@ METRICS = ("recall@5", "recall@10", "recall@20",
 FORBIDDEN_DEPTHS = (5, 10, 20)
 
 
+def parse_evidence_json(raw: str | bytes) -> dict:
+    """Fail closed on ambiguous/non-standard benchmark evidence JSON.
+
+    Default json.loads silently keeps the final duplicate key, including
+    nested relevance labels and ranked evidence. It also accepts NaN/Infinity,
+    which are not JSON numbers. Neither is valid for a frozen quality gate.
+    """
+    def unique_keys(pairs: list[tuple[str, object]]) -> dict:
+        result: dict = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key!r}")
+            result[key] = value
+        return result
+
+    def reject_nonfinite(value: str) -> None:
+        raise ValueError(f"non-finite JSON numeric constant: {value}")
+
+    return json.loads(raw, object_pairs_hook=unique_keys,
+                      parse_constant=reject_nonfinite)
+
+
 def load_fixture(path: pathlib.Path) -> tuple[dict, str]:
     content = path.read_bytes()
-    fixture = json.loads(content)
+    fixture = parse_evidence_json(content)
     if not isinstance(fixture, dict) or not fixture.get("corpus") or not fixture.get("cases"):
         raise ValueError("fixture requires nonempty corpus and cases")
     documents = fixture["corpus"]
@@ -231,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
             args.record_baseline.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
             print(f"RECORDED {len(current['cases'])} real lexical retrieval cases to {args.record_baseline}")
             return 0
-        baseline = json.loads(args.check.read_text())
+        baseline = parse_evidence_json(args.check.read_text())
         errors = validate_baseline(fixture, baseline)
         if not errors:
             errors = compare(current, baseline)

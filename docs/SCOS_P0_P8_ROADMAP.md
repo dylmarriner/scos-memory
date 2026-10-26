@@ -117,6 +117,18 @@ Operational rules:
 
 ---
 
+## P0 frozen benchmark evidence integrity (2026-10-27)
+
+The isolated lexical smoke quality gate now rejects duplicate JSON keys at
+any nesting level in the fixture and measured baseline, including conflicting
+relevance/forbidden labels and retrieved evidence IDs. It also rejects
+non-standard NaN/Infinity JSON constants. Three new regression tests with
+four RED-before-fix failure cases became GREEN; the original 7-case measured
+rankings, metrics and zero forbidden exposure were preserved while the
+generator digest was requalified. This strengthens **only** offline smoke
+evidence integrity. Representative live P0/P4 retrieval, tenant and temporal
+isolation, latency, model-space qualification and production gates remain open.
+
 ## Definition-of-done evidence pointer correction (2026-10-27)
 
 The §41 checker previously named two **nonexistent** test functions and reported
