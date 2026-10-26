@@ -17,7 +17,7 @@ import subprocess
 import sys
 import uuid
 
-from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, tree_blobs
+from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, parse_export_json, tree_blobs
 
 
 def fingerprint_manifest(repo: Path, commit: str | None) -> dict[str, tuple[str, str]]:
@@ -37,7 +37,7 @@ def read_complete_pages(
     with path.open(encoding="utf-8") as stream:
         for line in stream:
             if line.strip():
-                pages.append(json.loads(line))
+                pages.append(parse_export_json(line))
     if not pages:
         raise WorklistError("no exported event pages supplied")
     events = []

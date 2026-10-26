@@ -22,6 +22,8 @@ from scos_verify_snapshot_manifest import hash_git_blobs, read_pages
 def verify_bundle(
     repo: Path, target: str, parent: str | None, snapshot_id: str,
     manifest_pages: Path, event_pages: Path,
+    expected_repository_id: str | None = None,
+    expected_branch: str | None = None,
 ) -> dict:
     if parent is not None:
         if parent == target:
@@ -38,6 +40,10 @@ def verify_bundle(
         manifest_pages, snapshot_id, target, parent or "", return_identity=True)
     events, event_identity = read_complete_pages(
         event_pages, snapshot_id, target, parent, return_identity=True)
+    if expected_repository_id is not None and manifest_identity[0] != expected_repository_id:
+        raise WorklistError("export does not match trusted repository_id")
+    if expected_branch is not None and manifest_identity[1] != expected_branch:
+        raise WorklistError("export does not match trusted branch")
     if manifest_identity != event_identity:
         differences = [
             name for name, a, b in zip(
@@ -82,6 +88,8 @@ def main() -> int:
     source.add_argument("--parent", help="Trusted indexed parent Git revision")
     source.add_argument("--initial", action="store_true", help="Snapshot has no indexed parent")
     parser.add_argument("--snapshot-id", required=True)
+    parser.add_argument("--repository-id", help="Independently trusted SCOS repository UUID")
+    parser.add_argument("--branch", help="Independently trusted SCOS branch name")
     parser.add_argument("--manifest-pages-file", type=Path, required=True)
     parser.add_argument("--event-pages-file", type=Path, required=True)
     args = parser.parse_args()
@@ -90,12 +98,23 @@ def main() -> int:
             raise WorklistError("snapshot_id must be a canonical UUID")
         if args.parent == "":
             raise WorklistError("trusted parent cannot be empty")
+        if (args.repository_id is None) != (args.branch is None):
+            raise WorklistError("trusted repository_id and branch must be supplied together")
+        if args.repository_id is not None:
+            try:
+                if str(uuid.UUID(args.repository_id)) != args.repository_id:
+                    raise ValueError("not canonical")
+            except (ValueError, AttributeError) as exc:
+                raise WorklistError("trusted repository_id must be a canonical UUID") from exc
+            if not args.branch.strip() or "\x00" in args.branch:
+                raise WorklistError("trusted branch must be nonempty")
         repo = args.git_dir.resolve()
         target = commit_oid(repo, args.commit)
         parent = commit_oid(repo, args.parent) if args.parent is not None else None
         result = verify_bundle(
             repo, target, parent, args.snapshot_id,
-            args.manifest_pages_file, args.event_pages_file)
+            args.manifest_pages_file, args.event_pages_file,
+            args.repository_id, args.branch)
     except (WorklistError, ValueError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         print(f"scos_verify_snapshot_bundle: {exc}", file=sys.stderr)
         return 1

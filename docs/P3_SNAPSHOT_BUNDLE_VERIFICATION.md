@@ -26,6 +26,8 @@ python3 scripts/scos_verify_snapshot_bundle.py \
   --commit '<trusted-target-sha>' \
   --parent '<trusted-indexed-parent-sha>' \
   --snapshot-id '<snapshot-uuid>' \
+  --repository-id '<independently-trusted-scos-repository-uuid>' \
+  --branch '<independently-trusted-scos-branch>' \
   --manifest-pages-file /private/manifest.ndjson \
   --event-pages-file /private/events.ndjson
 ```
@@ -34,6 +36,16 @@ For a first indexed snapshot with no indexed parent, use `--initial` instead
 of `--parent`. With `--parent`, the resolved parent must be a **strict**
 ancestor of the target. An incomplete page export, mismatched repository or
 branch, forged source hash, or missing/incorrect event fails closed.
+
+**Trusted external identity (2026-10-27):** The optional `--repository-id`
+and `--branch` flags must be supplied together. Obtain their values from an
+independent trusted inventory or operator record, **not** from either exported
+JSON document. Without these flags, the verifier checks that both exports
+agree but cannot detect a consistently forged repository/branch claim across
+both. A noncanonical UUID, missing paired flag, or mismatched trusted identity
+fails closed. The JSON reader rejects duplicate keys at any nesting depth,
+including conflicting repository, branch, event or file metadata that Python's
+default JSON parser would otherwise silently overwrite.
 
 Verification:
 
@@ -51,7 +63,8 @@ verification. A real-Git RED/GREEN regression covers this substitution.
 
 **Trust boundary:** Both readback APIs report server-stored metadata, and
 Git commit labels originally come from the indexing caller. A compromised
-server or malicious indexing client can still lie. This tool proves that
+server or malicious indexing client can still lie. Even externally bound
+repository and branch labels do not prove the server indexed the Git bytes. This tool proves that
 the *provided exports* are mutually consistent with a trusted local Git
 tree, not that the server parsed those bytes, signed the exports, or has
 an attested chain of custody. It does not establish representative P3

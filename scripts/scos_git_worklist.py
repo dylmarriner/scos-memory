@@ -38,6 +38,24 @@ class WorklistError(Exception):
     pass
 
 
+def parse_export_json(line: str) -> object:
+    """Decode an export page without silently accepting conflicting JSON keys.
+
+    Python's default JSON decoder keeps the final value of duplicate keys,
+    which can conceal a conflicting repository, branch or snapshot identity.
+    Apply the check recursively to nested event/file records as well.
+    """
+    def unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise WorklistError(f"duplicate JSON key: {key!r}")
+            result[key] = value
+        return result
+
+    return json.loads(line, object_pairs_hook=unique_pairs)
+
+
 def git_env() -> dict[str, str]:
     """Do not let ambient Git configuration redirect an explicit repository.
 
