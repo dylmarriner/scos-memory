@@ -22,7 +22,10 @@ import uuid
 from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, tree_blobs
 
 
-def read_pages(path: Path, snapshot_id: str, commit_id: str) -> dict[str, tuple[str, str]]:
+def read_pages(
+    path: Path, snapshot_id: str, commit_id: str,
+    expected_parent_commit: str | None = None,
+) -> dict[str, tuple[str, str]]:
     files: dict[str, tuple[str, str]] = {}
     last_path: str | None = None
     binding: tuple[str, str, str] | None = None
@@ -46,6 +49,8 @@ def read_pages(path: Path, snapshot_id: str, commit_id: str) -> dict[str, tuple[
                 raise WorklistError(f"page {number} has invalid repository_id")
             if not isinstance(branch, str) or not branch.strip() or not isinstance(parent, str):
                 raise WorklistError(f"page {number} has invalid branch or parent_commit_id")
+            if expected_parent_commit is not None and parent != expected_parent_commit:
+                raise WorklistError(f"page {number} has wrong or missing trusted parent commit binding")
             identity = (repo, branch, parent)
             if binding is not None and identity != binding:
                 raise WorklistError(f"page {number} changed repository, branch or parent binding")
@@ -144,6 +149,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--git-dir", type=Path, required=True)
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--parent", help="Optional trusted indexed parent Git revision")
     parser.add_argument("--snapshot-id", required=True)
     parser.add_argument("--pages-file", type=Path, required=True)
     args = parser.parse_args()
@@ -152,7 +158,20 @@ def main() -> int:
             raise WorklistError("snapshot_id must be a canonical UUID")
         repo = args.git_dir.resolve()
         commit = commit_oid(repo, args.commit)
-        manifest = read_pages(args.pages_file, args.snapshot_id, commit)
+        if args.parent is not None and not args.parent:
+            raise WorklistError("trusted parent revision cannot be empty")
+        parent = commit_oid(repo, args.parent) if args.parent is not None else None
+        if parent is not None:
+            if parent == commit:
+                raise WorklistError("trusted parent must be a strict ancestor of target")
+            ancestry = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", parent, commit],
+                cwd=repo, env=git_env(), stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=False,
+            )
+            if ancestry.returncode != 0:
+                raise WorklistError("trusted parent must be an ancestor of target")
+        manifest = read_pages(args.pages_file, args.snapshot_id, commit, parent)
         blobs = tree_blobs(repo, commit)
         if manifest.keys() != blobs.keys():
             missing = sorted(blobs.keys() - manifest.keys())
