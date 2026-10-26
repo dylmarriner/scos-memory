@@ -99,6 +99,13 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
                                      extra_args=("--parent", parent))
                 self.assertNotEqual(result.returncode, 0, result.stdout)
 
+    def test_explicit_parent_rejects_target_itself_and_empty_revision(self):
+        same = self.invoke([self.page(self.files, parent_commit_id=self.commit)],
+                           extra_args=("--parent", self.commit))
+        self.assertNotEqual(same.returncode, 0, same.stdout)
+        empty = self.invoke(extra_args=("--parent", ""))
+        self.assertNotEqual(empty.returncode, 0, empty.stdout)
+
     def test_explicit_parent_must_be_target_ancestor(self):
         unrelated = self.commit
         git(self.repo, "checkout", "--orphan", "unrelated")

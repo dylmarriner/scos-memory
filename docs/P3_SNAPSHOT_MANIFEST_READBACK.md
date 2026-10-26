@@ -40,8 +40,8 @@ python3 scripts/scos_verify_snapshot_manifest.py \
 
 When the snapshot has a parent, supply `--parent` using a **trusted** local
 Git revision. The verifier requires the server-recorded `parent_commit_id`
-to match the resolved parent object and confirms that parent is an ancestor
-of the target. Omit `--parent` for initial snapshots; without it, parent
+to match the resolved parent object and confirms that parent is a strict ancestor
+of the target (not the target itself). Omit `--parent` for initial snapshots; without it, parent
 metadata is checked for cross-page consistency but not independently bound
 to a Git commit. This does not provide server-side Git attestation.
 

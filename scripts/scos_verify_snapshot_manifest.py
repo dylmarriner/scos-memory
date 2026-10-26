@@ -158,8 +158,12 @@ def main() -> int:
             raise WorklistError("snapshot_id must be a canonical UUID")
         repo = args.git_dir.resolve()
         commit = commit_oid(repo, args.commit)
-        parent = commit_oid(repo, args.parent) if args.parent else None
+        if args.parent is not None and not args.parent:
+            raise WorklistError("trusted parent revision cannot be empty")
+        parent = commit_oid(repo, args.parent) if args.parent is not None else None
         if parent is not None:
+            if parent == commit:
+                raise WorklistError("trusted parent must be a strict ancestor of target")
             ancestry = subprocess.run(
                 ["git", "merge-base", "--is-ancestor", parent, commit],
                 cwd=repo, env=git_env(), stdout=subprocess.DEVNULL,
