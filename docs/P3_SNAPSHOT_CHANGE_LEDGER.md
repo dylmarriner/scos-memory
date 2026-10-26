@@ -60,5 +60,7 @@ argument rejection. These tests do not prove production deployment.
 
 The authenticated event endpoint uses migration 000073 to index
 `(snapshot_id, path COLLATE "C")`, matching the deterministic keyset cursor
-on databases whose default collation is not C. The restricted-role HTTP
+on databases whose default collation is not C. The index is created
+CONCURRENTLY by the non-transactional migration runner to avoid blocking
+production writes during a future separately authorized deployment. The restricted-role HTTP
 regression establishes the verified tenant context within the read transaction.
