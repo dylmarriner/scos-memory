@@ -112,7 +112,7 @@ Operational rules:
 | **P4** | Hybrid memory + code retrieval | **MERGED TO MAIN (PR #29 on 2026-09-10); frozen P0/live performance qualification still pending** |
 | **P5** | Temporal evidence | **PARTIAL** |
 | **P6** | Unified memory + code graph | **PARTIAL** |
-| **P7** | Stale-memory revalidation | **PARTIAL: durable activation events and governed review listing exist; review/approval lifecycle remains** |
+| **P7** | Stale-memory revalidation | **PARTIAL: durable activation events and governed review listing merged; append-only review decisions remain in draft PR #64** |
 | **P8** | Impact intelligence | **CODE IMPACT + GOVERNED MEMORY LINKS PARTIAL; FULL CROSS-DOMAIN ACCEPTANCE OPEN** |
 
 ---
@@ -700,11 +700,37 @@ P4 additionally allows repo-aware retrieval to return code evidence beside memor
 - memory version/supersession system
 - `memory_code_links`
 
+## Implemented / review evidence (not final acceptance)
+
+- [x] Emit durable snapshot-activation revalidation events for linked changed/deleted code.
+- [x] Deterministic continuity classification with changed/deleted/ambiguous and safe-rename evidence (merged PR #63 additionally guards ambiguous copied successors).
+- [ ] Governed human review decisions: **review branch only, unmerged.** The P7 decision slice adds an append-only, one-decision-per-event review record, namespace reviewer authorization (read + promote/administer), a rationale requirement, a restricted-role RLS policy, and a POST decision endpoint. It projects review outcomes separately from the original event status. **This is an assessment record only:** no fact, version, standing answer or OKF knowledge is automatically changed. A future correction/reopen mechanism remains necessary.
+
+**P7 governed review decision TDD (2026-10-26; isolated AMD):**
+A real PostgreSQL 17 integration test failed RED with HTTP 405 for the missing review operation. The implementation passed GREEN for authorized decision creation, read-only/outsider denial, invalid outcome/rationale rejection, duplicate-decision conflict, immutable source-event/fact preservation, and restricted `scos_app` role read/write and update denial. Codex review identified a valid Unicode JSON body-limit defect: a 2000-character escaped non-BMP rationale was RED (HTTP 400), then GREEN after increasing the bounded request limit to 32 KiB (enough for 2000 JSON-escaped surrogate pairs). Migration `000070_memory_revalidation_review_decisions.sql` and the role-grant policy protect the append-only evidence. This is branch-local evidence only until CI, independent review and merge.
+
+**P7 review-finding remediation (2026-10-26; branch-only, unmerged):** CodeRabbit correctly identified that append-only review decisions obstruct parent event/tenant deletion. Migration `000071_revalidation_privileged_purge.sql` now adds a migration-owner-only, transactionally audited decision purge and an immutable tenant-independent ledger. The decision trigger rejects ordinary DELETE/UPDATE; `scos_app` cannot call the purge, delete decisions, or read the ledger. Real PostgreSQL tests first failed RED because the purge function was missing, then passed GREEN for restricted-role denial, transaction rollback, exact purge count and immutable audit evidence. `docs/P7_REVALIDATION_PURGE_RUNBOOK.md` documents the explicit-approval operator workflow. **Remaining review gate:** independent assessment of the privilege boundary, CI on the pushed commit, and validation of full tenant-offboarding dependencies outside P7; this function is not a general tenant-delete implementation. Distinct unsupported-outcome, short-rationale and >2000-character rationale cases were also added. No production tenant data was purged.
+
+**P7 draft PR #64 main-sync verification (2026-10-26; isolated AMD):**
+Reconciled the draft branch with main (including merged P7 ambiguous-copy guard
+and P8 graph impact changes), preserving both roadmap evidence streams.
+On a newly provisioned disposable PostgreSQL 17 database, all migrations
+000001–000071 and all RLS policies applied successfully. Three repetitions
+of focused governed-review/ambiguous-copy PostgreSQL tests passed with
+mandatory restricted-role checks; the full uncached Go suite passed
+(51 packages), as did `go vet ./...`. An earlier attempt against an older
+throwaway database failed the ambiguous-copy test because that database
+lacked migration 000069; fresh sequential migrations resolved the fixture
+mismatch. This is **review-branch evidence**, not merged-main or production
+qualification. PR #64 remains draft pending fresh CI and independent
+privilege-boundary review; no production purge is authorized.
+
 ## Remaining
 
 - [x] Emit durable revalidation events when linked symbols change/delete (migration 000064; snapshot activation).
 - [x] Resolve continuity into unchanged / renamed / changed / deleted / ambiguous states (unchanged produces no event; ambiguous requires review).
 - [x] Use deterministic classification first; see duplicate-copy hardening evidence below.
+- [ ] Qualify continuity classification against labelled corpora and remaining edge cases.
 - [ ] For changed/ambiguous cases, use existing reasoning models to create a proposal, not an authoritative mutation.
 - [ ] Outcomes: still-valid, needs-review, superseded, invalidated, unresolved.
 - [ ] Create governed memory versions/supersession relations only when approved.

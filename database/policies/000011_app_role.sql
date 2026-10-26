@@ -34,6 +34,13 @@ GRANT USAGE ON SCHEMA public TO scos_app;
 -- Minimal DML only -- no DDL, no ALL PRIVILEGES. Matches
 -- database/integration/rls_test.go's fixture grant exactly.
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO scos_app;
+-- Revalidation decisions are authoritative append-only reviewer evidence.
+-- This must follow the blanket grants on fresh installs; migration 000070
+-- also revokes these rights when upgrading an existing scos_app role.
+REVOKE UPDATE, DELETE ON memory_revalidation_decisions FROM scos_app;
+-- Privileged purge evidence and its entry point are never runtime APIs.
+REVOKE ALL ON memory_revalidation_decision_purge_audit FROM scos_app;
+REVOKE ALL ON FUNCTION purge_memory_revalidation_decisions_for_tenant(uuid,text) FROM PUBLIC, scos_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO scos_app;
 
 -- Without this, every future migration that adds a table silently leaves
