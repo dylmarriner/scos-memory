@@ -56,7 +56,7 @@ failed before the fix: one accepted the forged cross-tenant symbol at link
 creation; another returned a previously valid link after its symbol identity
 drifted to a foreign repository. Both now pass. The writer and reader require
 `code_symbols.repository_id = code_repositories.id`, and migration
-`000076_memory_code_link_symbol_repository_guard.sql` applies the same
+`000077_memory_code_link_symbol_repository_guard.sql` applies the same
 invariant to direct SQL link writers. The direct-SQL regression checks for
 SQLSTATE 23514 rather than merely accepting an arbitrary database error.
 
@@ -71,7 +71,7 @@ transaction-context migration and integration acceptance; it is not silently
 treated as completed by this endpoint.
 
 The focused and full memory-intelligence integration tests passed against a
-**disposable PostgreSQL 17/pgvector database**, with 75 baseline migration files plus the new 000076 integrity migration,
+**disposable PostgreSQL 17/pgvector database**, with 75 baseline migration files plus the new 000077 integrity migration,
 20 policy files and a non-BYPASSRLS `scos_app` role. The P4 CI PostgreSQL job
 now runs the memory-intelligence integration suite for future PRs and main.
 
