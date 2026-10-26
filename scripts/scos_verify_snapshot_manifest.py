@@ -62,9 +62,12 @@ def read_pages(path: Path, snapshot_id: str, commit_id: str) -> dict[str, tuple[
                     raise WorklistError("invalid manifest path")
                 if last_path is not None and name.encode() <= last_path.encode():
                     raise WorklistError(f"duplicate or unordered manifest path: {name!r}")
-                if not isinstance(language, str) or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                if not isinstance(language, str) or not isinstance(digest, str):
                     raise WorklistError(f"invalid SHA-256 or language for {name!r}")
-                files[name] = (language, digest.lower())
+                normalized = digest.strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+                    raise WorklistError(f"invalid SHA-256 for {name!r}")
+                files[name] = (language, normalized)
                 last_path = name
             cursor = page.get("next_after_path", "")
             if not isinstance(cursor, str):

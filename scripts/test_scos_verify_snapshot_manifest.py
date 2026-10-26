@@ -66,6 +66,12 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
         result = self.invoke([self.page(files)])
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_index_handler_accepted_surrounding_sha_whitespace(self):
+        files = [dict(x) for x in self.files]
+        files[0]["content_hash"] = "  \t" + files[0]["content_hash"].upper() + " \n"
+        result = self.invoke([self.page(files)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_forged_file_bytes_under_true_commit_are_rejected(self):
         files = [dict(x) for x in self.files]
         files[0]["content_hash"] = hashlib.sha256(b"forged\n").hexdigest()
