@@ -65,6 +65,40 @@ snapshot and recomputes its call edges. The parser work scales with changed
 content, but total writes and structural recomputation still scale with the
 manifest. The P3 performance acceptance gate therefore remains **open**.
 
+## Bounded call-edge insert experiment (2026-10-26, development branch)
+
+The structural pass previously issued one PostgreSQL statement per resolved
+call edge. It now resolves exactly the same ambiguity-constrained graph in
+memory and inserts edges in batches of at most 200 rows (601 bind arguments).
+All rows still belong to the snapshot's activation transaction. This removes
+SQL round trips, **not** whole-snapshot graph resolution or full-snapshot
+writes. An isolated PostgreSQL 17 container was migrated through 000074;
+the full Go integration suite, vet, Python Git fixtures, and a real 202-file
+cross-batch regression passed. The regression checks edge count, uniqueness,
+extractor and confidence provenance. Small-fixture clean/incremental graph
+equivalence also passed.
+
+Sequential single-iteration benchmarks against the **same disposable database**
+on AMD, three iterations per case, median milliseconds. The baseline was
+measured after the batched version, not in randomized order; accumulating
+database history and warm-cache effects mean the differences are directional
+rather than a controlled performance guarantee:
+
+| Files | Prior per-edge clean | Prior per-edge incremental | Batched clean | Batched incremental |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | 92.7 | 101.4 | 121.2 | 119.0 |
+| 128 | 460.1 | 531.5 | 443.5 | 368.3 |
+| 256 | 878.9 | 828.6 | 809.6 | 826.8 |
+
+A further 1024-file **Go-only** benchmark (three runs, one changed file)
+recorded median clean 3463.8 ms and incremental 3244.9 ms, with ~18.8 MiB
+versus ~15.3 MiB allocated per operation. This is one synthetic package,
+not a representative multi-language repository. The 32-file incremental
+case regressed in the directional comparison, and 256 was effectively
+unchanged; **no general speedup claim or P3 performance sign-off follows**.
+A bounded dependency-aware structural recomputation design, realistic
+1k–10k+ multi-language tests, and explicit latency budgets remain necessary.
+
 ## Remaining acceptance
 
 Benchmark representative multi-language repositories at 1k, 5k and 10k+

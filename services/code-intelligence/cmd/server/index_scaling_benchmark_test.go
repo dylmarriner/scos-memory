@@ -96,7 +96,7 @@ func BenchmarkPGIndexSnapshotScaling(b *testing.B) {
 	if err := db.QueryRowContext(ctx, "INSERT INTO tenants(name) VALUES($1) RETURNING id", fmt.Sprintf("scaling-benchmark-%d", time.Now().UnixNano())).Scan(&tenant); err != nil {
 		b.Fatal(err)
 	}
-	for _, size := range []int{32, 128, 256} {
+	for _, size := range []int{32, 128, 256, 1024} {
 		for _, incremental := range []bool{false, true} {
 			mode := "clean"
 			if incremental {
