@@ -104,13 +104,18 @@ clean versus incremental snapshot equivalence, and fail-closed parent
 compatibility (extractor/configuration/commit/path/hash/language/source evidence).
 These are small concrete fixtures, not throughput benchmarks on real large repositories.
 
-## Offline event sidecar (not yet persisted)
+## Offline event sidecar (not a server attestation)
 
 Use the same Git worklist arguments with `--events-only` to output deterministic
 Git add/modify/delete/rename/copy events without changing the existing index
 request schema. The sidecar is for local inspection and validation only. Git
 copy detection is heuristic and can report additions instead; it is not proof
-of persisted events or full P3 completion.
+of persisted events or full P3 completion. The sidecar includes the
+caller-declared SCOS `repository_id` and `branch` beside the resolved target
+and parent commit IDs, allowing local consumers to cross-check identity.
+Both output modes reject invalid SCOS identities, empty parent revisions,
+identical parent/target commits, and non-ancestor parents. These values remain
+**caller declarations**, not server-signed or server-verified Git provenance.
 
 
 ## Verify exported snapshot events against trusted Git trees (offline)
