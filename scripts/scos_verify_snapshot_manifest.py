@@ -25,7 +25,8 @@ from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_
 def read_pages(
     path: Path, snapshot_id: str, commit_id: str,
     expected_parent_commit: str | None = None,
-) -> dict[str, tuple[str, str]]:
+    *, return_identity: bool = False,
+) -> dict[str, tuple[str, str]] | tuple[dict[str, tuple[str, str]], tuple[str, str, str]]:
     files: dict[str, tuple[str, str]] = {}
     last_path: str | None = None
     binding: tuple[str, str, str] | None = None
@@ -93,6 +94,9 @@ def read_pages(
         raise WorklistError("empty manifest export")
     if pending:
         raise WorklistError("incomplete manifest export: outstanding cursor")
+    if return_identity:
+        assert binding is not None
+        return files, binding
     return files
 
 
