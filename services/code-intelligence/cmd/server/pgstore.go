@@ -384,6 +384,20 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 		}
 		allDecls = append(allDecls, decls...)
 	}
+	// Durable classification uses the indexed manifest rather than
+	// unverified client-provided Git sidecar labels.
+	oldManifest := make(map[string]snapshotFileFingerprint, len(parentHashes))
+	for path, fp := range parentHashes {
+		oldManifest[path] = snapshotFileFingerprint{Hash: fp.hash, Language: fp.language}
+	}
+	newManifest := make(map[string]snapshotFileFingerprint, len(files))
+	for _, f := range files {
+		newManifest[f.Path] = snapshotFileFingerprint{Hash: f.ContentHash, Language: f.Language}
+	}
+	if err := recordSnapshotChangesLocked(ctx, tx, snapshotID, oldManifest, newManifest); err != nil {
+		return fmt.Errorf("record indexed snapshot changes: %w", err)
+	}
+
 	if err := insertCallEdgesLocked(ctx, tx, snapshotID, allDecls); err != nil {
 		return fmt.Errorf("index call edges: %w", err)
 	}
