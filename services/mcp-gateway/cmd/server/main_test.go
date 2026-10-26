@@ -616,18 +616,26 @@ func TestCodeRevalidationToolForwardsOnlyTheVerifiedIdentity(t *testing.T) {
 	got, err := s.dispatchTool(r.Context(), r,
 		requestIdentity{TenantID: "real-tenant", PrincipalID: "real-principal"},
 		"scos_code_revalidations",
-		map[string]any{"repository_id": "11111111-1111-1111-1111-111111111111", "limit": float64(3)})
+		map[string]any{"repository_id": "11111111-1111-1111-1111-111111111111", "limit": float64(3), "pending_only": true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := got.([]any); !ok {
 		t.Fatalf("unexpected event payload %T: %v", got, got)
 	}
-	if gotPath != "/v2/code/revalidations?limit=3&repository_id=11111111-1111-1111-1111-111111111111" {
+	if gotPath != "/v2/code/revalidations?limit=3&pending_only=true&repository_id=11111111-1111-1111-1111-111111111111" {
 		t.Errorf("unexpected forwarded route %q", gotPath)
 	}
 	if gotTenant != "real-tenant" || gotPrincipal != "real-principal" {
 		t.Fatalf("identity spoofing: forwarded tenant=%q principal=%q", gotTenant, gotPrincipal)
+	}
+	for _, bad := range []any{"true", float64(1), nil} {
+		if _, err := s.dispatchTool(r.Context(), r,
+			requestIdentity{TenantID: "real-tenant", PrincipalID: "real-principal"},
+			"scos_code_revalidations",
+			map[string]any{"repository_id": "11111111-1111-1111-1111-111111111111", "pending_only": bad}); err == nil {
+			t.Errorf("invalid pending_only value %v accepted", bad)
+		}
 	}
 	for _, input := range []any{float64(0), float64(101), float64(1.5), "100"} {
 		if _, err := s.dispatchTool(r.Context(), r,

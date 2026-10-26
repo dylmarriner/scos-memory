@@ -222,6 +222,52 @@ func TestPGRevalidationGovernedDecision(t *testing.T) {
 		t.Fatalf("decision not projected with evidence: %+v", rows)
 	}
 
+	// Pending-only is a governed work queue, not an unfiltered audit.
+	// Older decisions must not crowd out the bounded list of work.
+	fourth, err := store.CreateSnapshot(ctx, repo, tenant, "main", "fourth", "heuristic-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, fourth, repo, []PGFileInput{{
+		Path: "a.go", Language: "go", ContentHash: hashContent("fourth revision"),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var expectedPending string
+	if err := db.QueryRowContext(ctx, "SELECT id::text FROM memory_revalidation_events WHERE fact_id=$1 AND new_snapshot_id=$2", fact, fourth).Scan(&expectedPending); err != nil {
+		t.Fatal(err)
+	}
+	pendingRequest := httptest.NewRequest(http.MethodGet, "/v2/code/revalidations?repository_id="+repo+"&pending_only=true&limit=3", nil)
+	pendingRequest = pendingRequest.WithContext(auth.ContextWithClaims(pendingRequest.Context(), auth.Claims{TenantID: tenant, PrincipalID: reviewer}))
+	pendingResponse := httptest.NewRecorder()
+	srv.handlePGRevalidations(pendingResponse, pendingRequest)
+	if pendingResponse.Code != http.StatusOK {
+		t.Fatalf("pending queue HTTP %d: %s", pendingResponse.Code, pendingResponse.Body.String())
+	}
+	var pendingRows []map[string]any
+	if err := json.Unmarshal(pendingResponse.Body.Bytes(), &pendingRows); err != nil {
+		t.Fatal(err)
+	}
+	if len(pendingRows) != 1 || pendingRows[0]["id"] != expectedPending {
+		t.Fatalf("pending list included decided event or missed work: %+v", pendingRows)
+	}
+	for _, bad := range []string{"TRUE", "1", "invalid"} {
+		invalid := httptest.NewRequest(http.MethodGet, "/v2/code/revalidations?repository_id="+repo+"&pending_only="+bad, nil)
+		invalid = invalid.WithContext(auth.ContextWithClaims(invalid.Context(), auth.Claims{TenantID: tenant, PrincipalID: reviewer}))
+		rejected := httptest.NewRecorder()
+		srv.handlePGRevalidations(rejected, invalid)
+		if rejected.Code != http.StatusBadRequest {
+			t.Fatalf("invalid pending_only=%q accepted: %d", bad, rejected.Code)
+		}
+	}
+	hiddenPending := httptest.NewRequest(http.MethodGet, "/v2/code/revalidations?repository_id="+repo+"&pending_only=true", nil)
+	hiddenPending = hiddenPending.WithContext(auth.ContextWithClaims(hiddenPending.Context(), auth.Claims{TenantID: tenant, PrincipalID: outsider}))
+	hiddenResponse := httptest.NewRecorder()
+	srv.handlePGRevalidations(hiddenResponse, hiddenPending)
+	if hiddenResponse.Code != http.StatusOK || hiddenResponse.Body.String() != "[]\n" {
+		t.Fatalf("unauthorized reviewer saw pending queue: %d %s", hiddenResponse.Code, hiddenResponse.Body.String())
+	}
+
 	// A tenant purge must never become an ordinary app-role delete. The
 	// explicit privileged path must leave durable audit evidence behind.
 	if _, err := db.ExecContext(ctx, "DELETE FROM memory_revalidation_decisions WHERE tenant_id=$1", tenant); err == nil {
