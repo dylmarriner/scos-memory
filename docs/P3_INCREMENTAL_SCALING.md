@@ -188,3 +188,49 @@ end-to-end proportional indexing speedup**. No randomized baseline A/B,
 multi-language workload, 5k–10k+ repository, resource budget or production
 p50/p95 evidence is available. The P3 changed-content dependency-bounded
 recomputation and performance acceptance gates remain open.
+
+
+## Changed-manifest dependency-bounded CALLS reuse (2026-10-26)
+
+The incremental indexer now avoids re-resolving native CALLS edges for
+**unchanged, independent scopes**, even when other scopes changed. It first
+collects changed/deleted file scopes from *both* snapshots; all qualified
+callers are conservatively invalidated because a cross-package target may
+have appeared, disappeared or become ambiguous. A single transaction checks
+parent resolver provenance, native-only edges, complete declaration identity
+and graph-relevant fingerprints in copied scopes, and absence of edges from
+copied scopes into dirty scopes. Any mismatch falls back to full resolution.
+
+PostgreSQL 17 integration tests use a disposable database with all 74
+migration files. An observed RED fixture initially reported 0 copied and 2
+resolved edges for an independent-package change; after implementation the
+same fixture reports 1 copied and 1 resolved. Additional fixtures verify
+qualified cross-package invalidation, deleted-scope isolation, legacy
+resolver rejection, non-native parent edge rejection, and stable
+duplicate-content identities. A 128-file, four-package test with one
+changed file reports **93 copied CALLS edges, 31 resolved CALLS edges,
+1 parsed file, 127 reused files**, and matches a fresh clean rebuild's
+qualified source/target edge set exactly. These are work counters and
+equivalence evidence, **not** an end-to-end speedup or a multi-language
+throughput acceptance result.
+
+Repeated single-iteration PostgreSQL 17 indexing benchmarks on the AMD
+Ryzen 5 2600 compared identical one-changed-file four-package workloads.
+Parent indexing, fixture creation and snapshot allocation were excluded.
+The control forced a legacy parent resolver version to disable graph reuse
+while preserving unchanged-file declaration reuse. Three repeats per case:
+
+| Files | Partial graph copy median | Full graph resolution median | Interpretation |
+| ---: | ---: | ---: | --- |
+| 128 | 409.8 ms | 415.4 ms | Within run-to-run variation |
+| 1,024 | 3,296.2 ms | 3,238.9 ms | No end-to-end improvement demonstrated |
+
+The 1,024-file partial case allocated about 14.3 MB versus 15.3 MB for
+full resolution. This work avoids unnecessary call resolution and reduces
+allocations in this fixture, but snapshot/database write costs still
+dominate and measured wall time does **not** establish a speedup. The
+comparison is a controlled development fixture, not production throughput.
+
+The remaining acceptance work includes 1k–10k+ representative multi-language
+fixtures, repeated wall-clock/resource benchmarks, defined regression budgets,
+trusted Git-commit provenance and production rollout/recovery evidence.
