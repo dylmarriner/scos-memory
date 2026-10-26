@@ -45,7 +45,7 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}()
 	statements := []string{
 		"CREATE TABLE " + schema + ".code_repositories (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, canonical_path text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,canonical_path))",
-		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
+		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
 		"GRANT SELECT,INSERT,UPDATE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots TO scos_app",
 		"ALTER TABLE " + schema + ".code_repositories ENABLE ROW LEVEL SECURITY",
@@ -79,6 +79,20 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if repo == "" || snap == "" {
 		t.Fatalf("missing IDs: repo=%q snap=%q", repo, snap)
+	}
+	building, err := store.IndexingSnapshot(ctx, repo, tenantA)
+	if err != nil || building != snap {
+		t.Fatalf("tenant-scoped indexing snapshot = %q, %v; want %q", building, err, snap)
+	}
+	if _, err := admin.ExecContext(ctx, "UPDATE "+schema+".code_repository_snapshots SET status='active',activated_at=now() WHERE id=$1", snap); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := store.LatestIndexedBranch(ctx, repo, tenantA)
+	if err != nil || branch != "main" {
+		t.Fatalf("tenant-scoped latest branch = %q, %v; want main", branch, err)
+	}
+	if branch, err := store.LatestIndexedBranch(ctx, repo, tenantB); err != nil || branch != "" {
+		t.Fatalf("foreign tenant latest branch = %q, %v; want empty", branch, err)
 	}
 	var visible int
 	if err := app.QueryRowContext(ctx, "SELECT count(*) FROM code_repositories").Scan(&visible); err != nil {

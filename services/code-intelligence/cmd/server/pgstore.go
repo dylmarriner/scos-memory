@@ -1705,10 +1705,12 @@ func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []st
 // when nothing has been indexed.
 func (s *pgCodeStore) LatestIndexedBranch(ctx context.Context, repositoryID, tenantID string) (string, error) {
 	var branch string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT branch FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('ready', 'active') AND activated_at IS NOT NULL
-		 ORDER BY activated_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&branch)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            SELECT branch FROM code_repository_snapshots
+             WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('ready', 'active') AND activated_at IS NOT NULL
+             ORDER BY activated_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&branch)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -1825,10 +1827,12 @@ func (s *pgCodeStore) FailInterruptedSnapshots(ctx context.Context) (int64, erro
 // or "" when none is.
 func (s *pgCodeStore) IndexingSnapshot(ctx context.Context, repositoryID, tenantID string) (string, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id::text FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')
-		 ORDER BY created_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&id)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            SELECT id::text FROM code_repository_snapshots
+             WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')
+             ORDER BY created_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&id)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

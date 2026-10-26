@@ -102,15 +102,20 @@ transaction-context migration and integration acceptance; it is not silently
 treated as completed by this endpoint.
 
 **Incremental runtime scoping evidence (2026-10-27, still draft):**
-`pgCodeStore.EnsureRepository` and `CreateSnapshot` now use the existing
+`pgCodeStore.EnsureRepository`, `CreateSnapshot`,
+`LatestIndexedBranch` and `IndexingSnapshot` now use the existing
 transaction-local `scos.tenant_id` helper, and that helper rejects invalid
 tenant UUIDs before starting database work. A new real-PostgreSQL integration
 test creates an isolated schema with FORCE RLS on both repository and snapshot
 tables, uses the restricted `scos_app` role, and verifies that the own-tenant
-write/read works, a foreign tenant cannot create a snapshot, and no tenant
+write/read works, pending and active snapshot discovery is tenant-scoped,
+a foreign tenant cannot create or discover a snapshot, and no tenant
 context leaks into subsequent pooled-connection reads. The regression failed
 before the change with SQLSTATE 42501 on repository creation and passed after
-the change on disposable PostgreSQL 17. The full non-database Go suite and
+the change on disposable PostgreSQL 17. A second RED case found that
+unscoped `IndexingSnapshot` returned an empty result for an authorized
+tenant; both snapshot-discovery reads now pass under forced RLS. The full
+non-database Go suite and
 `go vet` passed. **This does not activate RLS on the four production code
 tables:** indexing, historical queries, activation, recovery, and symbol-version
 paths still require coordinated scoping and restricted-role integration before

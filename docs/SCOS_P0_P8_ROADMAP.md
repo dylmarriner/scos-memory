@@ -793,8 +793,9 @@ snapshot FK migration and HTTP endpoint tests pass.
 **Open isolation gate:** legacy code repository, snapshot, symbol and symbol-version
 tables lack independent forced RLS; code-indexer/runtime tenant-context
 changes and real-PostgreSQL qualification are required before enabling it. A first TDD-scoped
-code-indexer increment (2026-10-27) moves repository registration and snapshot
-creation into transaction-local tenant context and rejects malformed tenant
+code-indexer increment (2026-10-27) moves repository registration, snapshot
+creation and pending/active snapshot discovery into transaction-local tenant
+context and rejects malformed tenant
 UUIDs. A disposable PostgreSQL 17 test with isolated forced-RLS shadow tables
 and the non-BYPASSRLS runtime role reproduced a SQLSTATE 42501 denial before
 the change and passed afterward, including foreign-tenant and connection-leak
