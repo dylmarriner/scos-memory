@@ -130,6 +130,77 @@ class SnapshotBundleTests(unittest.TestCase):
         ], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def rerun_existing_exports(self, args=()):
+        return subprocess.run([
+            sys.executable, str(SCRIPT), "--git-dir", str(self.repo),
+            "--commit", self.target, "--parent", self.parent,
+            "--snapshot-id", SNAPSHOT,
+            "--manifest-pages-file", str(self.repo / "manifest.ndjson"),
+            "--event-pages-file", str(self.repo / "events.ndjson"),
+            *args,
+        ], capture_output=True, text=True)
+
+    def test_trusted_repository_and_branch_accept_matching_export(self):
+        result = self.invoke(args=["--repository-id", REPO, "--branch", "main"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_trusted_repository_rejects_consistently_forged_both_exports(self):
+        result = self.invoke(
+            manifests=[self.page("files", self.manifest, repository_id=OTHER_REPO)],
+            events=[self.page("events", self.events, repository_id=OTHER_REPO)],
+            args=["--repository-id", REPO, "--branch", "main"])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("trusted repository", result.stderr)
+
+    def test_trusted_branch_rejects_consistently_forged_both_exports(self):
+        result = self.invoke(
+            manifests=[self.page("files", self.manifest, branch="release")],
+            events=[self.page("events", self.events, branch="release")],
+            args=["--repository-id", REPO, "--branch", "main"])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("trusted branch", result.stderr)
+
+    def test_trusted_repository_id_must_be_canonical_uuid(self):
+        result = self.invoke(args=["--repository-id", "not-a-uuid", "--branch", "main"])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("canonical UUID", result.stderr)
+
+    def test_manifest_export_rejects_duplicate_json_identity_keys(self):
+        self.assertEqual(self.invoke().returncode, 0)
+        path = self.repo / "manifest.ndjson"
+        raw = path.read_text()
+        path.write_text(raw.replace('"branch": "main"', '"branch": "release", "branch": "main"'))
+        result = self.rerun_existing_exports()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("duplicate JSON key", result.stderr)
+
+    def test_event_export_rejects_duplicate_json_identity_keys(self):
+        self.assertEqual(self.invoke().returncode, 0)
+        path = self.repo / "events.ndjson"
+        raw = path.read_text()
+        path.write_text(raw.replace('"repository_id": "' + REPO + '"',
+                                    '"repository_id": "' + OTHER_REPO + '", "repository_id": "' + REPO + '"'))
+        result = self.rerun_existing_exports()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("duplicate JSON key", result.stderr)
+
+    def test_partial_trusted_identity_is_rejected(self):
+        for args in (["--repository-id", REPO], ["--branch", "main"]):
+            with self.subTest(args=args):
+                result = self.invoke(args=args)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("supplied together", result.stderr)
+
+    def test_nested_duplicate_event_key_is_rejected(self):
+        self.assertEqual(self.invoke().returncode, 0)
+        path = self.repo / "events.ndjson"
+        raw = path.read_text()
+        path.write_text(raw.replace('"change_kind": "modify"',
+                                    '"change_kind": "delete", "change_kind": "modify"'))
+        result = self.rerun_existing_exports()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("duplicate JSON key", result.stderr)
+
     def test_git_replace_cannot_forge_trusted_commit_tree(self):
         # A local Git replacement ref can make the original SHA appear to
         # contain different source bytes unless replacement lookup is disabled.

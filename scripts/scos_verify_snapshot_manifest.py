@@ -19,7 +19,7 @@ import subprocess
 import sys
 import uuid
 
-from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, tree_blobs
+from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, parse_export_json, tree_blobs
 
 
 def read_pages(
@@ -36,7 +36,7 @@ def read_pages(
             if not line.strip():
                 continue
             count += 1
-            page = json.loads(line)
+            page = parse_export_json(line)
             if not isinstance(page, dict) or page.get("snapshot_id") != snapshot_id:
                 raise WorklistError(f"page {number} has incorrect snapshot_id")
             if page.get("commit_id") != commit_id:
