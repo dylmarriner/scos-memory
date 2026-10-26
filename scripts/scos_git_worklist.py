@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -53,7 +54,19 @@ def parse_export_json(line: str) -> object:
             result[key] = value
         return result
 
-    return json.loads(line, object_pairs_hook=unique_pairs)
+    def reject_nonfinite(value: str) -> object:
+        # Python accepts NaN and +/-Infinity even though RFC 8259 JSON does not.
+        # Evidence exports must fail closed, including unknown nested fields.
+        raise WorklistError(f"non-finite JSON constant: {value}")
+
+    def finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise WorklistError(f"non-finite JSON number: {value}")
+        return parsed
+
+    return json.loads(line, object_pairs_hook=unique_pairs,
+                      parse_constant=reject_nonfinite, parse_float=finite_float)
 
 
 def git_env() -> dict[str, str]:

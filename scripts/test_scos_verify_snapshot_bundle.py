@@ -201,6 +201,29 @@ class SnapshotBundleTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("duplicate JSON key", result.stderr)
 
+    def test_nonfinite_manifest_export_values_fail_closed(self):
+        for constant in ("NaN", "Infinity", "-Infinity", "1e999", "-1e999"):
+            with self.subTest(constant=constant):
+                self.assertEqual(self.invoke().returncode, 0)
+                path = self.repo / "manifest.ndjson"
+                raw = path.read_text()
+                path.write_text(raw.replace('"files": [', '"unconsumed": {"nested": ' + constant + '}, "files": ['))
+                result = self.rerun_existing_exports()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("non-finite JSON", result.stderr)
+
+    def test_nonfinite_event_export_values_fail_closed(self):
+        for constant in ("NaN", "Infinity", "-Infinity", "1e999", "-1e999"):
+            with self.subTest(constant=constant):
+                self.assertEqual(self.invoke().returncode, 0)
+                path = self.repo / "events.ndjson"
+                raw = path.read_text()
+                path.write_text(raw.replace('"change_kind": "modify"',
+                                            '"unconsumed": [' + constant + '], "change_kind": "modify"'))
+                result = self.rerun_existing_exports()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("non-finite JSON", result.stderr)
+
     def test_git_replace_cannot_forge_trusted_commit_tree(self):
         # A local Git replacement ref can make the original SHA appear to
         # contain different source bytes unless replacement lookup is disabled.

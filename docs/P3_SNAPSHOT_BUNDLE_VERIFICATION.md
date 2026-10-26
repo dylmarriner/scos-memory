@@ -45,7 +45,13 @@ agree but cannot detect a consistently forged repository/branch claim across
 both. A noncanonical UUID, missing paired flag, or mismatched trusted identity
 fails closed. The JSON reader rejects duplicate keys at any nesting depth,
 including conflicting repository, branch, event or file metadata that Python's
-default JSON parser would otherwise silently overwrite.
+default JSON parser would otherwise silently overwrite. The shared
+export parser also rejects nonstandard `NaN`, `Infinity` and `-Infinity`
+constants and exponent-overflow numbers at any nesting depth, including
+unknown fields, so malformed
+evidence cannot be certified by Python's permissive JSON decoder. The
+standalone manifest and event verifiers use this same strict parser, and all
+four Git verification suites are exercised in CI.
 
 Verification:
 
