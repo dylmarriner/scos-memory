@@ -85,6 +85,8 @@ def verify_events(
         elif kind == "delete":
             if path not in expected_delete or previous or evidence != "snapshot_manifest":
                 raise WorklistError(f"invalid delete evidence for {path!r}")
+            if path in seen_delete:
+                raise WorklistError(f"duplicate deletion coverage for {path!r}")
             seen_delete.add(path)
         elif kind == "add":
             if path not in expected_add or previous or evidence != "snapshot_manifest":
@@ -99,6 +101,8 @@ def verify_events(
             if kind == "rename":
                 if previous not in expected_delete or new_count[fp] != 1:
                     raise WorklistError(f"rename origin/target not uniquely supported: {path!r}")
+                if previous in seen_delete:
+                    raise WorklistError(f"duplicate deletion coverage for {previous!r}")
                 seen_delete.add(previous)
             elif new.get(previous) != fp:
                 raise WorklistError(f"copy origin is not unchanged in target: {path!r}")

@@ -113,6 +113,30 @@ class SnapshotEventVerificationTests(unittest.TestCase):
         result = self.invoke(target, events, parent, pages=pages)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_rename_and_explicit_delete_cannot_consume_same_old_path(self):
+        parent, target, events = self.fixture()
+        events.append({"change_kind": "delete", "path": "before.py",
+                       "evidence_class": "snapshot_manifest"})
+        events.sort(key=lambda event: event["path"].encode())
+        result = self.invoke(target, events, parent)
+        self.assertNotEqual(result.returncode, 0,
+                            "duplicate rename-source deletion must not be certified")
+        self.assertIn("duplicate", result.stderr.lower())
+
+    def test_explicit_delete_before_rename_also_fails(self):
+        (self.repo / "a.py").write_text("content = 1\n")
+        parent = self.commit("parent")
+        (self.repo / "a.py").rename(self.repo / "z.py")
+        target = self.commit("target")
+        events = [
+            {"change_kind": "delete", "path": "a.py", "evidence_class": "snapshot_manifest"},
+            {"change_kind": "rename", "path": "z.py", "previous_path": "a.py",
+             "evidence_class": "unambiguous_content"},
+        ]
+        result = self.invoke(target, events, parent)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicate", result.stderr.lower())
+
     def test_ambiguous_duplicate_content_cannot_be_called_rename(self):
         (self.repo / "one.py").write_text("same = 1\n")
         (self.repo / "two.py").write_text("same = 1\n")
