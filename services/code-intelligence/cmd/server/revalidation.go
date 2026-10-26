@@ -23,13 +23,14 @@ var errReviewDecisionExists = errors.New("revalidation event already reviewed")
 
 // ListRevalidationEvents returns immutable event evidence and, when present,
 // its separate, append-only human assessment. Neither changes the memory fact.
-func (s *pgCodeStore) ListRevalidationEvents(ctx context.Context, tenant, principal, repository string, limit int) ([]map[string]any, error) {
+func (s *pgCodeStore) ListRevalidationEvents(ctx context.Context, tenant, principal, repository string, limit int, pendingOnly ...bool) ([]map[string]any, error) {
 	if !reviewUUID.MatchString(tenant) || !reviewUUID.MatchString(principal) || !reviewUUID.MatchString(repository) {
 		return nil, fmt.Errorf("tenant, principal and repository must be UUIDs")
 	}
 	if limit < 1 || limit > 100 {
 		return nil, fmt.Errorf("limit must be 1..100")
 	}
+	onlyPending := len(pendingOnly) > 0 && pendingOnly[0]
 	out := make([]map[string]any, 0)
 	err := s.withCodeTenantContext(ctx, tenant, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SELECT set_config('scos.principal_id',$1,true)", principal); err != nil {
@@ -51,6 +52,7 @@ func (s *pgCodeStore) ListRevalidationEvents(ctx context.Context, tenant, princi
 			" LEFT JOIN code_symbol_versions new_symbol ON new_symbol.id=e.new_symbol_version_id" +
 			" LEFT JOIN memory_revalidation_decisions decision ON decision.event_id=e.id" +
 			" WHERE e.tenant_id=$1 AND item.sensitivity<=ns.sensitivity_ceiling" +
+			" AND (NOT $5::boolean OR (e.review_status='needs_review' AND decision.event_id IS NULL))" +
 			" ORDER BY e.created_at DESC,e.id DESC LIMIT $4"
 		var exists bool
 		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM code_repositories WHERE id=$1 AND tenant_id=$2)", repository, tenant).Scan(&exists); err != nil {
@@ -59,7 +61,7 @@ func (s *pgCodeStore) ListRevalidationEvents(ctx context.Context, tenant, princi
 		if !exists {
 			return errReviewRepoNotFound
 		}
-		rows, err := tx.QueryContext(ctx, q, tenant, repository, principal, limit)
+		rows, err := tx.QueryContext(ctx, q, tenant, repository, principal, limit, onlyPending)
 		if err != nil {
 			return fmt.Errorf("query reviews: %w", err)
 		}
@@ -243,7 +245,15 @@ func (s *server) handlePGRevalidations(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
-	events, err := s.pgStore.ListRevalidationEvents(r.Context(), tenant, principal, repository, limit)
+	pendingOnly := false
+	if rawValues, exists := r.URL.Query()["pending_only"]; exists {
+		if len(rawValues) != 1 || (rawValues[0] != "true" && rawValues[0] != "false") {
+			http.Error(w, "pending_only must be true or false", http.StatusBadRequest)
+			return
+		}
+		pendingOnly = rawValues[0] == "true"
+	}
+	events, err := s.pgStore.ListRevalidationEvents(r.Context(), tenant, principal, repository, limit, pendingOnly)
 	if errors.Is(err, errReviewRepoNotFound) {
 		http.Error(w, "repository not found", http.StatusNotFound)
 		return
