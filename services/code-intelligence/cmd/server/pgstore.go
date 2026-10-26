@@ -441,11 +441,12 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
            status='ready',parsed_file_count=$3,reused_file_count=$4,unparsed_file_count=$5,
            parsed_declaration_count=$6,reused_declaration_count=$7,
            cache_hit_ratio=$8,index_elapsed_ms=$9,extractor_tier_counts=$10::jsonb,
-           copied_call_edge_count=$11,resolved_call_edge_count=$12
+           copied_call_edge_count=$11,resolved_call_edge_count=$12,
+           call_resolver_version=$13
        WHERE id=$1`,
 		snapshotID, len(files), parsedFiles, reusedFiles, unparsedFiles,
 		parsedDecls, reusedDecls, cacheHitRatio, time.Since(started).Milliseconds(),
-		string(tiersJSON), copiedEdges, resolvedEdges); err != nil {
+		string(tiersJSON), copiedEdges, resolvedEdges, nativeCallResolverVersion); err != nil {
 		return fmt.Errorf("mark snapshot ready with indexing metrics: %w", err)
 	}
 
@@ -600,6 +601,11 @@ func buildCallEdgeInsert(snapshotID string, edges []resolvedCallEdge) (string, [
 	return sqlText.String(), args
 }
 
+// Bump this value whenever resolveCallEdges changes its semantics, even if
+// source extraction and its extractor_version remain unchanged. Legacy rows
+// default to a distinct version and therefore fail closed to full resolution.
+const nativeCallResolverVersion = "native-call-resolver-v1"
+
 // copyCompatibleParentCallEdgesLocked avoids whole-snapshot CALLS resolution
 // only when the parent and target have identical declaration identities and
 // graph-relevant evidence. The manifest guard in IndexSnapshot is necessary,
@@ -608,7 +614,8 @@ func buildCallEdgeInsert(snapshotID string, edges []resolvedCallEdge) (string, [
 func copyCompatibleParentCallEdgesLocked(ctx context.Context, tx *sql.Tx, parentID, snapshotID string) (bool, int, error) {
 	var compatible bool
 	err := tx.QueryRowContext(ctx, `SELECT
-        NOT EXISTS (
+        (SELECT call_resolver_version FROM code_repository_snapshots WHERE id=$1)=$3
+        AND NOT EXISTS (
             SELECT 1 FROM
                 (SELECT * FROM code_symbol_versions WHERE snapshot_id=$1) p
                 FULL JOIN
@@ -634,7 +641,7 @@ func copyCompatibleParentCallEdgesLocked(ctx context.Context, tx *sql.Tx, parent
             WHERE e.snapshot_id=$1
               AND (e.relation <> 'CALLS' OR e.confidence_class <> 'static_analysis'
                    OR src.id IS NULL OR dst.id IS NULL)
-        )`, parentID, snapshotID).Scan(&compatible)
+        )`, parentID, snapshotID, nativeCallResolverVersion).Scan(&compatible)
 	if err != nil || !compatible {
 		return false, 0, err
 	}

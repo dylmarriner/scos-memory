@@ -176,3 +176,47 @@ func TestPGCallGraphCopyRejectsNonNativeParentEdges(t *testing.T) {
 		t.Fatalf("non-native parent graph leaked: copied=%d resolved=%d total=%d", copied, resolved, edgeCount)
 	}
 }
+
+// A resolver algorithm upgrade must not inherit graph edges created by old
+// semantics, even if the extractor and source manifest are unchanged.
+func TestPGCallGraphCopyRejectsLegacyResolverVersion(t *testing.T) {
+	store, db := testPGStore(t)
+	ctx := context.Background()
+	tenant := testTenant(t, db)
+	repo, err := store.EnsureRepository(ctx, tenant, "/p3-resolver-version/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "package demo\nfunc A(){B()}\nfunc B(){}\n"
+	file := PGFileInput{Path: "code.go", Language: "go", Content: content, ContentHash: hashContent(content)}
+	parent, err := store.CreateSnapshot(ctx, repo, tenant, "main", "parent", "go/parser-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IndexSnapshot(ctx, parent, repo, []PGFileInput{file}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an existing generation indexed by the prior resolver.
+	if _, err := db.ExecContext(ctx, `UPDATE code_repository_snapshots SET call_resolver_version='legacy' WHERE id=$1`, parent); err != nil {
+		t.Fatal(err)
+	}
+	next, err := store.CreateSnapshot(ctx, repo, tenant, "main", "next", "go/parser-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Content = ""
+	file.ReuseParent = true
+	file.ExpectedParentCommit = "parent"
+	if err := store.IndexSnapshot(ctx, next, repo, []PGFileInput{file}); err != nil {
+		t.Fatal(err)
+	}
+	var copied, resolved int
+	var version string
+	if err := db.QueryRowContext(ctx, `SELECT copied_call_edge_count,resolved_call_edge_count,call_resolver_version
+        FROM code_repository_snapshots WHERE id=$1`, next).Scan(&copied, &resolved, &version); err != nil {
+		t.Fatal(err)
+	}
+	if copied != 0 || resolved != 1 || version == "legacy" {
+		t.Fatalf("legacy resolver graph reused: copied=%d resolved=%d version=%s", copied, resolved, version)
+	}
+}

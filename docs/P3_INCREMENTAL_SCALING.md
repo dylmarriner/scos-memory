@@ -156,13 +156,18 @@ or a parent containing non-native graph edges forces a fresh resolver pass.
 All copied edges are remapped to **target snapshot symbol-version UUIDs**,
 preserving immutable history and edge confidence/extractor metadata.
 Migration 000075 adds atomic `copied_call_edge_count` and
-`resolved_call_edge_count` metrics.
+`resolved_call_edge_count` metrics and a versioned `call_resolver_version`
+provenance column. Parent graphs indexed by an older resolver version
+(including pre-migration `legacy` rows) are never copied; they are
+re-resolved. The `nativeCallResolverVersion` constant must be incremented
+whenever call-resolution semantics change independently of the extractor.
 
 A test-first PostgreSQL 17 regression initially failed on the missing
 resolved-edge telemetry, then passed with the implementation. Three integration
 regressions cover identical/reordered complete manifests, deletion of a call
 target followed by restoration, duplicate-content identity reassignment,
-and non-native parent-edge rejection. The full Go suite against an isolated,
+non-native parent-edge rejection, and a RED/GREEN regression for stale
+resolver-version provenance. The full Go suite against an isolated,
 fully migrated PostgreSQL 17 database, `go vet ./...`, and 29 Git Python
 fixtures passed. No production service or paid cloud resources were used.
 
