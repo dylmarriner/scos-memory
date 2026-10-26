@@ -15,8 +15,8 @@ func codeDocumentHash(content string) string {
 }
 
 func (s *pgCodeStore) withCodeTenantContext(ctx context.Context, tenantID string, fn func(*sql.Tx) error) error {
-	if strings.TrimSpace(tenantID) == "" {
-		return fmt.Errorf("tenant id is required for code embedding access")
+	if !snapshotIDUUID.MatchString(tenantID) {
+		return fmt.Errorf("valid tenant UUID is required for code transaction")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

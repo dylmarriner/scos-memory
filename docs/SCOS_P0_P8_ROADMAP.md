@@ -792,7 +792,15 @@ The P6 PR remains blocked on this security finding even though the narrower
 snapshot FK migration and HTTP endpoint tests pass.
 **Open isolation gate:** legacy code repository, snapshot, symbol and symbol-version
 tables lack independent forced RLS; code-indexer/runtime tenant-context
-changes and real-PostgreSQL qualification are required before enabling it.
+changes and real-PostgreSQL qualification are required before enabling it. A first TDD-scoped
+code-indexer increment (2026-10-27) moves repository registration and snapshot
+creation into transaction-local tenant context and rejects malformed tenant
+UUIDs. A disposable PostgreSQL 17 test with isolated forced-RLS shadow tables
+and the non-BYPASSRLS runtime role reproduced a SQLSTATE 42501 denial before
+the change and passed afterward, including foreign-tenant and connection-leak
+checks. This is **preparatory only**, not a four-table RLS rollout: remaining
+code-indexer paths and production migrations are unqualified; PR #92 stays
+draft and the security review remains open.
 See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
 expansion, multi-hop traversal, ranking, inference, server-attested Git
 provenance and production qualification remain open.

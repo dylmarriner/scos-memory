@@ -185,11 +185,13 @@ type PGSymbolVersion struct {
 // indexed; it does not create a duplicate on repeat calls.
 func (s *pgCodeStore) EnsureRepository(ctx context.Context, tenantID, canonicalPath string) (string, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO code_repositories (tenant_id, canonical_path)
-		VALUES ($1, $2)
-		ON CONFLICT (tenant_id, canonical_path) DO UPDATE SET updated_at = now()
-		RETURNING id`, tenantID, canonicalPath).Scan(&id)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            INSERT INTO code_repositories (tenant_id, canonical_path)
+            VALUES ($1, $2)
+            ON CONFLICT (tenant_id, canonical_path) DO UPDATE SET updated_at = now()
+            RETURNING id`, tenantID, canonicalPath).Scan(&id)
+	})
 	if err != nil {
 		return "", fmt.Errorf("ensure repository: %w", err)
 	}
@@ -207,27 +209,29 @@ func (s *pgCodeStore) EnsureRepository(ctx context.Context, tenantID, canonicalP
 // which files it can skip re-parsing (blueprint §35's "for every new
 // snapshot: find parent").
 func (s *pgCodeStore) CreateSnapshot(ctx context.Context, repositoryID, tenantID, branch, commitID, extractorVersion, configHash string) (string, error) {
-	// The parent is reused for unchanged files' parsed declarations, so it
-	// must have been built by the same extractor: a newer extractor's
-	// output (e.g. qualified call names) is never mixed with an older one's.
-	var parentID string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND branch = $2 AND status = 'active' AND extractor_version = $3 AND configuration_hash = $4`,
-		repositoryID, branch, extractorVersion, configHash).Scan(&parentID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("resolve parent snapshot: %w", err)
-	}
 	var id string
-	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO code_repository_snapshots (repository_id, tenant_id, branch, commit_id, extractor_version, configuration_hash, parent_snapshot_id)
-		SELECT r.id, r.tenant_id, $3, $4, $5, $6, NULLIF($7, '')::uuid
-		  FROM code_repositories r
-		 WHERE r.id = $1 AND r.tenant_id = $2
-		ON CONFLICT (repository_id, branch, commit_id, extractor_version, configuration_hash)
-		DO UPDATE SET branch = EXCLUDED.branch
-		RETURNING id`,
-		repositoryID, tenantID, branch, commitID, extractorVersion, configHash, parentID).Scan(&id)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		// Parent lookup and creation must use one tenant-scoped transaction:
+		// pooled SQL connections cannot carry session-scoped identity safely.
+		var parentID string
+		err := tx.QueryRowContext(ctx, `
+            SELECT id FROM code_repository_snapshots
+             WHERE repository_id = $1 AND branch = $2 AND status = 'active'
+               AND extractor_version = $3 AND configuration_hash = $4`,
+			repositoryID, branch, extractorVersion, configHash).Scan(&parentID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("resolve parent snapshot: %w", err)
+		}
+		return tx.QueryRowContext(ctx, `
+            INSERT INTO code_repository_snapshots (repository_id, tenant_id, branch, commit_id, extractor_version, configuration_hash, parent_snapshot_id)
+            SELECT r.id, r.tenant_id, $3, $4, $5, $6, NULLIF($7, '')::uuid
+              FROM code_repositories r
+             WHERE r.id = $1 AND r.tenant_id = $2
+            ON CONFLICT (repository_id, branch, commit_id, extractor_version, configuration_hash)
+            DO UPDATE SET branch = EXCLUDED.branch
+            RETURNING id`,
+			repositoryID, tenantID, branch, commitID, extractorVersion, configHash, parentID).Scan(&id)
+	})
 	if err != nil {
 		return "", fmt.Errorf("create snapshot: %w", err)
 	}

@@ -101,6 +101,22 @@ Adding forced RLS to them requires a coordinated code-indexer/runtime
 transaction-context migration and integration acceptance; it is not silently
 treated as completed by this endpoint.
 
+**Incremental runtime scoping evidence (2026-10-27, still draft):**
+`pgCodeStore.EnsureRepository` and `CreateSnapshot` now use the existing
+transaction-local `scos.tenant_id` helper, and that helper rejects invalid
+tenant UUIDs before starting database work. A new real-PostgreSQL integration
+test creates an isolated schema with FORCE RLS on both repository and snapshot
+tables, uses the restricted `scos_app` role, and verifies that the own-tenant
+write/read works, a foreign tenant cannot create a snapshot, and no tenant
+context leaks into subsequent pooled-connection reads. The regression failed
+before the change with SQLSTATE 42501 on repository creation and passed after
+the change on disposable PostgreSQL 17. The full non-database Go suite and
+`go vet` passed. **This does not activate RLS on the four production code
+tables:** indexing, historical queries, activation, recovery, and symbol-version
+paths still require coordinated scoping and restricted-role integration before
+migration/merge. No production migration was attempted.
+
+
 The focused and full memory-intelligence integration tests passed against a
 **disposable PostgreSQL 17/pgvector database**, with 75 baseline migration files plus the new 000077 integrity migration,
 20 policy files and a non-BYPASSRLS `scos_app` role. The P4 CI PostgreSQL job
