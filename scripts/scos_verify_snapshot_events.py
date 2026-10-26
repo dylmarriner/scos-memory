@@ -78,6 +78,8 @@ def read_complete_pages(
             last_path = name
             events.append(item)
         cursor = page.get("next_after_path", "")
+        if not isinstance(cursor, str):
+            raise WorklistError(f"page {number+1} has invalid pagination cursor")
         if number < len(pages)-1:
             if not items or cursor != last_path:
                 raise WorklistError(f"page {number+1} has invalid pagination cursor")
@@ -103,7 +105,10 @@ def verify_events(
     for event in events:
         path = event["path"]
         kind = event.get("change_kind")
-        previous = event.get("previous_path") or ""
+        raw_previous = event.get("previous_path")
+        if raw_previous is not None and not isinstance(raw_previous, str):
+            raise WorklistError(f"invalid previous_path for {path!r}")
+        previous = raw_previous or ""
         evidence = event.get("evidence_class")
         if kind == "modify":
             if path not in expected_modify or previous or evidence != "exact_path":
@@ -158,7 +163,11 @@ def main() -> int:
             raise WorklistError("snapshot_id must be a canonical UUID")
         repo = args.git_dir.resolve()
         target = commit_oid(repo, args.commit)
-        parent = commit_oid(repo, args.parent) if args.parent else None
+        if args.parent == "":
+            raise WorklistError("trusted parent cannot be empty")
+        parent = commit_oid(repo, args.parent) if args.parent is not None else None
+        if parent == target:
+            raise WorklistError("parent must be a strict ancestor of target")
         if parent and subprocess.run(
             ["git", "merge-base", "--is-ancestor", parent, target],
             cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
