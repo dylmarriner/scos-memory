@@ -40,6 +40,32 @@ class GitWorklistTests(unittest.TestCase):
             capture_output=True, text=True, env=env,
         )
 
+    def test_events_only_rejects_identical_parent_and_target(self):
+        (self.repo / "source.py").write_text("value = 1\n")
+        target = self.commit("only commit")
+        result = self.invoke("--commit", target, "--parent", target, "--events-only")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("same commit", result.stderr)
+
+    def test_events_only_rejects_explicit_empty_parent(self):
+        (self.repo / "source.py").write_text("value = 1\n")
+        target = self.commit("only commit")
+        result = self.invoke("--commit", target, "--parent", "", "--events-only")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("parent", result.stderr)
+
+    def test_events_only_rejects_invalid_repository_identity_and_branch(self):
+        (self.repo / "source.py").write_text("value = 1\n")
+        target = self.commit("only commit")
+        for override, expected in (
+            (("--repository-id", "not-a-uuid"), "repository-id"),
+            (("--branch", " "), "branch"),
+        ):
+            with self.subTest(override=override):
+                result = self.invoke("--commit", target, "--initial", "--events-only", *override)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(expected, result.stderr)
+
     def test_git_replace_ref_does_not_substitute_committed_source(self):
         (self.repo / "source.py").write_text("real = 1\n")
         original = self.commit("trusted")
@@ -177,7 +203,12 @@ class GitWorklistTests(unittest.TestCase):
         head = self.commit("target")
         result = self.invoke("--commit", head, "--parent", parent, "--events-only")
         self.assertEqual(result.returncode, 0, result.stderr)
-        events = json.loads(result.stdout)["events"]
+        sidecar = json.loads(result.stdout)
+        self.assertEqual(sidecar["repository_id"], REPO_ID)
+        self.assertEqual(sidecar["branch"], "main")
+        self.assertEqual(sidecar["parent_commit_id"], parent)
+        self.assertEqual(sidecar["commit_id"], head)
+        events = sidecar["events"]
         self.assertEqual({(e["type"], e["path"]) for e in events},
                          {("rename", "after.py"), ("delete", "removed.py"),
                           ("add", "added.py")})

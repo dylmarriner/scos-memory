@@ -197,31 +197,45 @@ def read_blob(repo: Path, oid: str, include_source: bool, cap: int) -> tuple[str
             process.communicate()
     return digest.hexdigest(), b"".join(fragments) if include_source else b""
 
-def build(
-    repo: Path, repository_id: str, branch: str, target: str,
-    parent: str | None, initial: bool, max_bytes: int, full_source: bool = False,
-) -> bytes:
+def validate_identity(repository_id: str, branch: str) -> str:
+    """Apply the same SCOS identity preconditions to payload and event exports."""
     try:
         repository_id = str(uuid.UUID(repository_id))
     except (ValueError, AttributeError) as exc:
         raise WorklistError("repository-id must be an existing SCOS UUID") from exc
     if not branch.strip() or "\x00" in branch:
         raise WorklistError("branch must be nonempty")
+    return repository_id
+
+
+def resolve_commits(repo: Path, target: str, parent: str | None) -> tuple[str, str | None]:
+    """Require immutable commits and strict parent ancestry in every output mode."""
+    if parent == "":
+        raise WorklistError("trusted parent cannot be empty")
+    head_oid = commit_oid(repo, target)
+    parent_oid = commit_oid(repo, parent) if parent is not None else None
+    if parent_oid:
+        if parent_oid == head_oid:
+            raise WorklistError("parent and target cannot be the same commit")
+        try:
+            # Use the graft-checked Git reader, not a separate unchecked
+            # merge-base invocation with different repository safeguards.
+            git(repo, "merge-base", "--is-ancestor", parent_oid, head_oid)
+        except WorklistError as exc:
+            raise WorklistError("parent must be an ancestor of target commit") from exc
+    return head_oid, parent_oid
+
+
+def build(
+    repo: Path, repository_id: str, branch: str, target: str,
+    parent: str | None, initial: bool, max_bytes: int, full_source: bool = False,
+) -> bytes:
+    repository_id = validate_identity(repository_id, branch)
     if max_bytes <= 0 or max_bytes > DEFAULT_LIMIT:
         raise WorklistError("max-bytes must be positive and no more than 4194304")
     if initial == (parent is not None):
         raise WorklistError("select exactly one of --initial and --parent")
-    head_oid = commit_oid(repo, target)
-    parent_oid = commit_oid(repo, parent) if parent else None
-    if parent_oid:
-        if parent_oid == head_oid:
-            raise WorklistError("parent and target cannot be the same commit")
-        process = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", parent_oid, head_oid],
-            cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=git_env(),
-        )
-        if process.returncode != 0:
-            raise WorklistError("parent must be an ancestor of target commit")
+    head_oid, parent_oid = resolve_commits(repo, target, parent)
     old = tree_blobs(repo, parent_oid) if parent_oid and not full_source else {}
     new = tree_blobs(repo, head_oid)
 
@@ -350,13 +364,14 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.events_only:
-            target = commit_oid(args.git_dir.resolve(), args.commit)
-            parent = commit_oid(args.git_dir.resolve(), args.parent) if args.parent else None
-            if parent and subprocess.run(["git", "merge-base", "--is-ancestor", parent, target],
-                                         cwd=args.git_dir.resolve(), env=git_env()).returncode:
-                raise WorklistError("parent must be an ancestor of target commit")
-            events = git_events(args.git_dir.resolve(), parent, target)
-            print(json.dumps({"parent_commit_id": parent, "commit_id": target,
+            repository_id = validate_identity(args.repository_id, args.branch)
+            if args.initial == (args.parent is not None):
+                raise WorklistError("select exactly one of --initial and --parent")
+            repo = args.git_dir.resolve()
+            target, parent = resolve_commits(repo, args.commit, args.parent)
+            events = git_events(repo, parent, target)
+            print(json.dumps({"repository_id": repository_id, "branch": args.branch,
+                              "parent_commit_id": parent, "commit_id": target,
                               "events": events}, ensure_ascii=False))
             return 0
         payload = build(args.git_dir.resolve(), args.repository_id, args.branch,

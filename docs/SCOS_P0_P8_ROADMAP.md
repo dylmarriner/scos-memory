@@ -474,6 +474,9 @@ the P0–P8 acceptance gates remain open.
 
 # P3 — Incremental Git-Aware Indexing
 
+**P3 event-sidecar precondition consistency (2026-10-27, isolated development worktree):** Four real-Git RED-before-fix regression assertions showed `--events-only` accepted an explicit empty parent as an initial snapshot, accepted identical parent/target commits, and ignored invalid repository UUIDs and blank branches. Both index-payload and event-sidecar modes now share identity and strict ancestry validation (including the graft-checked Git reader); the sidecar includes caller-declared repository/branch IDs for local correlation. The 81 Python Git verification fixtures pass. This is offline input integrity only, **not** server-attested Git provenance, representative P3 throughput, production rollout or P0–P8 acceptance.
+
+
 **Objective:** update code intelligence proportionally to changed content while preserving immutable history.
 
 ## Already present
