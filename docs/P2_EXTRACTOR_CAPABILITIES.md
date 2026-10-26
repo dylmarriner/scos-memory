@@ -40,6 +40,12 @@ claim that every extension is supported by the Git worklist.
 go test ./services/code-intelligence/cmd/server -run '^TestP2(PublishedExtractorCapabilitiesMatchRuntime|WorkspaceScanIndexesModuleSuffixes)$' -count=1
 ```
 
-These are local parser/scan acceptance tests. They are not an independent
+A disposable PostgreSQL 17 database with migrations 000001–000071 also passed
+`TestPGP2ModuleSuffixesPersistSyntaxProvenance`, proving scanned module files
+persist function declarations with the correct syntax confidence and extractor
+provenance. The full code-intelligence PostgreSQL suite passed on the same
+disposable database. No production database was used.
+
+These are local parser/scan and PostgreSQL acceptance tests. They are not an independent
 semantic accuracy benchmark, complete language fixture-repository suite,
 type-resolved reference qualification or production rollout evidence.
