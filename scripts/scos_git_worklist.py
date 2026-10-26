@@ -202,46 +202,60 @@ def build(
 
 
 def git_events(repo: Path, parent: str | None, target: str) -> list[dict[str, str]]:
-    """Report Git changes without altering the index API contract."""
+    """Classify changes against the *supported regular-file trees*.
+
+    Git's status code alone is not the indexing scope. A source path can
+    leave the supported set by renaming to another extension or becoming a
+    symlink, and an unrelated README can change file type without affecting
+    any indexed source. Compare both endpoints before emitting events.
+    """
+    new = tree_blobs(repo, target)
     if parent is None:
-        return [{"type": "add", "path": path}
-                for path in sorted(tree_blobs(repo, target))]
+        return [{"type": "add", "path": path} for path in sorted(new)]
+    old = tree_blobs(repo, parent)
     raw = git(repo, "diff", "--name-status", "-z", "-M", "-C", parent, target)
     parts = raw.split(b"\0")
-    events = []
+    events: list[dict[str, str]] = []
     i = 0
     while i < len(parts) and parts[i]:
         status = parts[i].decode("ascii")
         i += 1
-        kind = {"A": "add", "M": "modify", "D": "delete",
-                "R": "rename", "C": "copy"}.get(status[:1])
+        code = status[:1]
         old_path = None
-        if kind in ("rename", "copy"):
+        if code in ("R", "C"):
             old_path = parts[i].decode("utf-8")
             i += 1
         path = parts[i].decode("utf-8")
         i += 1
-        supported_new = Path(path).suffix.lower() in LANGUAGE_SUFFIXES
-        supported_old = old_path is not None and Path(old_path).suffix.lower() in LANGUAGE_SUFFIXES
-        if kind is None:
-            if supported_new:
-                raise WorklistError(f"unsupported Git diff status: {status}")
-            continue
-        if kind in ("rename", "copy") and supported_old and not supported_new:
-            if kind == "rename":
-                events.append({"type": "delete", "path": old_path})
-            continue
-        if not supported_new:
-            continue
-        if kind in ("rename", "copy") and not supported_old:
-            kind = "add"
-            old_path = None
-        event = {"type": kind, "path": path}
-        if old_path is not None:
-            event["old_path"] = old_path
-        events.append(event)
-    return sorted(events, key=lambda e: (e["path"], e["type"]))
 
+        if old_path is not None:
+            previous = old_path in old
+            current = path in new
+            if previous and current:
+                events.append({"type": "rename" if code == "R" else "copy",
+                               "path": path, "old_path": old_path})
+            elif previous and code == "R":
+                events.append({"type": "delete", "path": old_path})
+            elif current:
+                events.append({"type": "add", "path": path})
+            continue
+
+        previous = path in old
+        current = path in new
+        if not previous and not current:
+            # Unsupported extension, symlink, submodule or README.
+            continue
+        if not previous:
+            events.append({"type": "add", "path": path})
+        elif not current:
+            events.append({"type": "delete", "path": path})
+        elif old[path] != new[path]:
+            events.append({"type": "modify", "path": path})
+        elif code not in ("M", "T"):
+            # Explicitly reject unknown supported-file statuses, but do not
+            # abort on irrelevant unsupported file-type changes.
+            raise WorklistError(f"unsupported Git diff status: {status}")
+    return sorted(events, key=lambda e: (e["path"], e["type"]))
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

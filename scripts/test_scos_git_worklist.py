@@ -130,6 +130,50 @@ class GitWorklistTests(unittest.TestCase):
         self.assertEqual(full_by_path["stable.py"]["content"], "def stable():\n    pass\n")
         self.assertFalse(full_by_path["stable.py"]["reuse_parent"])
 
+    def test_events_rename_crosses_supported_boundary(self):
+        (self.repo / "outside.py").write_text("print('original')\n")
+        (self.repo / "inside.txt").write_text("print('incoming')\n")
+        parent = self.commit("before extension boundary")
+        (self.repo / "outside.py").rename(self.repo / "outside.txt")
+        (self.repo / "inside.txt").rename(self.repo / "inside.py")
+        head = self.commit("rename across indexed types")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["events"], [
+            {"type": "add", "path": "inside.py"},
+            {"type": "delete", "path": "outside.py"},
+        ])
+
+    def test_events_file_type_changes_and_irrelevant_types(self):
+        (self.repo / "old.py").write_text("print(1)\n")
+        (self.repo / "README.md").write_text("not indexed")
+        (self.repo / "destination.py").write_text("print(2)\n")
+        parent = self.commit("normal")
+        (self.repo / "old.py").unlink()
+        os.symlink("destination.py", self.repo / "old.py")
+        (self.repo / "README.md").unlink()
+        os.symlink("destination.py", self.repo / "README.md")
+        (self.repo / "new.py").write_text("print(3)\n")
+        head = self.commit("symlinks and new")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["events"], [
+            {"type": "add", "path": "new.py"},
+            {"type": "delete", "path": "old.py"},
+        ])
+
+    def test_events_symlink_becomes_regular_source(self):
+        (self.repo / "target.py").write_text("print(9)\n")
+        os.symlink("target.py", self.repo / "new.py")
+        parent = self.commit("symlink")
+        (self.repo / "new.py").unlink()
+        (self.repo / "new.py").write_text("print(7)\n")
+        head = self.commit("materialize")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn({"type": "add", "path": "new.py"},
+                      json.loads(result.stdout)["events"])
+
     def test_unchanged_whitespace_source_is_sent_without_parent_reuse(self):
         (self.repo / "blank.py").write_text("  \n\t")
         (self.repo / "empty.py").write_text("")
