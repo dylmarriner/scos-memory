@@ -23,9 +23,8 @@ For an authorized SQL transaction, use a verified tenant identity to set
 scos.tenant_id transaction-locally before selecting this ledger.
 
 This is a native IndexSnapshot persistence slice. It does not yet
-verify Git sidecar claims, expose an authenticated agent-facing event
-endpoint, persist SCIP-only imports, handle very large index payloads,
-or establish large-repository performance superiority.
+verify Git sidecar claims, persist SCIP-only imports, handle very large
+index payloads, or establish large-repository performance superiority.
 
 Verified against disposable PostgreSQL 17 and the complete native Go
 integration suite with initial/changed snapshots, copy/rename ambiguity,
@@ -58,3 +57,8 @@ Real PostgreSQL integration tests cover pagination, tenant isolation, auth,
 incomplete snapshots, historical retrieval and add/modify/delete evidence;
 gateway tests verify upstream route, validated identity propagation and
 argument rejection. These tests do not prove production deployment.
+
+The authenticated event endpoint uses migration 000073 to index
+`(snapshot_id, path COLLATE "C")`, matching the deterministic keyset cursor
+on databases whose default collation is not C. The restricted-role HTTP
+regression establishes the verified tenant context within the read transaction.

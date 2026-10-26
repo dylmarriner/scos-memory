@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -91,7 +92,12 @@ func (s *server) handlePGSnapshotEvents(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "snapshot not found", http.StatusNotFound)
 		return
 	}
-	rows, err := s.pgStore.db.QueryContext(r.Context(), `
+	page := snapshotEventsPage{SnapshotID: req.SnapshotID, Events: make([]snapshotEvent, 0)}
+	// The event ledger has FORCE ROW LEVEL SECURITY. Explicit tenant
+	// predicates are not enough: the restricted runtime role must establish
+	// scos.tenant_id transaction-locally on the very same connection.
+	err = s.pgStore.withCodeTenantContext(r.Context(), tenant, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(r.Context(), `
         SELECT e.id::text,e.change_kind,e.path,COALESCE(e.previous_path,''),
                e.evidence_class,e.created_at
         FROM code_snapshot_change_events e
@@ -102,24 +108,22 @@ func (s *server) handlePGSnapshotEvents(w http.ResponseWriter, r *http.Request) 
           AND e.path COLLATE "C" > $3 COLLATE "C"
         ORDER BY e.path COLLATE "C"
         LIMIT $4`, req.SnapshotID, tenant, req.AfterPath, req.Limit+1)
-	if err != nil {
-		log.Printf("snapshot events query: %v", err)
-		http.Error(w, "snapshot events unavailable", http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-	page := snapshotEventsPage{SnapshotID: req.SnapshotID, Events: make([]snapshotEvent, 0)}
-	for rows.Next() {
-		var event snapshotEvent
-		if err := rows.Scan(&event.ID, &event.Kind, &event.Path, &event.PreviousPath, &event.EvidenceClass, &event.CreatedAt); err != nil {
-			log.Printf("snapshot events scan: %v", err)
-			http.Error(w, "snapshot events unavailable", http.StatusInternalServerError)
-			return
+		if err != nil {
+			return err
 		}
-		page.Events = append(page.Events, event)
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("snapshot events iteration: %v", err)
+		defer rows.Close()
+		for rows.Next() {
+			var event snapshotEvent
+			if err := rows.Scan(&event.ID, &event.Kind, &event.Path,
+				&event.PreviousPath, &event.EvidenceClass, &event.CreatedAt); err != nil {
+				return err
+			}
+			page.Events = append(page.Events, event)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		log.Printf("snapshot events scoped read: %v", err)
 		http.Error(w, "snapshot events unavailable", http.StatusInternalServerError)
 		return
 	}

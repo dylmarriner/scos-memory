@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
@@ -124,5 +126,60 @@ func TestPGSnapshotEventsAPIAuthIsolationAndPagination(t *testing.T) {
 	resp = pgRequest(t, srv, http.MethodPost, path, owner, map[string]any{"snapshot_id": incomplete})
 	if resp.Code != http.StatusNotFound {
 		t.Fatalf("incomplete snapshot returned %d: %s", resp.Code, resp.Body.String())
+	}
+}
+
+// The runtime uses a non-owner, NOBYPASSRLS role. The event table forces
+// tenant RLS even when SQL includes explicit tenant predicates.
+func TestPGSnapshotEventsAPIReadsWithRestrictedRuntimeRole(t *testing.T) {
+	dsn := os.Getenv("SCOS_APP_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SCOS_APP_TEST_DATABASE_URL not configured")
+	}
+	store, ownerDB := testPGStore(t)
+	tenant := testTenant(t, ownerDB)
+	ctx := context.Background()
+	repo, err := store.EnsureRepository(ctx, tenant, "/events-api-rls/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repo, tenant, "main", "rls-api-1", "go/parser-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "package demo\nfunc Visible(){}\n"
+	if err := store.IndexSnapshot(ctx, snap, repo, []PGFileInput{
+		{Path: "visible.go", Language: "go", Content: source, ContentHash: hashContent(source)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer appDB.Close()
+	if err := appDB.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Without transaction-local scos.tenant_id, forced RLS hides this row.
+	var invisible int
+	if err := appDB.QueryRowContext(ctx,
+		"SELECT count(*) FROM code_snapshot_change_events WHERE snapshot_id=$1", snap).Scan(&invisible); err != nil {
+		t.Fatal(err)
+	}
+	if invisible != 0 {
+		t.Fatalf("unscoped restricted role saw %d rows", invisible)
+	}
+	srv := &server{pgStore: newPGCodeStore(appDB)}
+	resp := pgRequest(t, srv, http.MethodPost, "/v2/code/snapshots/events", tenant, map[string]any{"snapshot_id": snap})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("restricted HTTP %d: %s", resp.Code, resp.Body.String())
+	}
+	var page snapshotEventsPage
+	if err := json.Unmarshal(resp.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 1 || page.Events[0].Path != "visible.go" || page.Events[0].Kind != "add" {
+		t.Fatalf("restricted role failed to retrieve tenant evidence: %+v", page)
 	}
 }
