@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -37,11 +38,22 @@ class WorklistError(Exception):
     pass
 
 
+def git_env() -> dict[str, str]:
+    """Do not let ambient Git configuration redirect an explicit repository.
+
+    All operations inspect committed local objects, so no inherited GIT_*
+    override is needed. This includes GIT_DIR, GIT_WORK_TREE, object stores,
+    namespaces, and environment-supplied configuration.
+    """
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith("GIT_")}
+
+
 def git(repo: Path, *arguments: str) -> bytes:
     try:
         process = subprocess.run(
             ["git", *arguments], cwd=repo, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False,
+            stderr=subprocess.PIPE, check=False, env=git_env(),
         )
     except OSError as exc:
         raise WorklistError(f"cannot execute git: {exc}") from exc
@@ -95,7 +107,7 @@ def read_blob(repo: Path, oid: str, include_source: bool, cap: int) -> tuple[str
     try:
         process = subprocess.Popen(
             ["git", "cat-file", "blob", oid], cwd=repo,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=git_env(),
         )
     except OSError as exc:
         raise WorklistError(f"unable to open Git blob: {exc}") from exc
@@ -147,7 +159,7 @@ def build(
             raise WorklistError("parent and target cannot be the same commit")
         process = subprocess.run(
             ["git", "merge-base", "--is-ancestor", parent_oid, head_oid],
-            cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=git_env(),
         )
         if process.returncode != 0:
             raise WorklistError("parent must be an ancestor of target commit")
@@ -161,7 +173,7 @@ def build(
         # Git ancestry alone never authorizes omission: the server must
         # independently validate parent commit, extractor, config and evidence.
         content_hash, source = read_blob(repo, blob, not unchanged, max_bytes)
-        if unchanged and content_hash != hashlib.sha256(b"").hexdigest() and int(subprocess.check_output(["git", "cat-file", "-s", blob], cwd=repo)) <= max_bytes:
+        if unchanged and content_hash != hashlib.sha256(b"").hexdigest() and int(subprocess.check_output(["git", "cat-file", "-s", blob], cwd=repo, env=git_env())) <= max_bytes:
             # Whitespace-only parents have no persisted source chunk.
             # Read small unchanged blobs to avoid unsafe source-less reuse.
             _, candidate = read_blob(repo, blob, True, max_bytes)
@@ -282,7 +294,7 @@ def main() -> int:
             target = commit_oid(args.git_dir.resolve(), args.commit)
             parent = commit_oid(args.git_dir.resolve(), args.parent) if args.parent else None
             if parent and subprocess.run(["git", "merge-base", "--is-ancestor", parent, target],
-                                         cwd=args.git_dir.resolve()).returncode:
+                                         cwd=args.git_dir.resolve(), env=git_env()).returncode:
                 raise WorklistError("parent must be an ancestor of target commit")
             events = git_events(args.git_dir.resolve(), parent, target)
             print(json.dumps({"parent_commit_id": parent, "commit_id": target,

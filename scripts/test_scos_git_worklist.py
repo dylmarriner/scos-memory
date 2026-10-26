@@ -33,12 +33,36 @@ class GitWorklistTests(unittest.TestCase):
         git(self.repo, "commit", "-qm", message)
         return git(self.repo, "rev-parse", "HEAD")
 
-    def invoke(self, *args):
+    def invoke(self, *args, env=None):
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--git-dir", str(self.repo),
              "--repository-id", REPO_ID, "--branch", "main", *args],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=env,
         )
+
+    def test_foreign_git_dir_environment_does_not_redirect_worklist(self):
+        (self.repo / "source.py").write_text("value = 1\n")
+        parent = self.commit("parent")
+        (self.repo / "source.py").write_text("value = 2\n")
+        head = self.commit("head")
+        foreign = self.repo / "foreign"
+        foreign.mkdir()
+        git(foreign, "init", "-q")
+        git(foreign, "config", "user.name", "Foreign")
+        git(foreign, "config", "user.email", "foreign@example.invalid")
+        (foreign / "other.py").write_text("different = True\n")
+        git(foreign, "add", "-A")
+        git(foreign, "commit", "-qm", "foreign")
+        env = os.environ.copy()
+        env.update({"GIT_DIR": str(foreign / ".git"),
+                    "GIT_WORK_TREE": str(foreign)})
+        result = self.invoke("--commit", head, "--parent", parent, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["files"][0]["content"], "value = 2\n")
+        events = self.invoke("--commit", head, "--parent", parent, "--events-only", env=env)
+        self.assertEqual(events.returncode, 0, events.stderr)
+        self.assertEqual(json.loads(events.stdout)["events"],
+                         [{"type": "modify", "path": "source.py"}])
 
     def test_initial_then_incremental_including_renames_and_deletions(self):
         (self.repo / "main.go").write_text("package demo\nfunc main(){}\n")
