@@ -453,7 +453,7 @@ the P0–P8 acceptance gates remain open.
 
 ## Remaining
 
-- [ ] Git-diff-aware ingestion driver for parent→target commit worklists.
+- [x] Git-aware **offline parent→target commit payload driver**: `scripts/scos_git_worklist.py` enumerates immutable target Git trees, transfers source for safe extractor fallback, retains the entire target manifest for deletions, enforces the 4 MiB API bound, and verifies Git ancestry. `docs/P3_GIT_WORKLIST.md` records preconditions and limitations; local Git fixtures, backend evidence-chunk equivalence and deleted-symbol integration tests pass. This is not yet a remote uploader, typed persisted Git events, or large-repository streaming.
 - [ ] Explicit add/modify/delete/rename/copy event metadata.
 - [ ] Verify deleted symbols cannot leak into active target snapshots.
 - [ ] Reduce unnecessary whole-snapshot structural recomputation where dependency boundaries permit it.
