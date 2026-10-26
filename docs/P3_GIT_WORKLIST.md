@@ -94,3 +94,11 @@ The tests verify source provenance, atomic size failures, safe paths, deletion,
 clean versus incremental snapshot equivalence, and fail-closed parent
 compatibility (extractor/configuration/commit/path/hash/language/source evidence).
 These are small concrete fixtures, not throughput benchmarks on real large repositories.
+
+## Offline event sidecar (not yet persisted)
+
+Use the same Git worklist arguments with `--events-only` to output deterministic
+Git add/modify/delete/rename/copy events without changing the existing index
+request schema. The sidecar is for local inspection and validation only. Git
+copy detection is heuristic and can report additions instead; it is not proof
+of persisted events or full P3 completion.

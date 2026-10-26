@@ -71,6 +71,44 @@ class GitWorklistTests(unittest.TestCase):
         self.assertEqual(data["parent_commit_id"], parent)
         self.assertNotIn("events", data)
 
+    def test_supported_source_renamed_to_unsupported_is_deletion(self):
+        (self.repo / "a.py").write_text("print(1)\n")
+        parent = self.commit("parent")
+        (self.repo / "a.py").rename(self.repo / "a.txt")
+        head = self.commit("head")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["events"],
+                         [{"type": "delete", "path": "a.py"}])
+
+    def test_unsupported_type_change_does_not_block_supported_addition(self):
+        (self.repo / "README.md").write_text("readme")
+        parent = self.commit("parent")
+        (self.repo / "README.md").unlink()
+        (self.repo / "README.md").symlink_to("missing")
+        (self.repo / "new.py").write_text("print(1)\n")
+        head = self.commit("head")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["events"],
+                         [{"type": "add", "path": "new.py"}])
+
+    def test_git_event_sidecar_reports_exact_paths_and_changes(self):
+        (self.repo / "before.py").write_text("value = 1\n")
+        (self.repo / "removed.py").write_text("old = True\n")
+        parent = self.commit("parent")
+        (self.repo / "before.py").rename(self.repo / "after.py")
+        (self.repo / "removed.py").unlink()
+        (self.repo / "added.py").write_text("new = True\n")
+        head = self.commit("target")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = json.loads(result.stdout)["events"]
+        self.assertEqual({(e["type"], e["path"]) for e in events},
+                         {("rename", "after.py"), ("delete", "removed.py"),
+                          ("add", "added.py")})
+        self.assertEqual(next(e for e in events if e["type"] == "rename")["old_path"], "before.py")
+
     def test_unchanged_source_omitted_with_explicit_reuse_and_full_source_fallback(self):
         (self.repo / "stable.py").write_text("def stable():\n    pass\n")
         parent = self.commit("first")
@@ -91,6 +129,50 @@ class GitWorklistTests(unittest.TestCase):
         full_by_path = {x["path"]: x for x in json.loads(full.stdout)["files"]}
         self.assertEqual(full_by_path["stable.py"]["content"], "def stable():\n    pass\n")
         self.assertFalse(full_by_path["stable.py"]["reuse_parent"])
+
+    def test_events_rename_crosses_supported_boundary(self):
+        (self.repo / "outside.py").write_text("print('original')\n")
+        (self.repo / "inside.txt").write_text("print('incoming')\n")
+        parent = self.commit("before extension boundary")
+        (self.repo / "outside.py").rename(self.repo / "outside.txt")
+        (self.repo / "inside.txt").rename(self.repo / "inside.py")
+        head = self.commit("rename across indexed types")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["events"], [
+            {"type": "add", "path": "inside.py"},
+            {"type": "delete", "path": "outside.py"},
+        ])
+
+    def test_events_file_type_changes_and_irrelevant_types(self):
+        (self.repo / "old.py").write_text("print(1)\n")
+        (self.repo / "README.md").write_text("not indexed")
+        (self.repo / "destination.py").write_text("print(2)\n")
+        parent = self.commit("normal")
+        (self.repo / "old.py").unlink()
+        os.symlink("destination.py", self.repo / "old.py")
+        (self.repo / "README.md").unlink()
+        os.symlink("destination.py", self.repo / "README.md")
+        (self.repo / "new.py").write_text("print(3)\n")
+        head = self.commit("symlinks and new")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["events"], [
+            {"type": "add", "path": "new.py"},
+            {"type": "delete", "path": "old.py"},
+        ])
+
+    def test_events_symlink_becomes_regular_source(self):
+        (self.repo / "target.py").write_text("print(9)\n")
+        os.symlink("target.py", self.repo / "new.py")
+        parent = self.commit("symlink")
+        (self.repo / "new.py").unlink()
+        (self.repo / "new.py").write_text("print(7)\n")
+        head = self.commit("materialize")
+        result = self.invoke("--commit", head, "--parent", parent, "--events-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn({"type": "add", "path": "new.py"},
+                      json.loads(result.stdout)["events"])
 
     def test_unchanged_whitespace_source_is_sent_without_parent_reuse(self):
         (self.repo / "blank.py").write_text("  \n\t")

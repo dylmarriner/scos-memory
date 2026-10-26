@@ -201,6 +201,62 @@ def build(
     return raw
 
 
+def git_events(repo: Path, parent: str | None, target: str) -> list[dict[str, str]]:
+    """Classify changes against the *supported regular-file trees*.
+
+    Git's status code alone is not the indexing scope. A source path can
+    leave the supported set by renaming to another extension or becoming a
+    symlink, and an unrelated README can change file type without affecting
+    any indexed source. Compare both endpoints before emitting events.
+    """
+    new = tree_blobs(repo, target)
+    if parent is None:
+        return [{"type": "add", "path": path} for path in sorted(new)]
+    old = tree_blobs(repo, parent)
+    raw = git(repo, "diff", "--name-status", "-z", "-M", "-C", parent, target)
+    parts = raw.split(b"\0")
+    events: list[dict[str, str]] = []
+    i = 0
+    while i < len(parts) and parts[i]:
+        status = parts[i].decode("ascii")
+        i += 1
+        code = status[:1]
+        old_path = None
+        if code in ("R", "C"):
+            old_path = parts[i].decode("utf-8")
+            i += 1
+        path = parts[i].decode("utf-8")
+        i += 1
+
+        if old_path is not None:
+            previous = old_path in old
+            current = path in new
+            if previous and current:
+                events.append({"type": "rename" if code == "R" else "copy",
+                               "path": path, "old_path": old_path})
+            elif previous and code == "R":
+                events.append({"type": "delete", "path": old_path})
+            elif current:
+                events.append({"type": "add", "path": path})
+            continue
+
+        previous = path in old
+        current = path in new
+        if not previous and not current:
+            # Unsupported extension, symlink, submodule or README.
+            continue
+        if not previous:
+            events.append({"type": "add", "path": path})
+        elif not current:
+            events.append({"type": "delete", "path": path})
+        elif old[path] != new[path]:
+            events.append({"type": "modify", "path": path})
+        elif code not in ("M", "T"):
+            # Explicitly reject unknown supported-file statuses, but do not
+            # abort on irrelevant unsupported file-type changes.
+            raise WorklistError(f"unsupported Git diff status: {status}")
+    return sorted(events, key=lambda e: (e["path"], e["type"]))
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--git-dir", type=Path, required=True,
@@ -218,8 +274,20 @@ def main() -> int:
                         help="Send all source bytes even with --parent (retry after HTTP 409)")
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_LIMIT,
                         help="Fail atomically if request exceeds server's 4 MiB maximum")
+    parser.add_argument("--events-only", action="store_true",
+                        help="Emit offline Git event sidecar; not accepted by index API")
     args = parser.parse_args()
     try:
+        if args.events_only:
+            target = commit_oid(args.git_dir.resolve(), args.commit)
+            parent = commit_oid(args.git_dir.resolve(), args.parent) if args.parent else None
+            if parent and subprocess.run(["git", "merge-base", "--is-ancestor", parent, target],
+                                         cwd=args.git_dir.resolve()).returncode:
+                raise WorklistError("parent must be an ancestor of target commit")
+            events = git_events(args.git_dir.resolve(), parent, target)
+            print(json.dumps({"parent_commit_id": parent, "commit_id": target,
+                              "events": events}, ensure_ascii=False))
+            return 0
         payload = build(args.git_dir.resolve(), args.repository_id, args.branch,
                         args.commit, args.parent, args.initial, args.max_bytes,
                         args.full_source)
