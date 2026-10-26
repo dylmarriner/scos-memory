@@ -151,6 +151,19 @@ or PITR validation.
 The DoD gate still fails on §41 governance status, and the wider P0–P8
 acceptance gates remain open.
 
+## P3 export JSON strictness and CI regression coverage (2026-10-27)
+
+Two real-Git bundle tests exposed ten RED-before-fix cases: the offline
+manifest/event verifier accepted nonstandard `NaN`, `Infinity`, and
+`-Infinity` constants and exponent-overflow numbers (`1e999`, `-1e999`)
+hidden inside otherwise unused nested export fields.
+The shared strict JSON decoder now rejects all five, including unknown
+fields, while retaining recursive duplicate-key rejection. The same decoder
+is used by standalone manifest and event verification. CI now explicitly
+runs the manifest, event and joint-bundle Python suites alongside the Git
+worklist suite. This is **offline evidence integrity only**, not server-side
+Git provenance attestation, P3 scaling acceptance, or production readiness.
+
 # P0 — Benchmark and Evidence Baseline
 
 **Objective:** make every retrieval/indexing/model change measurable.
