@@ -4,6 +4,28 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P5 single-document retrieval request integrity (2026-10-28, development)
+
+`POST /v1/retrieve` previously accepted a valid first JSON request while
+silently discarding a second JSON object, `null`, or malformed trailing bytes.
+The real handler regression reproduced three HTTP 501 responses instead of
+HTTP 400 for those invalid requests (RED); the fix requires EOF after the
+first decoded request (GREEN). Ordinary single-object requests and trailing
+whitespace still reach the deliberate historical system-time HTTP 501 gate.
+The authenticated static-token/mux path is covered too. Five repeated focused
+runs, the full uncached Go suite (51 passing packages) and `go vet ./...`
+passed on AMD.
+
+The governance-runtime regression previously **incorrectly asserted that no
+HTTP 501 exists**, despite the explicit P5 historical belief-ledger refusal.
+Its test now expects the one known retrieval-orchestrator finding; all five
+runtime-audit unit tests and four definition-of-done evidence tests pass.
+The actual runtime audit still correctly reports **FAIL (one HTTP 501)** and
+the §41 definition-of-done gate still correctly reports **FAIL (PARTIAL)**.
+This is bounded request parsing and evidence-integrity hardening, **not**
+bitemporal retrieval implementation, §41 closure, live deployment, or P0–P8
+acceptance. Merge and merged-main CI evidence must be recorded separately.
+
 ## P5 authenticated identity consistency (2026-10-28, source candidate)
 
 The static service-token fallback in retrieval previously accepted an

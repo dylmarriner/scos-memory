@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -350,6 +351,13 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Reject a second JSON value or malformed trailing bytes before any
+	// identity, temporal, or database processing. Whitespace alone is valid.
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		http.Error(w, "request must contain exactly one JSON value", http.StatusBadRequest)
 		return
 	}
 
