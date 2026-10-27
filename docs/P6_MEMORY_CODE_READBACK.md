@@ -252,6 +252,13 @@ reads. The full code-intelligence integration suite passed under these
 temporary policies after its restricted-role event fixture was corrected.
 The uncached full Go suite, Go vet and tagged memory-intelligence PostgreSQL
 integration suite also passed on the same disposable forced-RLS database.
+A further real PostgreSQL forced-RLS regression reproduced an authorized
+failed-SCIP retry returning HTTP 500 because the handler's unscoped
+`DeleteFailedSnapshot` silently deleted zero rows (RED). The handler now
+uses `DeleteFailedSnapshotScoped`, and the same end-to-end retry returns
+HTTP 200 with a new immutable snapshot ID (GREEN). This was tested with
+the restricted `scos_app` role and actual SCIP symbols.
+
 **No production policy migration was added or deployed.** Recovery,
 background maintenance and remaining unscoped callers still require
 qualification before those policies can be committed safely.

@@ -905,6 +905,11 @@ and permitted tenant-scoped reads. The opt-in
 code-intelligence package passed under those **disposable-only**
 policies, as did the uncached full Go suite, Go vet and tagged
 memory-intelligence PostgreSQL integration tests.
+A subsequent RED→GREEN end-to-end regression caught the SCIP handler's
+context-free failed-generation cleanup: an authorized retry returned HTTP
+500 under forced RLS because the old deletion affected zero rows.
+The handler now calls `DeleteFailedSnapshotScoped`; the same restricted-role
+retry returns HTTP 200 and a new immutable snapshot.
 **No production RLS migration, merge or rollout.**
 Background recovery and other legacy operations still need scoping
 and acceptance before enabling production forced RLS.

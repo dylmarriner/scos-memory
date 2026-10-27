@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestPGCodeRepositoryWritesRequireTransactionLocalTenant verifies the
@@ -506,6 +508,35 @@ func TestPGScopedIndexingAsRestrictedRole(t *testing.T) {
 	count, err := store.IndexSnapshotFromSCIPScoped(ctx, tenantA, scipSnap, repo, sampleSCIPIndex())
 	if err != nil || count == 0 {
 		t.Fatalf("own tenant SCIP indexing: count=%d err=%v", count, err)
+	}
+	// A failed SCIP generation must be deleted inside the tenant-scoped
+	// transaction before a retry can register and activate a new snapshot.
+	// A context-free DELETE silently affects zero rows under forced RLS.
+	failed, err := store.CreateSnapshot(ctx, repo, tenantA, "main", "failed-scip-retry", "scip", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSnapshotStatusScoped(ctx, tenantA, failed, "failed", "synthetic retry"); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := proto.Marshal(sampleSCIPIndex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := pgRequestAs(t, &server{pgStore: store}, http.MethodPost, "/v2/code/index/scip", tenantA, "principal",
+		map[string]any{"repository_id": repo, "branch": "main", "commit_id": "failed-scip-retry",
+			"index_base64": base64.StdEncoding.EncodeToString(encoded)})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("own-tenant failed SCIP retry under forced RLS: HTTP %d: %s", resp.Code, resp.Body.String())
+	}
+	var retry struct {
+		SnapshotID string `json:"snapshot_id"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry.SnapshotID == "" || retry.SnapshotID == failed {
+		t.Fatalf("SCIP retry did not replace failed generation: %+v", retry)
 	}
 }
 

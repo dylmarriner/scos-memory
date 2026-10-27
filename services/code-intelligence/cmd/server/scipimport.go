@@ -462,7 +462,7 @@ func (s *server) handlePGIndexSCIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != "" && status == "failed" {
-		if err := s.pgStore.DeleteFailedSnapshot(r.Context(), existing); err != nil {
+		if err := s.pgStore.DeleteFailedSnapshotScoped(r.Context(), tenant, existing); err != nil {
 			http.Error(w, "clear failed snapshot: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
