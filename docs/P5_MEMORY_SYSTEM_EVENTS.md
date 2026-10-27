@@ -1,4 +1,4 @@
-# P5 memory system-state transition evidence (merged prerequisite; hardening in review)
+# P5 memory system-state transition evidence (merged source; production not qualified)
 
 Migration `000082_memory_system_events.sql` is an **instrumentation prerequisite**, not an implementation of bitemporal retrieval. It captures state-bearing changes to `memory_items` in the same transaction as each mutation. Existing rows receive an explicitly marked migration-time `baseline` event, never a fictitious historical creation timestamp. An insert and a meaningful state update each produce a separate event. Hard deletion is not instrumented until offboarding/cascade recovery is qualified. Unrelated metadata updates do not claim a belief-state change.
 
@@ -6,7 +6,7 @@ Each event contains tenant, memory, namespace and owner IDs, type/status, select
 
 **Temporal limitations:** `observed_at` is a database clock observation, **not a commit timestamp**. A transaction can roll back, concurrent transactions can commit out of observation order, and events predating this migration do not exist. Neither the row's `created_at` nor its first version can safely reconstruct earlier approval, revocation or supersession state. Memory content redactions, version approvals, ACL changes, commit-order serialization, hard-delete/offboarding capture, deleted-memory recovery and point-in-time replay remain outside this increment. `POST /v1/retrieve` continues to return HTTP 501 for `as_of_system_time`. Do not treat these rows as sufficient evidence to answer historical-belief questions.
 
-## TRUNCATE integrity hardening (28 October 2026; isolated development candidate)
+## TRUNCATE integrity hardening (28 October 2026; merged PR #106)
 
 A real PostgreSQL 17 regression demonstrated that the migration owner could
 `TRUNCATE memory_system_events` and `TRUNCATE memory_system_event_purge_audit`
@@ -21,8 +21,11 @@ full retrieval PostgreSQL integration, `go vet ./...` and focused race tests
 passed against a disposable database with all 83 migrations and runtime
 policies. This is source-only data-loss hardening; the production migration,
 recovery qualification, historical commit ordering and `as_of_system_time`
-HTTP 501 gate remain outstanding. PR merge and merged-main CI are separate
-evidence gates.
+HTTP 501 gate remain outstanding. PR #106 merged with expected head
+`b2fdfbaea119b4fd3226cdbf0462297080af3253` into main
+`f0d0b8b39260dedf744293de9775e246298b53e9`. Both merged-main CI
+(5/5 jobs) and P4 PostgreSQL integration (9/9 jobs) passed on that SHA.
+This is not production rollout or recovery qualification.
 
 ## Acceptance evidence and rollout boundary
 

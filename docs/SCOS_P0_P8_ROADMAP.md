@@ -4,7 +4,7 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## P5 memory-event history TRUNCATE guard (2026-10-28; isolated source candidate)
+## P5 memory-event history TRUNCATE guard (2026-10-28; merged PR #106)
 
 Migration `000082` protects the append-only memory-state ledger and its purge
 audit against row-level UPDATE/DELETE, but PostgreSQL `TRUNCATE` does not fire
@@ -18,7 +18,13 @@ removed. A fresh disposable database with 83 migrations and restricted-role
 policies passed the full retrieval integration package, 51-package Go suite,
 90 Python tests, vet and focused race tests. This does
 **not** implement historical system-time retrieval, prove production recovery,
-or close §41; merge and main CI must be independently verified. See
+or close §41. PR #106 merged with expected head
+`b2fdfbaea119b4fd3226cdbf0462297080af3253` into main
+`f0d0b8b39260dedf744293de9775e246298b53e9`. The exact merged-main
+SHA passed [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40588180860)
+(5/5 jobs) and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40588180972)
+(9/9 jobs); independent merged-main Go tests passed 51 packages, vet and
+90 Python regressions passed. No live migration or deployment occurred. See
 `docs/P5_MEMORY_SYSTEM_EVENTS.md`.
 
 ## ACP governed downstream error isolation (2026-10-28, merged PR #104)
