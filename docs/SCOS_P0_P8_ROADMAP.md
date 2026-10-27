@@ -4,7 +4,7 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## ACP governed downstream error isolation (2026-10-28, source candidate)
+## ACP governed downstream error isolation (2026-10-28, merged PR #104)
 
 The autonomous control plane previously forwarded untrusted downstream HTTP
 error bodies and raw transport errors into durable lifecycle stage details and
@@ -21,8 +21,9 @@ regression failed for both success and error status paths (RED), then passed
 context cancellation from both reads (GREEN). This protects the ACP ingress
 and tool-governance boundary, but does not establish governance section 41
 completion, historical system-time retrieval, or production activation.
-PR review, exact-head CI, merged-main qualification and live recovery remain
-separate gates.
+PR #104 merged into main at `e35c4fda8f7c93ad06d43b610b0bfdc7cb4a5721`;
+merged-main CI (5 jobs) and P4 integration (9 jobs) passed. This does not
+prove a live rollout or recovery qualification.
 
 ## P4 retrieval resource-budget enforcement (2026-10-28, development)
 
@@ -1261,6 +1262,33 @@ coverage, production qualification, or permission to merge/deploy.
 ---
 
 # Cross-phase supporting work
+
+## §32 backup freshness telemetry (2026-10-28, isolated source candidate)
+
+The backup manager already emitted `scos.backup.age` only when a caller
+requested `GET /v1/backups`, while `scos.backup.restore_status` was emitted
+when a drill was recorded. A healthy service with no API polling therefore
+produced no backup-age observations, even when backups became stale. This is
+a source-level observability gap, not evidence that backups themselves failed.
+
+An independent periodic reporter now starts when the observability collector
+is configured, regardless of whether the optional backup/restore scheduler
+is enabled. It emits immediately and every 15 minutes by default (override
+with `SCOS_BACKUP_AGE_METRIC_INTERVAL`). The reporter enumerates provider manifests (HMAC-authenticated for
+encrypted providers), verifies the newest candidate's actual archive, and falls back
+to older candidates if verification fails; it does not decrypt every old
+archive on each heartbeat. It emits no fabricated zero-age metric when no
+backup verifies, and it stops on context cancellation. The existing
+on-demand age gauge and recorded restore-drill outcome metric remain.
+
+TDD evidence: new real HTTP collector regression tests failed to compile
+before the reporter existed (RED), then passed after implementation (GREEN).
+Tests cover no-client-polling delivery, periodic observations/cancellation,
+no-backup and tampered-archive refusal, bounded full-archive reads and
+restore-status delivery. This is a **source candidate**, not proof of
+production collector delivery, missing-backup alert configuration, recovery
+qualification, complete §32 service coverage, or governance §41 completion.
+No live backup, restore, production deployment or paid resource was invoked.
 
 ## Safety and secret handling
 
