@@ -202,3 +202,32 @@ func TestBackupAgeReporterDoesNotReadEveryHistoricalArchive(t *testing.T) {
 		t.Fatal("missing freshness metric")
 	}
 }
+
+func TestBackupAgeReporterFallsBackWhenNewestArchiveIsCorrupt(t *testing.T) {
+	fakePostgresTools(t)
+	s := newTestServer(t, nil)
+	collector := attachBackupMetrics(t, s)
+	older := takeBackup(t, s)
+	newer := takeBackup(t, s)
+	if newer.ID <= older.ID {
+		t.Fatalf("fixture backup IDs not chronological: %s <= %s", newer.ID, older.ID)
+	}
+	if err := os.WriteFile(filepath.Join(s.backupDir, newer.ID+".dump"), []byte("corrupt newest archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider := &countingBackupProvider{BackupProvider: s.provider}
+	s.provider = provider
+	if err := s.reportBackupAge(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if provider.loads != 2 {
+		t.Fatalf("expected corrupt newest then older verification, got %d loads", provider.loads)
+	}
+	if err := s.metrics.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	points := collector.snapshot()
+	if len(points) != 1 || points[0].Name != telemetry.MetricBackupAge {
+		t.Fatalf("missing fallback verified backup-age observation: %+v", points)
+	}
+}
