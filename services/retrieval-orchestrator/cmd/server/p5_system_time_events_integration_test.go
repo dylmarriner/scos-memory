@@ -119,3 +119,45 @@ func TestP5MemorySystemEventsAreAppendOnlyAndTenantIsolated(t *testing.T) {
 		t.Fatalf("context leaked across transactions: %d events", count)
 	}
 }
+
+// The event FK cascade must not make tenant offboarding impossible, nor may
+// ordinary callers silently delete immutable events without an audited purge.
+func TestP5MemorySystemEventTenantPurgeRequiresAudit(t *testing.T) {
+	ctx := context.Background()
+	admin := testRetrievalPool(t)
+	var tenant string
+	if err := admin.QueryRow(ctx, `INSERT INTO tenants(name) VALUES($1) RETURNING id`, t.Name()).Scan(&tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `INSERT INTO memory_system_events (
+        tenant_id,memory_id,namespace_id,owner_principal_id,memory_type,status,
+        authority_level,confidence_score,sensitivity,operation)
+        VALUES ($1,gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),
+        'semantic','candidate',50,0.9,'internal','baseline')`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `DELETE FROM tenants WHERE id=$1`, tenant); err == nil {
+		t.Fatal("tenant cascade bypassed append-only event guard")
+	}
+	var purged int64
+	if err := admin.QueryRow(ctx,
+		`SELECT purge_memory_system_events_for_tenant($1,$2)`,
+		tenant, "authorized offboarding with recorded reason").Scan(&purged); err != nil {
+		t.Fatal(err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged %d, want 1", purged)
+	}
+	var count int
+	if err := admin.QueryRow(ctx,
+		`SELECT count(*) FROM memory_system_event_purge_audit
+         WHERE tenant_id=$1 AND event_count=1`, tenant).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("missing durable purge audit: %d", count)
+	}
+	if _, err := admin.Exec(ctx, `DELETE FROM tenants WHERE id=$1`, tenant); err != nil {
+		t.Fatalf("audited tenant offboarding failed: %v", err)
+	}
+}
