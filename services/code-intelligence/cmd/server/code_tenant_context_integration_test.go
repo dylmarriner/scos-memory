@@ -46,12 +46,20 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	statements := []string{
 		"CREATE TABLE " + schema + ".code_repositories (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, canonical_path text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,canonical_path))",
 		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
+		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
+		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
-		"GRANT SELECT,INSERT,UPDATE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots TO scos_app",
+		"GRANT SELECT,INSERT,UPDATE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
 		"ALTER TABLE " + schema + ".code_repositories ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repositories FORCE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repository_snapshots ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repository_snapshots FORCE ROW LEVEL SECURITY",
+		"ALTER TABLE " + schema + ".code_symbols ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE " + schema + ".code_symbols FORCE ROW LEVEL SECURITY",
+		"ALTER TABLE " + schema + ".code_symbol_versions ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE " + schema + ".code_symbol_versions FORCE ROW LEVEL SECURITY",
+		"CREATE POLICY symbol_scope ON " + schema + ".code_symbols USING (EXISTS (SELECT 1 FROM " + schema + ".code_repositories WHERE id=repository_id)) WITH CHECK (EXISTS (SELECT 1 FROM " + schema + ".code_repositories WHERE id=repository_id))",
+		"CREATE POLICY version_scope ON " + schema + ".code_symbol_versions USING (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id)) WITH CHECK (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id))",
 		"CREATE POLICY repo_scope ON " + schema + ".code_repositories USING (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid)",
 		"CREATE POLICY snap_scope ON " + schema + ".code_repository_snapshots USING (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid)",
 	}
@@ -86,6 +94,26 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if _, err := admin.ExecContext(ctx, "UPDATE "+schema+".code_repository_snapshots SET status='active',activated_at=now() WHERE id=$1", snap); err != nil {
 		t.Fatal(err)
+	}
+	var symbolID, versionID string
+	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,'scope-file','file',$2) RETURNING id::text", repo, snap).Scan(&symbolID); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,content_hash) VALUES($1,$2,'pkg/scope.go','pkg/scope.go','test-hash') RETURNING id::text", symbolID, snap).Scan(&versionID); err != nil {
+		t.Fatal(err)
+	}
+	// Historical resolution and its symbol read must share a tenant-scoped
+	// transaction. This test is RED if either query uses a bare pool connection.
+	history, err := store.QueryHistoricalCode(ctx, tenantA, repo, "main", "commit1", "", "pkg/scope.go", 10)
+	if err != nil {
+		t.Fatalf("historical query under forced RLS: %v", err)
+	}
+	hits, ok := history["results"].([]PGSymbolVersion)
+	if !ok || len(hits) != 1 || hits[0].SymbolVersionID != versionID {
+		t.Fatalf("historical readback under forced RLS: %+v", history)
+	}
+	if _, err := store.QueryHistoricalCode(ctx, tenantB, repo, "main", "commit1", "", "pkg/scope.go", 10); err != errHistoricalNotFound {
+		t.Fatalf("foreign tenant historical query should not resolve: %v", err)
 	}
 	branch, err := store.LatestIndexedBranch(ctx, repo, tenantA)
 	if err != nil || branch != "main" {
@@ -127,6 +155,14 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if visible != 0 {
 		t.Fatalf("tenant context leaked outside transaction: %d snapshots visible", visible)
+	}
+	for _, table := range []string{"code_symbols", "code_symbol_versions"} {
+		if err := app.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&visible); err != nil {
+			t.Fatal(err)
+		}
+		if visible != 0 {
+			t.Fatalf("tenant context leaked outside transaction: %d %s visible", visible, table)
+		}
 	}
 	if _, err := store.CreateSnapshot(ctx, repo, tenantB, "main", "foreign", "test-v1", ""); err == nil {
 		t.Fatal("foreign tenant must not create snapshot in another tenant's repository")

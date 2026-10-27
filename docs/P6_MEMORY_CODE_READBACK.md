@@ -126,11 +126,19 @@ exist; after implementation it passed against a fresh disposable PostgreSQL
 17/pgvector instance with 97 migration/policy scripts applied. The full
 code-intelligence integration package also passed in that disposable database,
 as did the uncached Go suite, Go vet and diff validation.
-The full
-non-database Go suite and
-`go vet` passed. **This does not activate RLS on the four production code
-tables:** indexing, historical queries, activation, recovery, and symbol-version
-paths still require coordinated scoping and restricted-role integration before
+An additional RED→GREEN regression covered immutable historical code
+queries under FORCE RLS. The baseline returned `historical snapshot not found`
+for an authorized tenant because snapshot resolution used an unscoped pooled
+connection. Both snapshot selection and symbol-version retrieval now execute
+inside one transaction-local tenant context. The restricted-role shadow-schema
+test includes FORCE RLS on all four provenance tables and checks own-tenant
+historical readback, foreign-tenant denial and zero context-free symbol/version
+visibility. The full code-intelligence integration package, uncached Go suite
+and Go vet passed on a separate disposable PostgreSQL 17/pgvector database
+with 97 migration/policy files.
+**This does not activate RLS on the four production code tables:**
+indexing, activation, recovery, and other symbol-version query paths still
+require coordinated scoping and restricted-role integration before
 migration/merge. No production migration was attempted.
 
 

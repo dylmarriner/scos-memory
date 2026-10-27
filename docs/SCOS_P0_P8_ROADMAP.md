@@ -805,6 +805,15 @@ with RED→GREEN forced-RLS regression for own/foreign tenants, invalid
 identity and connection-context isolation. Fresh disposable PostgreSQL
 17/pgvector (97 migration/policy scripts) passed the scoped test and the
 full code-intelligence integration package; uncached Go and vet passed.
+A third TDD increment scopes immutable historical snapshot resolution and
+symbol-version readback to **one transaction**. With FORCE RLS on all four
+isolated code-provenance shadow tables, the baseline failed RED with
+`historical snapshot not found` for the authorized tenant; the scoped
+implementation passed GREEN, denied the foreign tenant and left zero
+symbol/symbol-version rows visible without context. On a separate disposable
+PostgreSQL 17/pgvector instance with 97 migration/policy files, the complete
+code-intelligence integration package, uncached `go test ./...`, and
+`go vet ./...` passed. No production policies were changed.
 This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.
