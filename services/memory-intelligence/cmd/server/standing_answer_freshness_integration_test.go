@@ -265,3 +265,41 @@ func TestP7StandingAnswerRefreshSerializesWithMemoryChange(t *testing.T) {
 		}
 	}
 }
+
+func TestP7StandingAnswerRejectsTemporaryDependencyShadowing(t *testing.T) {
+	f := newBehaviourFixture(t)
+	ctx := context.Background()
+	fact := f.scalar(`INSERT INTO memory_items(
+ tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+ authority_level,confidence_score,sensitivity)
+ VALUES($1,$2,$3,'semantic','active','shadow source','shadow source',80,0.9,'internal')
+ RETURNING id::text`, f.tenant, f.ns, f.owner)
+	answer, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{
+		TenantID: f.tenant, PrincipalID: f.owner,
+	}, func(tx querier) (string, error) {
+		// A runtime principal with TEMP permission must never trick the owner
+		// trigger into recording dependencies in a connection-local fake table.
+		if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE memory_standing_answer_dependencies(
+       standing_answer_id uuid,tenant_id uuid,fact_id uuid,observed_version_id uuid)
+       ON COMMIT DROP`); err != nil {
+			return "", err
+		}
+		var id string
+		err := tx.QueryRowContext(ctx, `INSERT INTO public.memory_standing_answers(
+        tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
+        VALUES($1,$2,'temp shadow','should register real evidence',$3)
+        RETURNING id::text`, f.tenant, f.ns, fmt.Sprintf("[%q]", fact)).Scan(&id)
+		return id, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := f.admin.QueryRowContext(ctx,
+		"SELECT count(*) FROM public.memory_standing_answer_dependencies WHERE standing_answer_id=$1", answer).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("security-definer trigger wrote %d real dependencies; temp-table shadowing bypassed provenance", n)
+	}
+}

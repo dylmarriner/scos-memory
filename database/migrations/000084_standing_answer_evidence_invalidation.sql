@@ -58,13 +58,26 @@ BEGIN
 END
 $revoke_role$;
 
+-- SELECT FOR SHARE also requires owner-level UPDATE policy under FORCE
+-- RLS. This exception applies only to the database migration owner, which
+-- already owns the memory table, never to the restricted scos_app role.
+DO $fact_lock_owner$
+DECLARE owner_role name := current_user;
+BEGIN
+    EXECUTE format(
+       'CREATE POLICY standing_cache_owner_fact_row_lock ON memory_items FOR UPDATE TO %I USING (true) WITH CHECK (true)',
+       owner_role
+    );
+END
+$fact_lock_owner$;
+
 -- When a cache is explicitly created/refreshed, derive its dependencies
 -- from *approved, current, same-namespace evidence*. No client-provided
 -- cross-tenant/superseded dependency is allowed to count as fresh.
 CREATE FUNCTION sync_standing_answer_dependencies()
 RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $sync$
 DECLARE
     evidence jsonb;
@@ -90,7 +103,7 @@ BEGIN
         RAISE EXCEPTION 'standing evidence must be a nonempty JSON UUID array'
             USING ERRCODE = '22023';
     END IF;
-    DELETE FROM memory_standing_answer_dependencies
+    DELETE FROM public.memory_standing_answer_dependencies
      WHERE standing_answer_id = NEW.id;
     FOR entry IN SELECT value FROM jsonb_array_elements(evidence) LOOP
         IF jsonb_typeof(entry) <> 'string' THEN
@@ -107,8 +120,8 @@ BEGIN
             CONTINUE;
         END IF;
         SELECT f.current_version_id INTO observed
-        FROM memory_items f
-        JOIN namespaces ns ON ns.id = f.namespace_id AND ns.tenant_id = f.tenant_id
+        FROM public.memory_items f
+        JOIN public.namespaces ns ON ns.id = f.namespace_id AND ns.tenant_id = f.tenant_id
         WHERE f.id = source_fact
           AND f.tenant_id = NEW.tenant_id
           AND f.namespace_id = NEW.namespace_id
@@ -123,8 +136,8 @@ BEGIN
           -- still_valid reviewer decision can clear that restriction.
           AND NOT EXISTS (
               SELECT 1
-              FROM memory_revalidation_events ev
-              LEFT JOIN memory_revalidation_decisions d
+              FROM public.memory_revalidation_events ev
+              LEFT JOIN public.memory_revalidation_decisions d
                 ON d.event_id = ev.id AND d.tenant_id = ev.tenant_id
               WHERE ev.fact_id = f.id
                 AND ev.tenant_id = f.tenant_id
@@ -142,7 +155,7 @@ BEGIN
             RAISE EXCEPTION 'standing answer references inaccessible or stale evidence'
                 USING ERRCODE = '23514';
         END IF;
-        INSERT INTO memory_standing_answer_dependencies
+        INSERT INTO public.memory_standing_answer_dependencies
             (standing_answer_id, tenant_id, fact_id, observed_version_id)
         VALUES (NEW.id, NEW.tenant_id, source_fact, observed);
         already_added := array_append(already_added, source_fact);
@@ -161,7 +174,7 @@ FOR EACH ROW EXECUTE FUNCTION sync_standing_answer_dependencies();
 CREATE FUNCTION mark_dependent_standing_answers_stale()
 RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $invalidate$
 DECLARE
     reason text;
@@ -181,10 +194,10 @@ BEGIN
         END IF;
         reason := 'supporting_memory_changed';
     END IF;
-    UPDATE memory_standing_answers sa
+    UPDATE public.memory_standing_answers sa
        SET stale_at = clock_timestamp(),
            stale_reason = reason
-      FROM memory_standing_answer_dependencies dep
+      FROM public.memory_standing_answer_dependencies dep
      WHERE dep.standing_answer_id = sa.id
        AND dep.tenant_id = OLD.tenant_id
        AND dep.fact_id = OLD.id
@@ -211,14 +224,14 @@ EXECUTE FUNCTION mark_dependent_standing_answers_stale();
 CREATE FUNCTION mark_standing_answers_stale_for_code_review()
 RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $review_stale$
 BEGIN
     IF NEW.review_status IN ('needs_review','superseded','invalidated','unresolved') THEN
-        UPDATE memory_standing_answers sa
+        UPDATE public.memory_standing_answers sa
            SET stale_at = clock_timestamp(),
                stale_reason = 'supporting_code_requires_review'
-          FROM memory_standing_answer_dependencies dep
+          FROM public.memory_standing_answer_dependencies dep
          WHERE dep.standing_answer_id = sa.id
            AND dep.tenant_id = NEW.tenant_id
            AND dep.fact_id = NEW.fact_id

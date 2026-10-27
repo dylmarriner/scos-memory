@@ -54,6 +54,14 @@ answers and does not close the P7 acceptance gate.
 
 - Migration `000084` is append-only and does not modify any production data
   without an approved deployment.
+- - The three `SECURITY DEFINER` triggers use `public.`-qualified application
+  tables and place `pg_temp` last in their search path. Real restricted-role
+  testing reproduced a temporary-table shadowing attack before the fix:
+  a fake dependency table caused zero real dependencies to be recorded.
+  The test passes after schema qualification.
+- The migration owner has an owner-only RLS UPDATE policy to support
+  `SELECT ... FOR SHARE` on evidence rows under forced RLS. The ordinary
+  application role does not receive that exception.
 - The dependency table uses forced RLS and an owner-only maintenance policy;
   `scos_app` direct table privileges are revoked both during upgrades and
   after the fresh-install blanket grant in `database/policies/000011_app_role.sql`.
@@ -70,7 +78,8 @@ cover exact dependency registration; unrelated metadata changes; status
 supersession; fact deletion; attempted stale-answer reactivation; approved
 reviewer `still_valid` recovery; changed-code `needs_review` invalidation;
 cross-tenant evidence rejection; direct dependency-table denial; and a
-concurrent memory correction/cache-refresh regression.
+concurrent memory correction/cache-refresh regression; and a restricted-role
+  temporary-table shadowing attack regression.
 
 Run with a disposable migrated PostgreSQL 17/pgvector database with all
 policies and both `DATABASE_URL` (migration owner) and
