@@ -427,7 +427,10 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// ── 1. Authorise / resolve namespaces ───────────────────────────
 	namespaces, err := s.resolveAuthorisedNamespaces(ctx, req)
 	if err != nil {
-		http.Error(w, "authorisation error: "+err.Error(), http.StatusInternalServerError)
+		// Database driver errors can contain connection hosts, roles and database
+		// names. Do not return those details to the authenticated caller.
+		log.Printf("retrieval namespace lookup failed (%T)", err)
+		http.Error(w, "retrieval temporarily unavailable", http.StatusInternalServerError)
 		return
 	}
 	if len(namespaces) == 0 {

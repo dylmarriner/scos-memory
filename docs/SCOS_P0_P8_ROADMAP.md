@@ -4,6 +4,28 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P5 namespace lookup failure response isolation (2026-10-28, development)
+
+The authenticated `POST /v1/retrieve` namespace-authorization path previously
+returned raw PostgreSQL driver errors as HTTP 500 bodies. A real pgx connection
+failure exposed the internal database username, database name, host and port,
+and dial error to a service-token caller (RED). The handler now returns a
+stable `retrieval temporarily unavailable` HTTP 500 while logging only the
+error type, not the connection string (GREEN). The regression exercises the
+real authenticated mux and a real pgx pool with an unreachable loopback
+endpoint, not a simulated database error; five focused runs passed. A
+follow-up CodeRabbit nitpick was addressed by capturing the real standard
+logger in the regression: mutating `%T` back to `%v` exposed the internal DSN
+(RED), and restoring type-only logging passed five race-enabled runs (GREEN).
+The full uncached Go suite, `go vet ./...`, and Python unittest suite passed
+on AMD before the follow-up test-only change.
+
+This closes **one P5 error-disclosure path**, not the historical system-time
+ledger or §41 governance gate. The runtime audit still correctly FAILS on
+historical retrieval HTTP 501, and the DoD checker still FAILS on §41 PARTIAL.
+No production rollout, migration, or paid resources were used. PR and
+merged-main CI evidence are separate acceptance requirements.
+
 ## P5 single-document retrieval request integrity (2026-10-28, development)
 
 `POST /v1/retrieve` previously accepted a valid first JSON request while
