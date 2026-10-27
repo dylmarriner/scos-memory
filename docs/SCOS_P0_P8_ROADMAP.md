@@ -4,6 +4,23 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P5 memory-event history TRUNCATE guard (2026-10-28; isolated source candidate)
+
+Migration `000082` protects the append-only memory-state ledger and its purge
+audit against row-level UPDATE/DELETE, but PostgreSQL `TRUNCATE` does not fire
+row-level DELETE triggers. Real PostgreSQL 17 tests demonstrated that both
+history tables could be truncated by their migration owner without the
+reasoned, counted purge workflow (RED). New migration `000083` installs
+statement-level `BEFORE TRUNCATE` rejection triggers on both tables, so
+accidental direct or `TRUNCATE tenants CASCADE` attempts fail with SQLSTATE `55006` (GREEN,
+five repeated runs). Existing privileged per-tenant audited deletion is not
+removed. A fresh disposable database with 83 migrations and restricted-role
+policies passed the full retrieval integration package, 51-package Go suite,
+90 Python tests, vet and focused race tests. This does
+**not** implement historical system-time retrieval, prove production recovery,
+or close §41; merge and main CI must be independently verified. See
+`docs/P5_MEMORY_SYSTEM_EVENTS.md`.
+
 ## ACP governed downstream error isolation (2026-10-28, merged PR #104)
 
 The autonomous control plane previously forwarded untrusted downstream HTTP
@@ -1263,7 +1280,7 @@ coverage, production qualification, or permission to merge/deploy.
 
 # Cross-phase supporting work
 
-## §32 backup freshness telemetry (2026-10-28, isolated source candidate)
+## §32 backup freshness telemetry (2026-10-28, merged PR #105)
 
 The backup manager already emitted `scos.backup.age` only when a caller
 requested `GET /v1/backups`, while `scos.backup.restore_status` was emitted
