@@ -71,7 +71,8 @@ func (s *server) requirePGStore(w http.ResponseWriter) bool {
 func (s *server) requireEnabled(w http.ResponseWriter, r *http.Request, tenant, principal string) bool {
 	enabled, err := s.pgStore.IsUserEnabled(r.Context(), tenant, principal)
 	if err != nil {
-		http.Error(w, "load user settings: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("load user settings: %v", err)
+		http.Error(w, "load user settings failed", http.StatusInternalServerError)
 		return false
 	}
 	if !enabled {
@@ -105,7 +106,8 @@ func (s *server) handlePGSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		enabled, err := s.pgStore.IsUserEnabled(r.Context(), tenant, principal)
 		if err != nil {
-			http.Error(w, "load user settings: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("load user settings: %v", err)
+			http.Error(w, "load user settings failed", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, map[string]any{"durable_store_enabled": enabled})
@@ -124,7 +126,8 @@ func (s *server) handlePGSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.pgStore.SetUserEnabled(r.Context(), tenant, principal, *req.DurableStoreEnabled); err != nil {
-			http.Error(w, "set user settings: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("set user settings: %v", err)
+			http.Error(w, "set user settings failed", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, map[string]any{"durable_store_enabled": *req.DurableStoreEnabled})

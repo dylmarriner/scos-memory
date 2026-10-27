@@ -955,7 +955,28 @@ code-intelligence suite, uncached Go suite, Go vet and diff checks
 passed. Legacy owner-level helper remains for internal test callers.
 This does not enable production RLS or close P4/P6 acceptance.
 
-**No production RLS migration, merge or rollout.**
+**P6 code settings RLS hardening (2026-10-27, PR #92 development):**
+The per-principal durable-store toggle was another legacy table with no
+row-level security. New policy 000020_code_user_settings_rls.sql enables
+and forces tenant isolation for its table. IsUserEnabled and
+SetUserEnabled now run SQL under transaction-local authenticated
+tenant context, including the common requireEnabled route guard.
+Restricted scos_app real-PostgreSQL regressions were RED before the fix
+(owner write rejected by candidate FORCE RLS; production catalog lacked
+RLS) and GREEN afterward. They prove owner write/read, other-tenant
+isolation, no context-free direct reads, invalid UUID rejection, pooled
+connection cleanup, and production policy catalog state. An additional
+RED-to-GREEN HTTP regression prevents SQL/driver errors leaking through
+settings GET/PUT and the route guard. A fresh disposable PostgreSQL 17/pgvector database applied all 98
+migration/policy scripts, then passed the full code-intelligence
+integration package, uncached Go suite (51 tested packages), Go vet and
+diff checks. This is a **source-only policy migration**, not a live
+migration or production rollout. The four legacy
+code-provenance tables still have no committed production FORCE RLS
+migration and PR #92 remains draft pending substantive security
+reviews and recovery qualification.
+
+**No production code-provenance RLS migration, merge or rollout.**
 Background recovery and other legacy operations still need scoping
 and acceptance before enabling production forced RLS.
 

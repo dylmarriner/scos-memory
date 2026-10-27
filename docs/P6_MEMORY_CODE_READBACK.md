@@ -316,7 +316,26 @@ PostgreSQL integration suites passed, including the opt-in forced-RLS
 qualification gate. This increment does not activate
 the four pending production provenance RLS policies.
 
-**No production policy migration was added or deployed.** Recovery,
+**P6 user settings isolation and error sanitization (2026-10-27,
+PR #92 development):** policy 000020_code_user_settings_rls.sql
+enables/forces RLS on the previously unprotected
+code_intelligence_user_settings table, and both runtime settings
+operations now use transaction-local authenticated tenant context.
+A new restricted-role PostgreSQL regression was RED before the
+runtime/policy changes (owner insert blocked, policy catalog absent)
+and GREEN afterward, covering tenant and principal separation,
+no-context direct read denial, invalid tenant UUIDs and pooled
+connection cleanup. A separate RED-to-GREEN HTTP regression proves
+settings GET/PUT and the shared route guard no longer return raw
+SQL/driver error details to clients. A fresh disposable PostgreSQL 17/pgvector database applied all 98
+migration/policy scripts and passed the complete code-intelligence
+integration package, uncached Go suite (51 tested packages), Go vet
+and diff checks. This new policy exists in source only; it has not
+been applied to any live service.
+The four provenance tables remain unprotected by production RLS,
+and startup recovery remains an open qualification gate.
+
+**No four-table provenance RLS migration was added or deployed.** Recovery,
 background maintenance and remaining unscoped callers still require
 qualification before those policies can be committed safely.
 

@@ -1513,9 +1513,11 @@ func (s *pgCodeStore) ActiveSnapshotID(ctx context.Context, repositoryID, branch
 // table only ever records an explicit opt-out.
 func (s *pgCodeStore) IsUserEnabled(ctx context.Context, tenantID, principalID string) (bool, error) {
 	var enabled bool
-	err := s.db.QueryRowContext(ctx, `
-		SELECT durable_store_enabled FROM code_intelligence_user_settings
-		WHERE tenant_id = $1 AND principal_id = $2`, tenantID, principalID).Scan(&enabled)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT durable_store_enabled FROM code_intelligence_user_settings
+			WHERE tenant_id = $1 AND principal_id = $2`, tenantID, principalID).Scan(&enabled)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, nil
 	}
@@ -1527,12 +1529,15 @@ func (s *pgCodeStore) IsUserEnabled(ctx context.Context, tenantID, principalID s
 
 // SetUserEnabled records (tenantID, principalID)'s explicit preference.
 func (s *pgCodeStore) SetUserEnabled(ctx context.Context, tenantID, principalID string, enabled bool) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO code_intelligence_user_settings (tenant_id, principal_id, durable_store_enabled)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (tenant_id, principal_id)
-		DO UPDATE SET durable_store_enabled = EXCLUDED.durable_store_enabled, updated_at = now()`,
-		tenantID, principalID, enabled)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO code_intelligence_user_settings (tenant_id, principal_id, durable_store_enabled)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (tenant_id, principal_id)
+			DO UPDATE SET durable_store_enabled = EXCLUDED.durable_store_enabled, updated_at = now()`,
+			tenantID, principalID, enabled)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("set user settings: %w", err)
 	}
