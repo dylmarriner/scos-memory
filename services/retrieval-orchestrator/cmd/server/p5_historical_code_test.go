@@ -22,18 +22,18 @@ func TestP5HistoricalCodeClientBindsImmutableSnapshotAndIdentity(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["as_of_commit"] != commit || body["snapshot_id"] != snapshot || body["branch"] != "main" || body["repository_id"] != "repo-1" {
+		if body["as_of_commit"] != commit || body["snapshot_id"] != snapshot || body["branch"] != "main" || body["repository_id"] != "a1bc12f0-3456-4123-8abc-123456789abc" {
 			t.Fatalf("historical selectors missing: %#v", body)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"historical": true, "snapshot_id": snapshot, "commit_id": commit, "branch": "main", "retrieval_mode": "historical_exact",
+			"historical": true, "repository_id": "a1bc12f0-3456-4123-8abc-123456789abc", "snapshot_id": snapshot, "commit_id": commit, "branch": "main", "retrieval_mode": "historical_exact",
 			"results": []map[string]any{{"SymbolVersionID": "sv-old", "SnapshotID": snapshot, "CommitID": commit, "Branch": "main", "Path": "old.go"}},
 		})
 	}))
 	defer upstream.Close()
 	client := &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}
-	out, err := client.QueryHistorical(context.Background(), "tenant-1", "principal-1", "repo-1", "main", "old.go", 10, commit, snapshot)
-	if err != nil || out == nil || !out.Historical || out.CommitID != commit || out.SnapshotID != snapshot || len(out.Results) != 1 {
+	out, err := client.QueryHistorical(context.Background(), "tenant-1", "principal-1", "a1bc12f0-3456-4123-8abc-123456789abc", "main", "old.go", 10, commit, snapshot)
+	if err != nil || out == nil || !out.Historical || out.RepositoryID != "a1bc12f0-3456-4123-8abc-123456789abc" || out.CommitID != commit || out.SnapshotID != snapshot || len(out.Results) != 1 {
 		t.Fatalf("historical provenance missing: %+v, %v", out, err)
 	}
 }
@@ -45,6 +45,8 @@ func TestP5HistoricalCodeClientRejectsFalseOrMixedProvenance(t *testing.T) {
 		response string
 	}{
 		{"current fallback", `{"retrieval_mode":"hybrid","results":[]}`},
+		{"wrong repository", `{"historical":true,"repository_id":"b1bc12f0-3456-4123-8abc-123456789abc","snapshot_id":"` + snapshot + `","commit_id":"old","branch":"main","results":[]}`},
+		{"missing repository", `{"historical":true,"snapshot_id":"` + snapshot + `","commit_id":"old","branch":"main","results":[]}`},
 		{"wrong commit", `{"historical":true,"snapshot_id":"` + snapshot + `","commit_id":"other","branch":"main","results":[]}`},
 		{"wrong branch", `{"historical":true,"snapshot_id":"` + snapshot + `","commit_id":"old","branch":"dev","results":[]}`},
 		{"mixed snapshot", `{"historical":true,"snapshot_id":"` + snapshot + `","commit_id":"old","branch":"main","results":[{"SymbolVersionID":"sv-1","SnapshotID":"other","CommitID":"old","Branch":"main"}]}`},
@@ -55,7 +57,7 @@ func TestP5HistoricalCodeClientRejectsFalseOrMixedProvenance(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.response)) }))
 			defer upstream.Close()
 			client := &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}
-			if out, err := client.QueryHistorical(context.Background(), "tenant", "principal", "repo", "main", "old.go", 10, "old", snapshot); err == nil {
+			if out, err := client.QueryHistorical(context.Background(), "tenant", "principal", "a1bc12f0-3456-4123-8abc-123456789abc", "main", "old.go", 10, "old", snapshot); err == nil {
 				t.Fatalf("accepted untrusted historical result: %+v", out)
 			}
 		})
@@ -69,8 +71,8 @@ func TestP5HistoricalRetrievalFailsClosedBeforeDatabaseAccess(t *testing.T) {
 		want          int
 	}{
 		{"missing repository", `{"tenant_id":"t","principal_id":"p","query":"memory","branch":"main","as_of_commit":"old"}`, http.StatusBadRequest},
-		{"missing branch", `{"tenant_id":"t","principal_id":"p","query":"memory","repository_id":"repo","as_of_commit":"old"}`, http.StatusBadRequest},
-		{"no code service", `{"tenant_id":"t","principal_id":"p","query":"remember my preference","repository_id":"repo","branch":"main","as_of_commit":"old"}`, http.StatusBadGateway},
+		{"missing branch", `{"tenant_id":"t","principal_id":"p","query":"memory","repository_id":"a1bc12f0-3456-4123-8abc-123456789abc","as_of_commit":"old"}`, http.StatusBadRequest},
+		{"no code service", `{"tenant_id":"t","principal_id":"p","query":"remember my preference","repository_id":"a1bc12f0-3456-4123-8abc-123456789abc","branch":"main","as_of_commit":"old"}`, http.StatusBadGateway},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,9 +86,9 @@ func TestP5HistoricalRetrievalFailsClosedBeforeDatabaseAccess(t *testing.T) {
 }
 
 func TestP5HistoricalCodeSelectorsAreAudited(t *testing.T) {
-	req := RetrieveRequest{RepositoryID: "repo-1", Branch: "main", AsOfCommit: "old", SnapshotID: "snapshot"}
+	req := RetrieveRequest{RepositoryID: "a1bc12f0-3456-4123-8abc-123456789abc", Branch: "main", AsOfCommit: "old", SnapshotID: "snapshot"}
 	got := appliedRestrictions(req)
-	if got["as_of_commit"] != "old" || got["snapshot_id"] != "snapshot" || got["repository_id"] != "repo-1" || got["branch"] != "main" || got["code_temporal_scope"] != "immutable_snapshot" {
+	if got["as_of_commit"] != "old" || got["snapshot_id"] != "snapshot" || got["repository_id"] != "a1bc12f0-3456-4123-8abc-123456789abc" || got["branch"] != "main" || got["code_temporal_scope"] != "immutable_snapshot" {
 		t.Fatalf("missing immutable code selectors in retrieval audit: %#v", got)
 	}
 	if strings.Contains(strings.TrimSpace(toJSONForTest(appliedRestrictions(RetrieveRequest{}))), "as_of_commit") {
@@ -106,7 +108,7 @@ func TestP5HistoricalRetrievalPreservesSafeNotFoundAndAmbiguity(t *testing.T) {
 			defer upstream.Close()
 			srv := &server{codeIntelligence: &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}}
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(`{"tenant_id":"t","principal_id":"p","query":"remember the previous code","repository_id":"repo","branch":"main","as_of_commit":"old"}`))
+			req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(`{"tenant_id":"t","principal_id":"p","query":"remember the previous code","repository_id":"a1bc12f0-3456-4123-8abc-123456789abc","branch":"main","as_of_commit":"old"}`))
 			srv.handleRetrieve(rec, req)
 			want := status
 			if status == http.StatusServiceUnavailable {
@@ -145,19 +147,19 @@ func TestP5HistoricalCodeClientSupportsCommitOrSnapshotSelection(t *testing.T) {
 					t.Error("forwarded unrequested snapshot")
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{
-					"historical": true, "snapshot_id": snapshot, "commit_id": commit, "branch": "main", "results": []any{},
+					"historical": true, "repository_id": "a1bc12f0-3456-4123-8abc-123456789abc", "snapshot_id": snapshot, "commit_id": commit, "branch": "main", "results": []any{},
 				})
 			}))
 			defer upstream.Close()
 			client := &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}
-			got, err := client.QueryHistorical(context.Background(), "tenant", "principal", "repo", "main", "code", 5, tc.requestedCommit, tc.requestedSnapshot)
+			got, err := client.QueryHistorical(context.Background(), "tenant", "principal", "a1bc12f0-3456-4123-8abc-123456789abc", "main", "code", 5, tc.requestedCommit, tc.requestedSnapshot)
 			if err != nil || got == nil || !got.Historical {
 				t.Fatalf("selector failed: %+v %v", got, err)
 			}
 		})
 	}
 	client := &codeIntelligenceClient{}
-	if _, err := client.QueryHistorical(context.Background(), "tenant", "principal", "repo", "main", "code", 5, "", ""); err == nil {
+	if _, err := client.QueryHistorical(context.Background(), "tenant", "principal", "a1bc12f0-3456-4123-8abc-123456789abc", "main", "code", 5, "", ""); err == nil {
 		t.Fatal("historical query without immutable selector must fail")
 	}
 }
@@ -174,14 +176,14 @@ func TestP5HistoricalCodeClientAcceptsCanonicalUUIDCase(t *testing.T) {
 			t.Errorf("selector was silently changed before lookup: %v", body)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"historical": true, "snapshot_id": canonical, "commit_id": "old", "branch": "main", "results": []map[string]any{
+			"historical": true, "repository_id": "a1bc12f0-3456-4123-8abc-123456789abc", "snapshot_id": canonical, "commit_id": "old", "branch": "main", "results": []map[string]any{
 				{"SymbolVersionID": "sv-1", "SnapshotID": canonical, "CommitID": "old", "Branch": "main"},
 			},
 		})
 	}))
 	defer upstream.Close()
 	client := &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}
-	got, err := client.QueryHistorical(context.Background(), "tenant", "principal", "repo", "main", "code", 5, "old", mixedCase)
+	got, err := client.QueryHistorical(context.Background(), "tenant", "principal", "a1bc12f0-3456-4123-8abc-123456789abc", "main", "code", 5, "old", mixedCase)
 	if err != nil || got == nil || got.SnapshotID != canonical {
 		t.Fatalf("case-equivalent UUID rejected: %+v %v", got, err)
 	}
@@ -196,6 +198,7 @@ func TestP5HistoricalFailureLogsOnlyStatusOrProvenanceCategory(t *testing.T) {
 	}{
 		{"downstream HTTP", http.StatusServiceUnavailable, secret, "HTTP 503"},
 		{"provenance mismatch", http.StatusOK, `{"historical":false,"results":[],"private":"` + secret + `"}`, "provenance mismatch"},
+		{"repository mismatch", http.StatusOK, `{"historical":true,"repository_id":"b1bc12f0-3456-4123-8abc-123456789abc","snapshot_id":"a3bc12f0-3456-4123-8abc-123456789abc","commit_id":"old","branch":"main","results":[],"private":"` + secret + `"}`, "provenance mismatch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -209,11 +212,38 @@ func TestP5HistoricalFailureLogsOnlyStatusOrProvenanceCategory(t *testing.T) {
 			log.SetOutput(&logs)
 			defer log.SetOutput(prior)
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(`{"tenant_id":"t","principal_id":"p","query":"remember the old code","repository_id":"repo","branch":"main","as_of_commit":"old"}`))
+			req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(`{"tenant_id":"t","principal_id":"p","query":"remember the old code","repository_id":"a1bc12f0-3456-4123-8abc-123456789abc","branch":"main","as_of_commit":"old"}`))
 			srv.handleRetrieve(rec, req)
 			if rec.Code != http.StatusBadGateway || !strings.Contains(logs.String(), tc.marker) || strings.Contains(logs.String(), secret) || strings.Contains(rec.Body.String(), secret) {
 				t.Fatalf("unsafe or unhelpful failure: status=%d logs=%q", rec.Code, logs.String())
 			}
 		})
+	}
+}
+
+// PostgreSQL canonicalizes UUID text; an equivalent uppercase repository
+// selector must not be mistaken for a cross-repository response.
+func TestP5HistoricalCodeClientAcceptsCanonicalRepositoryUUIDCase(t *testing.T) {
+	const canonicalRepository = "a1bc12f0-3456-4123-8abc-123456789abc"
+	const uppercaseRepository = "A1BC12F0-3456-4123-8ABC-123456789ABC"
+	const snapshot = "a3bc12f0-3456-4123-8abc-123456789abc"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body["repository_id"] != uppercaseRepository {
+			t.Errorf("selector changed before lookup: %v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"historical": true, "repository_id": canonicalRepository,
+			"snapshot_id": snapshot, "commit_id": "old", "branch": "main", "results": []any{},
+		})
+	}))
+	defer upstream.Close()
+	client := &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}
+	out, err := client.QueryHistorical(context.Background(), "tenant", "principal", uppercaseRepository, "main", "code", 5, "old", snapshot)
+	if err != nil || out == nil || out.RepositoryID != canonicalRepository {
+		t.Fatalf("case-equivalent repository UUID rejected: %+v %v", out, err)
 	}
 }

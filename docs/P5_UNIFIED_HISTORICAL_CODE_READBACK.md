@@ -10,9 +10,19 @@ principal, never an active-branch fallback. Even memory-classified natural
 language queries must execute the explicitly selected code lane.
 
 Successful historical code readback includes `code.historical=true`, the
-resolved `code.snapshot_id`, `code.commit_id`, `code.branch`, and concrete
+resolved `code.repository_id`, `code.snapshot_id`, `code.commit_id`, `code.branch`, and concrete
 `code.results[].SymbolVersionID`, `SnapshotID`, `CommitID`, `Branch` values.
 The orchestrator rejects missing/mismatched response and per-result provenance.
+The code service returns the repository ID from the same tenant-scoped immutable
+snapshot lookup, and the orchestrator requires it to equal the caller-selected
+repository even for empty result sets. UUID selectors are compared by parsed
+identity, accepting PostgreSQL-canonical lowercase responses to equivalent
+uppercase or alternate UUID spellings without weakening foreign-ID rejection.
+This prevents a cross-repository
+historical result from being silently accepted when commit/branch labels happen
+to match. Older code-service builds lacking this response field fail closed
+with HTTP 502 until the corresponding code service is rolled out; coordinated
+source-image deployment and recovery verification remain separate gates.
 An invalid selector returns a safe 400; an unknown snapshot returns a safe 404; an ambiguous commit returns a safe
 409 and asks for `snapshot_id`. Other downstream errors, unavailable services,
 and malformed provenance fail closed with 502, not a misleading empty/current
@@ -29,6 +39,12 @@ until a trustworthy historical belief ledger exists.
 
 ## Evidence and remaining gates
 
+- Repository provenance hardening (2026-10-28): RED tests demonstrated that
+  the historical client accepted a wrong or missing `repository_id`. GREEN
+  tests require repository binding, reject foreign/missing repository responses,
+  and verify the code service returns the repository from real PostgreSQL
+  snapshot lookup. An authenticated HTTP regression checks safe 502/logging
+  without leaking downstream data.
 - TDD: new client/handler/schema tests failed before implementation and
   passed afterward. Separate HTTP tests cover trusted identity forwarding,
   missing repository/branch, memory-classified query forcing, mismatched
