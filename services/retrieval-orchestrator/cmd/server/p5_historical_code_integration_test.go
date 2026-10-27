@@ -72,7 +72,7 @@ func TestP5HistoricalCodeReadbackPersistsImmutableSelectors(t *testing.T) {
 	if err := json.Unmarshal(selected, &ids); err != nil {
 		t.Fatal(err)
 	}
-	if f["as_of_commit"] != commit || f["snapshot_id"] != snapshot || f["code_temporal_scope"] != "immutable_snapshot" || len(ids) != 1 || ids[0] != symbol {
+	if f["as_of_commit"] != commit || f["snapshot_id"] != snapshot || f["repository_id"] != "repo-1" || f["branch"] != "main" || f["code_temporal_scope"] != "immutable_snapshot" || len(ids) != 1 || ids[0] != symbol {
 		t.Fatalf("historical audit missing selectors or symbol: filters=%v selected=%v", f, ids)
 	}
 }

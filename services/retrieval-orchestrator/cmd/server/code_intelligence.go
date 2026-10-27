@@ -170,7 +170,7 @@ func (c *codeIntelligenceClient) query(ctx context.Context, tenantID, principalI
 		// it returned the requested immutable generation, not active code.
 		if !out.Historical || out.SnapshotID == "" || out.CommitID == "" || out.Branch != branch ||
 			(asOfCommit != "" && out.CommitID != asOfCommit) ||
-			(snapshotID != "" && out.SnapshotID != snapshotID) {
+			(snapshotID != "" && !strings.EqualFold(out.SnapshotID, snapshotID)) {
 			return nil, fmt.Errorf("code-intelligence historical provenance mismatch")
 		}
 		for _, item := range out.Results {

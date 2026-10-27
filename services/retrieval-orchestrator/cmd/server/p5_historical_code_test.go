@@ -83,9 +83,9 @@ func TestP5HistoricalRetrievalFailsClosedBeforeDatabaseAccess(t *testing.T) {
 }
 
 func TestP5HistoricalCodeSelectorsAreAudited(t *testing.T) {
-	req := RetrieveRequest{AsOfCommit: "old", SnapshotID: "snapshot"}
+	req := RetrieveRequest{RepositoryID: "repo-1", Branch: "main", AsOfCommit: "old", SnapshotID: "snapshot"}
 	got := appliedRestrictions(req)
-	if got["as_of_commit"] != "old" || got["snapshot_id"] != "snapshot" || got["code_temporal_scope"] != "immutable_snapshot" {
+	if got["as_of_commit"] != "old" || got["snapshot_id"] != "snapshot" || got["repository_id"] != "repo-1" || got["branch"] != "main" || got["code_temporal_scope"] != "immutable_snapshot" {
 		t.Fatalf("missing immutable code selectors in retrieval audit: %#v", got)
 	}
 	if strings.Contains(strings.TrimSpace(toJSONForTest(appliedRestrictions(RetrieveRequest{}))), "as_of_commit") {
@@ -158,5 +158,30 @@ func TestP5HistoricalCodeClientSupportsCommitOrSnapshotSelection(t *testing.T) {
 	client := &codeIntelligenceClient{}
 	if _, err := client.QueryHistorical(context.Background(), "tenant", "principal", "repo", "main", "code", 5, "", ""); err == nil {
 		t.Fatal("historical query without immutable selector must fail")
+	}
+}
+
+func TestP5HistoricalCodeClientAcceptsCanonicalUUIDCase(t *testing.T) {
+	const canonical = "a3bc12f0-3456-4123-8abc-123456789abc"
+	const mixedCase = "A3BC12F0-3456-4123-8ABC-123456789ABC"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body["snapshot_id"] != mixedCase {
+			t.Errorf("selector was silently changed before lookup: %v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"historical": true, "snapshot_id": canonical, "commit_id": "old", "branch": "main", "results": []map[string]any{
+				{"SymbolVersionID": "sv-1", "SnapshotID": canonical, "CommitID": "old", "Branch": "main"},
+			},
+		})
+	}))
+	defer upstream.Close()
+	client := &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}
+	got, err := client.QueryHistorical(context.Background(), "tenant", "principal", "repo", "main", "code", 5, "old", mixedCase)
+	if err != nil || got == nil || got.SnapshotID != canonical {
+		t.Fatalf("case-equivalent UUID rejected: %+v %v", got, err)
 	}
 }

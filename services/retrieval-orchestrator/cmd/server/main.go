@@ -1652,6 +1652,10 @@ func appliedRestrictions(req RetrieveRequest) map[string]any {
 		out["temporal_scope"] = temporalScopeFor(req.AsOfValidTime)
 	}
 	if req.AsOfCommit != "" || req.SnapshotID != "" {
+		// The selector alone does not identify a historical code generation:
+		// repository and branch must survive even when no symbols matched.
+		out["repository_id"] = req.RepositoryID
+		out["branch"] = req.Branch
 		out["code_temporal_scope"] = "immutable_snapshot"
 		if req.AsOfCommit != "" {
 			out["as_of_commit"] = req.AsOfCommit

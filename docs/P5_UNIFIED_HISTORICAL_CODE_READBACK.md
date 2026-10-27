@@ -18,7 +18,8 @@ An invalid selector returns a safe 400; an unknown snapshot returns a safe 404; 
 and malformed provenance fail closed with 502, not a misleading empty/current
 code result. Downstream error bodies are never exposed.
 
-`retrieval_runs.filters` records the requested immutable code selectors and
+`retrieval_runs.filters` records the requested immutable code selectors,
+repository UUID and branch (even on an empty result), and
 `code_temporal_scope=immutable_snapshot`; selected symbol-version IDs are
 recorded separately. **Memory sections remain governed by the current SCOS
 system belief** (and optionally `as_of_valid_time`). `as_of_commit` is not
