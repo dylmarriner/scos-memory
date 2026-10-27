@@ -1228,6 +1228,8 @@ correction, production rollout, or P7 completion.
 - [ ] Create governed memory versions/supersession relations only when approved.
 - [ ] Create OKF review proposals with old/new code evidence.
 - [ ] Invalidate standing answers depending on stale/superseded evidence.
+  - [x] **Database-level P7 standing-answer invalidation candidate (2026-10-28, migration 000084):** typed tenant-bound dependencies, conservative stale marking for legacy rows, atomic invalidation on fact status/version/effective-date/deletion and P7 code `needs_review` events, guarded refreshes requiring governed still-valid reviews, runtime privilege denial, and real PostgreSQL restricted-role and concurrent-refresh race tests (RED before the row lock, GREEN after), plus TEMP-table shadowing reproduction (RED before schema-qualification, GREEN after). See `docs/P7_STANDING_ANSWER_FRESHNESS.md`. The checkbox stays open because no end-to-end cache writer/read path, time-passage expiry check at read, production rollout, or full stale-answer acceptance has been verified.
+
 - [ ] Measure false-positive/false-negative outcomes.
 
 **P7 ambiguous-copy revalidation regression (2026-10-26; PR review branch,
