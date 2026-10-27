@@ -16,7 +16,15 @@ class RuntimeGovernanceAuditTests(unittest.TestCase):
     def test_repository_reports_known_runtime_findings(self):
         findings = audit_runtime.audit(ROOT)
 
-        self.assertFalse(any("HTTP 501/unavailable" in finding for finding in findings))
+        # P5 historical system-time retrieval deliberately fails closed with
+        # HTTP 501 until a durable belief ledger exists. Keep this finding
+        # visible rather than asserting the runtime audit is already clean.
+        unavailable = [finding for finding in findings if "HTTP 501/unavailable" in finding]
+        self.assertEqual(len(unavailable), 1, unavailable)
+        self.assertTrue(
+            unavailable[0].startswith("services/retrieval-orchestrator/cmd/server/main.go:"),
+            unavailable,
+        )
         self.assertFalse(any("local JSON authority fallback" in finding for finding in findings))
         self.assertFalse(any("unconditionally healthy" in finding for finding in findings))
         self.assertFalse(any("without authentication middleware" in finding for finding in findings))
