@@ -449,7 +449,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exact, err := s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, req.Query)
+	exact, err := s.pgStore.QueryByPathOrFQNScoped(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query)
 	if err != nil {
 		http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -461,7 +461,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	// interface's qualified name.
 	if name := declarationQuery(req.Query); len(exact) == 0 && name != "" {
 		for _, pattern := range declarationPatterns(name) {
-			if exact, err = s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, pattern); err != nil {
+			if exact, err = s.pgStore.QueryByPathOrFQNScoped(r.Context(), tenant, req.RepositoryID, req.Branch, pattern); err != nil {
 				http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -485,7 +485,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lexical, err := s.pgStore.QueryLexical(r.Context(), req.RepositoryID, req.Branch, req.Query, limit)
+	lexical, err := s.pgStore.QueryLexicalScoped(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query, limit)
 	if err != nil {
 		http.Error(w, "lexical query: "+err.Error(), http.StatusInternalServerError)
 		return

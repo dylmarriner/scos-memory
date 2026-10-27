@@ -47,7 +47,7 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		"CREATE TABLE " + schema + ".code_repositories (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, canonical_path text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,canonical_path))",
 		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
-		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector)",
+		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
 		"GRANT SELECT,INSERT,UPDATE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
 		"ALTER TABLE " + schema + ".code_repositories ENABLE ROW LEVEL SECURITY",
@@ -114,6 +114,26 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if _, err := store.QueryHistoricalCode(ctx, tenantB, repo, "main", "commit1", "", "pkg/scope.go", 10); err != errHistoricalNotFound {
 		t.Fatalf("foreign tenant historical query should not resolve: %v", err)
+	}
+	// Current exact and lexical reads must share transaction-local tenant context.
+	if _, err := admin.ExecContext(ctx, "UPDATE "+schema+".code_symbol_versions SET search_vector=to_tsvector('simple','pkg scope go') WHERE id=$1", versionID); err != nil {
+		t.Fatal(err)
+	}
+	exact, err := store.QueryByPathOrFQNScoped(ctx, tenantA, repo, "main", "pkg/scope.go")
+	if err != nil || len(exact) != 1 || exact[0].SymbolVersionID != versionID {
+		t.Fatalf("own-tenant exact readback: %+v, %v", exact, err)
+	}
+	exact, err = store.QueryByPathOrFQNScoped(ctx, tenantB, repo, "main", "pkg/scope.go")
+	if err != nil || len(exact) != 0 {
+		t.Fatalf("foreign-tenant exact readback: %+v, %v", exact, err)
+	}
+	lexical, err := store.QueryLexicalScoped(ctx, tenantA, repo, "main", "scope", 10)
+	if err != nil || len(lexical) != 1 || lexical[0].SymbolVersionID != versionID {
+		t.Fatalf("own-tenant lexical readback: %+v, %v", lexical, err)
+	}
+	lexical, err = store.QueryLexicalScoped(ctx, tenantB, repo, "main", "scope", 10)
+	if err != nil || len(lexical) != 0 {
+		t.Fatalf("foreign-tenant lexical readback: %+v, %v", lexical, err)
 	}
 	branch, err := store.LatestIndexedBranch(ctx, repo, tenantA)
 	if err != nil || branch != "main" {

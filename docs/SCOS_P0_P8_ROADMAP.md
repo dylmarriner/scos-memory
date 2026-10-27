@@ -814,6 +814,13 @@ symbol/symbol-version rows visible without context. On a separate disposable
 PostgreSQL 17/pgvector instance with 97 migration/policy files, the complete
 code-intelligence integration package, uncached `go test ./...`, and
 `go vet ./...` passed. No production policies were changed.
+A fourth RED→GREEN increment adds tenant-scoped active-snapshot exact
+path/FQN and lexical symbol queries and wires both HTTP query paths to them.
+The real PostgreSQL shadow-schema test exercises all four forced-RLS
+provenance tables, authorized exact/lexical hits, foreign-tenant empty results
+and no context-free symbol/version visibility. Legacy owner-level query
+helpers remain for existing callers/tests; impact, indexing and recovery
+paths are still unqualified for the future four-table policy migration.
 This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.

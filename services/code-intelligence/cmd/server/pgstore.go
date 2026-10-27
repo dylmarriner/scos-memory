@@ -1026,8 +1026,30 @@ var errImpactEdgeBudgetExceeded = errors.New("impact edge budget exceeded; narro
 // rather than only at the cache layer). If the resolved symbol's identity
 // was already active under a different path in the branch's previous
 // active snapshot, RenamedFromPath/RenamedFromSnapshot report it.
+// codeSQLQuerier lets legacy owner-level tests and tenant-scoped runtime reads
+// share the exact same SQL, without losing the transaction's RLS identity.
+type codeSQLQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
 func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch, query string) ([]PGSymbolVersion, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return queryByPathOrFQN(ctx, s.db, repositoryID, branch, query)
+}
+
+// QueryByPathOrFQNScoped performs the complete active-snapshot lookup under
+// the authenticated tenant's transaction-local RLS context.
+func (s *pgCodeStore) QueryByPathOrFQNScoped(ctx context.Context, tenantID, repositoryID, branch, query string) ([]PGSymbolVersion, error) {
+	var out []PGSymbolVersion
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var queryErr error
+		out, queryErr = queryByPathOrFQN(ctx, tx, repositoryID, branch, query)
+		return queryErr
+	})
+	return out, err
+}
+
+func queryByPathOrFQN(ctx context.Context, q codeSQLQuerier, repositoryID, branch, query string) ([]PGSymbolVersion, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
 		       prior.path AS renamed_from_path, prior.snapshot_id AS renamed_from_snapshot
 		FROM code_symbol_versions sv
@@ -1081,6 +1103,22 @@ func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch
 // for exact identifier lookups. Results are ordered by ts_rank descending
 // and capped at limit.
 func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, term string, limit int) ([]PGSymbolVersion, error) {
+	return queryLexical(ctx, s.db, repositoryID, branch, term, limit)
+}
+
+// QueryLexicalScoped executes full-text retrieval within the caller's
+// transaction-local tenant context, including snapshot and symbol joins.
+func (s *pgCodeStore) QueryLexicalScoped(ctx context.Context, tenantID, repositoryID, branch, term string, limit int) ([]PGSymbolVersion, error) {
+	var out []PGSymbolVersion
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var queryErr error
+		out, queryErr = queryLexical(ctx, tx, repositoryID, branch, term, limit)
+		return queryErr
+	})
+	return out, err
+}
+
+func queryLexical(ctx context.Context, q codeSQLQuerier, repositoryID, branch, term string, limit int) ([]PGSymbolVersion, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1088,7 +1126,7 @@ func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, te
 	if simpleTerms == "" {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
 		       ts_rank(sv.search_vector, query) AS rank
 		FROM code_symbol_versions sv

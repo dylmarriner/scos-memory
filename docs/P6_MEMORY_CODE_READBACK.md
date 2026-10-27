@@ -136,6 +136,14 @@ historical readback, foreign-tenant denial and zero context-free symbol/version
 visibility. The full code-intelligence integration package, uncached Go suite
 and Go vet passed on a separate disposable PostgreSQL 17/pgvector database
 with 97 migration/policy files.
+Current exact path/FQN and lexical code retrieval now have explicit
+tenant-scoped variants, and the HTTP query handler uses those variants.
+A new RED-before-fix test failed compilation because the scoped methods
+did not exist, then passed against the restricted runtime role and four
+FORCE-RLS shadow tables. It checks the authorized exact and lexical symbol
+version, foreign-tenant empty results and context-free invisibility. The
+existing owner-level methods remain for legacy internal callers and tests;
+impact traversal and other code-indexer paths still require conversion.
 **This does not activate RLS on the four production code tables:**
 indexing, activation, recovery, and other symbol-version query paths still
 require coordinated scoping and restricted-role integration before
