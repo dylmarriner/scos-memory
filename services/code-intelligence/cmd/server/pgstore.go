@@ -1887,6 +1887,28 @@ func (s *pgCodeStore) DeleteFailedSnapshot(ctx context.Context, snapshotID strin
 	return err
 }
 
+// DeleteFailedSnapshotScoped removes only a failed snapshot owned by the
+// authenticated tenant. A missing or foreign snapshot is indistinguishable.
+func (s *pgCodeStore) DeleteFailedSnapshotScoped(ctx context.Context, tenantID, snapshotID string) error {
+	return s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+            DELETE FROM code_repository_snapshots
+             WHERE id = $1 AND tenant_id = $2 AND status = 'failed'`,
+			snapshotID, tenantID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
+}
+
 // FailInterruptedSnapshots marks snapshots left mid-index by a previous
 // process as failed, so they neither block re-indexing nor look current.
 func (s *pgCodeStore) FailInterruptedSnapshots(ctx context.Context) (int64, error) {

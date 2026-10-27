@@ -275,7 +275,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 			"branch": branch, "commit_id": commit, "git_commit": head, "file_count": len(files)})
 		return
 	} else if existing != "" {
-		if err := s.pgStore.DeleteFailedSnapshot(r.Context(), existing); err != nil {
+		if err := s.pgStore.DeleteFailedSnapshotScoped(r.Context(), tenant, existing); err != nil {
 			http.Error(w, "clear failed snapshot: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -446,7 +446,7 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 	switch {
 	case existing == "":
 	case status == "failed":
-		if err := s.pgStore.DeleteFailedSnapshot(ctx, existing); err != nil {
+		if err := s.pgStore.DeleteFailedSnapshotScoped(ctx, tenant, existing); err != nil {
 			return nil, fmt.Errorf("clear failed snapshot: %w", err)
 		}
 	case status == "ready" || status == "active" || status == "superseded":

@@ -133,6 +133,19 @@ func TestPGScopedSnapshotStatusTransitionUsesRealEnum(t *testing.T) {
 	if err := admin.QueryRowContext(ctx, "SELECT status::text FROM code_repository_snapshots WHERE id=$1", snap).Scan(&status); err != nil || status != "indexing" {
 		t.Fatalf("production enum status = %q, %v", status, err)
 	}
+	if err := restricted.SetSnapshotStatusScoped(ctx, tenant, snap, "failed", "synthetic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := restricted.DeleteFailedSnapshotScoped(ctx, foreign, snap); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign failed snapshot cleanup = %v", err)
+	}
+	if err := restricted.DeleteFailedSnapshotScoped(ctx, tenant, snap); err != nil {
+		t.Fatalf("own failed snapshot cleanup: %v", err)
+	}
+	var remaining int
+	if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM code_repository_snapshots WHERE id=$1", snap).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("failed snapshot cleanup left %d rows, %v", remaining, err)
+	}
 }
 
 // TestPGRenamePreservesSymbolIdentity: a file's stable identity is keyed

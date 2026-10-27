@@ -51,7 +51,7 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
 		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
-		"GRANT SELECT,INSERT,UPDATE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
+		"GRANT SELECT,INSERT,UPDATE,DELETE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
 		"ALTER TABLE " + schema + ".code_repositories ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repositories FORCE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repository_snapshots ENABLE ROW LEVEL SECURITY",
@@ -118,6 +118,24 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,content_hash) VALUES($1,$2,'pkg/scope.go','pkg/scope.go','test-hash') RETURNING id::text", symbolID, snap).Scan(&versionID); err != nil {
 		t.Fatal(err)
+	}
+	// Failed snapshot cleanup must not delete another tenant's generation.
+	failed, err := store.CreateSnapshot(ctx, repo, tenantA, "main", "failed-commit", "test-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSnapshotStatusScoped(ctx, tenantA, failed, "failed", "synthetic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteFailedSnapshotScoped(ctx, tenantB, failed); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign tenant deleted failed snapshot: %v", err)
+	}
+	if err := store.DeleteFailedSnapshotScoped(ctx, tenantA, failed); err != nil {
+		t.Fatalf("own tenant failed snapshot cleanup: %v", err)
+	}
+	var remaining int
+	if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM "+schema+".code_repository_snapshots WHERE id=$1", failed).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("failed snapshot cleanup left %d rows, %v", remaining, err)
 	}
 	// The event API must resolve snapshot identity under the same tenant
 	// transaction as its ledger read. Without this, forced RLS hides an

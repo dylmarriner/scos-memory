@@ -153,11 +153,12 @@ Fresh disposable PostgreSQL 17/pgvector applied 97 migration/policy scripts;
 the complete code-intelligence PostgreSQL integration package, uncached
 `go test -count=1 ./...`, `go vet ./...`, and `git diff --check` passed.
 The next TDD increment converts the scan/indexing status transitions
-to `SetSnapshotStatusScoped`, using the authenticated tenant in a
+to `SetSnapshotStatusScoped` and failed-snapshot cleanup to
+`DeleteFailedSnapshotScoped`, using the authenticated tenant in a
 transaction-local context. The new forced-RLS regression was RED at
-compile time before implementation, then GREEN for own-tenant updates,
-foreign-tenant rejection, invalid tenant IDs and no pooled-connection
-context leakage. A second real-PostgreSQL test covers the production
+compile time before implementation, then GREEN for own-tenant updates/deletes,
+foreign-tenant rejection of both operations, invalid tenant IDs and no
+pooled-connection context leakage. A second real-PostgreSQL test covers the production
 `code_snapshot_status` enum using the non-BYPASSRLS runtime role.
 On a disposable PostgreSQL 17/pgvector database with 97 migrations
 and policies, the full code-intelligence integration suite, uncached
