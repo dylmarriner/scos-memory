@@ -910,6 +910,18 @@ context-free failed-generation cleanup: an authorized retry returned HTTP
 500 under forced RLS because the old deletion affected zero rows.
 The handler now calls `DeleteFailedSnapshotScoped`; the same restricted-role
 retry returns HTTP 200 and a new immutable snapshot.
+**P6 snapshot list/detail readback tenant scoping (2026-10-27,
+PR #92 development):** both GET snapshot routes now use the same
+transaction-local tenant context as other code provenance reads, with
+repository and snapshot tenant predicates. A restricted-role PostgreSQL
+17 forced-RLS regression was RED for the authorized list (HTTP 200
+empty) before the fix, then GREEN for authorized list/detail,
+cross-tenant isolation and sanitized invalid-context errors. The
+dedicated disposable database applied 97 migration/policy files;
+the complete code-intelligence integration suite, uncached full Go
+suite, Go vet and diff checks passed. No production policy activation
+or main-branch qualification is implied.
+
 **No production RLS migration, merge or rollout.**
 Background recovery and other legacy operations still need scoping
 and acceptance before enabling production forced RLS.

@@ -52,7 +52,7 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}()
 	statements := []string{
 		"CREATE TABLE " + schema + ".code_repositories (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, canonical_path text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,canonical_path))",
-		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', error text, symbol_count integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
+		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', error text, symbol_count integer NOT NULL DEFAULT 0, file_count integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
 		"CREATE TABLE " + schema + ".code_file_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), snapshot_id uuid NOT NULL, path text NOT NULL, content_hash text NOT NULL)",
 		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector, extractor text NOT NULL DEFAULT '', signature text, doc_comment text)",
@@ -103,6 +103,65 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if repo == "" || snap == "" {
 		t.Fatalf("missing IDs: repo=%q snap=%q", repo, snap)
+	}
+
+	// The snapshot listing and detail HTTP routes must retain tenant context
+	// through the actual SQL read, not only filter on tenant_id in the query.
+	// The previous handlers use the pool directly and return [] / 404 for
+	// the rightful owner when FORCE RLS is enabled.
+	otherRepo, err := store.EnsureRepository(ctx, tenantB, "/other-scope-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSnap, err := store.CreateSnapshot(ctx, otherRepo, tenantB, "main", "other-commit", "test-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotServer := &server{pgStore: store}
+	callSnapshot := func(tenant, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r = r.WithContext(auth.ContextWithClaims(r.Context(),
+			auth.Claims{TenantID: tenant, PrincipalID: "p"}))
+		w := httptest.NewRecorder()
+		if path == "/v2/code/snapshots" {
+			snapshotServer.handlePGSnapshots(w, r)
+		} else {
+			snapshotServer.handlePGSnapshot(w, r)
+		}
+		return w
+	}
+	ownerList := callSnapshot(tenantA, "/v2/code/snapshots")
+	var listed []snapshotView
+	if ownerList.Code != http.StatusOK || json.Unmarshal(ownerList.Body.Bytes(), &listed) != nil ||
+		len(listed) != 1 || listed[0].ID != snap || listed[0].RepositoryID != repo {
+		t.Fatalf("own tenant snapshot listing under FORCE RLS: HTTP %d %s", ownerList.Code, ownerList.Body.String())
+	}
+	ownerDetail := callSnapshot(tenantA, "/v2/code/snapshots/"+snap)
+	var detail snapshotView
+	if ownerDetail.Code != http.StatusOK || json.Unmarshal(ownerDetail.Body.Bytes(), &detail) != nil ||
+		detail.ID != snap || detail.RepositoryID != repo {
+		t.Fatalf("own tenant snapshot detail under FORCE RLS: HTTP %d %s", ownerDetail.Code, ownerDetail.Body.String())
+	}
+	foreignList := callSnapshot(tenantB, "/v2/code/snapshots")
+	var foreignRows []snapshotView
+	if foreignList.Code != http.StatusOK || json.Unmarshal(foreignList.Body.Bytes(), &foreignRows) != nil ||
+		len(foreignRows) != 1 || foreignRows[0].ID != otherSnap {
+		t.Fatalf("foreign tenant listing did not isolate its own snapshot: HTTP %d %s", foreignList.Code, foreignList.Body.String())
+	}
+	if otherDetail := callSnapshot(tenantB, "/v2/code/snapshots/"+otherSnap); otherDetail.Code != http.StatusOK {
+		t.Fatalf("second tenant could not read its own snapshot: HTTP %d %s", otherDetail.Code, otherDetail.Body.String())
+	}
+	if foreignDetail := callSnapshot(tenantB, "/v2/code/snapshots/"+snap); foreignDetail.Code != http.StatusNotFound {
+		t.Fatalf("foreign tenant saw snapshot detail: HTTP %d %s", foreignDetail.Code, foreignDetail.Body.String())
+	}
+	for _, path := range []string{"/v2/code/snapshots", "/v2/code/snapshots/" + snap} {
+		badTenant := callSnapshot("invalid-tenant", path)
+		if badTenant.Code != http.StatusInternalServerError ||
+			strings.Contains(badTenant.Body.String(), "valid tenant UUID") {
+			t.Fatalf("invalid tenant response leaked internals or succeeded for %s: HTTP %d %s",
+				path, badTenant.Code, badTenant.Body.String())
+		}
 	}
 	// Status transitions must be scoped at the database boundary, not
 	// merely protected by the HTTP repository ownership check.

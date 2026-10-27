@@ -259,6 +259,22 @@ uses `DeleteFailedSnapshotScoped`, and the same end-to-end retry returns
 HTTP 200 with a new immutable snapshot ID (GREEN). This was tested with
 the restricted `scos_app` role and actual SCIP symbols.
 
+**P6 snapshot listing/detail tenant-scoped readback (2026-10-27, PR #92
+development):** `GET /v2/code/snapshots` and
+`GET /v2/code/snapshots/{snapshot_id}` now execute repository/snapshot
+joins within the authenticated tenant's transaction-local context, and
+require matching tenant identities on both joined records. Before the
+change, a real restricted-role PostgreSQL 17 shadow-schema regression
+returned HTTP 200 with an empty list to the legitimate owner (RED)
+because the query ran on a context-free pooled connection. The same
+regression now returns the owner's snapshot and detail (GREEN), isolates
+a second tenant's own repository and snapshot, denies cross-tenant
+detail reads, and checks invalid tenant contexts cannot expose driver
+errors in HTTP responses. A dedicated disposable database applied all
+97 migrations/policies; the complete code-intelligence integration
+package, uncached Go suite, Go vet and diff validation passed. This is
+runtime scoping only; production forced RLS remains blocked.
+
 **No production policy migration was added or deployed.** Recovery,
 background maintenance and remaining unscoped callers still require
 qualification before those policies can be committed safely.

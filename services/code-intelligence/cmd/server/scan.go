@@ -359,29 +359,31 @@ func (s *server) handlePGSnapshots(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
 		return
 	}
-	rows, err := s.pgStore.db.QueryContext(r.Context(), `
+	out := []snapshotView{}
+	err := s.pgStore.withCodeTenantContext(r.Context(), tenant, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(r.Context(), `
 		SELECT `+snapshotViewColumns+`
 		  FROM code_repository_snapshots snap
 		  JOIN code_repositories repo ON repo.id = snap.repository_id
-		 WHERE snap.tenant_id = $1::uuid
+		 WHERE snap.tenant_id = $1::uuid AND repo.tenant_id = $1::uuid
 		 ORDER BY snap.created_at DESC
 		 LIMIT 50`, tenant)
-	if err != nil {
-		http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-	out := []snapshotView{}
-	for rows.Next() {
-		v, err := scanSnapshotView(rows)
 		if err != nil {
-			http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
-			return
+			return err
 		}
-		out = append(out, v)
-	}
-	if err := rows.Err(); err != nil {
-		http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
+		defer rows.Close()
+		for rows.Next() {
+			v, err := scanSnapshotView(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, v)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		log.Printf("list code snapshots failed: %v", err)
+		http.Error(w, "list snapshots failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, out)
@@ -405,17 +407,24 @@ func (s *server) handlePGSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	out, err := scanSnapshotView(s.pgStore.db.QueryRowContext(r.Context(), `
+	var out snapshotView
+	err := s.pgStore.withCodeTenantContext(r.Context(), tenant, func(tx *sql.Tx) error {
+		var queryErr error
+		out, queryErr = scanSnapshotView(tx.QueryRowContext(r.Context(), `
 		SELECT `+snapshotViewColumns+`
 		  FROM code_repository_snapshots snap
 		  JOIN code_repositories repo ON repo.id = snap.repository_id
-		 WHERE snap.id::text = $1 AND snap.tenant_id = $2::uuid`, id, tenant))
+		 WHERE snap.id::text = $1 AND snap.tenant_id = $2::uuid
+		   AND repo.tenant_id = $2::uuid`, id, tenant))
+		return queryErr
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "snapshot not found", http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		http.Error(w, "load snapshot: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("load code snapshot failed: %v", err)
+		http.Error(w, "load snapshot failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, out)
