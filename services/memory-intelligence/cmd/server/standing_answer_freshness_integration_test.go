@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestP7StandingAnswerEvidenceInvalidation(t *testing.T) {
@@ -208,4 +209,59 @@ func TestP7StandingAnswerStalesOnUnreviewedCodeChange(t *testing.T) {
 		t.Fatal("approved evidence remains incorrectly stale")
 	}
 
+}
+
+func TestP7StandingAnswerRefreshSerializesWithMemoryChange(t *testing.T) {
+	f := newBehaviourFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	fact := f.scalar(`INSERT INTO memory_items(
+     tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+     authority_level,confidence_score,sensitivity)
+     VALUES($1,$2,$3,'semantic','active','concurrent','concurrent',80,0.9,'internal')
+     RETURNING id::text`, f.tenant, f.ns, f.owner)
+	tx, err := f.admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE memory_items SET status='superseded' WHERE id=$1", fact); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, e := withPrincipalContext(ctx, f.srv.db, requestIdentity{
+			TenantID: f.tenant, PrincipalID: f.owner,
+		}, func(appTx querier) (bool, error) {
+			_, e := appTx.ExecContext(ctx, `INSERT INTO memory_standing_answers(
+            tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
+            VALUES($1,$2,'racing refresh','would be stale',$3)`,
+				f.tenant, f.ns, fmt.Sprintf("[%q]", fact))
+			return true, e
+		})
+		result <- e
+	}()
+	select {
+	case e := <-result:
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if e == nil {
+			t.Fatal("cache refresh committed against a memory correction still in flight")
+		}
+		t.Fatalf("cache failed before the correction committed instead of waiting on fact row: %v", e)
+	case <-time.After(350 * time.Millisecond):
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case e := <-result:
+			if e == nil {
+				t.Fatal("superseded evidence allowed a fresh answer after committed correction")
+			}
+		case <-ctx.Done():
+			t.Fatal("cache refresh did not complete after fact update commit")
+		}
+	}
 }

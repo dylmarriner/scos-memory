@@ -132,7 +132,12 @@ BEGIN
                     'needs_review','superseded','invalidated','unresolved'
                 )
                 AND (d.outcome IS NULL OR d.outcome <> 'still_valid')
-          );
+          )
+          -- Hold a row lock until this cache refresh commits. Otherwise a
+          -- concurrent status/version UPDATE can invalidate before our
+          -- uncommitted dependency becomes visible, leaving a fresh cache
+          -- that cites superseded evidence.
+          FOR SHARE OF f;
         IF NOT FOUND THEN
             RAISE EXCEPTION 'standing answer references inaccessible or stale evidence'
                 USING ERRCODE = '23514';

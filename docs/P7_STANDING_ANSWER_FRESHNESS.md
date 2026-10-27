@@ -25,6 +25,13 @@ pretend their historical free-text evidence lists are authoritative.
 
 ## Automatic stale transitions
 
+Each fresh cache registration takes a \`FOR SHARE\` lock on its supporting
+memory rows until commit. This serializes with concurrent correction/version
+updates; without it, the correction trigger could run before an uncommitted
+cache dependency is visible and leave stale evidence incorrectly fresh.
+A real two-transaction regression reproduced this race before the lock and
+passed after the fix.
+
 In the same PostgreSQL transaction as a fact status, version, supersession,
 effective-date, expiry, sensitivity or namespace update, only standing
 answers linked to that fact are marked stale. Deleting a fact marks its
@@ -62,7 +69,8 @@ The new real PostgreSQL integration tests under the restricted app role
 cover exact dependency registration; unrelated metadata changes; status
 supersession; fact deletion; attempted stale-answer reactivation; approved
 reviewer \`still_valid\` recovery; changed-code \`needs_review\` invalidation;
-cross-tenant evidence rejection; and direct dependency-table denial.
+cross-tenant evidence rejection; direct dependency-table denial; and a
+concurrent memory correction/cache-refresh regression.
 
 Run with a disposable migrated PostgreSQL 17/pgvector database with all
 policies and both \`DATABASE_URL\` (migration owner) and
