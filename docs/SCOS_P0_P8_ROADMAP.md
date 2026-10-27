@@ -4,6 +4,23 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P6 merged-source isolation checkpoint
+
+**Source merged (PR #92 and PR #93), checked 2026-10-28:** Merged `main`
+contains `database/migrations/000079_code_provenance_force_rls.sql`
+(four provenance tables) and `000080_derived_code_force_rls.sql`
+(five derived-source/graph tables). Both enable and FORCE tenant RLS;
+restricted-role PostgreSQL qualification is required in the P4 CI workflow.
+The merged-main CI and P4 workflows passed on commit
+`8e13cf60f9a85cbe6f64be41fca8c2a1af9764eb` on 2026-10-27.
+**Live production deployment is not established** for either migration:
+merging source and passing disposable-database tests do not apply policies
+to the live database. Startup recovery/maintenance qualification, governance
+§41, server-attested provenance, representative performance and P0–P8
+acceptance remain open. Dated pre-merge development notes below describe
+historical checkpoints, not the current merge state.
+
+
 > **Live/merge evidence update, 2026-10-25 NZ:** PR #29 merged on 2026-09-10. PR #48 (backup recovery, memory-history redaction, model/runtime and Docker CVE fixes) and PR #44 (x/crypto 0.58.0) are merged; latest main CI passed on commits `5d8d969` and `f840bea`. The Kubuntux SCOS backup manager was repaired after its SSHFS bind mount became stale; a new logical backup, physical backup, scratch PITR recovery, recovered Bitwarden decryption key, and OKF Git mirror all verified through SCOS's live APIs. The live backup plan reached **12/12** passing checks at 2026-10-24 22:03 UTC. **Release verification update (2026-10-25):** Kubuntux now runs the newly built shared image at source SHA `a697a7e6e4fd9aaf310a8b49daec9aa7252968e2` across **22 healthy Go services**, and the separate model-runtime and changed consolidation-worker images were rebuilt and deployed. The other workers, PostgreSQL and GPU BGE services were unchanged and remained running. All 30 project containers were running with no unhealthy healthchecked container in the post-rollout scan. The active image before rollout was saved as `scos-fabric:rollback-4f9e643` and its data was retained; the release worktree lives at `/run/media/kubuntux/backup-dev-ext4/scos/scos-memory-release`. Original developer checkout/branch was left untouched. The operator corrected a stale Docker bind to the SSHFS off-host backups directory, added mount-aware startup/rebind scripts with backups, preserved existing model-runtime TLS volume driver options, and passed real logical and physical backup, integrity, PITR, Bitwarden secret-recovery, and OKF Git mirror operations. The SCOS backup plan API reported **12/12 passing** after the rollout; restore-test cadence reported no overdue tests. **This is live deployment and backup evidence, not proof of full P0–P8 completion.** P0 quality baselines and P5–P8 acceptance remain open. The current documentation-only commit may post-date the deployed build SHA.
 
 ## Goal
@@ -788,10 +805,10 @@ not enable RLS or establish complete symbol-version chain consistency.
 A restricted-role direct-SQL check on disposable PostgreSQL 17 proved the
 outstanding exposure: `scos_app` with no tenant GUC read 439 repository rows
 across 430 test tenants; all four provenance tables still had RLS disabled.
-The P6 PR remains blocked on this security finding even though the narrower
+At that pre-migration checkpoint, the P6 PR was blocked on this security finding even though the narrower
 snapshot FK migration and HTTP endpoint tests pass.
-**Open isolation gate:** legacy code repository, snapshot, symbol and symbol-version
-tables lack independent forced RLS; code-indexer/runtime tenant-context
+**Historical isolation gate (before PR #92 merged):** legacy code repository, snapshot, symbol and symbol-version
+tables lacked independent forced RLS; code-indexer/runtime tenant-context
 changes and real-PostgreSQL qualification are required before enabling it. A first TDD-scoped
 code-indexer increment (2026-10-27) moves repository registration, snapshot
 creation and pending/active snapshot discovery into transaction-local tenant
@@ -820,7 +837,7 @@ The real PostgreSQL shadow-schema test exercises all four forced-RLS
 provenance tables, authorized exact/lexical hits, foreign-tenant empty results
 and no context-free symbol/version visibility. Legacy owner-level query
 helpers remain for existing callers/tests; impact, indexing and recovery
-paths are still unqualified for the future four-table policy migration.
+paths were not yet qualified for the then-planned four-table policy migration.
 A fifth RED→GREEN increment scopes the snapshot-change-event API's
 snapshot-identity lookup and event readback to the same tenant-local
 transaction. The restricted-role, four-table forced-RLS shadow-schema
@@ -871,11 +888,10 @@ with "count snapshot symbols: sql: no rows in result set". Both paths now
 use a tenant-scoped transaction, and the regression verifies the authorized
 count, foreign-tenant denial and malformed-tenant rejection. No production
 policy or live database was changed.
-This is **preparatory only**, not a four-table RLS rollout: remaining
-code-indexer paths and production migrations are unqualified; PR #92 stays
-draft and the security review remains open.
-**P6/P8 current + historical impact tenant scoping (2026-10-27, PR #92
-development, not merged):** current impact now resolves seed symbols,
+At that intermediate checkpoint this was **preparatory only**: remaining
+code-indexer paths and production migrations were unqualified, and PR #92 was
+draft. The migration subsequently merged as PR #92; live rollout remains unverified.
+**P6/P8 current + historical impact tenant scoping (2026-10-27, PR #92, merged source):** current impact now resolves seed symbols,
 traverses reverse-CALLS edges and ranks evidence through one transaction
 carrying the authenticated tenant's RLS context. Historical impact
 likewise resolves its immutable generation and traverses/ranks within
@@ -890,7 +906,7 @@ policies were enabled; file/SCIP indexing is scoped in a later increment,
 while recovery and remaining legacy paths remain blockers.
 
 **P6 file/SCIP indexing under tenant-local transactions (2026-10-27,
-PR #92 development, not merged):** production scan and SCIP handlers now
+PR #92, merged source):** production scan and SCIP handlers now
 invoke scoped indexers. Snapshot/repository ownership, symbol/version
 writes, change-event ledger, status transitions and activation share one
 authenticated tenant-local transaction. A real restricted-role PostgreSQL
@@ -911,7 +927,7 @@ context-free failed-generation cleanup: an authorized retry returned HTTP
 The handler now calls `DeleteFailedSnapshotScoped`; the same restricted-role
 retry returns HTTP 200 and a new immutable snapshot.
 **P6 dense embedding maintenance tenant scoping (2026-10-27,
-PR #92 development, not merged):** authenticated code-embedding
+PR #92, merged source):** authenticated code-embedding
 maintenance now resolves active snapshots, loads symbol documents and
 persists missing chunks inside transaction-local tenant context.
 RED-before-implementation and GREEN-after-implementation regression
@@ -924,11 +940,11 @@ four-table FORCE RLS was applied only to that disposable database, and
 full code-intelligence plus tagged memory-intelligence integration
 suites passed with the forced-RLS qualification gate. The uncached
 full Go suite and Go vet passed separately. Production
-forced RLS on four legacy provenance tables, recovery paths,
-remaining callers and complete P0-P8 acceptance remain open.
+forced RLS on four legacy provenance tables was not yet merged at that checkpoint;
+recovery paths, remaining callers and complete P0–P8 acceptance were still open.
 
 **P6 snapshot list/detail readback tenant scoping (2026-10-27,
-PR #92 development):** both GET snapshot routes now use the same
+PR #92, merged source):** both GET snapshot routes now use the same
 transaction-local tenant context as other code provenance reads, with
 repository and snapshot tenant predicates. A restricted-role PostgreSQL
 17 forced-RLS regression was RED for the authorized list (HTTP 200
@@ -943,8 +959,7 @@ code-intelligence integration package and tagged memory-intelligence
 PostgreSQL integration all passed. No production policy activation
 or main-branch qualification is implied.
 
-**P4/P6 structural code retrieval scoping (2026-10-27, PR #92
-development):** the HTTP hybrid query's structural graph lane now
+**P4/P6 structural code retrieval scoping (2026-10-27, PR #92, merged source):** the HTTP hybrid query's structural graph lane now
 holds the authenticated tenant context through active snapshot selection,
 neighbor expansion, edge loading and PageRank. Neighbor versions must
 match the resolved snapshot. A restricted-role forced-RLS shadow-schema
@@ -955,7 +970,7 @@ code-intelligence suite, uncached Go suite, Go vet and diff checks
 passed. Legacy owner-level helper remains for internal test callers.
 This does not enable production RLS or close P4/P6 acceptance.
 
-**P6 code settings RLS hardening (2026-10-27, PR #92 development):**
+**P6 code settings RLS hardening (2026-10-27, PR #92, merged source):**
 The per-principal durable-store toggle was another legacy table with no
 row-level security. New policy 000020_code_user_settings_rls.sql enables
 and forces tenant isolation for its table. IsUserEnabled and
@@ -971,14 +986,14 @@ settings GET/PUT and the route guard. A fresh disposable PostgreSQL 17/pgvector 
 migration/policy scripts, then passed the full code-intelligence
 integration package, uncached Go suite (51 tested packages), Go vet and
 diff checks. This is a **source-only policy migration**, not a live
-migration or production rollout. The four legacy
-code-provenance tables still have no committed production FORCE RLS
-migration and PR #92 remains draft pending substantive security
-reviews and recovery qualification.
+migration or production rollout. The four legacy code-provenance tables now have committed FORCE RLS
+source migration 000079 (merged via PR #92), with derived-table migration
+000080 merged via PR #93. Live rollout and recovery qualification remain open.
 
-**No production code-provenance RLS migration, merge or rollout.**
-Background recovery and other legacy operations still need scoping
-and acceptance before enabling production forced RLS.
+**Merged source, no verified live rollout:** migrations 000079 and 000080
+are on `main`, but the live production database has not been verified to
+run them. Background recovery and remaining legacy operations require
+production rollout/recovery qualification before completion can be claimed.
 
 See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
 expansion, multi-hop traversal, ranking, inference, server-attested Git

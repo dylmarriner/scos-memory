@@ -1,6 +1,21 @@
 # P6: bounded memory → code evidence readback
 
-**Status (2026-10-27): implemented and verified on an isolated development branch. Not a P6 completion claim.**
+**Status (2026-10-28): merged-source readback and RLS hardening, P6 acceptance still PARTIAL.**
+
+**Source merged (PR #92 and PR #93), checked 2026-10-28:** Merged `main`
+contains `database/migrations/000079_code_provenance_force_rls.sql`
+(four provenance tables) and `000080_derived_code_force_rls.sql`
+(five derived-source/graph tables). Both enable and FORCE tenant RLS;
+restricted-role PostgreSQL qualification is required in the P4 CI workflow.
+The merged-main CI and P4 workflows passed on commit
+`8e13cf60f9a85cbe6f64be41fca8c2a1af9764eb` on 2026-10-27.
+**Live production deployment is not established** for either migration:
+merging source and passing disposable-database tests do not apply policies
+to the live database. Startup recovery/maintenance qualification, governance
+§41, server-attested provenance, representative performance and P0–P8
+acceptance remain open. Dated pre-merge development notes below describe
+historical checkpoints, not the current merge state.
+
 
 ## API and MCP contract
 
@@ -80,10 +95,10 @@ This closes one structural
 tenant-provenance mismatch, **not** direct-access code-table RLS or the wider
 symbol/version lineage integrity work.
 
-**Outstanding database isolation debt:** the pre-existing
+**Historical database isolation debt (before migration 000079):** the pre-existing
 `code_repositories`, `code_repository_snapshots`,
-`code_symbols` and `code_symbol_versions` tables do not yet have
-independent forced RLS.
+`code_symbols` and `code_symbol_versions` tables did not yet have
+independent forced RLS at that checkpoint. The source migration has since merged.
 The new endpoint uses forced memory/link RLS plus explicit tenant/repository
 join predicates and has negative cross-scope tests, but this does not qualify
 those legacy code tables for unrestricted direct access by the runtime role.
@@ -92,16 +107,16 @@ role confirmed this is an exploitable **direct SQL access boundary**, not
 merely a missing schema decoration: without any tenant context,
 `SELECT count(*), count(DISTINCT tenant_id) FROM code_repositories`
 returned 439 rows spanning 430 fixture tenants after integration tests.
-The four legacy provenance tables reported `relrowsecurity=false` and
-`relforcerowsecurity=false`. The composite snapshot FK does not mitigate
-this direct read exposure. **PR #92 must not merge while this review finding
-remains unresolved.**
+At that checkpoint the four legacy provenance tables reported
+`relrowsecurity=false` and `relforcerowsecurity=false`. The composite
+snapshot FK did not mitigate that direct read exposure. **PR #92 was held
+until the forced-RLS migration and qualification resolved the finding.**
 
-Adding forced RLS to them requires a coordinated code-indexer/runtime
-transaction-context migration and integration acceptance; it is not silently
-treated as completed by this endpoint.
+Adding forced RLS required coordinated code-indexer/runtime
+transaction-context changes and integration acceptance. Those source changes
+subsequently merged; the endpoint alone was never sufficient evidence.
 
-**Incremental runtime scoping evidence (2026-10-27, still draft):**
+**Incremental runtime scoping evidence (2026-10-27, pre-merge checkpoint):**
 `pgCodeStore.EnsureRepository`, `CreateSnapshot`,
 `LatestIndexedBranch` and `IndexingSnapshot` now use the existing
 transaction-local `scos.tenant_id` helper, and that helper rejects invalid
@@ -205,7 +220,7 @@ database is disposable and production policies remain unchanged.
 
 
 **P8 current and historical impact traversal hardening (2026-10-27,
-PR #92 development):** `POST /v2/code/impact` now calls
+PR #92, merged source):** `POST /v2/code/impact` now calls
 `ChangeImpactScoped` for current snapshots. Seed lookup, every bounded
 reverse-CALLS hop, graph evidence loading and PageRank all run in one
 authenticated transaction-local tenant context. Historical impact now keeps
@@ -223,12 +238,12 @@ The new test was RED before implementation because `ChangeImpactScoped`
 did not exist and passed GREEN after implementation. All 97
 migration/policy scripts and the full code-intelligence integration
 package passed in a disposable database. This is preparatory runtime
-scoping only; the four legacy production provenance tables **still lack
-forced RLS**. File and SCIP ingestion receive additional scoping below;
+scoping only at that checkpoint; the four legacy provenance tables
+**then lacked forced RLS** (subsequently added in merged migration 000079).
+File and SCIP ingestion received additional scoping in the later increments below;
 recovery and other legacy paths remain unqualified. No live database was changed.
 
-**P6 file and SCIP indexing transaction scoping (2026-10-27, PR #92
-development):** production file indexing and SCIP import now share
+**P6 file and SCIP indexing transaction scoping (2026-10-27, PR #92, merged source):** production file indexing and SCIP import now share
 transaction-local tenant context across repository/snapshot ownership,
 symbol/version writes, change-ledger emission, status updates and atomic
 activation. Both paths use an explicit tenant+repository+snapshot ownership
@@ -259,8 +274,7 @@ uses `DeleteFailedSnapshotScoped`, and the same end-to-end retry returns
 HTTP 200 with a new immutable snapshot ID (GREEN). This was tested with
 the restricted `scos_app` role and actual SCIP symbols.
 
-**P6 snapshot listing/detail tenant-scoped readback (2026-10-27, PR #92
-development):** `GET /v2/code/snapshots` and
+**P6 snapshot listing/detail tenant-scoped readback (2026-10-27, PR #92, merged source):** `GET /v2/code/snapshots` and
 `GET /v2/code/snapshots/{snapshot_id}` now execute repository/snapshot
 joins within the authenticated tenant's transaction-local context, and
 require matching tenant identities on both joined records. Before the
@@ -278,11 +292,10 @@ tables in **that disposable database only**. The opt-in
 `SCOS_EXPECT_CODE_PROVENANCE_RLS=1` check and the complete code-intelligence
 integration package passed, as did tagged memory-intelligence PostgreSQL
 integration. Direct context-free runtime-role reads were checked by the
-qualification test. This is runtime scoping only; production forced RLS
-remains blocked.
+qualification test. This was runtime scoping only at that checkpoint; source-level forced RLS
+subsequently merged, while live production rollout remains unverified.
 
-**P4/P6 structural retrieval tenant scoping (2026-10-27, PR #92
-development):** the production code-query handler now calls
+**P4/P6 structural retrieval tenant scoping (2026-10-27, PR #92, merged source):** the production code-query handler now calls
 `QueryStructuralCandidatesScoped`. Active snapshot resolution, every
 bounded structural-neighbor hop, edge loading and PageRank all use one
 authenticated transaction-local tenant context. Neighbor versions must
@@ -297,8 +310,7 @@ candidate four-table forced RLS on a disposable production-schema
 database, as did the uncached Go suite and Go vet. This is not
 production policy activation or P4/P6 completion.
 
-**P6 code embedding maintenance tenant scoping (2026-10-27, PR #92
-development, not merged):** `embedCodeSnapshot` now reads immutable symbol
+**P6 code embedding maintenance tenant scoping (2026-10-27, PR #92, merged source):** `embedCodeSnapshot` now reads immutable symbol
 documents and inserts missing chunks only within transaction-local
 authenticated tenant context. Active-snapshot discovery for dense
 maintenance is also tenant-scoped; the original context-free helpers
@@ -314,10 +326,10 @@ applied to the four legacy provenance tables in that disposable database
 only; the complete code-intelligence and tagged memory-intelligence
 PostgreSQL integration suites passed, including the opt-in forced-RLS
 qualification gate. This increment does not activate
-the four pending production provenance RLS policies.
+the then-pending provenance RLS policies (now merged in source).
 
 **P6 user settings isolation and error sanitization (2026-10-27,
-PR #92 development):** policy 000020_code_user_settings_rls.sql
+PR #92, merged source):** policy 000020_code_user_settings_rls.sql
 enables/forces RLS on the previously unprotected
 code_intelligence_user_settings table, and both runtime settings
 operations now use transaction-local authenticated tenant context.
@@ -332,19 +344,19 @@ migration/policy scripts and passed the complete code-intelligence
 integration package, uncached Go suite (51 tested packages), Go vet
 and diff checks. This new policy exists in source only; it has not
 been applied to any live service.
-The four provenance tables remain unprotected by production RLS,
-and startup recovery remains an open qualification gate.
+The four provenance tables now have forced-RLS policies in merged source;
+live deployment has not been verified, and startup recovery remains an open qualification gate.
 
-**No four-table provenance RLS migration was added or deployed.** Recovery,
-background maintenance and remaining unscoped callers still require
-qualification before those policies can be committed safely.
+**Four-table provenance RLS migration 000079 is merged, not deployed here.**
+Derived-table migration 000080 is merged too. Recovery, background maintenance
+and remaining callers require qualification for a controlled live rollout.
 
 This does not make the Git commit label server-attested. Additional
 recovery and maintenance paths still need RLS qualification.
-**This does not activate RLS on the four production code tables:**
-remaining legacy indexing/activation helpers, recovery and maintenance paths
-still require coordinated scoping and restricted-role integration before
-migration/merge. No production migration was attempted.
+**This does not establish live production RLS activation:**
+merged source migrations are not a live database migration. Recovery and
+maintenance paths still require rollout qualification. No production
+migration was attempted in this development work.
 
 
 The focused and full memory-intelligence integration tests passed against a
