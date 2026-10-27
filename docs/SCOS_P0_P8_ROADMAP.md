@@ -919,7 +919,11 @@ empty) before the fix, then GREEN for authorized list/detail,
 cross-tenant isolation and sanitized invalid-context errors. The
 dedicated disposable database applied 97 migration/policy files;
 the complete code-intelligence integration suite, uncached full Go
-suite, Go vet and diff checks passed. No production policy activation
+suite, Go vet and diff checks passed. A second pass on the same
+disposable database applied candidate FORCE RLS policies to all four
+provenance tables; the opt-in restricted-role qualification, complete
+code-intelligence integration package and tagged memory-intelligence
+PostgreSQL integration all passed. No production policy activation
 or main-branch qualification is implied.
 
 **No production RLS migration, merge or rollout.**

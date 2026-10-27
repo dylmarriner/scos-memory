@@ -272,8 +272,14 @@ a second tenant's own repository and snapshot, denies cross-tenant
 detail reads, and checks invalid tenant contexts cannot expose driver
 errors in HTTP responses. A dedicated disposable database applied all
 97 migrations/policies; the complete code-intelligence integration
-package, uncached Go suite, Go vet and diff validation passed. This is
-runtime scoping only; production forced RLS remains blocked.
+package, uncached Go suite, Go vet and diff validation passed.
+A second pass enabled candidate FORCE RLS policies on all four provenance
+tables in **that disposable database only**. The opt-in
+`SCOS_EXPECT_CODE_PROVENANCE_RLS=1` check and the complete code-intelligence
+integration package passed, as did tagged memory-intelligence PostgreSQL
+integration. Direct context-free runtime-role reads were checked by the
+qualification test. This is runtime scoping only; production forced RLS
+remains blocked.
 
 **No production policy migration was added or deployed.** Recovery,
 background maintenance and remaining unscoped callers still require
