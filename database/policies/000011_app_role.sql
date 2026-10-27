@@ -43,6 +43,12 @@ REVOKE UPDATE, DELETE ON code_snapshot_change_events FROM scos_app;
 -- Privileged purge evidence and its entry point are never runtime APIs.
 REVOKE ALL ON memory_revalidation_decision_purge_audit FROM scos_app;
 REVOKE ALL ON FUNCTION purge_memory_revalidation_decisions_for_tenant(uuid,text) FROM PUBLIC, scos_app;
+-- P5 memory-system transition history is trigger-owned; tenant purge
+-- requires a privileged, reasoned operator action. Fresh installs must
+-- revoke these AFTER the blanket grants above (000082 handles upgrades).
+REVOKE INSERT, UPDATE, DELETE ON memory_system_events FROM scos_app;
+REVOKE ALL ON memory_system_event_purge_audit FROM scos_app;
+REVOKE ALL ON FUNCTION purge_memory_system_events_for_tenant(uuid,text) FROM PUBLIC, scos_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO scos_app;
 
 -- Without this, every future migration that adds a table silently leaves
