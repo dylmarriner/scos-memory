@@ -83,7 +83,12 @@ func (s *server) handlePGSnapshotEvents(w http.ResponseWriter, r *http.Request) 
 	// Commit IDs are immutable snapshot metadata supplied at index time.
 	// This is an authenticated server record, NOT cryptographic proof that
 	// the indexed bytes match the corresponding Git object tree.
-	err := s.pgStore.db.QueryRowContext(r.Context(), `
+	// Resolve the snapshot identity and its event ledger on the same
+	// tenant-scoped connection. A pooled, context-free identity query fails
+	// closed under FORCE RLS even for an authorized tenant.
+	found := false
+	err := s.pgStore.withCodeTenantContext(r.Context(), tenant, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(r.Context(), `
         SELECT s.repository_id::text, s.branch, s.commit_id,
                COALESCE(p.commit_id, '')
         FROM code_repository_snapshots s
@@ -92,20 +97,14 @@ func (s *server) handlePGSnapshotEvents(w http.ResponseWriter, r *http.Request) 
         WHERE s.id=$1 AND s.tenant_id=$2 AND r.tenant_id=$2
           AND s.status IN ('active','superseded')
     `, req.SnapshotID, tenant).Scan(
-		&page.RepositoryID, &page.Branch, &page.CommitID, &page.ParentCommitID)
-	if errors.Is(err, sql.ErrNoRows) {
-		http.Error(w, "snapshot not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		log.Printf("snapshot events access check: %v", err)
-		http.Error(w, "snapshot events unavailable", http.StatusInternalServerError)
-		return
-	}
-	// The event ledger has FORCE ROW LEVEL SECURITY. Explicit tenant
-	// predicates are not enough: the restricted runtime role must establish
-	// scos.tenant_id transaction-locally on the very same connection.
-	err = s.pgStore.withCodeTenantContext(r.Context(), tenant, func(tx *sql.Tx) error {
+			&page.RepositoryID, &page.Branch, &page.CommitID, &page.ParentCommitID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
 		rows, err := tx.QueryContext(r.Context(), `
         SELECT e.id::text,e.change_kind,e.path,COALESCE(e.previous_path,''),
                e.evidence_class,e.created_at
@@ -134,6 +133,10 @@ func (s *server) handlePGSnapshotEvents(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		log.Printf("snapshot events scoped read: %v", err)
 		http.Error(w, "snapshot events unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, "snapshot not found", http.StatusNotFound)
 		return
 	}
 	if len(page.Events) > req.Limit {

@@ -97,6 +97,74 @@ func TestPGExactSymbolResolution(t *testing.T) {
 	}
 }
 
+// TestPGScopedSnapshotStatusTransitionUsesRealEnum proves the scoped
+// transition also works with the production enum column (the forced-RLS
+// shadow-schema test uses a minimal text column).
+func TestPGScopedSnapshotStatusTransitionUsesRealEnum(t *testing.T) {
+	adminStore, admin := testPGStore(t)
+	appDSN := os.Getenv("SCOS_APP_TEST_DATABASE_URL")
+	if appDSN == "" {
+		t.Skip("requires restricted-role disposable PostgreSQL DSN")
+	}
+	app, err := sql.Open("pgx", appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	ctx := context.Background()
+	tenant := testTenant(t, admin)
+	foreign := testTenant(t, admin)
+	repo, err := adminStore.EnsureRepository(ctx, tenant, "/status/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := adminStore.CreateSnapshot(ctx, repo, tenant, "main", "status-test", "test-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restricted := newPGCodeStore(app)
+	if err := restricted.SetSnapshotStatusScoped(ctx, foreign, snap, "indexing", ""); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign status transition = %v; want no rows", err)
+	}
+	if err := restricted.SetSnapshotStatusScoped(ctx, tenant, snap, "indexing", ""); err != nil {
+		t.Fatalf("own tenant status transition: %v", err)
+	}
+	var status string
+	if err := admin.QueryRowContext(ctx, "SELECT status::text FROM code_repository_snapshots WHERE id=$1", snap).Scan(&status); err != nil || status != "indexing" {
+		t.Fatalf("production enum status = %q, %v", status, err)
+	}
+	indexed, err := adminStore.CreateSnapshot(ctx, repo, tenant, "main", "file-commit", "test-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := []PGFileInput{{Path: "scope.go", Language: "go", ContentHash: hashContent("package scope")}}
+	if err := adminStore.IndexSnapshot(ctx, indexed, repo, manifest); err != nil {
+		t.Fatalf("seed production code-file manifest: %v", err)
+	}
+	if same, err := restricted.SnapshotHoldsFilesScoped(ctx, tenant, indexed, manifest); err != nil || !same {
+		t.Fatalf("own production snapshot manifest = %v, %v", same, err)
+	}
+	if same, err := restricted.SnapshotHoldsFilesScoped(ctx, foreign, indexed, manifest); !errors.Is(err, sql.ErrNoRows) || same {
+		t.Fatalf("foreign production snapshot manifest = %v, %v", same, err)
+	}
+	if same, err := restricted.SnapshotHoldsFilesScoped(ctx, tenant, indexed, nil); err != nil || same {
+		t.Fatalf("nonempty production manifest accepted empty file list: %v, %v", same, err)
+	}
+	if err := restricted.SetSnapshotStatusScoped(ctx, tenant, snap, "failed", "synthetic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := restricted.DeleteFailedSnapshotScoped(ctx, foreign, snap); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign failed snapshot cleanup = %v", err)
+	}
+	if err := restricted.DeleteFailedSnapshotScoped(ctx, tenant, snap); err != nil {
+		t.Fatalf("own failed snapshot cleanup: %v", err)
+	}
+	var remaining int
+	if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM code_repository_snapshots WHERE id=$1", snap).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("failed snapshot cleanup left %d rows, %v", remaining, err)
+	}
+}
+
 // TestPGRenamePreservesSymbolIdentity: a file's stable identity is keyed
 // on its content hash, so renaming it without changing its content
 // resolves to the *same* code_symbols.id under the new path, and the

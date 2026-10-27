@@ -185,11 +185,13 @@ type PGSymbolVersion struct {
 // indexed; it does not create a duplicate on repeat calls.
 func (s *pgCodeStore) EnsureRepository(ctx context.Context, tenantID, canonicalPath string) (string, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO code_repositories (tenant_id, canonical_path)
-		VALUES ($1, $2)
-		ON CONFLICT (tenant_id, canonical_path) DO UPDATE SET updated_at = now()
-		RETURNING id`, tenantID, canonicalPath).Scan(&id)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            INSERT INTO code_repositories (tenant_id, canonical_path)
+            VALUES ($1, $2)
+            ON CONFLICT (tenant_id, canonical_path) DO UPDATE SET updated_at = now()
+            RETURNING id`, tenantID, canonicalPath).Scan(&id)
+	})
 	if err != nil {
 		return "", fmt.Errorf("ensure repository: %w", err)
 	}
@@ -207,27 +209,29 @@ func (s *pgCodeStore) EnsureRepository(ctx context.Context, tenantID, canonicalP
 // which files it can skip re-parsing (blueprint §35's "for every new
 // snapshot: find parent").
 func (s *pgCodeStore) CreateSnapshot(ctx context.Context, repositoryID, tenantID, branch, commitID, extractorVersion, configHash string) (string, error) {
-	// The parent is reused for unchanged files' parsed declarations, so it
-	// must have been built by the same extractor: a newer extractor's
-	// output (e.g. qualified call names) is never mixed with an older one's.
-	var parentID string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND branch = $2 AND status = 'active' AND extractor_version = $3 AND configuration_hash = $4`,
-		repositoryID, branch, extractorVersion, configHash).Scan(&parentID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("resolve parent snapshot: %w", err)
-	}
 	var id string
-	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO code_repository_snapshots (repository_id, tenant_id, branch, commit_id, extractor_version, configuration_hash, parent_snapshot_id)
-		SELECT r.id, r.tenant_id, $3, $4, $5, $6, NULLIF($7, '')::uuid
-		  FROM code_repositories r
-		 WHERE r.id = $1 AND r.tenant_id = $2
-		ON CONFLICT (repository_id, branch, commit_id, extractor_version, configuration_hash)
-		DO UPDATE SET branch = EXCLUDED.branch
-		RETURNING id`,
-		repositoryID, tenantID, branch, commitID, extractorVersion, configHash, parentID).Scan(&id)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		// Parent lookup and creation must use one tenant-scoped transaction:
+		// pooled SQL connections cannot carry session-scoped identity safely.
+		var parentID string
+		err := tx.QueryRowContext(ctx, `
+            SELECT id FROM code_repository_snapshots
+             WHERE repository_id = $1 AND branch = $2 AND status = 'active'
+               AND extractor_version = $3 AND configuration_hash = $4`,
+			repositoryID, branch, extractorVersion, configHash).Scan(&parentID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("resolve parent snapshot: %w", err)
+		}
+		return tx.QueryRowContext(ctx, `
+            INSERT INTO code_repository_snapshots (repository_id, tenant_id, branch, commit_id, extractor_version, configuration_hash, parent_snapshot_id)
+            SELECT r.id, r.tenant_id, $3, $4, $5, $6, NULLIF($7, '')::uuid
+              FROM code_repositories r
+             WHERE r.id = $1 AND r.tenant_id = $2
+            ON CONFLICT (repository_id, branch, commit_id, extractor_version, configuration_hash)
+            DO UPDATE SET branch = EXCLUDED.branch
+            RETURNING id`,
+			repositoryID, tenantID, branch, commitID, extractorVersion, configHash, parentID).Scan(&id)
+	})
 	if err != nil {
 		return "", fmt.Errorf("create snapshot: %w", err)
 	}
@@ -272,12 +276,44 @@ func lockSnapshotForMutation(ctx context.Context, tx *sql.Tx, snapshotID string)
 // partway through never leaves activate_code_snapshot to promote an
 // incomplete generation.
 func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryID string, files []PGFileInput) error {
-	started := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin index transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := s.indexSnapshotLocked(ctx, tx, snapshotID, repositoryID, files); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// verifyCodeSnapshotTenant is an explicit ownership guard even before the
+// legacy provenance tables acquire FORCE RLS. It runs in the same transaction
+// as the subsequent indexing, so tenant identity cannot be lost to pooling.
+func verifyCodeSnapshotTenant(ctx context.Context, tx *sql.Tx, tenantID, snapshotID, repositoryID string) error {
+	var owned int
+	return tx.QueryRowContext(ctx, `
+        SELECT 1 FROM code_repository_snapshots snap
+        JOIN code_repositories repo ON repo.id = snap.repository_id
+        WHERE snap.id=$1 AND snap.repository_id=$2
+          AND snap.tenant_id=$3 AND repo.tenant_id=$3`,
+		snapshotID, repositoryID, tenantID).Scan(&owned)
+}
+
+// IndexSnapshotScoped is the production file-indexing entry point. All
+// snapshot, symbol, version and activation SQL shares one authenticated
+// transaction-local tenant identity, including the ownership check.
+func (s *pgCodeStore) IndexSnapshotScoped(ctx context.Context, tenantID, snapshotID, repositoryID string, files []PGFileInput) error {
+	return s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		if err := verifyCodeSnapshotTenant(ctx, tx, tenantID, snapshotID, repositoryID); err != nil {
+			return err
+		}
+		return s.indexSnapshotLocked(ctx, tx, snapshotID, repositoryID, files)
+	})
+}
+
+func (s *pgCodeStore) indexSnapshotLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, files []PGFileInput) error {
+	started := time.Now()
 
 	// Lock the repository before the snapshot. Activation and all indexing
 	// paths use this order to avoid a repository/snapshot deadlock.
@@ -466,7 +502,7 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1)`, snapshotID); err != nil {
 		return fmt.Errorf("activate snapshot: %w", err)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // indexedDecl is what indexFileLocked reports back about each declaration
@@ -1022,8 +1058,30 @@ var errImpactEdgeBudgetExceeded = errors.New("impact edge budget exceeded; narro
 // rather than only at the cache layer). If the resolved symbol's identity
 // was already active under a different path in the branch's previous
 // active snapshot, RenamedFromPath/RenamedFromSnapshot report it.
+// codeSQLQuerier lets legacy owner-level tests and tenant-scoped runtime reads
+// share the exact same SQL, without losing the transaction's RLS identity.
+type codeSQLQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
 func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch, query string) ([]PGSymbolVersion, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return queryByPathOrFQN(ctx, s.db, repositoryID, branch, query)
+}
+
+// QueryByPathOrFQNScoped performs the complete active-snapshot lookup under
+// the authenticated tenant's transaction-local RLS context.
+func (s *pgCodeStore) QueryByPathOrFQNScoped(ctx context.Context, tenantID, repositoryID, branch, query string) ([]PGSymbolVersion, error) {
+	var out []PGSymbolVersion
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var queryErr error
+		out, queryErr = queryByPathOrFQN(ctx, tx, repositoryID, branch, query)
+		return queryErr
+	})
+	return out, err
+}
+
+func queryByPathOrFQN(ctx context.Context, q codeSQLQuerier, repositoryID, branch, query string) ([]PGSymbolVersion, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
 		       prior.path AS renamed_from_path, prior.snapshot_id AS renamed_from_snapshot
 		FROM code_symbol_versions sv
@@ -1077,6 +1135,22 @@ func (s *pgCodeStore) QueryByPathOrFQN(ctx context.Context, repositoryID, branch
 // for exact identifier lookups. Results are ordered by ts_rank descending
 // and capped at limit.
 func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, term string, limit int) ([]PGSymbolVersion, error) {
+	return queryLexical(ctx, s.db, repositoryID, branch, term, limit)
+}
+
+// QueryLexicalScoped executes full-text retrieval within the caller's
+// transaction-local tenant context, including snapshot and symbol joins.
+func (s *pgCodeStore) QueryLexicalScoped(ctx context.Context, tenantID, repositoryID, branch, term string, limit int) ([]PGSymbolVersion, error) {
+	var out []PGSymbolVersion
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var queryErr error
+		out, queryErr = queryLexical(ctx, tx, repositoryID, branch, term, limit)
+		return queryErr
+	})
+	return out, err
+}
+
+func queryLexical(ctx context.Context, q codeSQLQuerier, repositoryID, branch, term string, limit int) ([]PGSymbolVersion, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1084,7 +1158,7 @@ func (s *pgCodeStore) QueryLexical(ctx context.Context, repositoryID, branch, te
 	if simpleTerms == "" {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch,
 		       ts_rank(sv.search_vector, query) AS rank
 		FROM code_symbol_versions sv
@@ -1140,8 +1214,16 @@ type snapshotSymbolRow struct {
 	SCIPDocument bool // declaration-derived path fingerprint, not file bytes
 }
 
-func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+// codeSnapshotQuerier keeps every query in a snapshot diff on the same
+// connection. A scoped caller supplies *sql.Tx; legacy internal callers may
+// still use *sql.DB for non-runtime migration and test tooling.
+type codeSnapshotQuerier interface {
+	codeSQLQuerier
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, q codeSnapshotQuerier, snapshotID string) ([]snapshotSymbolRow, error) {
+	rows, err := q.QueryContext(ctx, `
         SELECT symbol_id, path, content_hash FROM code_symbol_versions
         WHERE snapshot_id = $1 AND kind = 'file' ORDER BY path, id`, snapshotID)
 	if err != nil {
@@ -1167,7 +1249,7 @@ func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string
 	// kind is "file", but its hash is still only the SCIP symbol identity,
 	// not source bytes. Prefer the complete SCIP document fingerprint whenever
 	// SCIP declarations exist, even if the index contains File-kind symbols.
-	scipRows, err := s.loadSCIPSnapshotDocuments(ctx, snapshotID)
+	scipRows, err := s.loadSCIPSnapshotDocuments(ctx, q, snapshotID)
 	if err != nil {
 		return nil, err
 	}
@@ -1181,8 +1263,8 @@ func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string
 // content_hash is derived from symbol identity alone, so metadata must also
 // contribute to the fingerprint to detect changed declarations. This is a
 // semantic/index delta, not proof that every source-byte change was indexed.
-func (s *pgCodeStore) loadSCIPSnapshotDocuments(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *pgCodeStore) loadSCIPSnapshotDocuments(ctx context.Context, q codeSnapshotQuerier, snapshotID string) ([]snapshotSymbolRow, error) {
+	rows, err := q.QueryContext(ctx, `
         SELECT symbol_id::text, path, content_hash, fully_qualified_name, kind,
                COALESCE(signature, ''), COALESCE(doc_comment, ''), COALESCE(extractor, '')
         FROM code_symbol_versions
@@ -1236,15 +1318,53 @@ func (s *pgCodeStore) loadSCIPSnapshotDocuments(ctx context.Context, snapshotID 
 // path disappeared, or Copied if the source survives unchanged. SCIP
 // snapshots lack file-byte hashes, so their document-level declaration
 // changes are reported by path without speculative rename/copy claims.
+// DiffSnapshotScoped requires an authenticated tenant and performs the entire
+// snapshot and parent comparison under one transaction-local RLS identity.
+// Missing and foreign-tenant snapshots deliberately have the same result.
+func (s *pgCodeStore) DiffSnapshotScoped(ctx context.Context, tenantID, snapshotID string) (SnapshotDiff, error) {
+	var result SnapshotDiff
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var repositoryID string
+		var parentID sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT snap.repository_id::text, snap.parent_snapshot_id::text
+			FROM code_repository_snapshots snap
+			JOIN code_repositories repo ON repo.id=snap.repository_id
+			WHERE snap.id=$1 AND snap.tenant_id=$2 AND repo.tenant_id=$2`,
+			snapshotID, tenantID).Scan(&repositoryID, &parentID)
+		if err != nil {
+			return err
+		}
+		if parentID.Valid {
+			var parentVisible bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+				SELECT 1 FROM code_repository_snapshots
+				WHERE id=$1 AND repository_id=$2 AND tenant_id=$3)`,
+				parentID.String, repositoryID, tenantID).Scan(&parentVisible); err != nil {
+				return err
+			}
+			if !parentVisible {
+				return fmt.Errorf("snapshot parent is outside the tenant/repository scope")
+			}
+		}
+		result, err = s.diffSnapshotQuery(ctx, tx, snapshotID)
+		return err
+	})
+	return result, err
+}
+
 func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (SnapshotDiff, error) {
+	return s.diffSnapshotQuery(ctx, s.db, snapshotID)
+}
+
+func (s *pgCodeStore) diffSnapshotQuery(ctx context.Context, q codeSnapshotQuerier, snapshotID string) (SnapshotDiff, error) {
 	var parentID sql.NullString
-	if err := s.db.QueryRowContext(ctx, `
+	if err := q.QueryRowContext(ctx, `
 		SELECT parent_snapshot_id FROM code_repository_snapshots WHERE id = $1`, snapshotID).Scan(&parentID); err != nil {
 		return SnapshotDiff{}, fmt.Errorf("load snapshot: %w", err)
 	}
 	diff := SnapshotDiff{SnapshotID: snapshotID, ParentSnapshotID: parentID.String}
 
-	newRows, err := s.loadSnapshotSymbols(ctx, snapshotID)
+	newRows, err := s.loadSnapshotSymbols(ctx, q, snapshotID)
 	if err != nil {
 		return diff, err
 	}
@@ -1255,7 +1375,7 @@ func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (Snap
 		return diff, nil
 	}
 
-	oldRows, err := s.loadSnapshotSymbols(ctx, parentID.String)
+	oldRows, err := s.loadSnapshotSymbols(ctx, q, parentID.String)
 	if err != nil {
 		return diff, err
 	}
@@ -1355,6 +1475,20 @@ func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (Snap
 	return diff, nil
 }
 
+// SnapshotSymbolCountScoped reads index response metadata under the same
+// tenant-local RLS boundary as snapshot ownership and diff readback.
+func (s *pgCodeStore) SnapshotSymbolCountScoped(ctx context.Context, tenantID, snapshotID string) (int, error) {
+	var count int
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT snap.symbol_count
+			FROM code_repository_snapshots snap
+			JOIN code_repositories repo ON repo.id=snap.repository_id
+			WHERE snap.id=$1 AND snap.tenant_id=$2 AND repo.tenant_id=$2`,
+			snapshotID, tenantID).Scan(&count)
+	})
+	return count, err
+}
+
 // ActiveSnapshotID returns the currently active snapshot for
 // (repositoryID, branch), or "" if the branch has never been indexed.
 func (s *pgCodeStore) ActiveSnapshotID(ctx context.Context, repositoryID, branch string) (string, error) {
@@ -1379,9 +1513,11 @@ func (s *pgCodeStore) ActiveSnapshotID(ctx context.Context, repositoryID, branch
 // table only ever records an explicit opt-out.
 func (s *pgCodeStore) IsUserEnabled(ctx context.Context, tenantID, principalID string) (bool, error) {
 	var enabled bool
-	err := s.db.QueryRowContext(ctx, `
-		SELECT durable_store_enabled FROM code_intelligence_user_settings
-		WHERE tenant_id = $1 AND principal_id = $2`, tenantID, principalID).Scan(&enabled)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT durable_store_enabled FROM code_intelligence_user_settings
+			WHERE tenant_id = $1 AND principal_id = $2`, tenantID, principalID).Scan(&enabled)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, nil
 	}
@@ -1393,12 +1529,15 @@ func (s *pgCodeStore) IsUserEnabled(ctx context.Context, tenantID, principalID s
 
 // SetUserEnabled records (tenantID, principalID)'s explicit preference.
 func (s *pgCodeStore) SetUserEnabled(ctx context.Context, tenantID, principalID string, enabled bool) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO code_intelligence_user_settings (tenant_id, principal_id, durable_store_enabled)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (tenant_id, principal_id)
-		DO UPDATE SET durable_store_enabled = EXCLUDED.durable_store_enabled, updated_at = now()`,
-		tenantID, principalID, enabled)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO code_intelligence_user_settings (tenant_id, principal_id, durable_store_enabled)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (tenant_id, principal_id)
+			DO UPDATE SET durable_store_enabled = EXCLUDED.durable_store_enabled, updated_at = now()`,
+			tenantID, principalID, enabled)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("set user settings: %w", err)
 	}
@@ -1448,25 +1587,40 @@ const (
 // central symbol (a logging helper called from everywhere) can't turn one
 // request into a full-graph traversal.
 func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
+	return changeImpactWithQuerier(ctx, s.db, repositoryID, branch, query, maxDepth)
+}
+
+// ChangeImpactScoped retains the authenticated tenant's transaction-local RLS
+// identity for seed resolution, every reverse-CALLS hop and ranking evidence.
+// A separate repository-ownership check cannot protect pooled SQL reads.
+func (s *pgCodeStore) ChangeImpactScoped(ctx context.Context, tenantID, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
+	var impact *PGImpact
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var queryErr error
+		impact, queryErr = changeImpactWithQuerier(ctx, tx, repositoryID, branch, query, maxDepth)
+		return queryErr
+	})
+	return impact, err
+}
+
+func changeImpactWithQuerier(ctx context.Context, q codeSQLQuerier, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
 	if maxDepth > maxImpactDepth {
 		return nil, errImpactDepthTooLarge
 	}
 	if maxDepth <= 0 {
 		maxDepth = 3
 	}
-	matched, err := s.QueryByPathOrFQN(ctx, repositoryID, branch, query)
+	matched, err := queryByPathOrFQN(ctx, q, repositoryID, branch, query)
 	if err != nil {
 		return nil, fmt.Errorf("resolve query: %w", err)
 	}
 	if len(matched) == 0 && query != "" && !strings.ContainsAny(query, "./") {
-		// A bare name ("Sign") means every declaration of that name; each
-		// is listed in MatchedSymbols, so an ambiguous name is visible.
-		matched, err = s.QueryByPathOrFQN(ctx, repositoryID, branch, "%."+query)
+		matched, err = queryByPathOrFQN(ctx, q, repositoryID, branch, "%."+query)
 		if err != nil {
 			return nil, fmt.Errorf("resolve name: %w", err)
 		}
 	}
-	return s.changeImpactFromMatches(ctx, matched, maxDepth)
+	return changeImpactFromMatchesWithQuerier(ctx, q, matched, maxDepth)
 }
 
 // ChangeImpactHistorical traverses code edges only in the explicitly selected
@@ -1479,35 +1633,45 @@ func (s *pgCodeStore) ChangeImpactHistorical(
 	if maxDepth > maxImpactDepth {
 		return nil, errImpactDepthTooLarge
 	}
-	historical, err := s.QueryHistoricalCode(ctx, tenant, repository, branch, commit, snapshot, query, 100)
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(commit) == "" && strings.TrimSpace(snapshot) == "" {
+		return nil, fmt.Errorf("as_of_commit or snapshot_id is required")
 	}
-	matched, ok := historical["results"].([]PGSymbolVersion)
-	if !ok || len(matched) == 0 || historical["retrieval_mode"] != "historical_exact" {
-		return nil, ErrSymbolNotFound
-	}
-	// QueryHistoricalCode caps results at 100. Hitting that limit means
-	// the actual match count is unknown, so fail instead of hiding affected
-	// symbols behind a deceptively complete blast-radius response.
-	if len(matched) >= 100 {
-		return nil, errHistoricalImpactTooBroad
-	}
-	impact, err := s.changeImpactFromMatches(ctx, matched, maxDepth)
-	if err != nil {
-		return nil, err
-	}
-	impact.Historical = true
-	// Matched versions already carry the resolved immutable generation's
-	// identity; avoid unchecked assertions on the generic response map.
-	impact.SnapshotID = matched[0].SnapshotID
-	impact.CommitID = matched[0].CommitID
-	impact.Branch = matched[0].Branch
-	return impact, nil
+	var impact *PGImpact
+	err := s.withCodeTenantContext(ctx, tenant, func(tx *sql.Tx) error {
+		historical, err := queryHistoricalCodeScoped(ctx, tx, repository, tenant, branch, commit, snapshot, query, 100)
+		if err != nil {
+			return err
+		}
+		matched, ok := historical["results"].([]PGSymbolVersion)
+		if !ok || len(matched) == 0 || historical["retrieval_mode"] != "historical_exact" {
+			return ErrSymbolNotFound
+		}
+		// The historical query caps matches at 100. Never silently report
+		// a partial blast radius when more matches may exist.
+		if len(matched) >= 100 {
+			return errHistoricalImpactTooBroad
+		}
+		impact, err = changeImpactFromMatchesWithQuerier(ctx, tx, matched, maxDepth)
+		if err != nil {
+			return err
+		}
+		impact.Historical = true
+		impact.SnapshotID = matched[0].SnapshotID
+		impact.CommitID = matched[0].CommitID
+		impact.Branch = matched[0].Branch
+		return nil
+	})
+	return impact, err
 }
 
 func (s *pgCodeStore) changeImpactFromMatches(
 	ctx context.Context, matched []PGSymbolVersion, maxDepth int,
+) (*PGImpact, error) {
+	return changeImpactFromMatchesWithQuerier(ctx, s.db, matched, maxDepth)
+}
+
+func changeImpactFromMatchesWithQuerier(
+	ctx context.Context, q codeSQLQuerier, matched []PGSymbolVersion, maxDepth int,
 ) (*PGImpact, error) {
 	if maxDepth > maxImpactDepth {
 		return nil, errImpactDepthTooLarge
@@ -1542,7 +1706,7 @@ func (s *pgCodeStore) changeImpactFromMatches(
 
 	impact.CodeEvidencePaths = codeImpactEvidencePaths(seeds, nil)
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
-		next, err := s.callersOf(ctx, frontier, impact.SnapshotID)
+		next, err := callersOfWithQuerier(ctx, q, frontier, impact.SnapshotID)
 		if err != nil {
 			return nil, fmt.Errorf("callers at depth %d: %w", depth, err)
 		}
@@ -1578,7 +1742,7 @@ func (s *pgCodeStore) changeImpactFromMatches(
 		for id := range visited {
 			nodes = append(nodes, id)
 		}
-		edges, err := s.edgesAmong(ctx, nodes)
+		edges, err := edgesAmongWithQuerier(ctx, q, nodes)
 		if err != nil {
 			return nil, fmt.Errorf("load ranking edges: %w", err)
 		}
@@ -1612,6 +1776,10 @@ func (s *pgCodeStore) changeImpactFromMatches(
 // fail closed beyond 4096 CALLS rows rather than silently ranking a partial
 // graph. The SQL LIMIT bounds rows transferred before Go enforces the cap.
 func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string) (map[string][]string, error) {
+	return edgesAmongWithQuerier(ctx, s.db, symbolVersionIDs)
+}
+
+func edgesAmongWithQuerier(ctx context.Context, q codeSQLQuerier, symbolVersionIDs []string) (map[string][]string, error) {
 	edges := make(map[string][]string, len(symbolVersionIDs))
 	if len(symbolVersionIDs) == 0 {
 		return edges, nil
@@ -1631,7 +1799,7 @@ func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string)
 		  AND target_symbol_version_id IN (%s)
 		LIMIT %d`,
 		inList, inList, maxImpactEdges+1)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query edges among visited: %w", err)
 	}
@@ -1660,6 +1828,10 @@ func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string)
 // capped at maxImpactNodes+1, with a snapshot filter, so a wide fan-in
 // is rejected rather than silently truncated or polluted by other snapshots.
 func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []string, snapshotID string) ([]PGSymbolVersion, error) {
+	return callersOfWithQuerier(ctx, s.db, targetSymbolVersionIDs, snapshotID)
+}
+
+func callersOfWithQuerier(ctx context.Context, q codeSQLQuerier, targetSymbolVersionIDs []string, snapshotID string) ([]PGSymbolVersion, error) {
 	if len(targetSymbolVersionIDs) == 0 {
 		return nil, nil
 	}
@@ -1679,7 +1851,7 @@ func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []st
 		LIMIT %d`,
 		strings.Join(placeholders, ","), len(args)+1, maxImpactNodes+1)
 	args = append(args, snapshotID)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query callers: %w", err)
 	}
@@ -1701,25 +1873,42 @@ func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []st
 // when nothing has been indexed.
 func (s *pgCodeStore) LatestIndexedBranch(ctx context.Context, repositoryID, tenantID string) (string, error) {
 	var branch string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT branch FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('ready', 'active') AND activated_at IS NOT NULL
-		 ORDER BY activated_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&branch)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            SELECT branch FROM code_repository_snapshots
+             WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('ready', 'active') AND activated_at IS NOT NULL
+             ORDER BY activated_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&branch)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return branch, err
 }
 
+// RepositoryPathForTenant checks repository ownership inside a transaction
+// whose tenant identity is local to that transaction. A missing or foreign
+// repository returns sql.ErrNoRows, without exposing which case occurred.
+func (s *pgCodeStore) RepositoryPathForTenant(ctx context.Context, tenantID, repositoryID string) (string, error) {
+	var path string
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            SELECT canonical_path FROM code_repositories
+             WHERE id = $1 AND tenant_id = $2`, repositoryID, tenantID).Scan(&path)
+	})
+	return path, err
+}
+
 // SnapshotByKey finds the snapshot already recorded for this exact tree,
 // returning its id and status, or "" when there is none.
-func (s *pgCodeStore) SnapshotByKey(ctx context.Context, repositoryID, branch, commitID, extractorVersion, configurationHash string) (string, string, error) {
+func (s *pgCodeStore) SnapshotByKey(ctx context.Context, tenantID, repositoryID, branch, commitID, extractorVersion, configurationHash string) (string, string, error) {
 	var id, status string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id::text, status::text FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND branch = $2 AND commit_id = $3
-		   AND extractor_version = $4 AND configuration_hash = $5`,
-		repositoryID, branch, commitID, extractorVersion, configurationHash).Scan(&id, &status)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            SELECT id::text, status::text FROM code_repository_snapshots
+             WHERE repository_id = $1 AND tenant_id = $2 AND branch = $3 AND commit_id = $4
+               AND extractor_version = $5 AND configuration_hash = $6`,
+			repositoryID, tenantID, branch, commitID, extractorVersion, configurationHash).Scan(&id, &status)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
@@ -1729,11 +1918,38 @@ func (s *pgCodeStore) SnapshotByKey(ctx context.Context, repositoryID, branch, c
 // SnapshotHoldsFiles reports whether snapshotID holds exactly these files,
 // by path and content hash.
 func (s *pgCodeStore) SnapshotHoldsFiles(ctx context.Context, snapshotID string, files []PGFileInput) (bool, error) {
+	return snapshotHoldsFilesQuery(ctx, s.db, snapshotID, files)
+}
+
+// SnapshotHoldsFilesScoped verifies snapshot ownership and reads its manifest
+// in the same tenant-scoped transaction. A foreign snapshot is not treated as
+// an empty manifest, even when the caller supplies an empty file list.
+func (s *pgCodeStore) SnapshotHoldsFilesScoped(ctx context.Context, tenantID, snapshotID string, files []PGFileInput) (bool, error) {
+	var same bool
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var id string
+		if err := tx.QueryRowContext(ctx, `
+            SELECT id::text FROM code_repository_snapshots
+             WHERE id=$1 AND tenant_id=$2`, snapshotID, tenantID).Scan(&id); err != nil {
+			return err
+		}
+		var err error
+		same, err = snapshotHoldsFilesQuery(ctx, tx, snapshotID, files)
+		return err
+	})
+	return same, err
+}
+
+type codeManifestQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func snapshotHoldsFilesQuery(ctx context.Context, q codeManifestQuerier, snapshotID string, files []PGFileInput) (bool, error) {
 	want := make(map[string]string, len(files))
 	for _, f := range files {
 		want[f.Path] = strings.ToLower(f.ContentHash)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT path, content_hash FROM code_file_versions WHERE snapshot_id = $1`, snapshotID)
+	rows, err := q.QueryContext(ctx, `SELECT path, content_hash FROM code_file_versions WHERE snapshot_id = $1`, snapshotID)
 	if err != nil {
 		return false, err
 	}
@@ -1760,24 +1976,46 @@ func (s *pgCodeStore) SnapshotHoldsFiles(ctx context.Context, snapshotID string,
 // reverted, a branch moved back), so it is served instead of whichever
 // snapshot replaced it. No re-index is needed; its rows are immutable.
 func (s *pgCodeStore) ReactivateSnapshot(ctx context.Context, snapshotID string) error {
-	// A SELECT that matches no rows is a successful Exec, not an error. That
-	// previously let interrupted, failed and missing generations appear to
-	// reactivate successfully. Lock the selected generation through activation
-	// so its status cannot change between validation and the transition.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin snapshot reactivation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := reactivateSnapshotLocked(ctx, tx, snapshotID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReactivateSnapshotScoped validates ownership and activates inside the same
+// transaction-local tenant context. Never reuse a pooled connection's session
+// state for this mutation: RLS must see the authenticated tenant on every read
+// and on the activation function's writes.
+func (s *pgCodeStore) ReactivateSnapshotScoped(ctx context.Context, tenantID, snapshotID string) error {
+	return s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var owned bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM code_repository_snapshots WHERE id=$1 AND tenant_id=$2)`,
+			snapshotID, tenantID).Scan(&owned); err != nil {
+			return fmt.Errorf("check snapshot reactivation ownership: %w", err)
+		}
+		if !owned {
+			return sql.ErrNoRows
+		}
+		return reactivateSnapshotLocked(ctx, tx, snapshotID)
+	})
+}
+
+func reactivateSnapshotLocked(ctx context.Context, tx *sql.Tx, snapshotID string) error {
+	// A SELECT that matches no rows is a successful Exec, not an error.
+	// Lock the generation through activation to prevent status races.
 	_, status, err := lockSnapshotForMutation(ctx, tx, snapshotID)
 	if err != nil {
 		return fmt.Errorf("load snapshot for reactivation: %w", err)
 	}
 	switch status {
 	case "active":
-		// Already active for its branch. A repository can have several
-		// active branches; its convenience active_snapshot_id points only
-		// at the most recently activated one.
+		// Already active for its branch.
 	case "superseded":
 		if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1::uuid)`, snapshotID); err != nil {
 			return fmt.Errorf("reactivate snapshot %s: %w", snapshotID, err)
@@ -1785,7 +2023,7 @@ func (s *pgCodeStore) ReactivateSnapshot(ctx context.Context, snapshotID string)
 	default:
 		return fmt.Errorf("snapshot %s cannot be reactivated from status %s", snapshotID, status)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // SetSnapshotStatus records a snapshot's state, and the error when failed.
@@ -1796,11 +2034,58 @@ func (s *pgCodeStore) SetSnapshotStatus(ctx context.Context, snapshotID, status,
 	return err
 }
 
+// SetSnapshotStatusScoped records a transition only for a snapshot visible to
+// the authenticated tenant. The tenant setting is transaction-local, so a
+// pooled connection cannot carry another request's identity.
+func (s *pgCodeStore) SetSnapshotStatusScoped(ctx context.Context, tenantID, snapshotID, status, failure string) error {
+	return s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+            UPDATE code_repository_snapshots
+               SET status = $2, error = NULLIF($3, '')
+             WHERE id = $1 AND tenant_id = $4
+               AND status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')`,
+			snapshotID, status, failure, tenantID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
+}
+
 // DeleteFailedSnapshot removes a failed snapshot so the same tree can be
 // indexed again under its key.
 func (s *pgCodeStore) DeleteFailedSnapshot(ctx context.Context, snapshotID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM code_repository_snapshots WHERE id = $1 AND status = 'failed'`, snapshotID)
 	return err
+}
+
+// DeleteFailedSnapshotScoped removes only a failed snapshot owned by the
+// authenticated tenant. A missing or foreign snapshot is indistinguishable.
+func (s *pgCodeStore) DeleteFailedSnapshotScoped(ctx context.Context, tenantID, snapshotID string) error {
+	return s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+            DELETE FROM code_repository_snapshots
+             WHERE id = $1 AND tenant_id = $2 AND status = 'failed'`,
+			snapshotID, tenantID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
 }
 
 // FailInterruptedSnapshots marks snapshots left mid-index by a previous
@@ -1821,10 +2106,12 @@ func (s *pgCodeStore) FailInterruptedSnapshots(ctx context.Context) (int64, erro
 // or "" when none is.
 func (s *pgCodeStore) IndexingSnapshot(ctx context.Context, repositoryID, tenantID string) (string, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id::text FROM code_repository_snapshots
-		 WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')
-		 ORDER BY created_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&id)
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+            SELECT id::text FROM code_repository_snapshots
+             WHERE repository_id = $1 AND tenant_id = $2 AND status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')
+             ORDER BY created_at DESC LIMIT 1`, repositoryID, tenantID).Scan(&id)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

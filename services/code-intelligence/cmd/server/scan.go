@@ -206,20 +206,16 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repository_id is required", http.StatusBadRequest)
 		return
 	}
-	var owningTenant, canonical string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text, canonical_path FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant, &canonical); err != nil {
+	canonical, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
-	if owningTenant != tenant {
-		http.Error(w, "repository not found", http.StatusNotFound)
-		return
-	}
+
 	dir, err := workspace.Resolve(canonical)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
@@ -246,7 +242,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 	if head != "" {
 		commit = head + "+" + strings.TrimPrefix(tree, "worktree-")[:16]
 	}
-	if existing, status, err := s.pgStore.SnapshotByKey(r.Context(), req.RepositoryID, branch, commit, extractorVersion, ""); err != nil {
+	if existing, status, err := s.pgStore.SnapshotByKey(r.Context(), tenant, req.RepositoryID, branch, commit, extractorVersion, ""); err != nil {
 		http.Error(w, "look up snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	} else if existing != "" && status != "failed" {
@@ -269,7 +265,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if status == "superseded" {
-			if err := s.pgStore.ReactivateSnapshot(r.Context(), existing); err != nil {
+			if err := s.pgStore.ReactivateSnapshotScoped(r.Context(), tenant, existing); err != nil {
 				http.Error(w, "reactivate snapshot: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -279,7 +275,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 			"branch": branch, "commit_id": commit, "git_commit": head, "file_count": len(files)})
 		return
 	} else if existing != "" {
-		if err := s.pgStore.DeleteFailedSnapshot(r.Context(), existing); err != nil {
+		if err := s.pgStore.DeleteFailedSnapshotScoped(r.Context(), tenant, existing); err != nil {
 			http.Error(w, "clear failed snapshot: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -289,7 +285,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.pgStore.SetSnapshotStatus(r.Context(), snapshotID, "indexing", ""); err != nil {
+	if err := s.pgStore.SetSnapshotStatusScoped(r.Context(), tenant, snapshotID, "indexing", ""); err != nil {
 		http.Error(w, "mark snapshot indexing: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -301,7 +297,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		if _, err := s.buildSnapshot(ctx, tenant, req.RepositoryID, snapshotID, files); err != nil {
 			log.Printf("scan of repository %s snapshot %s failed: %v", req.RepositoryID, snapshotID, err)
-			if markErr := s.pgStore.SetSnapshotStatus(context.Background(), snapshotID, "failed", err.Error()); markErr != nil {
+			if markErr := s.pgStore.SetSnapshotStatusScoped(context.Background(), tenant, snapshotID, "failed", err.Error()); markErr != nil {
 				log.Printf("record failure of snapshot %s: %v", snapshotID, markErr)
 			}
 		}
@@ -363,29 +359,31 @@ func (s *server) handlePGSnapshots(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authenticated tenant header is required", http.StatusUnauthorized)
 		return
 	}
-	rows, err := s.pgStore.db.QueryContext(r.Context(), `
+	out := []snapshotView{}
+	err := s.pgStore.withCodeTenantContext(r.Context(), tenant, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(r.Context(), `
 		SELECT `+snapshotViewColumns+`
 		  FROM code_repository_snapshots snap
 		  JOIN code_repositories repo ON repo.id = snap.repository_id
-		 WHERE snap.tenant_id = $1::uuid
+		 WHERE snap.tenant_id = $1::uuid AND repo.tenant_id = $1::uuid
 		 ORDER BY snap.created_at DESC
 		 LIMIT 50`, tenant)
-	if err != nil {
-		http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-	out := []snapshotView{}
-	for rows.Next() {
-		v, err := scanSnapshotView(rows)
 		if err != nil {
-			http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
-			return
+			return err
 		}
-		out = append(out, v)
-	}
-	if err := rows.Err(); err != nil {
-		http.Error(w, "list snapshots: "+err.Error(), http.StatusInternalServerError)
+		defer rows.Close()
+		for rows.Next() {
+			v, err := scanSnapshotView(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, v)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		log.Printf("list code snapshots failed: %v", err)
+		http.Error(w, "list snapshots failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, out)
@@ -409,17 +407,24 @@ func (s *server) handlePGSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	out, err := scanSnapshotView(s.pgStore.db.QueryRowContext(r.Context(), `
+	var out snapshotView
+	err := s.pgStore.withCodeTenantContext(r.Context(), tenant, func(tx *sql.Tx) error {
+		var queryErr error
+		out, queryErr = scanSnapshotView(tx.QueryRowContext(r.Context(), `
 		SELECT `+snapshotViewColumns+`
 		  FROM code_repository_snapshots snap
 		  JOIN code_repositories repo ON repo.id = snap.repository_id
-		 WHERE snap.id::text = $1 AND snap.tenant_id = $2::uuid`, id, tenant))
+		 WHERE snap.id::text = $1 AND snap.tenant_id = $2::uuid
+		   AND repo.tenant_id = $2::uuid`, id, tenant))
+		return queryErr
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "snapshot not found", http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		http.Error(w, "load snapshot: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("load code snapshot failed: %v", err)
+		http.Error(w, "load snapshot failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, out)
@@ -443,18 +448,18 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 	// A snapshot's key names one tree. Sending the same tree again (a
 	// client retry) returns the snapshot already built; different files
 	// under a key that is already indexed are refused, never merged in.
-	existing, status, err := s.pgStore.SnapshotByKey(ctx, repositoryID, branch, commit, extractorVersion, configurationHash)
+	existing, status, err := s.pgStore.SnapshotByKey(ctx, tenant, repositoryID, branch, commit, extractorVersion, configurationHash)
 	if err != nil {
 		return nil, fmt.Errorf("look up snapshot: %w", err)
 	}
 	switch {
 	case existing == "":
 	case status == "failed":
-		if err := s.pgStore.DeleteFailedSnapshot(ctx, existing); err != nil {
+		if err := s.pgStore.DeleteFailedSnapshotScoped(ctx, tenant, existing); err != nil {
 			return nil, fmt.Errorf("clear failed snapshot: %w", err)
 		}
 	case status == "ready" || status == "active" || status == "superseded":
-		same, err := s.pgStore.SnapshotHoldsFiles(ctx, existing, files)
+		same, err := s.pgStore.SnapshotHoldsFilesScoped(ctx, tenant, existing, files)
 		if err != nil {
 			return nil, fmt.Errorf("compare snapshot files: %w", err)
 		}
@@ -462,14 +467,13 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 			return nil, fmt.Errorf("%w: snapshot %s already holds different files for commit %q", errSnapshotConflict, existing, commit)
 		}
 		if status == "superseded" {
-			if err := s.pgStore.ReactivateSnapshot(ctx, existing); err != nil {
+			if err := s.pgStore.ReactivateSnapshotScoped(ctx, tenant, existing); err != nil {
 				return nil, fmt.Errorf("reactivate snapshot: %w", err)
 			}
 			status = "active"
 		}
-		var symbols int
-		if err := s.pgStore.db.QueryRowContext(ctx,
-			`SELECT symbol_count FROM code_repository_snapshots WHERE id = $1`, existing).Scan(&symbols); err != nil {
+		symbols, err := s.pgStore.SnapshotSymbolCountScoped(ctx, tenant, existing)
+		if err != nil {
 			return nil, fmt.Errorf("count snapshot symbols: %w", err)
 		}
 		return map[string]any{
@@ -490,7 +494,7 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 	}
 	result, err := s.buildSnapshot(ctx, tenant, repositoryID, snapshotID, files)
 	if err != nil {
-		if markErr := s.pgStore.SetSnapshotStatus(context.Background(), snapshotID, "failed", err.Error()); markErr != nil {
+		if markErr := s.pgStore.SetSnapshotStatusScoped(context.Background(), tenant, snapshotID, "failed", err.Error()); markErr != nil {
 			log.Printf("record failure of snapshot %s: %v", snapshotID, markErr)
 		}
 		return nil, err
@@ -501,7 +505,7 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 // buildSnapshot indexes, embeds (when a code model runtime is configured)
 // and diffs an already-created snapshot.
 func (s *server) buildSnapshot(ctx context.Context, tenant, repositoryID, snapshotID string, files []PGFileInput) (map[string]any, error) {
-	if err := s.pgStore.IndexSnapshot(ctx, snapshotID, repositoryID, files); err != nil {
+	if err := s.pgStore.IndexSnapshotScoped(ctx, tenant, snapshotID, repositoryID, files); err != nil {
 		return nil, fmt.Errorf("index snapshot: %w", err)
 	}
 	degradedModels := []string{}
@@ -511,13 +515,12 @@ func (s *server) buildSnapshot(ctx context.Context, tenant, repositoryID, snapsh
 			degradedModels = append(degradedModels, "code_embedding")
 		}
 	}
-	diff, err := s.pgStore.DiffSnapshot(ctx, snapshotID)
+	diff, err := s.pgStore.DiffSnapshotScoped(ctx, tenant, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("diff snapshot: %w", err)
 	}
-	var symbols int
-	if err := s.pgStore.db.QueryRowContext(ctx,
-		`SELECT symbol_count FROM code_repository_snapshots WHERE id = $1`, snapshotID).Scan(&symbols); err != nil {
+	symbols, err := s.pgStore.SnapshotSymbolCountScoped(ctx, tenant, snapshotID)
+	if err != nil {
 		return nil, fmt.Errorf("count snapshot symbols: %w", err)
 	}
 	return map[string]any{

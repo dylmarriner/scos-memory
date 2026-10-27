@@ -496,6 +496,27 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			impacts = append(impacts, map[string]any{"symbol": symbol, "impact": impact})
 		}
 		return map[string]any{"repository_id": repositoryID, "impacts": impacts}, nil
+	case "scos_memory_code_links":
+		factID := stringArg(args, "fact_id")
+		if !isUUID(factID) {
+			return nil, fmt.Errorf("fact_id must be a UUID")
+		}
+		query := url.Values{"fact_id": {factID}}
+		if raw, ok := args["limit"]; ok {
+			limit, valid := raw.(float64)
+			if !valid || limit < 1 || limit > 100 || math.Trunc(limit) != limit {
+				return nil, fmt.Errorf("limit must be an integer between 1 and 100")
+			}
+			query.Set("limit", strconv.Itoa(int(limit)))
+		}
+		if raw, ok := args["after"]; ok {
+			cursor, valid := raw.(string)
+			if !valid || !isUUID(cursor) {
+				return nil, fmt.Errorf("after must be a UUID")
+			}
+			query.Set("after", cursor)
+		}
+		return s.forwardGET(ctx, r, s.memoryIntelligenceURL+"/v1/evidence-links?"+query.Encode())
 	case "scos_link_evidence":
 		factID := stringArg(args, "fact_id")
 		symbolVersionID := stringArg(args, "code_symbol_version_id")
@@ -1737,6 +1758,19 @@ func governedTools() []map[string]any {
 					"snapshot_id":      map[string]any{"type": "string", "description": "Immutable snapshot UUID; requires branch; knowledge links are checked against current fact validity"},
 				},
 				"required": []string{"repository_id"},
+			},
+		},
+		{
+			"name":        "scos_memory_code_links",
+			"description": "Read a bounded, tenant/namespace-scoped page of concrete historical code symbol versions linked to a memory fact (P6). Returns immutable snapshot, repository, commit and path provenance; never substitutes the active symbol.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"fact_id": map[string]any{"type": "string", "description": "Memory fact UUID"},
+					"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Page size, defaults to 25"},
+					"after":   map[string]any{"type": "string", "description": "Last link UUID returned by previous page"},
+				},
+				"required": []string{"fact_id"},
 			},
 		},
 		{

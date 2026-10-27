@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -70,7 +71,8 @@ func (s *server) requirePGStore(w http.ResponseWriter) bool {
 func (s *server) requireEnabled(w http.ResponseWriter, r *http.Request, tenant, principal string) bool {
 	enabled, err := s.pgStore.IsUserEnabled(r.Context(), tenant, principal)
 	if err != nil {
-		http.Error(w, "load user settings: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("load user settings: %v", err)
+		http.Error(w, "load user settings failed", http.StatusInternalServerError)
 		return false
 	}
 	if !enabled {
@@ -104,7 +106,8 @@ func (s *server) handlePGSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		enabled, err := s.pgStore.IsUserEnabled(r.Context(), tenant, principal)
 		if err != nil {
-			http.Error(w, "load user settings: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("load user settings: %v", err)
+			http.Error(w, "load user settings failed", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, map[string]any{"durable_store_enabled": enabled})
@@ -123,7 +126,8 @@ func (s *server) handlePGSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.pgStore.SetUserEnabled(r.Context(), tenant, principal, *req.DurableStoreEnabled); err != nil {
-			http.Error(w, "set user settings: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("set user settings: %v", err)
+			http.Error(w, "set user settings failed", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, map[string]any{"durable_store_enabled": *req.DurableStoreEnabled})
@@ -259,18 +263,12 @@ func (s *server) handlePGIndex(w http.ResponseWriter, r *http.Request) {
 	// canonical_path), not on repository_id, so a repository_id supplied by
 	// one tenant that happens to belong to another is rejected here rather
 	// than silently indexing into it.
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+	if _, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
-		http.Error(w, "repository not found", http.StatusNotFound)
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -321,32 +319,26 @@ func (s *server) handlePGSnapshotDiff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.SnapshotID == "" {
-		http.Error(w, "snapshot_id is required", http.StatusBadRequest)
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		http.Error(w, "request must contain one JSON object", http.StatusBadRequest)
+		return
+	}
+	if !snapshotIDUUID.MatchString(req.SnapshotID) {
+		http.Error(w, "valid snapshot_id is required", http.StatusBadRequest)
 		return
 	}
 
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(), `
-		SELECT repo.tenant_id::text
-		FROM code_repository_snapshots snap
-		JOIN code_repositories repo ON repo.id = snap.repository_id
-		WHERE snap.id = $1`, req.SnapshotID).Scan(&owningTenant); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "snapshot not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "load snapshot: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
+	// The identity check, parent resolution and symbol reads must share the
+	// authenticated tenant's RLS transaction, not a pooled connection.
+	diff, err := s.pgStore.DiffSnapshotScoped(r.Context(), tenant, req.SnapshotID)
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "snapshot not found", http.StatusNotFound)
 		return
 	}
-
-	diff, err := s.pgStore.DiffSnapshot(r.Context(), req.SnapshotID)
 	if err != nil {
-		http.Error(w, "diff snapshot: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("scoped snapshot diff: %v", err)
+		http.Error(w, "snapshot diff unavailable", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, diff)
@@ -423,18 +415,12 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	// client-supplied field -- same rule as requireTenant (§19.10) -- so a
 	// query can never be widened to another tenant's repositories even if
 	// repository_id happens to collide.
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+	if _, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, map[string]any{"results": []PGSymbolVersion{}})
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
-		writeJSON(w, map[string]any{"results": []PGSymbolVersion{}})
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -461,7 +447,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exact, err := s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, req.Query)
+	exact, err := s.pgStore.QueryByPathOrFQNScoped(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query)
 	if err != nil {
 		http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -473,7 +459,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	// interface's qualified name.
 	if name := declarationQuery(req.Query); len(exact) == 0 && name != "" {
 		for _, pattern := range declarationPatterns(name) {
-			if exact, err = s.pgStore.QueryByPathOrFQN(r.Context(), req.RepositoryID, req.Branch, pattern); err != nil {
+			if exact, err = s.pgStore.QueryByPathOrFQNScoped(r.Context(), tenant, req.RepositoryID, req.Branch, pattern); err != nil {
 				http.Error(w, "query: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -497,7 +483,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lexical, err := s.pgStore.QueryLexical(r.Context(), req.RepositoryID, req.Branch, req.Query, limit)
+	lexical, err := s.pgStore.QueryLexicalScoped(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query, limit)
 	if err != nil {
 		http.Error(w, "lexical query: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -540,7 +526,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	degradedSources := []string{}
 	if len(seedIDs) > 0 {
 		var ranks map[string]float64
-		structural, ranks, err = s.pgStore.QueryStructuralCandidates(r.Context(), req.RepositoryID, req.Branch, seedIDs, 2, limit)
+		structural, ranks, err = s.pgStore.QueryStructuralCandidatesScoped(r.Context(), tenant, req.RepositoryID, req.Branch, seedIDs, 2, limit)
 		if err != nil {
 			log.Printf("structural code retrieval degraded: %v", err)
 			degradedSources = append(degradedSources, "structural_graph")
@@ -647,18 +633,12 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 	// Same tenant-ownership rule as handlePGQuery: a repository belonging
 	// to another tenant behaves as if it doesn't exist (§19.10), not as an
 	// error that would confirm its existence.
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+	if _, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
-		http.Error(w, "repository not found", http.StatusNotFound)
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -669,7 +649,7 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 			r.Context(), tenant, req.RepositoryID, req.Branch,
 			req.AsOfCommit, req.SnapshotID, req.Query, req.MaxDepth)
 	} else {
-		impact, err = s.pgStore.ChangeImpact(r.Context(), req.RepositoryID, req.Branch, req.Query, req.MaxDepth)
+		impact, err = s.pgStore.ChangeImpactScoped(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query, req.MaxDepth)
 	}
 	if err != nil {
 		switch {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -21,10 +22,25 @@ func (s *pgCodeStore) QueryHistoricalCode(
 	if limit <= 0 || limit > 100 {
 		return nil, fmt.Errorf("limit must be 1..100")
 	}
+	// Resolve the immutable generation and read its symbols on the same
+	// connection under transaction-local tenant RLS. Pool-level queries
+	// silently return no rows once code provenance tables enforce RLS.
+	var output map[string]any
+	err := s.withCodeTenantContext(ctx, tenant, func(tx *sql.Tx) error {
+		var queryErr error
+		output, queryErr = queryHistoricalCodeScoped(ctx, tx, repository, tenant, branch, commit, snapshot, query, limit)
+		return queryErr
+	})
+	return output, err
+}
+
+func queryHistoricalCodeScoped(
+	ctx context.Context, tx *sql.Tx, repository, tenant, branch, commit, snapshot, query string, limit int,
+) (map[string]any, error) {
 	lookup := "SELECT id::text,commit_id FROM code_repository_snapshots " +
 		"WHERE repository_id=$1 AND tenant_id=$2 AND branch=$3 AND ($4='' OR commit_id=$4) " +
 		"AND ($5='' OR id=NULLIF($5,'')::uuid) AND status IN ('active','superseded') ORDER BY id LIMIT 2"
-	rows, err := s.db.QueryContext(ctx, lookup, repository, tenant, branch, commit, snapshot)
+	rows, err := tx.QueryContext(ctx, lookup, repository, tenant, branch, commit, snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve historical snapshot: %w", err)
 	}
@@ -85,7 +101,7 @@ func (s *pgCodeStore) QueryHistoricalCode(
 		if pass == 1 {
 			args = append(args, simple, english)
 		}
-		results, err := s.db.QueryContext(ctx, sqlText, args...)
+		results, err := tx.QueryContext(ctx, sqlText, args...)
 		if err != nil {
 			return nil, fmt.Errorf("historical code query: %w", err)
 		}

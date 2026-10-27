@@ -15,8 +15,8 @@ func codeDocumentHash(content string) string {
 }
 
 func (s *pgCodeStore) withCodeTenantContext(ctx context.Context, tenantID string, fn func(*sql.Tx) error) error {
-	if strings.TrimSpace(tenantID) == "" {
-		return fmt.Errorf("tenant id is required for code embedding access")
+	if !snapshotIDUUID.MatchString(tenantID) {
+		return fmt.Errorf("valid tenant UUID is required for code transaction")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -54,7 +54,13 @@ func (s *pgCodeStore) EnsureCodeEmbeddingSpace(ctx context.Context, space codeEm
 }
 
 func (s *pgCodeStore) SnapshotEmbeddingDocuments(ctx context.Context, snapshotID string) ([]codeSymbolDocument, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return snapshotEmbeddingDocumentsFrom(ctx, s.db, snapshotID)
+}
+
+func snapshotEmbeddingDocumentsFrom(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, snapshotID string) ([]codeSymbolDocument, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT sv.id::text, sv.symbol_id::text, sv.fully_qualified_name, sv.path,
 		       sv.kind, COALESCE(sv.signature, ''), COALESCE(sv.doc_comment, ''),
 		       sv.content_hash, sv.snapshot_id::text, snap.commit_id, snap.branch,
@@ -221,10 +227,10 @@ func (s *server) embedCodeSnapshot(ctx context.Context, tenantID, snapshotID str
 	if err != nil {
 		return err
 	}
-	if err := s.pgStore.EnsureSnapshotChunks(ctx, snapshotID); err != nil {
+	if err := s.pgStore.EnsureSnapshotChunksScoped(ctx, tenantID, snapshotID); err != nil {
 		return err
 	}
-	items, err := s.pgStore.SnapshotEmbeddingDocuments(ctx, snapshotID)
+	items, err := s.pgStore.SnapshotEmbeddingDocumentsScoped(ctx, tenantID, snapshotID)
 	if err != nil {
 		return err
 	}
@@ -250,7 +256,7 @@ func (s *server) embedCodeSnapshot(ctx context.Context, tenantID, snapshotID str
 }
 
 func (s *server) ensureActiveCodeEmbeddings(ctx context.Context, tenantID, repositoryID, branch string) error {
-	snapshotID, err := s.pgStore.ActiveSnapshotID(ctx, repositoryID, branch)
+	snapshotID, err := s.pgStore.ActiveSnapshotIDScoped(ctx, tenantID, repositoryID, branch)
 	if err != nil || snapshotID == "" {
 		return err
 	}

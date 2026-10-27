@@ -272,7 +272,29 @@ func (s *pgCodeStore) IndexSnapshotFromSCIP(ctx context.Context, snapshotID, rep
 		return 0, fmt.Errorf("begin SCIP index transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	count, err := s.indexSnapshotFromSCIPLocked(ctx, tx, snapshotID, repositoryID, index)
+	if err != nil {
+		return 0, err
+	}
+	return count, tx.Commit()
+}
 
+// IndexSnapshotFromSCIPScoped uses the same tenant-local transaction for
+// ownership, symbol import, status update and atomic snapshot activation.
+func (s *pgCodeStore) IndexSnapshotFromSCIPScoped(ctx context.Context, tenantID, snapshotID, repositoryID string, index *scip.Index) (int, error) {
+	var count int
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		if err := verifyCodeSnapshotTenant(ctx, tx, tenantID, snapshotID, repositoryID); err != nil {
+			return err
+		}
+		var importErr error
+		count, importErr = s.indexSnapshotFromSCIPLocked(ctx, tx, snapshotID, repositoryID, index)
+		return importErr
+	})
+	return count, err
+}
+
+func (s *pgCodeStore) indexSnapshotFromSCIPLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, index *scip.Index) (int, error) {
 	ownedRepositoryID, status, err := lockSnapshotForMutation(ctx, tx, snapshotID)
 	if err != nil {
 		return 0, fmt.Errorf("load SCIP snapshot for indexing: %w", err)
@@ -298,7 +320,7 @@ func (s *pgCodeStore) IndexSnapshotFromSCIP(ctx context.Context, snapshotID, rep
 	if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1)`, snapshotID); err != nil {
 		return 0, fmt.Errorf("activate snapshot: %w", err)
 	}
-	return count, tx.Commit()
+	return count, nil
 }
 
 func (s *pgCodeStore) indexSCIPSymbolLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, doc *scip.Document, sym *scip.SymbolInformation) (string, error) {
@@ -423,30 +445,24 @@ func (s *server) handlePGIndexSCIP(w http.ResponseWriter, r *http.Request) {
 	// Same tenant-ownership rule as handlePGIndex: a repository_id
 	// supplied by one tenant that happens to belong to another is
 	// rejected here rather than silently indexing into it.
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(),
-		`SELECT tenant_id::text FROM code_repositories WHERE id = $1`, req.RepositoryID).Scan(&owningTenant); err != nil {
+	if _, err := s.pgStore.RepositoryPathForTenant(r.Context(), tenant, req.RepositoryID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "load repository: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
-		http.Error(w, "repository not found", http.StatusNotFound)
+		http.Error(w, "load repository failed", http.StatusInternalServerError)
 		return
 	}
 
 	// A SCIP index for a key that is already indexed cannot be compared
 	// with what was stored, so it is refused rather than written over it.
-	existing, status, err := s.pgStore.SnapshotByKey(r.Context(), req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)
+	existing, status, err := s.pgStore.SnapshotByKey(r.Context(), tenant, req.RepositoryID, req.Branch, req.CommitID, req.ExtractorVersion, req.ConfigurationHash)
 	if err != nil {
 		http.Error(w, "look up snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if existing != "" && status == "failed" {
-		if err := s.pgStore.DeleteFailedSnapshot(r.Context(), existing); err != nil {
+		if err := s.pgStore.DeleteFailedSnapshotScoped(r.Context(), tenant, existing); err != nil {
 			http.Error(w, "clear failed snapshot: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -459,7 +475,7 @@ func (s *server) handlePGIndexSCIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	symbolCount, err := s.pgStore.IndexSnapshotFromSCIP(r.Context(), snapshotID, req.RepositoryID, index)
+	symbolCount, err := s.pgStore.IndexSnapshotFromSCIPScoped(r.Context(), tenant, snapshotID, req.RepositoryID, index)
 	if err != nil {
 		http.Error(w, "index SCIP snapshot: "+err.Error(), http.StatusInternalServerError)
 		return

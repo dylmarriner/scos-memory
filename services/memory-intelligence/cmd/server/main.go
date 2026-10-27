@@ -1232,6 +1232,10 @@ If durable is false, category/slug/title/type/authority/tags/summary may be empt
 // P1-C write point (maybePromoteToOKF auto-linking on promotion) is
 // separate and unconditional on this endpoint existing.
 func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleEvidenceLinksRead(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1274,17 +1278,20 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		http.Error(w, "begin transaction: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("evidence-link write begin transaction failed: %v", err)
+		http.Error(w, "internal evidence-link write failure", http.StatusInternalServerError)
 		return
 	}
 	defer tx.Rollback()
 	if err := setPrincipalContext(ctx, tx, identity); err != nil {
-		http.Error(w, "set principal context: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("evidence-link write principal context failed: %v", err)
+		http.Error(w, "internal evidence-link write failure", http.StatusInternalServerError)
 		return
 	}
 	var factExists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_items WHERE id=$1 AND tenant_id=$2)`, req.FactID, identity.TenantID).Scan(&factExists); err != nil {
-		http.Error(w, "look up fact: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("evidence-link write fact lookup failed: %v", err)
+		http.Error(w, "internal evidence-link write failure", http.StatusInternalServerError)
 		return
 	}
 	if !factExists {
@@ -1305,11 +1312,13 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "code symbol version not found (use a SymbolVersionID from scos_code_query or scos_code_impact)", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "insert evidence link: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("evidence-link write insert failed: %v", err)
+		http.Error(w, "internal evidence-link write failure", http.StatusInternalServerError)
 		return
 	}
 	if err := tx.Commit(); err != nil {
-		http.Error(w, "commit: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("evidence-link write commit failed: %v", err)
+		http.Error(w, "internal evidence-link write failure", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"id": id, "fact_id": req.FactID, "code_symbol_version_id": req.CodeSymbolVersionID, "link_type": req.LinkType})

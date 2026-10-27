@@ -759,6 +759,231 @@ temporal contradiction/supersession cases, merge, and deployment verification.
 
 P4 additionally allows repo-aware retrieval to return code evidence beside memory evidence without collapsing the two authority domains.
 
+## Partial P6 evidence: bounded memory → code readback (2026-10-27)
+
+The memory-intelligence service now supports tenant/namespace-RLS-scoped,
+keyset-paginated `GET /v1/evidence-links` for an accessible fact (max 100 links
+per page). Every returned edge identifies the concrete immutable symbol
+version, repository, snapshot, recorded commit label, path, relationship,
+source and confidence. The governed `scos_memory_code_links` MCP tool exposes
+this readback without inventing transitive edges. RED-before-fix HTTP and
+MCP tests and real PostgreSQL 17/pgvector integration tests cover pagination,
+invalid selectors, zero links, tenant/namespace denial and provenance. The
+CI PostgreSQL job now exercises memory-intelligence integration tests.
+A follow-up TDD integrity gate found two real cross-repository symbol-version
+failures (foreign symbol accepted at link creation; drifted foreign symbol
+returned by readback). Both failed on the prior branch and passed after
+repository-chain validation in the writer, reader and SQL link trigger
+(migration 000077). The direct-SQL guard is tested for SQLSTATE 23514. A separate RED→GREEN
+regression also removed raw SQL-driver error disclosure from the existing
+evidence-link POST handler's HTTP 500 responses.
+A further real-PostgreSQL RED→GREEN regression (migration 000078) binds each
+snapshot's `tenant_id` to its repository using a validated composite foreign
+key, including protection against later snapshot/repository tenant updates.
+The migration was also replayed against deliberately inconsistent disposable
+legacy data: validation failed closed, then succeeded after test-only cleanup,
+and reapplying it remained idempotent. This guards one previously accepted
+cross-tenant provenance forgery but does
+not enable RLS or establish complete symbol-version chain consistency.
+A restricted-role direct-SQL check on disposable PostgreSQL 17 proved the
+outstanding exposure: `scos_app` with no tenant GUC read 439 repository rows
+across 430 test tenants; all four provenance tables still had RLS disabled.
+The P6 PR remains blocked on this security finding even though the narrower
+snapshot FK migration and HTTP endpoint tests pass.
+**Open isolation gate:** legacy code repository, snapshot, symbol and symbol-version
+tables lack independent forced RLS; code-indexer/runtime tenant-context
+changes and real-PostgreSQL qualification are required before enabling it. A first TDD-scoped
+code-indexer increment (2026-10-27) moves repository registration, snapshot
+creation and pending/active snapshot discovery into transaction-local tenant
+context and rejects malformed tenant
+UUIDs. A disposable PostgreSQL 17 test with isolated forced-RLS shadow tables
+and the non-BYPASSRLS runtime role reproduced a SQLSTATE 42501 denial before
+the change and passed afterward, including foreign-tenant and connection-leak
+checks. A second scoped increment moves all five HTTP repository-ownership
+reads and the exact snapshot-key lookup into tenant-local transactions,
+with RED→GREEN forced-RLS regression for own/foreign tenants, invalid
+identity and connection-context isolation. Fresh disposable PostgreSQL
+17/pgvector (97 migration/policy scripts) passed the scoped test and the
+full code-intelligence integration package; uncached Go and vet passed.
+A third TDD increment scopes immutable historical snapshot resolution and
+symbol-version readback to **one transaction**. With FORCE RLS on all four
+isolated code-provenance shadow tables, the baseline failed RED with
+`historical snapshot not found` for the authorized tenant; the scoped
+implementation passed GREEN, denied the foreign tenant and left zero
+symbol/symbol-version rows visible without context. On a separate disposable
+PostgreSQL 17/pgvector instance with 97 migration/policy files, the complete
+code-intelligence integration package, uncached `go test ./...`, and
+`go vet ./...` passed. No production policies were changed.
+A fourth RED→GREEN increment adds tenant-scoped active-snapshot exact
+path/FQN and lexical symbol queries and wires both HTTP query paths to them.
+The real PostgreSQL shadow-schema test exercises all four forced-RLS
+provenance tables, authorized exact/lexical hits, foreign-tenant empty results
+and no context-free symbol/version visibility. Legacy owner-level query
+helpers remain for existing callers/tests; impact, indexing and recovery
+paths are still unqualified for the future four-table policy migration.
+A fifth RED→GREEN increment scopes the snapshot-change-event API's
+snapshot-identity lookup and event readback to the same tenant-local
+transaction. The restricted-role, four-table forced-RLS shadow-schema
+regression first returned 404 for an authorized snapshot, then passed with
+own-tenant HTTP 200 and foreign-tenant HTTP 404. Fresh disposable PostgreSQL
+17/pgvector applied 97 migration/policy scripts; full code-intelligence
+integration, uncached Go tests, vet and diff checks passed. This is
+preparatory evidence, not a production RLS migration or a P6 completion gate.
+A sixth TDD increment scopes snapshot status transitions, failed-snapshot
+cleanup and idempotent snapshot-manifest comparison in the scan/index paths. The regression was RED
+before the new method existed and GREEN with restricted `scos_app` against
+forced-RLS shadow tables: an authorized transition succeeds, a foreign
+tenant cannot update or delete the snapshot, malformed tenant IDs fail
+closed, and pooled connections retain no tenant context. A separate real-schema integration
+test verifies the production `code_snapshot_status` enum, actual indexed
+file manifest, foreign-tenant denial and empty-manifest mismatch with the
+restricted role. A disposable PostgreSQL 17/pgvector database applied
+97 migration/policy scripts; the complete code-intelligence integration
+package, uncached Go suite, vet and diff checks passed. This does not
+scope indexing, activation, deletion, recovery or impact traversal.
+A seventh RED→GREEN TDD increment scopes snapshot reactivation in both
+scan and synchronous index-retry paths: `ReactivateSnapshotScoped` validates
+ownership and runs locking/activation within one transaction-local tenant
+context. The restricted `scos_app` forced-RLS shadow-schema test proves
+own-tenant active retry, foreign-tenant denial and invalid-ID rejection; a
+real-schema integration test covers superseded-generation reactivation and
+foreign-tenant denial. The method was absent (compile RED) before implementation.
+Disposable PostgreSQL 17/pgvector applied all 97 migration/policy scripts;
+code-intelligence integration, uncached full Go tests, vet and diff checks
+passed. This does **not** qualify unscoped indexing, recovery or impact paths.
+An eighth RED→GREEN increment scopes the snapshot-diff HTTP endpoint and
+the scan/indexing response's diff calculation to the authenticated tenant.
+Snapshot ownership, parent lineage and both generations' symbol reads now
+run on a single transaction-local RLS connection. A real PostgreSQL 17
+restricted-role test with forced-RLS shadow tables first returned HTTP 404
+for an authorized snapshot; after the fix it returned the expected added
+file, preserved a modified-file diff against its parent, denied foreign
+and missing snapshots with identical 404 responses, and rejected malformed
+snapshot UUIDs and trailing JSON objects. The legacy owner-level diff
+helper remains for internal tests only. The full code-intelligence
+integration package, uncached Go suite and Go vet passed on a disposable
+97-migration/policy PostgreSQL 17/pgvector instance. No production RLS
+policy was enabled or live data migrated.
+A ninth RED→GREEN increment closes two unscoped snapshot-symbol-count
+reads in the synchronous indexing response and idempotent retry path.
+The restricted-role forced-RLS regression first failed an authorized retry
+with "count snapshot symbols: sql: no rows in result set". Both paths now
+use a tenant-scoped transaction, and the regression verifies the authorized
+count, foreign-tenant denial and malformed-tenant rejection. No production
+policy or live database was changed.
+This is **preparatory only**, not a four-table RLS rollout: remaining
+code-indexer paths and production migrations are unqualified; PR #92 stays
+draft and the security review remains open.
+**P6/P8 current + historical impact tenant scoping (2026-10-27, PR #92
+development, not merged):** current impact now resolves seed symbols,
+traverses reverse-CALLS edges and ranks evidence through one transaction
+carrying the authenticated tenant's RLS context. Historical impact
+likewise resolves its immutable generation and traverses/ranks within
+one transaction, preserving ambiguous-generation and selector guards.
+A restricted-role PostgreSQL 17 shadow-schema regression with forced RLS
+on five code/edge tables verifies real owner-visible caller evidence,
+historical evidence, foreign-tenant denial and invalid selectors. The
+new test failed RED at compile time before the scoped API existed, then
+passed GREEN; 97 migration/policy scripts and the complete code-indexer
+integration suite passed in a disposable database. No production RLS
+policies were enabled; file/SCIP indexing is scoped in a later increment,
+while recovery and remaining legacy paths remain blockers.
+
+**P6 file/SCIP indexing under tenant-local transactions (2026-10-27,
+PR #92 development, not merged):** production scan and SCIP handlers now
+invoke scoped indexers. Snapshot/repository ownership, symbol/version
+writes, change-event ledger, status transitions and activation share one
+authenticated tenant-local transaction. A real restricted-role PostgreSQL
+test first failed RED at compile time, then passed GREEN for actual Go
+file and SCIP indexing, foreign-tenant denial and connection-context
+cleanup. The existing event-ledger test fixture now uses the same scoped
+runtime method. In an isolated PostgreSQL 17 database with all 97
+migration/policy scripts, candidate forced-RLS policies on all four
+code-provenance tables denied direct context-free reads (0/0/0/0 rows)
+and permitted tenant-scoped reads. The opt-in
+`SCOS_EXPECT_CODE_PROVENANCE_RLS=1` integration gate and the full
+code-intelligence package passed under those **disposable-only**
+policies, as did the uncached full Go suite, Go vet and tagged
+memory-intelligence PostgreSQL integration tests.
+A subsequent RED→GREEN end-to-end regression caught the SCIP handler's
+context-free failed-generation cleanup: an authorized retry returned HTTP
+500 under forced RLS because the old deletion affected zero rows.
+The handler now calls `DeleteFailedSnapshotScoped`; the same restricted-role
+retry returns HTTP 200 and a new immutable snapshot.
+**P6 dense embedding maintenance tenant scoping (2026-10-27,
+PR #92 development, not merged):** authenticated code-embedding
+maintenance now resolves active snapshots, loads symbol documents and
+persists missing chunks inside transaction-local tenant context.
+RED-before-implementation and GREEN-after-implementation regression
+coverage exercises owner visibility, cross-tenant denial, invalid
+tenant IDs, idempotent chunk writes and active snapshot selection
+under forced RLS with `scos_app`; a separate real-schema restricted-role
+integration test covers the same production methods. Disposable
+PostgreSQL 17 applied 77 migrations and 20 policies; candidate
+four-table FORCE RLS was applied only to that disposable database, and
+full code-intelligence plus tagged memory-intelligence integration
+suites passed with the forced-RLS qualification gate. The uncached
+full Go suite and Go vet passed separately. Production
+forced RLS on four legacy provenance tables, recovery paths,
+remaining callers and complete P0-P8 acceptance remain open.
+
+**P6 snapshot list/detail readback tenant scoping (2026-10-27,
+PR #92 development):** both GET snapshot routes now use the same
+transaction-local tenant context as other code provenance reads, with
+repository and snapshot tenant predicates. A restricted-role PostgreSQL
+17 forced-RLS regression was RED for the authorized list (HTTP 200
+empty) before the fix, then GREEN for authorized list/detail,
+cross-tenant isolation and sanitized invalid-context errors. The
+dedicated disposable database applied 97 migration/policy files;
+the complete code-intelligence integration suite, uncached full Go
+suite, Go vet and diff checks passed. A second pass on the same
+disposable database applied candidate FORCE RLS policies to all four
+provenance tables; the opt-in restricted-role qualification, complete
+code-intelligence integration package and tagged memory-intelligence
+PostgreSQL integration all passed. No production policy activation
+or main-branch qualification is implied.
+
+**P4/P6 structural code retrieval scoping (2026-10-27, PR #92
+development):** the HTTP hybrid query's structural graph lane now
+holds the authenticated tenant context through active snapshot selection,
+neighbor expansion, edge loading and PageRank. Neighbor versions must
+match the resolved snapshot. A restricted-role forced-RLS shadow-schema
+regression was RED before the scoped API and GREEN for owner-visible
+caller evidence, centrality and foreign-tenant denial. On disposable
+PostgreSQL 17 with candidate four-table forced RLS, the complete
+code-intelligence suite, uncached Go suite, Go vet and diff checks
+passed. Legacy owner-level helper remains for internal test callers.
+This does not enable production RLS or close P4/P6 acceptance.
+
+**P6 code settings RLS hardening (2026-10-27, PR #92 development):**
+The per-principal durable-store toggle was another legacy table with no
+row-level security. New policy 000020_code_user_settings_rls.sql enables
+and forces tenant isolation for its table. IsUserEnabled and
+SetUserEnabled now run SQL under transaction-local authenticated
+tenant context, including the common requireEnabled route guard.
+Restricted scos_app real-PostgreSQL regressions were RED before the fix
+(owner write rejected by candidate FORCE RLS; production catalog lacked
+RLS) and GREEN afterward. They prove owner write/read, other-tenant
+isolation, no context-free direct reads, invalid UUID rejection, pooled
+connection cleanup, and production policy catalog state. An additional
+RED-to-GREEN HTTP regression prevents SQL/driver errors leaking through
+settings GET/PUT and the route guard. A fresh disposable PostgreSQL 17/pgvector database applied all 98
+migration/policy scripts, then passed the full code-intelligence
+integration package, uncached Go suite (51 tested packages), Go vet and
+diff checks. This is a **source-only policy migration**, not a live
+migration or production rollout. The four legacy
+code-provenance tables still have no committed production FORCE RLS
+migration and PR #92 remains draft pending substantive security
+reviews and recovery qualification.
+
+**No production code-provenance RLS migration, merge or rollout.**
+Background recovery and other legacy operations still need scoping
+and acceptance before enabling production forced RLS.
+
+See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
+expansion, multi-hop traversal, ranking, inference, server-attested Git
+provenance and production qualification remain open.
+
 ## Remaining
 
 - [ ] Complete governed API/MCP tooling for explicit memory↔symbol-version links.
