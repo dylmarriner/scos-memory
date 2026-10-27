@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // codeMemoryPaths traverses only code-version -> readable fact ->
@@ -59,7 +60,8 @@ func (s *gatewayServer) codeMemoryPaths(ctx context.Context, r *http.Request, ar
 		return unavailable(err)
 	}
 	first, valid := incoming.(map[string]any)
-	if !valid || first["code_symbol_version_id"] != start {
+	headerVersion, _ := first["code_symbol_version_id"].(string)
+	if !valid || !isUUID(headerVersion) || !strings.EqualFold(headerVersion, start) {
 		return nil, fmt.Errorf("governed reverse evidence response invalid")
 	}
 	inbound, valid := first["links"].([]any)
@@ -75,7 +77,7 @@ func (s *gatewayServer) codeMemoryPaths(ctx context.Context, r *http.Request, ar
 		fact, _ := edge["fact_id"].(string)
 		link, _ := edge["id"].(string)
 		symbol, _ := edge["code_symbol_version_id"].(string)
-		if !isUUID(fact) || !isUUID(link) || symbol != start {
+		if !isUUID(fact) || !isUUID(link) || !isUUID(symbol) || !strings.EqualFold(symbol, start) {
 			return nil, fmt.Errorf("governed reverse evidence identity invalid")
 		}
 		secondQuery := url.Values{"fact_id": {fact}, "limit": {strconv.Itoa(perFact)}}
@@ -84,7 +86,8 @@ func (s *gatewayServer) codeMemoryPaths(ctx context.Context, r *http.Request, ar
 			return unavailable(err)
 		}
 		page, valid := outbound.(map[string]any)
-		if !valid || page["fact_id"] != fact {
+		pageFact, _ := page["fact_id"].(string)
+		if !valid || !isUUID(pageFact) || !strings.EqualFold(pageFact, fact) {
 			return nil, fmt.Errorf("governed fact evidence response invalid")
 		}
 		codeLinks, valid := page["links"].([]any)

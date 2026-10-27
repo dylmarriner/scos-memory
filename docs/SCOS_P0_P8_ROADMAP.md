@@ -1158,7 +1158,7 @@ See `docs/P6_MEMORY_CODE_READBACK.md`. The **one-hop** reverse code→memory evi
 - [ ] Record actor/operation/turn evidence where schema metadata needs expansion.
 - [ ] Infer high-confidence links from deterministic signals before model inference.
 - [x] Add bounded **one-hop** memory→code and code→memory evidence readback (immutable symbol versions, tenant/namespace RLS, link-UUID cursor, 100-row cap).
-- [x] Bound and expose **two-hop** code-version → RLS-visible memory fact → immutable code-version paths through governed `scos_code_memory_paths` (10×10 caps, UUID-keyset pagination, original evidence IDs and provenance). HTTP identity and malformed-upstream regressions pass locally. See `docs/P6_MEMORY_CODE_READBACK.md`.
+- [x] Bound and expose **two-hop** code-version → RLS-visible memory fact → immutable code-version paths through governed `scos_code_memory_paths` (10×10 caps, UUID-keyset pagination, original evidence IDs and provenance). HTTP identity and malformed-upstream regressions pass locally; uppercase/mixed-case UUID evidence identity now has RED/GREEN regression coverage (5 focused repetitions, 2 race repetitions, full uncached Go suite and `go vet`). See `docs/P6_MEMORY_CODE_READBACK.md`.
 - [ ] Add general multi-hop graph expansion, impact traversal and measured large-graph budgets.
 - [ ] Use graph proximity as a ranking feature, never an authority override.
 - [ ] Expose explainable provenance paths.
