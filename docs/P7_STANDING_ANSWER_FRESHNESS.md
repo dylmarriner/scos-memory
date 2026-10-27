@@ -54,7 +54,9 @@ writer/refresh generator is implemented, so this does not close P7 acceptance.
 `memory_standing_answers_current` is a PostgreSQL `security_invoker`,
 `security_barrier` view over only non-stale answers whose complete evidence
 list still resolves to active, effective, unexpired, non-superseded, visible
-facts within the same tenant and namespace. It also rechecks unresolved
+facts within the same tenant and namespace. The view uses
+`statement_timestamp()`, not transaction-start `now()`, so a long-lived
+transaction cannot serve evidence that expired after it began. It also rechecks unresolved
 code-revalidation events. A missing, revoked or hidden fact makes the answer
 unreadable. It applies the caller's forced row-level policies rather than
 running as the migration owner; ordinary `scos_app` receives SELECT only.

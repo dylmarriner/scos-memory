@@ -57,8 +57,26 @@ func TestP7StandingAnswerCurrentViewRequiresLiveEvidence(t *testing.T) {
 	if got := countAs(f.otherTenant, f.other); got != 0 {
 		t.Fatalf("cross-tenant standing answer exposed: %d", got)
 	}
-	if remaining := time.Until(expires.Add(200 * time.Millisecond)); remaining > 0 {
-		time.Sleep(remaining)
+	// The caller may begin a transaction before expiry and issue the SELECT
+	// after expiry. now() is frozen at transaction start and is unsafe for
+	// this read-time contract; statement_timestamp() is not.
+	longTransactionCount, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{
+		TenantID: f.tenant, PrincipalID: f.owner,
+	}, func(tx querier) (int, error) {
+		if remaining := time.Until(expires.Add(200 * time.Millisecond)); remaining > 0 {
+			time.Sleep(remaining)
+		}
+		var n int
+		err := tx.QueryRowContext(ctx,
+			"SELECT count(*) FROM memory_standing_answers_current WHERE id=$1",
+			answer).Scan(&n)
+		return n, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if longTransactionCount != 0 {
+		t.Fatalf("expired answer visible in long-running transaction: %d", longTransactionCount)
 	}
 	// A wall-clock transition does not invoke the mutation triggers.
 	var stillMarkedFresh bool

@@ -1,7 +1,10 @@
 BEGIN;
 
 -- P7 read-time freshness is separate from trigger invalidation: a fact can
--- expire solely because time advances, without any row UPDATE. This view is
+-- expire solely because time advances, without any row UPDATE.
+-- statement_timestamp() uses the read statement clock, not the transaction
+-- start time (now()), so long-lived read transactions cannot serve expired
+-- evidence merely because they began before expiry. This view is
 -- a fail-closed read primitive, not an answer generator or a cache-serving
 -- endpoint. It revalidates every cited fact on every read.
 --
@@ -36,9 +39,9 @@ WHERE CASE
                 AND f.namespace_id = sa.namespace_id
                 AND f.status = 'active'
                 AND f.superseded_by_id IS NULL
-                AND (f.expires_at IS NULL OR f.expires_at > now())
-                AND (f.valid_from IS NULL OR f.valid_from <= now())
-                AND (f.valid_until IS NULL OR f.valid_until > now())
+                AND (f.expires_at IS NULL OR f.expires_at > statement_timestamp())
+                AND (f.valid_from IS NULL OR f.valid_from <= statement_timestamp())
+                AND (f.valid_until IS NULL OR f.valid_until > statement_timestamp())
                 AND f.sensitivity <= ns.sensitivity_ceiling
                 AND NOT EXISTS (
                     SELECT 1
