@@ -171,14 +171,16 @@ first, then observability breadth and deployment-owned verification.
   `post_turn` when configured. Full hook coverage for every remaining
   lifecycle event and production extension endpoint deployment remain to be
   exercised in integration tests.
-- **§32 — cross-service metric-emission breadth.** The observability
-  service's own ingestion/correlation/export contract is now complete
-  (this pass), but only `transparency-projection` actually pushes metrics
-  into it today; other services (e.g. `backup-manager`) do not yet emit
-  their §32-listed metrics (backup age, restore status, etc.). Instrumenting
-  every producing service is a genuine, multi-service rollout gap outside
-  this pass's assigned service boundaries, not something the observability
-  service itself can close.
+- **§32 — cross-service metric-emission breadth (historical audit finding,
+  superseded in part by later source changes).** At the 2026-07-31 audit
+  snapshot only `transparency-projection` was confirmed to push metrics.
+  This is **not** a current-tense claim: `packages/telemetry` now supplies
+  shared emitters, and `backup-manager` emits backup-age and restore-status
+  measures. A 2026-10-28 source candidate adds an independent periodic
+  verified-backup-age reporter with real HTTP ingest regression coverage
+  (see `services/backup-manager/cmd/server/backup_metrics_test.go`).
+  Independent full-fleet metric delivery, alert configuration and production
+  collector qualification are still open, so §32 and §41 remain PARTIAL.
 - Everything marked **PARTIAL (Carried)** or **FAIL (Carried)** in the
   master table above (sections 1, 2, 3, 5, 6, 7, 17, 18, 24, 25, 26, 27, 36,
   37) — none of these were in this pass's assigned scope and none should be

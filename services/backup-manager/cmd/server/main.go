@@ -31,10 +31,6 @@ import (
 	"github.com/dylmarriner/scos-memory/packages/tlsserve"
 )
 
-// serviceMetrics emits this service's §32 measures. It is nil-safe and a
-// no-op when no collector is configured.
-var serviceMetrics = telemetry.FromEnvironment("backup-manager")
-
 const version = "0.1.0"
 
 type backupConfig struct {
@@ -121,6 +117,7 @@ type backupArtifact struct {
 }
 
 type backupServer struct {
+	metrics      *telemetry.Emitter
 	mu           sync.RWMutex
 	restoreTests map[string]*RestoreTestResult
 	retention    RetentionPolicy
@@ -162,6 +159,7 @@ func newBackupServer() *backupServer {
 func newBackupServerWithDir(dir string) *backupServer {
 	cfg := loadBackupConfig()
 	s := &backupServer{
+		metrics:      telemetry.FromEnvironment("backup-manager"),
 		restoreTests: make(map[string]*RestoreTestResult),
 		backupDir:    dir, config: cfg,
 		retention:         RetentionPolicy{WALAndDaily: 35, Weekly: 12, Monthly: 12, OKFIndefinite: true},
@@ -256,6 +254,12 @@ func main() {
 		interval := envDuration("SCOS_WAL_SHIP_INTERVAL", 30*time.Second)
 		go s.runWALShipper(context.Background(), interval)
 		log.Printf("WAL shipper enabled: archived WAL is encrypted to the provider every %s", interval)
+	}
+	// §32 backup-age observations must not require an HTTP client to poll
+	// /v1/backups or the optional restore scheduler to be enabled.
+	if s.metrics.Enabled() && s.provider != nil {
+		go s.runBackupAgeReporter(context.Background(),
+			envDuration("SCOS_BACKUP_AGE_METRIC_INTERVAL", 15*time.Minute))
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("SCOS_BACKUP_RESTORE_SCHEDULER_ENABLED")), "true") {
 		interval := restoreSchedulerInterval()
@@ -396,12 +400,9 @@ func (s *backupServer) handleBackups(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "backup storage unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	// §32 backup age: report the age of the newest verified backup, which is
-	// what a stale-backup alert must fire on.
-	if age, ok := newestVerifiedBackupAge(backups, time.Now()); ok {
-		serviceMetrics.Gauge(telemetry.MetricBackupAge, age.Seconds(), "s",
-			map[string]string{"provider": s.provider.Name()}, telemetry.Correlation{})
-	}
+	// Preserve the existing on-demand observation alongside the periodic
+	// reporter. Both paths use the same verified-backup evidence.
+	s.emitBackupAge(backups, time.Now())
 	writeJSON(w, backups)
 }
 
@@ -654,7 +655,7 @@ func (s *backupServer) recordRestoreTest(t *RestoreTestResult) {
 	}
 	// §32 restore status: emit pass/fail for every attempted restore drill so
 	// "scheduled restore success" is measurable, not just logged.
-	serviceMetrics.Count(telemetry.MetricRestoreStatus, map[string]string{
+	s.metrics.Count(telemetry.MetricRestoreStatus, map[string]string{
 		"test_type": t.TestType, "status": t.Status,
 	}, telemetry.Correlation{})
 }
