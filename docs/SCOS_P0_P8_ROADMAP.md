@@ -841,6 +841,16 @@ restricted role. A disposable PostgreSQL 17/pgvector database applied
 97 migration/policy scripts; the complete code-intelligence integration
 package, uncached Go suite, vet and diff checks passed. This does not
 scope indexing, activation, deletion, recovery or impact traversal.
+A seventh RED→GREEN TDD increment scopes snapshot reactivation in both
+scan and synchronous index-retry paths: `ReactivateSnapshotScoped` validates
+ownership and runs locking/activation within one transaction-local tenant
+context. The restricted `scos_app` forced-RLS shadow-schema test proves
+own-tenant active retry, foreign-tenant denial and invalid-ID rejection; a
+real-schema integration test covers superseded-generation reactivation and
+foreign-tenant denial. The method was absent (compile RED) before implementation.
+Disposable PostgreSQL 17/pgvector applied all 97 migration/policy scripts;
+code-intelligence integration, uncached full Go tests, vet and diff checks
+passed. This does **not** qualify unscoped indexing, recovery or impact paths.
 This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.

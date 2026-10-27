@@ -169,6 +169,20 @@ and policies, the full code-intelligence integration suite, uncached
 Go suite, vet and diff checks passed. The old unscoped helper remains
 for legacy internal tests; this change does **not** make all indexer
 operations safe under future forced RLS.
+A further RED→GREEN TDD increment scopes **snapshot reactivation** to the
+authenticated tenant. Both scan and synchronous index-retry paths now use
+`ReactivateSnapshotScoped`, which validates snapshot ownership and performs
+the status lock and activation inside the same transaction-local tenant context.
+The previous unscoped helper remains only for legacy internal callers/tests.
+The restricted `scos_app` forced-RLS shadow-schema regression verifies an
+authorized active-snapshot retry, foreign-tenant denial and malformed-tenant
+rejection; a real-schema PostgreSQL regression additionally exercises an
+authorized superseded-generation reactivation and foreign-tenant rejection.
+The tests failed at compile time before the scoped method existed, then passed
+after implementation. On disposable PostgreSQL 17/pgvector with all 97
+migration/policy scripts, the complete code-intelligence integration package,
+uncached `go test -count=1 ./...`, `go vet ./...`, and diff checks passed.
+This is a scoped activation-path improvement, **not** a four-table RLS rollout.
 This does not make the Git commit label server-attested, and the remaining
 indexing, impact, activation and recovery paths still need RLS qualification.
 **This does not activate RLS on the four production code tables:**

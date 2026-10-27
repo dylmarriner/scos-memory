@@ -1846,24 +1846,46 @@ func snapshotHoldsFilesQuery(ctx context.Context, q codeManifestQuerier, snapsho
 // reverted, a branch moved back), so it is served instead of whichever
 // snapshot replaced it. No re-index is needed; its rows are immutable.
 func (s *pgCodeStore) ReactivateSnapshot(ctx context.Context, snapshotID string) error {
-	// A SELECT that matches no rows is a successful Exec, not an error. That
-	// previously let interrupted, failed and missing generations appear to
-	// reactivate successfully. Lock the selected generation through activation
-	// so its status cannot change between validation and the transition.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin snapshot reactivation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := reactivateSnapshotLocked(ctx, tx, snapshotID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReactivateSnapshotScoped validates ownership and activates inside the same
+// transaction-local tenant context. Never reuse a pooled connection's session
+// state for this mutation: RLS must see the authenticated tenant on every read
+// and on the activation function's writes.
+func (s *pgCodeStore) ReactivateSnapshotScoped(ctx context.Context, tenantID, snapshotID string) error {
+	return s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var owned bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM code_repository_snapshots WHERE id=$1 AND tenant_id=$2)`,
+			snapshotID, tenantID).Scan(&owned); err != nil {
+			return fmt.Errorf("check snapshot reactivation ownership: %w", err)
+		}
+		if !owned {
+			return sql.ErrNoRows
+		}
+		return reactivateSnapshotLocked(ctx, tx, snapshotID)
+	})
+}
+
+func reactivateSnapshotLocked(ctx context.Context, tx *sql.Tx, snapshotID string) error {
+	// A SELECT that matches no rows is a successful Exec, not an error.
+	// Lock the generation through activation to prevent status races.
 	_, status, err := lockSnapshotForMutation(ctx, tx, snapshotID)
 	if err != nil {
 		return fmt.Errorf("load snapshot for reactivation: %w", err)
 	}
 	switch status {
 	case "active":
-		// Already active for its branch. A repository can have several
-		// active branches; its convenience active_snapshot_id points only
-		// at the most recently activated one.
+		// Already active for its branch.
 	case "superseded":
 		if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1::uuid)`, snapshotID); err != nil {
 			return fmt.Errorf("reactivate snapshot %s: %w", snapshotID, err)
@@ -1871,7 +1893,7 @@ func (s *pgCodeStore) ReactivateSnapshot(ctx context.Context, snapshotID string)
 	default:
 		return fmt.Errorf("snapshot %s cannot be reactivated from status %s", snapshotID, status)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // SetSnapshotStatus records a snapshot's state, and the error when failed.

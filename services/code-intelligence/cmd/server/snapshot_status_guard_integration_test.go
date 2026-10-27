@@ -36,7 +36,11 @@ func TestPGSetSnapshotStatusPreservesSupersededGeneration(t *testing.T) {
 	if status != "superseded" {
 		t.Fatalf("late worker failure overwrote historical generation status: %s", status)
 	}
-	if err := store.ReactivateSnapshot(ctx, first); err != nil {
+	foreignTenant := testTenant(t, db)
+	if err := store.ReactivateSnapshotScoped(ctx, foreignTenant, first); err == nil {
+		t.Fatal("foreign tenant reactivated a superseded snapshot")
+	}
+	if err := store.ReactivateSnapshotScoped(ctx, tenant, first); err != nil {
 		t.Fatalf("historical generation must remain reactivatable: %v", err)
 	}
 	var active string

@@ -265,7 +265,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if status == "superseded" {
-			if err := s.pgStore.ReactivateSnapshot(r.Context(), existing); err != nil {
+			if err := s.pgStore.ReactivateSnapshotScoped(r.Context(), tenant, existing); err != nil {
 				http.Error(w, "reactivate snapshot: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -458,7 +458,7 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 			return nil, fmt.Errorf("%w: snapshot %s already holds different files for commit %q", errSnapshotConflict, existing, commit)
 		}
 		if status == "superseded" {
-			if err := s.pgStore.ReactivateSnapshot(ctx, existing); err != nil {
+			if err := s.pgStore.ReactivateSnapshotScoped(ctx, tenant, existing); err != nil {
 				return nil, fmt.Errorf("reactivate snapshot: %w", err)
 			}
 			status = "active"

@@ -129,6 +129,18 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	if _, err := admin.ExecContext(ctx, "UPDATE "+schema+".code_repository_snapshots SET status='active',activated_at=now() WHERE id=$1", snap); err != nil {
 		t.Fatal(err)
 	}
+	// Reactivation must use the same transaction-local tenant scope as the
+	// snapshot lock. An already-active snapshot avoids the activation function
+	// while still exercising the restricted-role ownership boundary.
+	if err := store.ReactivateSnapshotScoped(ctx, tenantA, snap); err != nil {
+		t.Fatalf("own tenant reactivation under forced RLS: %v", err)
+	}
+	if err := store.ReactivateSnapshotScoped(ctx, tenantB, snap); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign tenant reactivated snapshot: %v", err)
+	}
+	if err := store.ReactivateSnapshotScoped(ctx, "not-a-uuid", snap); err == nil {
+		t.Fatal("invalid tenant accepted for reactivation")
+	}
 	var symbolID, versionID string
 	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,'scope-file','file',$2) RETURNING id::text", repo, snap).Scan(&symbolID); err != nil {
 		t.Fatal(err)
