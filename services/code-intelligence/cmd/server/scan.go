@@ -285,7 +285,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create snapshot: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.pgStore.SetSnapshotStatus(r.Context(), snapshotID, "indexing", ""); err != nil {
+	if err := s.pgStore.SetSnapshotStatusScoped(r.Context(), tenant, snapshotID, "indexing", ""); err != nil {
 		http.Error(w, "mark snapshot indexing: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -297,7 +297,7 @@ func (s *server) handlePGScan(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		if _, err := s.buildSnapshot(ctx, tenant, req.RepositoryID, snapshotID, files); err != nil {
 			log.Printf("scan of repository %s snapshot %s failed: %v", req.RepositoryID, snapshotID, err)
-			if markErr := s.pgStore.SetSnapshotStatus(context.Background(), snapshotID, "failed", err.Error()); markErr != nil {
+			if markErr := s.pgStore.SetSnapshotStatusScoped(context.Background(), tenant, snapshotID, "failed", err.Error()); markErr != nil {
 				log.Printf("record failure of snapshot %s: %v", snapshotID, markErr)
 			}
 		}
@@ -486,7 +486,7 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 	}
 	result, err := s.buildSnapshot(ctx, tenant, repositoryID, snapshotID, files)
 	if err != nil {
-		if markErr := s.pgStore.SetSnapshotStatus(context.Background(), snapshotID, "failed", err.Error()); markErr != nil {
+		if markErr := s.pgStore.SetSnapshotStatusScoped(context.Background(), tenant, snapshotID, "failed", err.Error()); markErr != nil {
 			log.Printf("record failure of snapshot %s: %v", snapshotID, markErr)
 		}
 		return nil, err

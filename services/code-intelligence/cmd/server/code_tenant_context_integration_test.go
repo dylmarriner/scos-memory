@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -46,7 +47,7 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}()
 	statements := []string{
 		"CREATE TABLE " + schema + ".code_repositories (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, canonical_path text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,canonical_path))",
-		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
+		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', error text, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
 		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
@@ -88,6 +89,21 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if repo == "" || snap == "" {
 		t.Fatalf("missing IDs: repo=%q snap=%q", repo, snap)
+	}
+	// Status transitions must be scoped at the database boundary, not
+	// merely protected by the HTTP repository ownership check.
+	if err := store.SetSnapshotStatusScoped(ctx, tenantB, snap, "indexing", ""); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign tenant changed snapshot status: %v", err)
+	}
+	if err := store.SetSnapshotStatusScoped(ctx, tenantA, snap, "indexing", ""); err != nil {
+		t.Fatalf("own tenant status update under forced RLS: %v", err)
+	}
+	var scopedStatus string
+	if err := admin.QueryRowContext(ctx, "SELECT status FROM "+schema+".code_repository_snapshots WHERE id=$1", snap).Scan(&scopedStatus); err != nil || scopedStatus != "indexing" {
+		t.Fatalf("status after scoped update = %q, %v", scopedStatus, err)
+	}
+	if err := store.SetSnapshotStatusScoped(ctx, "not-a-uuid", snap, "failed", ""); err == nil {
+		t.Fatal("invalid tenant accepted for snapshot status transition")
 	}
 	building, err := store.IndexingSnapshot(ctx, repo, tenantA)
 	if err != nil || building != snap {

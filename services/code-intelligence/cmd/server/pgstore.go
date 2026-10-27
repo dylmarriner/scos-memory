@@ -1855,6 +1855,31 @@ func (s *pgCodeStore) SetSnapshotStatus(ctx context.Context, snapshotID, status,
 	return err
 }
 
+// SetSnapshotStatusScoped records a transition only for a snapshot visible to
+// the authenticated tenant. The tenant setting is transaction-local, so a
+// pooled connection cannot carry another request's identity.
+func (s *pgCodeStore) SetSnapshotStatusScoped(ctx context.Context, tenantID, snapshotID, status, failure string) error {
+	return s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+            UPDATE code_repository_snapshots
+               SET status = $2, error = NULLIF($3, '')
+             WHERE id = $1 AND tenant_id = $4
+               AND status IN ('queued', 'scanning', 'parsing', 'indexing', 'validating')`,
+			snapshotID, status, failure, tenantID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
+}
+
 // DeleteFailedSnapshot removes a failed snapshot so the same tree can be
 // indexed again under its key.
 func (s *pgCodeStore) DeleteFailedSnapshot(ctx context.Context, snapshotID string) error {

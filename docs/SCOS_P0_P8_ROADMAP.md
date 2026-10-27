@@ -829,6 +829,17 @@ own-tenant HTTP 200 and foreign-tenant HTTP 404. Fresh disposable PostgreSQL
 17/pgvector applied 97 migration/policy scripts; full code-intelligence
 integration, uncached Go tests, vet and diff checks passed. This is
 preparatory evidence, not a production RLS migration or a P6 completion gate.
+A sixth TDD increment scopes snapshot status transitions used by both the
+asynchronous scan and durable index error paths. The regression was RED
+before the new method existed and GREEN with restricted `scos_app` against
+forced-RLS shadow tables: an authorized transition succeeds, a foreign
+tenant gets no matching row, malformed tenant IDs fail closed, and pooled
+connections retain no tenant context. A separate real-schema integration
+test verifies the production `code_snapshot_status` enum with the
+restricted role. A disposable PostgreSQL 17/pgvector database applied
+97 migration/policy scripts; the complete code-intelligence integration
+package, uncached Go suite, vet and diff checks passed. This does not
+scope indexing, activation, deletion, recovery or impact traversal.
 This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.
