@@ -111,6 +111,16 @@ go test -tags=integration -count=1 ./services/memory-intelligence/cmd/server \
 
 Migration `000084` merged in PR #111; exact merged-main CI and P4 workflows
 passed on commit `6030318ac61e367844fec061688e773e096b71de`.
-Migration `000085` is a new source candidate and requires its own PR review,
-exact-head CI, merged-main tests and separately approved live rollout.
-No production database has been changed.
+Migration `000085` merged in PR #112 at
+`50f2252d242edb8cb795fe6f274322887610f89c`. Its exact-head
+[CI](https://github.com/dylmarriner/scos-memory/actions/runs/40603566260)
+and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40603566254)
+passed, as did merged-main
+[CI](https://github.com/dylmarriner/scos-memory/actions/runs/40604314213)
+(5/5 jobs) and
+[P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40604314371)
+(9/9 jobs). The full merged-main 51-package Go suite, vet and tagged
+memory-intelligence PostgreSQL integration suite passed independently on AMD.
+Kilo review passed; the Codex statement-time finding was reproduced RED,
+fixed and regression-tested GREEN before merge. No production database has
+been changed; live rollout and recovery qualification require separate approval.
