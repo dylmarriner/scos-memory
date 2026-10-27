@@ -119,8 +119,12 @@ func (c *codeIntelligenceClient) Query(ctx context.Context, tenantID, principalI
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("code-intelligence returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		// Downstream error bodies can contain credentials, SQL and tenant data.
+		// Retain the status code for diagnostics, never the untrusted body.
+		// Drain a bounded amount so short error responses keep HTTP connections
+		// reusable. Larger responses are deliberately not read unboundedly.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("code-intelligence returned HTTP %d", resp.StatusCode)
 	}
 	var out codeQueryResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out); err != nil {

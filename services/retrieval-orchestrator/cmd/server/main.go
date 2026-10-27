@@ -417,7 +417,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 			var codeErr error
 			codeResponse, codeErr = s.codeIntelligence.Query(ctx, req.TenantID, req.PrincipalID, req.RepositoryID, req.Branch, req.Query, plan.CodeLimit)
 			if codeErr != nil {
-				log.Printf("code-intelligence retrieval degraded: %v", codeErr)
+				log.Printf("code-intelligence retrieval degraded (%T)", codeErr)
 				meta.DegradedSources = append(meta.DegradedSources, "code_intelligence")
 				codeResponse = &codeQueryResponse{Results: []codeQueryResult{}, RetrievalMode: "unavailable", DegradedSources: []string{"code_intelligence"}}
 			}
