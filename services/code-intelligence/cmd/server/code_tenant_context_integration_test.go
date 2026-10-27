@@ -56,10 +56,12 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
 		"CREATE TABLE " + schema + ".code_file_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), snapshot_id uuid NOT NULL, path text NOT NULL, content_hash text NOT NULL)",
 		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', range text, search_vector tsvector, extractor text NOT NULL DEFAULT '', signature text, doc_comment text)",
+		"CREATE TABLE " + schema + ".code_chunks (symbol_version_id uuid UNIQUE NOT NULL, content text NOT NULL, path text NOT NULL, range text, content_hash text NOT NULL)",
 		"CREATE TABLE " + schema + ".code_edges (snapshot_id uuid NOT NULL, source_symbol_version_id uuid NOT NULL, target_symbol_version_id uuid NOT NULL, relation text NOT NULL, confidence_class text NOT NULL DEFAULT 'deterministic', confidence_score double precision NOT NULL DEFAULT 1)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
 		"GRANT SELECT,INSERT,UPDATE,DELETE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
 		"GRANT SELECT ON " + schema + ".code_file_versions, " + schema + ".code_edges TO scos_app",
+		"GRANT SELECT,INSERT ON " + schema + ".code_chunks TO scos_app",
 		"ALTER TABLE " + schema + ".code_edges ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_edges FORCE ROW LEVEL SECURITY",
 		"CREATE POLICY edge_scope ON " + schema + ".code_edges USING (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id))",
@@ -76,6 +78,9 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		"CREATE POLICY symbol_scope ON " + schema + ".code_symbols USING (EXISTS (SELECT 1 FROM " + schema + ".code_repositories WHERE id=repository_id)) WITH CHECK (EXISTS (SELECT 1 FROM " + schema + ".code_repositories WHERE id=repository_id))",
 		"CREATE POLICY version_scope ON " + schema + ".code_symbol_versions USING (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id)) WITH CHECK (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id))",
 		"CREATE POLICY file_scope ON " + schema + ".code_file_versions USING (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id))",
+		"ALTER TABLE " + schema + ".code_chunks ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE " + schema + ".code_chunks FORCE ROW LEVEL SECURITY",
+		"CREATE POLICY chunk_scope ON " + schema + ".code_chunks USING (EXISTS (SELECT 1 FROM " + schema + ".code_symbol_versions sv JOIN " + schema + ".code_repository_snapshots snap ON snap.id=sv.snapshot_id WHERE sv.id=symbol_version_id)) WITH CHECK (EXISTS (SELECT 1 FROM " + schema + ".code_symbol_versions sv JOIN " + schema + ".code_repository_snapshots snap ON snap.id=sv.snapshot_id WHERE sv.id=symbol_version_id))",
 		"CREATE POLICY repo_scope ON " + schema + ".code_repositories USING (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid)",
 		"CREATE POLICY snap_scope ON " + schema + ".code_repository_snapshots USING (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid)",
 	}
@@ -467,6 +472,58 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	if branch, err := store.LatestIndexedBranch(ctx, repo, tenantB); err != nil || branch != "" {
 		t.Fatalf("foreign tenant latest branch = %q, %v; want empty", branch, err)
 	}
+	// Embedding maintenance must use the same transaction-local tenant as the
+	// indexer. Before the fix, snapshot document reads used s.db directly,
+	// returning zero documents for the rightful owner under FORCE RLS.
+	if _, err := admin.ExecContext(ctx, "UPDATE "+schema+".code_repository_snapshots SET status='active' WHERE id=$1", snap); err != nil {
+		t.Fatal(err)
+	}
+	var embeddingSymbolID, embeddingVersionID string
+	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,'embedding-scope','file',$2) RETURNING id::text", repo, snap).Scan(&embeddingSymbolID); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,kind,content_hash,signature) VALUES($1,$2,'Owned.embedding','owned.go','file','hash','func Owned()') RETURNING id::text", embeddingSymbolID, snap).Scan(&embeddingVersionID); err != nil {
+		t.Fatal(err)
+	}
+	docs, err := store.SnapshotEmbeddingDocumentsScoped(ctx, tenantA, snap)
+	foundEmbedding := false
+	for _, doc := range docs {
+		if doc.SymbolVersionID == embeddingVersionID {
+			foundEmbedding = true
+		}
+	}
+	if err != nil || !foundEmbedding {
+		t.Fatalf("own embedding documents = %+v, %v", docs, err)
+	}
+	if docs, err := store.SnapshotEmbeddingDocumentsScoped(ctx, tenantB, snap); !errors.Is(err, sql.ErrNoRows) || len(docs) != 0 {
+		t.Fatalf("foreign embedding documents = %+v, %v", docs, err)
+	}
+	if err := store.EnsureSnapshotChunksScoped(ctx, tenantB, snap); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign embedding chunk maintenance = %v", err)
+	}
+	if err := store.EnsureSnapshotChunksScoped(ctx, tenantA, snap); err != nil {
+		t.Fatalf("own embedding chunk maintenance: %v", err)
+	}
+	if err := store.EnsureSnapshotChunksScoped(ctx, tenantA, snap); err != nil {
+		t.Fatalf("idempotent chunk maintenance: %v", err)
+	}
+	var chunkCount int
+	if err := admin.QueryRowContext(ctx, "SELECT count(*) FROM "+schema+".code_chunks WHERE symbol_version_id=$1", embeddingVersionID).Scan(&chunkCount); err != nil || chunkCount != 1 {
+		t.Fatalf("persisted chunk count = %d, %v", chunkCount, err)
+	}
+	if active, err := store.ActiveSnapshotIDScoped(ctx, tenantA, repo, "main"); err != nil || active != snap {
+		t.Fatalf("own active snapshot = %q, %v", active, err)
+	}
+	if active, err := store.ActiveSnapshotIDScoped(ctx, tenantB, repo, "main"); err != nil || active != "" {
+		t.Fatalf("foreign active snapshot = %q, %v", active, err)
+	}
+	if _, err := store.ActiveSnapshotIDScoped(ctx, "not-a-uuid", repo, "main"); err == nil {
+		t.Fatal("invalid tenant accepted")
+	}
+	if docs, err := store.SnapshotEmbeddingDocumentsScoped(ctx, "not-a-uuid", snap); err == nil || len(docs) != 0 {
+		t.Fatalf("invalid tenant embedding read = %+v, %v", docs, err)
+	}
+
 	var visible int
 	if err := app.QueryRowContext(ctx, "SELECT count(*) FROM code_repositories").Scan(&visible); err != nil {
 		t.Fatal(err)

@@ -297,6 +297,25 @@ candidate four-table forced RLS on a disposable production-schema
 database, as did the uncached Go suite and Go vet. This is not
 production policy activation or P4/P6 completion.
 
+**P6 code embedding maintenance tenant scoping (2026-10-27, PR #92
+development, not merged):** `embedCodeSnapshot` now reads immutable symbol
+documents and inserts missing chunks only within transaction-local
+authenticated tenant context. Active-snapshot discovery for dense
+maintenance is also tenant-scoped; the original context-free helpers
+remain only for legacy internal test compatibility. A restricted
+`scos_app` PostgreSQL 17 forced-RLS shadow-schema regression was RED
+before the scoped APIs existed and GREEN afterward. It checks
+owner-visible symbol documents, foreign-tenant denial, idempotent
+chunk creation, active-snapshot selection and invalid tenant UUIDs.
+A second integration test exercises the real migrated schema using
+the restricted role. The disposable test database applied 77
+migrations and 20 policy scripts. Candidate FORCE RLS policies were then
+applied to the four legacy provenance tables in that disposable database
+only; the complete code-intelligence and tagged memory-intelligence
+PostgreSQL integration suites passed, including the opt-in forced-RLS
+qualification gate. This increment does not activate
+the four pending production provenance RLS policies.
+
 **No production policy migration was added or deployed.** Recovery,
 background maintenance and remaining unscoped callers still require
 qualification before those policies can be committed safely.

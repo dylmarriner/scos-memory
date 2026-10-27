@@ -910,6 +910,23 @@ context-free failed-generation cleanup: an authorized retry returned HTTP
 500 under forced RLS because the old deletion affected zero rows.
 The handler now calls `DeleteFailedSnapshotScoped`; the same restricted-role
 retry returns HTTP 200 and a new immutable snapshot.
+**P6 dense embedding maintenance tenant scoping (2026-10-27,
+PR #92 development, not merged):** authenticated code-embedding
+maintenance now resolves active snapshots, loads symbol documents and
+persists missing chunks inside transaction-local tenant context.
+RED-before-implementation and GREEN-after-implementation regression
+coverage exercises owner visibility, cross-tenant denial, invalid
+tenant IDs, idempotent chunk writes and active snapshot selection
+under forced RLS with `scos_app`; a separate real-schema restricted-role
+integration test covers the same production methods. Disposable
+PostgreSQL 17 applied 77 migrations and 20 policies; candidate
+four-table FORCE RLS was applied only to that disposable database, and
+full code-intelligence plus tagged memory-intelligence integration
+suites passed with the forced-RLS qualification gate. The uncached
+full Go suite and Go vet passed separately. Production
+forced RLS on four legacy provenance tables, recovery paths,
+remaining callers and complete P0-P8 acceptance remain open.
+
 **P6 snapshot list/detail readback tenant scoping (2026-10-27,
 PR #92 development):** both GET snapshot routes now use the same
 transaction-local tenant context as other code provenance reads, with
