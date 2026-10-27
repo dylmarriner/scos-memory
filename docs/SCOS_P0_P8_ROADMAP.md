@@ -13,7 +13,12 @@ database connection string in the returned error and a service URL username in
 a transport failure (RED). The outbound client now preserves upstream HTTP
 status without exposing response bodies and preserves context cancellation
 semantics without forwarding credential-bearing transport URLs. Short error
-bodies are drained to retain connection reuse. This protects the ACP ingress
+bodies are drained to retain connection reuse. A CodeRabbit review found
+that cancellation during response-body reads was being disguised as HTTP
+status or a generic read error. A synchronized real HTTP response-body
+regression failed for both success and error status paths (RED), then passed
+20 focused repetitions and three race-enabled repetitions after preserving
+context cancellation from both reads (GREEN). This protects the ACP ingress
 and tool-governance boundary, but does not establish governance section 41
 completion, historical system-time retrieval, or production activation.
 PR review, exact-head CI, merged-main qualification and live recovery remain

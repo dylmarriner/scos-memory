@@ -418,10 +418,19 @@ func (c *controlPlane) callService(ctx context.Context, system, path string, pay
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		// Keep short error responses reusable, but never retain or expose
 		// their potentially sensitive bodies.
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("%s upstream error-body read failed (%T)", system, readErr)
+		}
 		return nil, fmt.Errorf("%s upstream returned HTTP %d", system, response.StatusCode)
 	}
 	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if readErr != nil {
 		return nil, fmt.Errorf("%s upstream response read failed (%T)", system, readErr)
 	}
