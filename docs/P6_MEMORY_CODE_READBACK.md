@@ -402,3 +402,32 @@ real PostgreSQL 17/pgvector tests after all migrations and tenant RLS
 policies for two linked facts, keyset pagination, provenance, non-member and
 foreign-tenant denial. The full integration and Go regression gates are
 required before merge.
+
+## P6 governed two-hop evidence paths (2026-10-28)
+
+The MCP tool `scos_code_memory_paths` traverses exactly two evidence hops:
+
+```text
+immutable code symbol version → visible memory fact → linked code symbol versions
+```
+
+It calls the existing authenticated reverse and forward readback endpoints,
+reusing their tenant/principal/namespace RLS rather than issuing cross-scope
+SQL. The resulting response has `start_code_symbol_version_id`, a list of
+`paths` with `via_fact_id`, `inbound_link_id`, and `code_links`, and a
+`next_cursor` for pagination over incoming links. A per-fact
+`next_code_cursor` is returned when further code links exist. Each
+`code_links` item retains its immutable snapshot/repository/commit/path
+provenance as returned by the authoritative fact→code endpoint.
+
+`max_facts` and `max_code_per_fact` each default to 5 and are bounded
+to 1–10. Therefore one call can make at most 11 authorized upstream reads
+and emit at most 100 second-hop code evidence links. It does not silently
+cross pages, and it never interprets graph proximity as approval. The tool
+rejects foreign/forged hop identities, malformed pages, and untrusted
+upstream error bodies. Cancellation still propagates.
+
+This is a bounded explainable **two-hop** path, not arbitrary-depth traversal,
+a code dependency/causality claim, a ranking signal, an auto-generated fact,
+or a governed edit/OKF mutation. Production deployment, large-graph
+performance gates, and P0 acceptance remain outstanding.
