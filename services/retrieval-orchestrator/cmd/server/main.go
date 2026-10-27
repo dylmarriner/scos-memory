@@ -312,6 +312,12 @@ func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (tenantI
 		if tenantID == "" || principalID == "" {
 			return "", "", http.StatusUnauthorized, "X-SCOS-Tenant-ID and X-SCOS-Principal-ID are required"
 		}
+		// Static service authentication supplies no per-user claims. The
+		// trusted gateway headers are authoritative, and conflicting JSON
+		// selectors must be rejected rather than silently ignored.
+		if (bodyTenant != "" && bodyTenant != tenantID) || (bodyPrincipal != "" && bodyPrincipal != principalID) {
+			return "", "", http.StatusForbidden, "request identity does not match authenticated identity"
+		}
 		return tenantID, principalID, 0, ""
 	}
 	// Reached only when no auth middleware ran in front of this handler

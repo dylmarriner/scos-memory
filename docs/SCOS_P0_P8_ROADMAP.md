@@ -4,6 +4,22 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P5 authenticated identity consistency (2026-10-28, source candidate)
+
+The static service-token fallback in retrieval previously accepted an
+authenticated gateway tenant/principal header pair while silently ignoring
+conflicting `tenant_id` or `principal_id` JSON selectors. This contradicted
+the signed-claims path and the documented identity contract. A real
+authenticated HTTP middleware regression reproduced three accepted
+mismatches (204 instead of 403) before the fix. The handler now rejects
+any conflicting non-empty body identity with HTTP 403, before database
+access; matching and omitted body identities still resolve to the trusted
+gateway headers. Focused middleware/HTTP regressions passed five repeats;
+the full uncached Go suite, `go vet ./...` and diff checks passed on AMD.
+This is a bounded P5 tenant-identity consistency fix, **not** evidence of
+historical system-time retrieval, full P5 acceptance or live deployment.
+PR review, exact-head CI and merged-main verification are separate gates.
+
 ## P6 merged-source isolation checkpoint
 
 **Source merged (PR #92 and PR #93), checked 2026-10-28:** Merged `main`
@@ -735,7 +751,7 @@ GitHub Actions has also experienced runner-launch failures where jobs are create
 - [ ] Add explicit `as_of_commit` / snapshot selection to code paths still assuming active state.
 - [ ] Ensure memory↔code evidence references concrete historical symbol versions.
 - [ ] Add temporal contradiction/supersession tests and P0 cases.
-- [x] **P5 conflict endpoint-visibility regression (2026-10-28, development branch):** reproduced cross-namespace/tenant target-UUID disclosure in contradiction readback and source-only `memory_relations` RLS on disposable PostgreSQL 17. Added two-endpoint read/write RLS policy upgrade (migration `000081`), per-lane opposite-endpoint tenant/namespace/request-and-namespace-sensitivity/status/valid-time filtering, owner-safe memory-intelligence GET/reflection filtering, and PostgreSQL regressions across seven retrieval lanes, public HTTP, owner-role and restricted-role SQL reads/writes and connection cleanup. Source and disposable test evidence only; PR review, merged-main CI, historical belief semantics and production rollout remain separate gates. See `docs/P5_CONFLICT_VISIBILITY.md`.
+- [x] **P5 conflict endpoint-visibility regression (2026-10-28, merged PR #95):** reproduced cross-namespace/tenant target-UUID disclosure in contradiction readback and source-only `memory_relations` RLS on disposable PostgreSQL 17. Added two-endpoint read/write RLS policy upgrade (migration `000081`), per-lane opposite-endpoint tenant/namespace/request-and-namespace-sensitivity/status/valid-time filtering, owner-safe memory-intelligence GET/reflection filtering, and PostgreSQL regressions across seven retrieval lanes, public HTTP, owner-role and restricted-role SQL reads/writes and connection cleanup. Merged source (commit `d01427945762acf07ce7ea39c08de88ee53a7103`) passed P4 merged-main CI; historical belief semantics and production rollout remain separate gates. See `docs/P5_CONFLICT_VISIBILITY.md`.
 
 **P5 review evidence (2026-10-26, PR #60, unmerged):** Corrected the
 successful empty-result path in `POST /v1/retrieve` so principals with no
