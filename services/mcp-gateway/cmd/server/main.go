@@ -496,6 +496,8 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			impacts = append(impacts, map[string]any{"symbol": symbol, "impact": impact})
 		}
 		return map[string]any{"repository_id": repositoryID, "impacts": impacts}, nil
+	case "scos_code_memory_paths":
+		return s.codeMemoryPaths(ctx, r, args)
 	case "scos_code_memory_links":
 		versionID := stringArg(args, "code_symbol_version_id")
 		if !isUUID(versionID) {
@@ -1781,6 +1783,20 @@ func governedTools() []map[string]any {
 					"snapshot_id":      map[string]any{"type": "string", "description": "Immutable snapshot UUID; requires branch; knowledge links are checked against current fact validity"},
 				},
 				"required": []string{"repository_id"},
+			},
+		},
+		{
+			"name":        "scos_code_memory_paths",
+			"description": "Bounded explainable code-version -> visible memory fact -> linked historical code versions (two evidence hops). Maintains tenant/principal scope, original link IDs and immutable provenance. No inference or authority mutation.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"code_symbol_version_id": map[string]any{"type": "string", "description": "Starting immutable code symbol version UUID"},
+					"max_facts":              map[string]any{"type": "integer", "minimum": 1, "maximum": 10, "description": "Max visible linked memory facts, default 5"},
+					"max_code_per_fact":      map[string]any{"type": "integer", "minimum": 1, "maximum": 10, "description": "Max evidence code links per fact, default 5"},
+					"after":                  map[string]any{"type": "string", "description": "Last inbound link UUID returned in previous page"},
+				},
+				"required": []string{"code_symbol_version_id"},
 			},
 		},
 		{
