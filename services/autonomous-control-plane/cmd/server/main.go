@@ -383,7 +383,8 @@ func (c *controlPlane) callService(ctx context.Context, system, path string, pay
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		// The URL may contain service credentials. Do not propagate it.
+		return nil, fmt.Errorf("%s upstream request construction failed (%T)", system, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	if token := auth.BearerToken(ctx); token != "" {
@@ -401,15 +402,28 @@ func (c *controlPlane) callService(ctx context.Context, system, path string, pay
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		// Transport errors can include upstream URLs and embedded credentials.
+		// Preserve cancellation semantics without copying untrusted details
+		// into durable lifecycle stages or tool-error hook payloads.
+		switch {
+		case errors.Is(err, context.Canceled):
+			return nil, context.Canceled
+		case errors.Is(err, context.DeadlineExceeded):
+			return nil, context.DeadlineExceeded
+		default:
+			return nil, fmt.Errorf("%s upstream transport failure (%T)", system, err)
+		}
 	}
 	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// Keep short error responses reusable, but never retain or expose
+		// their potentially sensitive bodies.
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return nil, fmt.Errorf("%s upstream returned HTTP %d", system, response.StatusCode)
+	}
 	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	if readErr != nil {
-		return nil, readErr
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, errors.New(strings.TrimSpace(string(responseBody)))
+		return nil, fmt.Errorf("%s upstream response read failed (%T)", system, readErr)
 	}
 	return responseBody, nil
 }
