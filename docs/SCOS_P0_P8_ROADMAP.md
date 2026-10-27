@@ -735,6 +735,7 @@ GitHub Actions has also experienced runner-launch failures where jobs are create
 - [ ] Add explicit `as_of_commit` / snapshot selection to code paths still assuming active state.
 - [ ] Ensure memory↔code evidence references concrete historical symbol versions.
 - [ ] Add temporal contradiction/supersession tests and P0 cases.
+- [x] **P5 conflict endpoint-visibility regression (2026-10-28, development branch):** reproduced cross-namespace/tenant target-UUID disclosure in contradiction readback and source-only `memory_relations` RLS on disposable PostgreSQL 17. Added two-endpoint read/write RLS policy upgrade (migration `000081`), per-lane opposite-endpoint tenant/namespace/request-and-namespace-sensitivity/status/valid-time filtering, owner-safe memory-intelligence GET/reflection filtering, and PostgreSQL regressions across seven retrieval lanes, public HTTP, owner-role and restricted-role SQL reads/writes and connection cleanup. Source and disposable test evidence only; PR review, merged-main CI, historical belief semantics and production rollout remain separate gates. See `docs/P5_CONFLICT_VISIBILITY.md`.
 
 **P5 review evidence (2026-10-26, PR #60, unmerged):** Corrected the
 successful empty-result path in `POST /v1/retrieve` so principals with no

@@ -382,8 +382,21 @@ func loadActiveContradictions(ctx context.Context, q querier, tenantID string, f
 			 WHERE r.relation_type = 'contradicts' AND r.target_memory_id = ANY($2::uuid[])
 		  ) c
 		  JOIN memory_items o ON o.id = c.other
+          JOIN memory_items cited ON cited.id = c.cited AND cited.tenant_id = o.tenant_id
+          JOIN namespaces other_ns ON other_ns.id = o.namespace_id
+          JOIN namespaces cited_ns ON cited_ns.id = cited.namespace_id
+          JOIN namespace_memberships other_member ON other_member.namespace_id = o.namespace_id
+              AND other_member.principal_id = NULLIF(current_setting('scos.principal_id',true),'')::uuid
+              AND other_member.can_read
+          JOIN namespace_memberships cited_member ON cited_member.namespace_id = cited.namespace_id
+              AND cited_member.principal_id = NULLIF(current_setting('scos.principal_id',true),'')::uuid
+              AND cited_member.can_read
 		 WHERE o.tenant_id = $1 AND o.status = 'active'
+           AND o.sensitivity <= other_ns.sensitivity_ceiling
+           AND cited.sensitivity <= cited_ns.sensitivity_ceiling
+           AND (o.valid_from IS NULL OR o.valid_from <= now())
 		   AND (o.valid_until IS NULL OR o.valid_until > now())
+           AND (o.expires_at IS NULL OR o.expires_at > now())
 	`, tenantID, "{"+strings.Join(ids, ",")+"}")
 	if err != nil {
 		return nil, err
