@@ -4,6 +4,21 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P4 retrieval resource-budget enforcement (2026-10-28, development)
+
+Authenticated `POST /v1/retrieve` accepted arbitrarily large `max_results`
+values, multiplying PostgreSQL candidate work across retrieval lanes and
+potentially overwhelming the optional code service and reranker. It also
+accepted unbounded `token_budget` values. A real authenticated HTTP/mux
+regression now requires HTTP 400 **before any database access** for negative
+or oversized limits. `max_results` is capped at 100 and `token_budget` at
+32768; zero retains the documented defaults of 20 and 4000. Boundary tests
+cover the accepted maxima and defaults. These limits are deliberately explicit
+rather than silently truncating caller requests, so clients can correct them.
+This is P4 resource-exhaustion hardening, **not** representative P0 performance
+acceptance, P5 historical-system-time support, governance §41 closure or
+production rollout. PR review, CI and merged-main qualification remain separate.
+
 ## P5 code-intelligence degradation diagnostic isolation (2026-10-28, development)
 
 The authenticated retrieval orchestrator's optional code-intelligence lane
