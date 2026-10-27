@@ -152,14 +152,18 @@ tenant), then passed GREEN for authorized access and foreign-tenant 404.
 Fresh disposable PostgreSQL 17/pgvector applied 97 migration/policy scripts;
 the complete code-intelligence PostgreSQL integration package, uncached
 `go test -count=1 ./...`, `go vet ./...`, and `git diff --check` passed.
-The next TDD increment converts the scan/indexing status transitions
-to `SetSnapshotStatusScoped` and failed-snapshot cleanup to
-`DeleteFailedSnapshotScoped`, using the authenticated tenant in a
-transaction-local context. The new forced-RLS regression was RED at
+The next TDD increment converts scan/indexing status transitions to
+`SetSnapshotStatusScoped`, failed-snapshot cleanup to
+`DeleteFailedSnapshotScoped`, and idempotent snapshot file-manifest
+comparison to `SnapshotHoldsFilesScoped`. Each uses the authenticated
+tenant in a transaction-local context; the manifest lookup first checks
+snapshot ownership, so an empty file list cannot authorize a foreign
+snapshot. The new forced-RLS regression was RED at
 compile time before implementation, then GREEN for own-tenant updates/deletes,
 foreign-tenant rejection of both operations, invalid tenant IDs and no
 pooled-connection context leakage. A second real-PostgreSQL test covers the production
-`code_snapshot_status` enum using the non-BYPASSRLS runtime role.
+`code_snapshot_status` enum and an actual indexed file manifest, including
+foreign-tenant denial and mismatch handling, using the non-BYPASSRLS role.
 On a disposable PostgreSQL 17/pgvector database with 97 migrations
 and policies, the full code-intelligence integration suite, uncached
 Go suite, vet and diff checks passed. The old unscoped helper remains

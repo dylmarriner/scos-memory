@@ -450,7 +450,7 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 			return nil, fmt.Errorf("clear failed snapshot: %w", err)
 		}
 	case status == "ready" || status == "active" || status == "superseded":
-		same, err := s.pgStore.SnapshotHoldsFiles(ctx, existing, files)
+		same, err := s.pgStore.SnapshotHoldsFilesScoped(ctx, tenant, existing, files)
 		if err != nil {
 			return nil, fmt.Errorf("compare snapshot files: %w", err)
 		}

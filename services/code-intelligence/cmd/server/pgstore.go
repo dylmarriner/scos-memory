@@ -1788,11 +1788,38 @@ func (s *pgCodeStore) SnapshotByKey(ctx context.Context, tenantID, repositoryID,
 // SnapshotHoldsFiles reports whether snapshotID holds exactly these files,
 // by path and content hash.
 func (s *pgCodeStore) SnapshotHoldsFiles(ctx context.Context, snapshotID string, files []PGFileInput) (bool, error) {
+	return snapshotHoldsFilesQuery(ctx, s.db, snapshotID, files)
+}
+
+// SnapshotHoldsFilesScoped verifies snapshot ownership and reads its manifest
+// in the same tenant-scoped transaction. A foreign snapshot is not treated as
+// an empty manifest, even when the caller supplies an empty file list.
+func (s *pgCodeStore) SnapshotHoldsFilesScoped(ctx context.Context, tenantID, snapshotID string, files []PGFileInput) (bool, error) {
+	var same bool
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var id string
+		if err := tx.QueryRowContext(ctx, `
+            SELECT id::text FROM code_repository_snapshots
+             WHERE id=$1 AND tenant_id=$2`, snapshotID, tenantID).Scan(&id); err != nil {
+			return err
+		}
+		var err error
+		same, err = snapshotHoldsFilesQuery(ctx, tx, snapshotID, files)
+		return err
+	})
+	return same, err
+}
+
+type codeManifestQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func snapshotHoldsFilesQuery(ctx context.Context, q codeManifestQuerier, snapshotID string, files []PGFileInput) (bool, error) {
 	want := make(map[string]string, len(files))
 	for _, f := range files {
 		want[f.Path] = strings.ToLower(f.ContentHash)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT path, content_hash FROM code_file_versions WHERE snapshot_id = $1`, snapshotID)
+	rows, err := q.QueryContext(ctx, `SELECT path, content_hash FROM code_file_versions WHERE snapshot_id = $1`, snapshotID)
 	if err != nil {
 		return false, err
 	}

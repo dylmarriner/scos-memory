@@ -49,19 +49,24 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		"CREATE TABLE " + schema + ".code_repositories (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, canonical_path text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,canonical_path))",
 		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', error text, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
+		"CREATE TABLE " + schema + ".code_file_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), snapshot_id uuid NOT NULL, path text NOT NULL, content_hash text NOT NULL)",
 		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
 		"GRANT SELECT,INSERT,UPDATE,DELETE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
+		"GRANT SELECT ON " + schema + ".code_file_versions TO scos_app",
 		"ALTER TABLE " + schema + ".code_repositories ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repositories FORCE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repository_snapshots ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repository_snapshots FORCE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_symbols ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_symbols FORCE ROW LEVEL SECURITY",
+		"ALTER TABLE " + schema + ".code_file_versions ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE " + schema + ".code_file_versions FORCE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_symbol_versions ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_symbol_versions FORCE ROW LEVEL SECURITY",
 		"CREATE POLICY symbol_scope ON " + schema + ".code_symbols USING (EXISTS (SELECT 1 FROM " + schema + ".code_repositories WHERE id=repository_id)) WITH CHECK (EXISTS (SELECT 1 FROM " + schema + ".code_repositories WHERE id=repository_id))",
 		"CREATE POLICY version_scope ON " + schema + ".code_symbol_versions USING (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id)) WITH CHECK (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id))",
+		"CREATE POLICY file_scope ON " + schema + ".code_file_versions USING (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id))",
 		"CREATE POLICY repo_scope ON " + schema + ".code_repositories USING (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid)",
 		"CREATE POLICY snap_scope ON " + schema + ".code_repository_snapshots USING (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('scos.tenant_id',true),'')::uuid)",
 	}
@@ -104,6 +109,18 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if err := store.SetSnapshotStatusScoped(ctx, "not-a-uuid", snap, "failed", ""); err == nil {
 		t.Fatal("invalid tenant accepted for snapshot status transition")
+	}
+	if _, err := admin.ExecContext(ctx, "INSERT INTO "+schema+".code_file_versions(snapshot_id,path,content_hash) VALUES($1,'scope.go','abc')", snap); err != nil {
+		t.Fatal(err)
+	}
+	if same, err := store.SnapshotHoldsFilesScoped(ctx, tenantA, snap, []PGFileInput{{Path: "scope.go", ContentHash: "abc"}}); err != nil || !same {
+		t.Fatalf("own tenant snapshot files = %v, %v", same, err)
+	}
+	if same, err := store.SnapshotHoldsFilesScoped(ctx, tenantB, snap, []PGFileInput{{Path: "scope.go", ContentHash: "abc"}}); !errors.Is(err, sql.ErrNoRows) || same {
+		t.Fatalf("foreign tenant snapshot files = %v, %v", same, err)
+	}
+	if same, err := store.SnapshotHoldsFilesScoped(ctx, tenantA, snap, []PGFileInput{{Path: "scope.go", ContentHash: "different"}}); err != nil || same {
+		t.Fatalf("mismatched snapshot manifest = %v, %v", same, err)
 	}
 	building, err := store.IndexingSnapshot(ctx, repo, tenantA)
 	if err != nil || building != snap {

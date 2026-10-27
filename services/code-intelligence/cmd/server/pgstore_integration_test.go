@@ -133,6 +133,23 @@ func TestPGScopedSnapshotStatusTransitionUsesRealEnum(t *testing.T) {
 	if err := admin.QueryRowContext(ctx, "SELECT status::text FROM code_repository_snapshots WHERE id=$1", snap).Scan(&status); err != nil || status != "indexing" {
 		t.Fatalf("production enum status = %q, %v", status, err)
 	}
+	indexed, err := adminStore.CreateSnapshot(ctx, repo, tenant, "main", "file-commit", "test-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := []PGFileInput{{Path: "scope.go", Language: "go", ContentHash: hashContent("package scope")}}
+	if err := adminStore.IndexSnapshot(ctx, indexed, repo, manifest); err != nil {
+		t.Fatalf("seed production code-file manifest: %v", err)
+	}
+	if same, err := restricted.SnapshotHoldsFilesScoped(ctx, tenant, indexed, manifest); err != nil || !same {
+		t.Fatalf("own production snapshot manifest = %v, %v", same, err)
+	}
+	if same, err := restricted.SnapshotHoldsFilesScoped(ctx, foreign, indexed, manifest); !errors.Is(err, sql.ErrNoRows) || same {
+		t.Fatalf("foreign production snapshot manifest = %v, %v", same, err)
+	}
+	if same, err := restricted.SnapshotHoldsFilesScoped(ctx, tenant, indexed, nil); err != nil || same {
+		t.Fatalf("nonempty production manifest accepted empty file list: %v, %v", same, err)
+	}
 	if err := restricted.SetSnapshotStatusScoped(ctx, tenant, snap, "failed", "synthetic"); err != nil {
 		t.Fatal(err)
 	}
