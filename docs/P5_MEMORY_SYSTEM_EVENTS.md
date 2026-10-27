@@ -1,10 +1,28 @@
-# P5 memory system-state transition evidence (source candidate)
+# P5 memory system-state transition evidence (merged prerequisite; hardening in review)
 
 Migration `000082_memory_system_events.sql` is an **instrumentation prerequisite**, not an implementation of bitemporal retrieval. It captures state-bearing changes to `memory_items` in the same transaction as each mutation. Existing rows receive an explicitly marked migration-time `baseline` event, never a fictitious historical creation timestamp. An insert and a meaningful state update each produce a separate event. Hard deletion is not instrumented until offboarding/cascade recovery is qualified. Unrelated metadata updates do not claim a belief-state change.
 
 Each event contains tenant, memory, namespace and owner IDs, type/status, selected immutable version and supersession references, authority/confidence, sensitivity and valid-time bounds. It deliberately excludes content and structured metadata. A database-owned trigger writes events; application roles cannot insert forged events or update/delete history. FORCE RLS requires current access to the memory plus historical-namespace membership and historical sensitivity. Deleted memories are not visible through the runtime read policy. Tenant offboarding requires a privileged, reasoned call to `purge_memory_system_events_for_tenant(tenant_id, reason)` before tenant deletion. The procedure locks the tenant, records a durable append-only purge audit with operator, count and transaction ID, deletes exactly that count, and refuses unaudited cascades. The purge audit intentionally survives tenant deletion; event history does not. This table is not an immutable external audit archive.
 
 **Temporal limitations:** `observed_at` is a database clock observation, **not a commit timestamp**. A transaction can roll back, concurrent transactions can commit out of observation order, and events predating this migration do not exist. Neither the row's `created_at` nor its first version can safely reconstruct earlier approval, revocation or supersession state. Memory content redactions, version approvals, ACL changes, commit-order serialization, hard-delete/offboarding capture, deleted-memory recovery and point-in-time replay remain outside this increment. `POST /v1/retrieve` continues to return HTTP 501 for `as_of_system_time`. Do not treat these rows as sufficient evidence to answer historical-belief questions.
+
+## TRUNCATE integrity hardening (28 October 2026; isolated development candidate)
+
+A real PostgreSQL 17 regression demonstrated that the migration owner could
+`TRUNCATE memory_system_events` and `TRUNCATE memory_system_event_purge_audit`
+without firing the existing row-level DELETE guards. Both commands succeeded
+before the fix (RED). Migration `000083_memory_system_history_truncate_guard.sql`
+adds statement-level `BEFORE TRUNCATE` guards to both tables, including
+a `TRUNCATE tenants CASCADE` attempt. Both now fail with SQLSTATE `55006` (GREEN,
+five repeated runs). The privileged, reasoned, count-checked per-tenant DELETE
+purge remains available; the guard does not turn ordinary offboarding into
+an unsupported operation. The full Go suite (51 packages), 90 Python regression tests,
+full retrieval PostgreSQL integration, `go vet ./...` and focused race tests
+passed against a disposable database with all 83 migrations and runtime
+policies. This is source-only data-loss hardening; the production migration,
+recovery qualification, historical commit ordering and `as_of_system_time`
+HTTP 501 gate remain outstanding. PR merge and merged-main CI are separate
+evidence gates.
 
 ## Acceptance evidence and rollout boundary
 
