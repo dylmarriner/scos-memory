@@ -176,7 +176,7 @@ first, then observability breadth and deployment-owned verification.
   snapshot only `transparency-projection` was confirmed to push metrics.
   This is **not** a current-tense claim: `packages/telemetry` now supplies
   shared emitters, and `backup-manager` emits backup-age and restore-status
-  measures. A 2026-10-28 source candidate adds an independent periodic
+  measures. Merged PR #105 adds an independent periodic
   verified-backup-age reporter with real HTTP ingest regression coverage
   (see `services/backup-manager/cmd/server/backup_metrics_test.go`).
   Independent full-fleet metric delivery, alert configuration and production
