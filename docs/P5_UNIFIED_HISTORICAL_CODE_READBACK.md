@@ -15,7 +15,10 @@ resolved `code.repository_id`, `code.snapshot_id`, `code.commit_id`, `code.branc
 The orchestrator rejects missing/mismatched response and per-result provenance.
 The code service returns the repository ID from the same tenant-scoped immutable
 snapshot lookup, and the orchestrator requires it to equal the caller-selected
-repository even for empty result sets. This prevents a cross-repository
+repository even for empty result sets. UUID selectors are compared by parsed
+identity, accepting PostgreSQL-canonical lowercase responses to equivalent
+uppercase or alternate UUID spellings without weakening foreign-ID rejection.
+This prevents a cross-repository
 historical result from being silently accepted when commit/branch labels happen
 to match. Older code-service builds lacking this response field fail closed
 with HTTP 502 until the corresponding code service is rolled out; coordinated

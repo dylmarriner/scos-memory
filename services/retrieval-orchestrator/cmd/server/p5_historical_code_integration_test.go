@@ -37,13 +37,13 @@ func TestP5HistoricalCodeReadbackPersistsImmutableSelectors(t *testing.T) {
 			t.Errorf("lost historical selectors: %v", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"historical": true, "repository_id": "repo-1", "snapshot_id": snapshot, "commit_id": commit, "branch": "main", "retrieval_mode": "historical_exact",
+			"historical": true, "repository_id": "a1bc12f0-3456-4123-8abc-123456789abc", "snapshot_id": snapshot, "commit_id": commit, "branch": "main", "retrieval_mode": "historical_exact",
 			"results": []map[string]any{{"SymbolVersionID": symbol, "SnapshotID": snapshot, "CommitID": commit, "Branch": "main", "Path": "old.go"}},
 		})
 	}))
 	defer upstream.Close()
 	srv := &server{db: pool, codeIntelligence: &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}}
-	body, _ := json.Marshal(RetrieveRequest{TenantID: tenant, PrincipalID: principal, Query: "remember the old implementation", RepositoryID: "repo-1", Branch: "main", AsOfCommit: commit, SnapshotID: snapshot})
+	body, _ := json.Marshal(RetrieveRequest{TenantID: tenant, PrincipalID: principal, Query: "remember the old implementation", RepositoryID: "a1bc12f0-3456-4123-8abc-123456789abc", Branch: "main", AsOfCommit: commit, SnapshotID: snapshot})
 	rec := httptest.NewRecorder()
 	srv.handleRetrieve(rec, httptest.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(body)))
 	if rec.Code != http.StatusOK {
@@ -53,7 +53,7 @@ func TestP5HistoricalCodeReadbackPersistsImmutableSelectors(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Code == nil || !out.Code.Historical || out.Code.RepositoryID != "repo-1" || out.Code.SnapshotID != snapshot || len(out.Code.Results) != 1 || out.Code.Results[0].SymbolVersionID != symbol {
+	if out.Code == nil || !out.Code.Historical || out.Code.RepositoryID != "a1bc12f0-3456-4123-8abc-123456789abc" || out.Code.SnapshotID != snapshot || len(out.Code.Results) != 1 || out.Code.Results[0].SymbolVersionID != symbol {
 		t.Fatalf("historical code missing: %+v", out.Code)
 	}
 	if out.RetrievalRunID == "" {
@@ -72,7 +72,7 @@ func TestP5HistoricalCodeReadbackPersistsImmutableSelectors(t *testing.T) {
 	if err := json.Unmarshal(selected, &ids); err != nil {
 		t.Fatal(err)
 	}
-	if f["as_of_commit"] != commit || f["snapshot_id"] != snapshot || f["repository_id"] != "repo-1" || f["branch"] != "main" || f["code_temporal_scope"] != "immutable_snapshot" || len(ids) != 1 || ids[0] != symbol {
+	if f["as_of_commit"] != commit || f["snapshot_id"] != snapshot || f["repository_id"] != "a1bc12f0-3456-4123-8abc-123456789abc" || f["branch"] != "main" || f["code_temporal_scope"] != "immutable_snapshot" || len(ids) != 1 || ids[0] != symbol {
 		t.Fatalf("historical audit missing selectors or symbol: filters=%v selected=%v", f, ids)
 	}
 }
