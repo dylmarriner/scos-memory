@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,14 +35,26 @@ func TestP5NamespaceLookupFailureSanitizesDatabaseError(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer test-service-token")
 	request.Header.Set("X-SCOS-Tenant-ID", "tenant-a")
 	request.Header.Set("X-SCOS-Principal-ID", "principal-a")
+	// Capture the real standard logger as well: a future change to %v would
+	// reintroduce the DSN disclosure through application logs.
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, request)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("unexpected status: %d, body %q", rec.Code, rec.Body.String())
 	}
+	if !strings.Contains(logs.String(), "retrieval namespace lookup failed (") {
+		t.Errorf("missing internal diagnostic event: %q", logs.String())
+	}
 	for _, secret := range []string{"private_retrieval_operator", "private_memory", "127.0.0.1", "connection refused", "failed to connect", "dial tcp"} {
 		if strings.Contains(strings.ToLower(rec.Body.String()), strings.ToLower(secret)) {
 			t.Errorf("response disclosed internal database detail %q: %s", secret, rec.Body.String())
+		}
+		if strings.Contains(strings.ToLower(logs.String()), strings.ToLower(secret)) {
+			t.Errorf("log disclosed internal database detail %q: %s", secret, logs.String())
 		}
 	}
 	if !strings.Contains(rec.Body.String(), "retrieval temporarily unavailable") {
