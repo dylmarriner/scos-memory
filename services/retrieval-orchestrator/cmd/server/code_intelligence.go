@@ -121,6 +121,9 @@ func (c *codeIntelligenceClient) Query(ctx context.Context, tenantID, principalI
 	if resp.StatusCode/100 != 2 {
 		// Downstream error bodies can contain credentials, SQL and tenant data.
 		// Retain the status code for diagnostics, never the untrusted body.
+		// Drain a bounded amount so short error responses keep HTTP connections
+		// reusable. Larger responses are deliberately not read unboundedly.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("code-intelligence returned HTTP %d", resp.StatusCode)
 	}
 	var out codeQueryResponse

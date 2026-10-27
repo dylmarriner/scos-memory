@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,11 +29,8 @@ func TestP5CodeQueryFailureDoesNotPropagateDownstreamBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected downstream error")
 	}
-	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "private_code_operator") {
-		t.Fatalf("downstream sensitive body propagated: %v", err)
-	}
-	if !strings.Contains(err.Error(), "503") {
-		t.Fatalf("lost actionable upstream status: %v", err)
+	if got := err.Error(); got != "code-intelligence returned HTTP 503" {
+		t.Fatalf("unexpected status-only downstream error: %v", err)
 	}
 }
 
@@ -95,5 +94,31 @@ func TestP5CodeDegradationDoesNotLogDownstreamBody(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), transportSecret) {
 		t.Fatalf("transport credentials leaked to logs: %s", logs.String())
+	}
+}
+
+// Bounded discard must preserve keep-alive for short error responses, without
+// making any of the discarded text available to callers or logs.
+func TestP5CodeQueryShortErrorReusesHTTPConnection(t *testing.T) {
+	var connections atomic.Int64
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "private downstream detail", http.StatusServiceUnavailable)
+	}))
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	upstream.Start()
+	defer upstream.Close()
+	client := &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}
+	for i := 0; i < 2; i++ {
+		_, err := client.Query(context.Background(), "tenant", "principal", "repo", "main", "find code", 10)
+		if err == nil || err.Error() != "code-intelligence returned HTTP 503" {
+			t.Fatalf("query %d unexpected error: %v", i, err)
+		}
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("short error body should reuse one HTTP connection, got %d", got)
 	}
 }

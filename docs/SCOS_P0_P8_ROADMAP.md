@@ -11,7 +11,8 @@ previously copied up to 4096 bytes of an upstream HTTP error body into its
 returned error and logged the complete error. A real HTTP 503 response carrying
 a PostgreSQL connection URI leaked the internal role, database and host into
 application logs (RED). The client now preserves the numeric upstream HTTP
-status without copying untrusted response bodies, while the orchestrator logs
+status without copying untrusted response bodies, while boundedly discarding up to
+4096 bytes to preserve connection reuse for short errors; the orchestrator logs
 only the Go error type. The real HTTP regression exercises both the client
 and authenticated retrieval handler, with a real pgx connection-failure path
 rather than a simulated database. The regression also checks that transport
@@ -20,6 +21,10 @@ type-only logging back to raw error logging reproduced the transport URL
 leak (RED), and restoring the fix passed (GREEN). Five focused test
 repetitions, three race-enabled repetitions, the full uncached Go suite,
 `go vet ./...`, and seven DoD/P6 evidence regressions passed on AMD.
+A follow-up review found the initial change disabled HTTP keep-alive on
+short errors: a real two-request HTTP regression failed with two connections
+(RED). Bounded draining restored one reused connection (GREEN), and the
+status-only error assertion was strengthened to reject *any* leaked body text.
 Local Python consolidation tests could not run because the host Python 3.14
 environment lacks `pydantic`; GitHub CI must independently qualify the
 complete Python suite. The §41 DoD checker still correctly FAILS on PARTIAL.
