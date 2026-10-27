@@ -1443,6 +1443,20 @@ func (s *pgCodeStore) diffSnapshotQuery(ctx context.Context, q codeSnapshotQueri
 	return diff, nil
 }
 
+// SnapshotSymbolCountScoped reads index response metadata under the same
+// tenant-local RLS boundary as snapshot ownership and diff readback.
+func (s *pgCodeStore) SnapshotSymbolCountScoped(ctx context.Context, tenantID, snapshotID string) (int, error) {
+	var count int
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT snap.symbol_count
+			FROM code_repository_snapshots snap
+			JOIN code_repositories repo ON repo.id=snap.repository_id
+			WHERE snap.id=$1 AND snap.tenant_id=$2 AND repo.tenant_id=$2`,
+			snapshotID, tenantID).Scan(&count)
+	})
+	return count, err
+}
+
 // ActiveSnapshotID returns the currently active snapshot for
 // (repositoryID, branch), or "" if the branch has never been indexed.
 func (s *pgCodeStore) ActiveSnapshotID(ctx context.Context, repositoryID, branch string) (string, error) {

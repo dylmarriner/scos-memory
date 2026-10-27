@@ -50,7 +50,7 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}()
 	statements := []string{
 		"CREATE TABLE " + schema + ".code_repositories (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, canonical_path text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,canonical_path))",
-		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', error text, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
+		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', error text, symbol_count integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
 		"CREATE TABLE " + schema + ".code_file_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), snapshot_id uuid NOT NULL, path text NOT NULL, content_hash text NOT NULL)",
 		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector, extractor text NOT NULL DEFAULT '', signature text, doc_comment text)",
@@ -150,6 +150,31 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,content_hash) VALUES($1,$2,'pkg/scope.go','pkg/scope.go','test-hash') RETURNING id::text", symbolID, snap).Scan(&versionID); err != nil {
 		t.Fatal(err)
+	}
+
+	// A retry of an already-indexed snapshot must read its symbol count
+	// with the tenant context, not via a pooled connection. The old
+	// implementation fails under FORCE RLS with "no rows in result set".
+	if _, err := admin.ExecContext(ctx, "UPDATE "+schema+".code_repository_snapshots SET symbol_count=1 WHERE id=$1", snap); err != nil {
+		t.Fatal(err)
+	}
+	retryResult, err := (&server{pgStore: store}).indexDurableSnapshot(ctx, tenantA, repo,
+		"main", "commit1", "test-v1", "", []PGFileInput{{Path: "scope.go", ContentHash: "abc"}})
+	if err != nil {
+		t.Fatalf("own-tenant idempotent index retry under forced RLS: %v", err)
+	}
+	if retryResult["unchanged"] != true || retryResult["symbol_count"] != 1 {
+		t.Fatalf("idempotent index retry lost symbol count: %+v", retryResult)
+	}
+
+	if count, err := store.SnapshotSymbolCountScoped(ctx, tenantA, snap); err != nil || count != 1 {
+		t.Fatalf("own-tenant snapshot count = %d, %v", count, err)
+	}
+	if _, err := store.SnapshotSymbolCountScoped(ctx, tenantB, snap); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign tenant read symbol count: %v", err)
+	}
+	if _, err := store.SnapshotSymbolCountScoped(ctx, "not-a-uuid", snap); err == nil {
+		t.Fatal("invalid tenant accepted for symbol count")
 	}
 
 	// A snapshot diff must read the snapshot, parent and symbol versions

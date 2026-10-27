@@ -196,6 +196,13 @@ invalid UUID rejection and single-object JSON parsing. Legacy internal
 migration/policy scripts, the code-intelligence integration package,
 uncached Go suite and Go vet passed in a disposable test database.
 This is preparatory code hardening, **not** production forced-RLS activation.
+The synchronous index and idempotent retry responses now also retrieve
+snapshot symbol counts through `SnapshotSymbolCountScoped`. The prior
+context-free query returned SQL "no rows in result set" for the authorized
+tenant under forced RLS (RED); the scoped implementation returns the correct
+count and rejects foreign or invalid tenants (GREEN). The existing test
+database is disposable and production policies remain unchanged.
+
 
 This does not make the Git commit label server-attested, and the remaining
 indexing, impact, activation and recovery paths still need RLS qualification.

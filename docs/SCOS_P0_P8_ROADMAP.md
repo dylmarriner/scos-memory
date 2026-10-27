@@ -864,6 +864,13 @@ helper remains for internal tests only. The full code-intelligence
 integration package, uncached Go suite and Go vet passed on a disposable
 97-migration/policy PostgreSQL 17/pgvector instance. No production RLS
 policy was enabled or live data migrated.
+A ninth RED→GREEN increment closes two unscoped snapshot-symbol-count
+reads in the synchronous indexing response and idempotent retry path.
+The restricted-role forced-RLS regression first failed an authorized retry
+with "count snapshot symbols: sql: no rows in result set". Both paths now
+use a tenant-scoped transaction, and the regression verifies the authorized
+count, foreign-tenant denial and malformed-tenant rejection. No production
+policy or live database was changed.
 This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.

@@ -463,9 +463,8 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 			}
 			status = "active"
 		}
-		var symbols int
-		if err := s.pgStore.db.QueryRowContext(ctx,
-			`SELECT symbol_count FROM code_repository_snapshots WHERE id = $1`, existing).Scan(&symbols); err != nil {
+		symbols, err := s.pgStore.SnapshotSymbolCountScoped(ctx, tenant, existing)
+		if err != nil {
 			return nil, fmt.Errorf("count snapshot symbols: %w", err)
 		}
 		return map[string]any{
@@ -511,9 +510,8 @@ func (s *server) buildSnapshot(ctx context.Context, tenant, repositoryID, snapsh
 	if err != nil {
 		return nil, fmt.Errorf("diff snapshot: %w", err)
 	}
-	var symbols int
-	if err := s.pgStore.db.QueryRowContext(ctx,
-		`SELECT symbol_count FROM code_repository_snapshots WHERE id = $1`, snapshotID).Scan(&symbols); err != nil {
+	symbols, err := s.pgStore.SnapshotSymbolCountScoped(ctx, tenant, snapshotID)
+	if err != nil {
 		return nil, fmt.Errorf("count snapshot symbols: %w", err)
 	}
 	return map[string]any{
