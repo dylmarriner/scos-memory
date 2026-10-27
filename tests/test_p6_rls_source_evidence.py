@@ -1,5 +1,6 @@
 """Guard the merged P6 RLS source evidence against roadmap status drift."""
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,10 +26,38 @@ class P6RlsSourceEvidenceTests(unittest.TestCase):
                     for action in ('ENABLE', 'FORCE'):
                         self.assertRegex(sql, rf'ALTER\s+TABLE\s+{table}\s+{action}\s+ROW\s+LEVEL\s+SECURITY\s*;')
 
-    def test_required_postgresql_ci_qualifiers_are_present(self):
+    @staticmethod
+    def _postgres_qualifiers_enabled(workflow):
+        job = re.search(
+            r'(?ms)^  postgres-integration:\n(.*?)(?=^  [a-zA-Z][\w-]*:\n|\Z)',
+            workflow,
+        )
+        if not job:
+            return False
+        env = re.search(
+            r'(?ms)^    env:\n(.*?)(?=^    [a-zA-Z][\w-]*:\n|\Z)',
+            job.group(1),
+        )
+        if not env:
+            return False
+        for name in ('SCOS_EXPECT_CODE_PROVENANCE_RLS', 'SCOS_EXPECT_DERIVED_CODE_RLS'):
+            if not re.search(
+                rf'(?m)^      {name}:\s*[\"\']?1[\"\']?\s*$',
+                env.group(1),
+            ):
+                return False
+        return True
+
+    def test_required_postgresql_ci_qualifiers_are_enabled_not_just_named(self):
         workflow = (ROOT / '.github/workflows/p4-hybrid-retrieval.yml').read_text()
-        self.assertIn('SCOS_EXPECT_CODE_PROVENANCE_RLS', workflow)
-        self.assertIn('SCOS_EXPECT_DERIVED_CODE_RLS', workflow)
+        self.assertTrue(self._postgres_qualifiers_enabled(workflow))
+        for name in ('SCOS_EXPECT_CODE_PROVENANCE_RLS', 'SCOS_EXPECT_DERIVED_CODE_RLS'):
+            with self.subTest(disabled=name):
+                disabled = re.sub(
+                    rf'(?m)^      {name}:.*$', f'      {name}: "0"', workflow,
+                )
+                self.assertNotEqual(disabled, workflow)
+                self.assertFalse(self._postgres_qualifiers_enabled(disabled))
 
     def test_roadmaps_distinguish_merged_source_from_live_deployment(self):
         stale = (
