@@ -1228,7 +1228,8 @@ correction, production rollout, or P7 completion.
 - [ ] Create governed memory versions/supersession relations only when approved.
 - [ ] Create OKF review proposals with old/new code evidence.
 - [ ] Invalidate standing answers depending on stale/superseded evidence.
-  - [x] **Database-level P7 standing-answer invalidation candidate (2026-10-28, migration 000084):** typed tenant-bound dependencies, conservative stale marking for legacy rows, atomic invalidation on fact status/version/effective-date/deletion and P7 code `needs_review` events, guarded refreshes requiring governed still-valid reviews, runtime privilege denial, and real PostgreSQL restricted-role and concurrent-refresh race tests (RED before the row lock, GREEN after), plus TEMP-table shadowing reproduction (RED before schema-qualification, GREEN after). See `docs/P7_STANDING_ANSWER_FRESHNESS.md`. The checkbox stays open because no end-to-end cache writer/read path, time-passage expiry check at read, production rollout, or full stale-answer acceptance has been verified.
+  - [x] **Database-level P7 standing-answer invalidation (2026-10-28, migration 000084, merged PR #111):** typed tenant-bound dependencies, conservative stale marking for legacy rows, atomic invalidation on fact status/version/effective-date/deletion and P7 code `needs_review` events, guarded refreshes requiring governed still-valid reviews, runtime privilege denial, and real PostgreSQL restricted-role and concurrent-refresh race tests (RED before the row lock, GREEN after), plus TEMP-table shadowing reproduction (RED before schema-qualification, GREEN after). Exact-head CI and P4 workflows passed; merge commit `6030318ac61e367844fec061688e773e096b71de` passed merged-main CI and P4 workflows. See `docs/P7_STANDING_ANSWER_FRESHNESS.md`.
+  - [x] **Read-time freshness projection source candidate (2026-10-28, migration 000085):** PostgreSQL `security_invoker`/`security_barrier` view rechecks all supporting evidence on each read, including wall-clock expiry, tenant/namespace visibility, status and P7 review restrictions. Real PostgreSQL tests first failed because the view was missing (RED), then passed after implementation (GREEN) for live-to-expired transition without cache mutation (including a long-lived transaction RED with `now()`, GREEN with statement time), cross-tenant denial, membership revocation and malformed legacy exclusion. Source PR, review, merged-main CI and production rollout remain separate. The parent checkbox stays open because no end-to-end cache writer/serving path, stale-answer benchmark, or full P7 acceptance has been verified.
 
 - [ ] Measure false-positive/false-negative outcomes.
 
@@ -1334,13 +1335,15 @@ merge or deployment.
 
 ## Standing-answer completion
 
-The standing-answer table/read path exists. Remaining work:
+The standing-answer **table** exists, but no active HTTP serving path or
+answer-generation/refresh writer was found. Database-level safeguards are
+not equivalent to a deployed cache service:
 
-- evidence dependency tracking;
-- writer/refresh generation;
-- invalidation on evidence supersession/revocation/P7 staleness;
-- freshness policy;
-- stale-answer benchmark coverage.
+- [x] Typed evidence dependency tracking and transactional invalidation (migration 000084, merged PR #111).
+- [x] Restricted-role, read-time evidence/clock freshness projection (migration 000085 source candidate; not yet merged).
+- [ ] Governed writer and refresh generation with a real retrieval/answer pipeline.
+- [ ] Authorized cache-serving endpoint using the read-time projection.
+- [ ] End-to-end expiry/revocation and stale-answer benchmark coverage.
 
 ## Agent execution-trace consolidation
 
