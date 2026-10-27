@@ -425,7 +425,9 @@ to 1–10. Therefore one call can make at most 11 authorized upstream reads
 and emit at most 100 second-hop code evidence links. It does not silently
 cross pages, and it never interprets graph proximity as approval. The tool
 rejects foreign/forged hop identities, malformed pages, and untrusted
-upstream error bodies. Cancellation still propagates.
+upstream error bodies. UUID identity comparisons are case-insensitive, so
+PostgreSQL-canonical lowercase evidence matches valid uppercase input UUIDs.
+Cancellation still propagates.
 
 This is a bounded explainable **two-hop** path, not arbitrary-depth traversal,
 a code dependency/causality claim, a ranking signal, an auto-generated fact,

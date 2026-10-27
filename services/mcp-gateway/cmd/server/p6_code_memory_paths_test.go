@@ -126,3 +126,36 @@ func TestP6CodeMemoryPathsRejectsUntrustedDownstreamEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestP6CodeMemoryPathsUppercaseVersionIdentity(t *testing.T) {
+	start := "4CBE32C6-891C-4155-A9EC-6AA39E66704A"
+	canonical := strings.ToLower(start)
+	fact := "5cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	link := "7cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/evidence-links/by-code":
+			if !strings.EqualFold(r.URL.Query().Get("code_symbol_version_id"), start) {
+				t.Errorf("wrong requested version: %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"code_symbol_version_id":"` + start + `","links":[{"id":"` + link + `","fact_id":"` + fact + `","code_symbol_version_id":"` + canonical + `"}]}`))
+		case "/v1/evidence-links":
+			_, _ = w.Write([]byte(`{"fact_id":"` + fact + `","links":[{"id":"` + link + `","code_symbol_version_id":"` + canonical + `"}]}`))
+		default:
+			t.Errorf("unexpected upstream request: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	s := &gatewayServer{memoryIntelligenceURL: server.URL, client: server.Client()}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	result, err := s.dispatchTool(req.Context(), req, requestIdentity{TenantID: "t", PrincipalID: "p"},
+		"scos_code_memory_paths", map[string]any{"code_symbol_version_id": start})
+	if err != nil {
+		t.Fatalf("uppercase UUID should represent the same code symbol: %v", err)
+	}
+	paths := result.(map[string]any)["paths"].([]any)
+	if len(paths) != 1 {
+		t.Fatalf("expected one verified path, got %#v", paths)
+	}
+}
