@@ -138,6 +138,7 @@ jobs:
       SCOS_APP_TEST_DATABASE_URL: postgresql://scos_app:scos-app-ci@127.0.0.1:5432/scos_memory?sslmode=disable
       SCOS_REQUIRE_APP_RLS_TESTS: "1"
       SCOS_EXPECT_CODE_PROVENANCE_RLS: "1"
+      SCOS_EXPECT_DERIVED_CODE_RLS: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
