@@ -40,6 +40,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO scos_app;
 REVOKE UPDATE, DELETE ON memory_revalidation_decisions FROM scos_app;
 -- Snapshot-diff evidence is server-derived and append-only to runtime roles.
 REVOKE UPDATE, DELETE ON code_snapshot_change_events FROM scos_app;
+-- P7 normalized cache dependencies are maintained only by a schema-owner
+-- trigger. Revoke after blanket grants on fresh installs.
+REVOKE ALL ON memory_standing_answer_dependencies FROM scos_app;
 -- Privileged purge evidence and its entry point are never runtime APIs.
 REVOKE ALL ON memory_revalidation_decision_purge_audit FROM scos_app;
 REVOKE ALL ON FUNCTION purge_memory_revalidation_decisions_for_tenant(uuid,text) FROM PUBLIC, scos_app;
