@@ -43,18 +43,35 @@ answers dependent on its fact stale, without editing memory truth or making
 any human review decision. An attempted refresh using unresolved P7 evidence
 fails. The cache remains stale until an authorized, evidence-valid refresh.
 
-This does **not** continuously detect when the wall clock passes a previously
-future `valid_until` or `expires_at`. Any future standing-answer read path
-MUST check `stale_at IS NULL` **and live evidence validity at read time**.
-The existing source tree does not contain an active standing-answer read
-service. Merely writing these schema rules is not proof of serving fresh
-answers and does not close the P7 acceptance gate.
+The mutation triggers alone cannot detect when the wall clock passes a
+previously future `valid_until` or `expires_at`. Migration `000085`
+provides a read-time projection that checks those bounds without relying on
+an UPDATE or a scheduled job. No active HTTP cache-serving endpoint or
+writer/refresh generator is implemented, so this does not close P7 acceptance.
+
+## Read-time projection (migration 000085)
+
+`memory_standing_answers_current` is a PostgreSQL `security_invoker`,
+`security_barrier` view over only non-stale answers whose complete evidence
+list still resolves to active, effective, unexpired, non-superseded, visible
+facts within the same tenant and namespace. It also rechecks unresolved
+code-revalidation events. A missing, revoked or hidden fact makes the answer
+unreadable. It applies the caller's forced row-level policies rather than
+running as the migration owner; ordinary `scos_app` receives SELECT only.
+
+The view never writes cache state. It deliberately does not change `stale_at`
+when time passes, so it is safe for historical audit and future read services.
+A stale legacy row with malformed free-text evidence is excluded without
+parsing that text. Tests use a real PostgreSQL clock transition and a
+restricted-role membership revocation. The service integration, answer
+generation, query-key matching, authorization at HTTP ingress and read-path
+benchmarking remain separate acceptance gates.
 
 ## Isolation and recovery
 
 - Migration `000084` is append-only and does not modify any production data
   without an approved deployment.
-- - The three `SECURITY DEFINER` triggers use `public.`-qualified application
+- The three `SECURITY DEFINER` triggers use `public.`-qualified application
   tables and place `pg_temp` last in their search path. Real restricted-role
   testing reproduced a temporary-table shadowing attack before the fix:
   a fake dependency table caused zero real dependencies to be recorded.
@@ -90,5 +107,8 @@ go test -tags=integration -count=1 ./services/memory-intelligence/cmd/server \
   -run '^TestP7StandingAnswer'
 ```
 
-This release requires GitHub CI, independent review, source merge, merged-main
-tests and a separately approved live rollout before being considered deployed.
+Migration `000084` merged in PR #111; exact merged-main CI and P4 workflows
+passed on commit `6030318ac61e367844fec061688e773e096b71de`.
+Migration `000085` is a new source candidate and requires its own PR review,
+exact-head CI, merged-main tests and separately approved live rollout.
+No production database has been changed.
