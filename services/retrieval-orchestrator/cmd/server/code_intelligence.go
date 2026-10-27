@@ -38,6 +38,7 @@ type codeQueryResult struct {
 }
 
 type codeQueryResponse struct {
+	RepositoryID    string            `json:"repository_id,omitempty"`
 	Historical      bool              `json:"historical,omitempty"`
 	SnapshotID      string            `json:"snapshot_id,omitempty"`
 	CommitID        string            `json:"commit_id,omitempty"`
@@ -171,7 +172,7 @@ func (c *codeIntelligenceClient) query(ctx context.Context, tenantID, principalI
 	if asOfCommit != "" || snapshotID != "" {
 		// A 2xx response is insufficient: the code service must prove that
 		// it returned the requested immutable generation, not active code.
-		if !out.Historical || out.SnapshotID == "" || out.CommitID == "" || out.Branch != branch ||
+		if !out.Historical || out.RepositoryID != repositoryID || out.SnapshotID == "" || out.CommitID == "" || out.Branch != branch ||
 			(asOfCommit != "" && out.CommitID != asOfCommit) ||
 			(snapshotID != "" && !strings.EqualFold(out.SnapshotID, snapshotID)) {
 			return nil, fmt.Errorf("%w: response metadata", errHistoricalProvenanceMismatch)

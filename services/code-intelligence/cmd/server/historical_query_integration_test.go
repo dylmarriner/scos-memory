@@ -47,7 +47,7 @@ func TestPGHistoricalCodeQueryUsesImmutableCommit(t *testing.T) {
 	}
 	check(map[string]any{"repository_id": repo, "query": "pkg/legacy.txt", "as_of_commit": "commit-old"}, tenant, 400)
 	historical := check(map[string]any{"repository_id": repo, "branch": "main", "query": "pkg/legacy.txt", "as_of_commit": "commit-old"}, tenant, 200)
-	if historical["snapshot_id"] != old || historical["commit_id"] != "commit-old" {
+	if historical["repository_id"] != repo || historical["snapshot_id"] != old || historical["commit_id"] != "commit-old" {
 		t.Fatalf("historical source not preserved: %+v", historical)
 	}
 	rows, ok := historical["results"].([]any)

@@ -37,22 +37,23 @@ func (s *pgCodeStore) QueryHistoricalCode(
 func queryHistoricalCodeScoped(
 	ctx context.Context, tx *sql.Tx, repository, tenant, branch, commit, snapshot, query string, limit int,
 ) (map[string]any, error) {
-	lookup := "SELECT id::text,commit_id FROM code_repository_snapshots " +
+	lookup := "SELECT id::text,commit_id,repository_id::text FROM code_repository_snapshots " +
 		"WHERE repository_id=$1 AND tenant_id=$2 AND branch=$3 AND ($4='' OR commit_id=$4) " +
 		"AND ($5='' OR id=NULLIF($5,'')::uuid) AND status IN ('active','superseded') ORDER BY id LIMIT 2"
 	rows, err := tx.QueryContext(ctx, lookup, repository, tenant, branch, commit, snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve historical snapshot: %w", err)
 	}
-	var ids, commits []string
+	var ids, commits, repositories []string
 	for rows.Next() {
-		var id, revision string
-		if err := rows.Scan(&id, &revision); err != nil {
+		var id, revision, storedRepository string
+		if err := rows.Scan(&id, &revision, &storedRepository); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		ids = append(ids, id)
 		commits = append(commits, revision)
+		repositories = append(repositories, storedRepository)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -67,7 +68,7 @@ func queryHistoricalCodeScoped(
 	if len(ids) > 1 {
 		return nil, errHistoricalAmbiguous
 	}
-	output := map[string]any{"snapshot_id": ids[0], "commit_id": commits[0], "branch": branch}
+	output := map[string]any{"repository_id": repositories[0], "snapshot_id": ids[0], "commit_id": commits[0], "branch": branch}
 	for pass := 0; pass < 2; pass++ {
 		filter := "(sv.path=$2 OR sv.fully_qualified_name=$2)"
 		rank := "0::double precision"
