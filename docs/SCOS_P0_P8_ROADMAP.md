@@ -1149,9 +1149,7 @@ are on `main`, but the live production database has not been verified to
 run them. Background recovery and remaining legacy operations require
 production rollout/recovery qualification before completion can be claimed.
 
-See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
-expansion, multi-hop traversal, ranking, inference, server-attested Git
-provenance and production qualification remain open.
+See `docs/P6_MEMORY_CODE_READBACK.md`. The **one-hop** reverse code→memory evidence page and governed MCP tool are now implemented with principal-scoped RLS and immutable symbol-version provenance (2026-10-28 development). **Partial only:** multi-hop traversal, ranking, inference, server-attested Git provenance and production qualification remain open.
 
 ## Remaining
 
@@ -1159,7 +1157,8 @@ provenance and production qualification remain open.
 - [ ] Validate tenant/scope ownership at link creation.
 - [ ] Record actor/operation/turn evidence where schema metadata needs expansion.
 - [ ] Infer high-confidence links from deterministic signals before model inference.
-- [ ] Add bounded memory→code and code→memory expansion.
+- [x] Add bounded **one-hop** memory→code and code→memory evidence readback (immutable symbol versions, tenant/namespace RLS, link-UUID cursor, 100-row cap).
+- [ ] Add bounded multi-hop graph expansion with provenance-path evidence and impact traversal.
 - [ ] Use graph proximity as a ranking feature, never an authority override.
 - [ ] Expose explainable provenance paths.
 - [ ] Allow OKF proposals to reference concrete memory/code evidence without mutating approved OKF state automatically.
