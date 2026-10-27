@@ -55,3 +55,53 @@ func TestP6EvidenceLinkReadbackMCPForwarding(t *testing.T) {
 		t.Fatalf("invalid arguments reached upstream: %d calls", calls)
 	}
 }
+
+// Reverse code->memory traversal preserves the gateway's verified identity,
+// never trusts identity fields supplied in tool arguments, and bounds pages.
+func TestP6CodeMemoryLinksReverseMCPForwarding(t *testing.T) {
+	version := "4cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	cursor := "5cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/evidence-links/by-code" ||
+			r.URL.Query().Get("code_symbol_version_id") != version ||
+			r.URL.Query().Get("limit") != "2" ||
+			r.URL.Query().Get("after") != cursor ||
+			r.Header.Get("X-SCOS-Tenant-ID") != "tenant-1" ||
+			r.Header.Get("X-SCOS-Principal-ID") != "principal-1" {
+			t.Errorf("untrusted reverse evidence request: %v, tenant=%s, principal=%s",
+				r.URL, r.Header.Get("X-SCOS-Tenant-ID"), r.Header.Get("X-SCOS-Principal-ID"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"links":[],"code_symbol_version_id":"` + version + `"}`))
+	}))
+	defer upstream.Close()
+	s := &gatewayServer{memoryIntelligenceURL: upstream.URL, client: upstream.Client()}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	identity := requestIdentity{TenantID: "tenant-1", PrincipalID: "principal-1"}
+	result, err := s.dispatchTool(req.Context(), req, identity, "scos_code_memory_links",
+		map[string]any{"code_symbol_version_id": version, "limit": float64(2), "after": cursor,
+			"tenant_id": "attacker", "principal_id": "attacker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := result.(map[string]any)
+	if !ok || got["code_symbol_version_id"] != version || calls != 1 {
+		t.Fatalf("unexpected reverse response: %v, calls=%d", result, calls)
+	}
+	for _, args := range []map[string]any{
+		{"code_symbol_version_id": "invalid"},
+		{"code_symbol_version_id": version, "limit": float64(0)},
+		{"code_symbol_version_id": version, "limit": float64(101)},
+		{"code_symbol_version_id": version, "limit": 2},
+		{"code_symbol_version_id": version, "after": "bad"},
+	} {
+		if _, err := s.dispatchTool(req.Context(), req, identity, "scos_code_memory_links", args); err == nil {
+			t.Fatalf("invalid tool arguments forwarded: %v", args)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("%d invalid requests reached upstream", calls-1)
+	}
+}

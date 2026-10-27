@@ -371,3 +371,34 @@ traversal, ranking from graph proximity, automatic link inference, temporal
 belief-history reconstruction, or production deployment/recovery validation.
 The repository/snapshot/commit values are persisted labels rather than
 cryptographic Git attestations. Full P6 and P0–P8 gates remain open.
+
+## P6 reverse code-to-memory readback (2026-10-28)
+
+The corresponding **read-only** reverse direction is now exposed through
+`GET /v1/evidence-links/by-code?code_symbol_version_id=<immutable-UUID>`
+and the governed MCP tool `scos_code_memory_links`. It accepts an optional
+integer `limit` (1–100, default 25) and `after` (last returned link UUID)
+for immutable-link UUID keyset pagination.
+
+Each response preserves the original link and memory `fact_id`, exact
+`code_symbol_version_id`, repository, snapshot, commit and file path, along
+with the link type, source, confidence and timestamp. It never replaces a
+historical symbol with the current branch symbol.
+
+The read runs inside the authenticated transaction-local tenant/principal
+context and joins `memory_code_links` to RLS-visible `memory_items` and
+RLS-scoped code provenance. A nonexistent or inaccessible symbol returns an
+empty page rather than revealing its existence; other-tenant and non-member
+facts remain invisible. The caller cannot override the verified identity
+through MCP arguments. Database errors return sanitized HTTP 500s.
+
+This is one code→memory edge hop and the existing endpoint provides the
+memory→code hop. It does **not** implement unrestricted multi-hop traversal,
+automatic inference, OKF-state mutation, graph ranking, historical *memory*
+belief reconstruction, or production activation.
+
+Verification: failing-then-passing HTTP selector and MCP forwarding tests;
+real PostgreSQL 17/pgvector tests after all migrations and tenant RLS
+policies for two linked facts, keyset pagination, provenance, non-member and
+foreign-tenant denial. The full integration and Go regression gates are
+required before merge.
