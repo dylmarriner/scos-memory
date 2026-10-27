@@ -468,6 +468,11 @@ func TestSCOSRetrieveSchemaExposesDurableRepositoryContext(t *testing.T) {
 		if _, ok := props["as_of_valid_time"]; !ok {
 			t.Fatal("scos_retrieve missing valid-time selector")
 		}
+		for _, selector := range []string{"as_of_commit", "snapshot_id"} {
+			if _, ok := props[selector]; !ok {
+				t.Fatalf("scos_retrieve missing immutable code selector %s", selector)
+			}
+		}
 		return
 	}
 	t.Fatal("scos_retrieve not found")

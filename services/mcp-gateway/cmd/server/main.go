@@ -2398,6 +2398,8 @@ func governedTools() []map[string]any {
 			"repository_id":    strField("Durable code repository UUID; with branch, enables P4 code retrieval alongside memory"),
 			"branch":           strField("Branch for durable code retrieval"),
 			"as_of_valid_time": strField("RFC3339 timestamp for memory facts effective at that valid time, using today's approved SCOS belief state. Does not reconstruct historical approvals, statuses, or memory versions."),
+			"as_of_commit":     strField("Select an immutable indexed code commit for the code lane; requires repository_id and branch. Memory evidence remains at current system belief; no historical memory reconstruction."),
+			"snapshot_id":      strField("Select a concrete immutable indexed code generation (UUID); requires repository_id and branch. Can accompany as_of_commit to disambiguate generations."),
 		}, "query"),
 	)
 
