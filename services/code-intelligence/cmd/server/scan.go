@@ -507,7 +507,7 @@ func (s *server) buildSnapshot(ctx context.Context, tenant, repositoryID, snapsh
 			degradedModels = append(degradedModels, "code_embedding")
 		}
 	}
-	diff, err := s.pgStore.DiffSnapshot(ctx, snapshotID)
+	diff, err := s.pgStore.DiffSnapshotScoped(ctx, tenant, snapshotID)
 	if err != nil {
 		return nil, fmt.Errorf("diff snapshot: %w", err)
 	}

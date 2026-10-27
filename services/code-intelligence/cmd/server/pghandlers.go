@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -315,32 +316,26 @@ func (s *server) handlePGSnapshotDiff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.SnapshotID == "" {
-		http.Error(w, "snapshot_id is required", http.StatusBadRequest)
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		http.Error(w, "request must contain one JSON object", http.StatusBadRequest)
+		return
+	}
+	if !snapshotIDUUID.MatchString(req.SnapshotID) {
+		http.Error(w, "valid snapshot_id is required", http.StatusBadRequest)
 		return
 	}
 
-	var owningTenant string
-	if err := s.pgStore.db.QueryRowContext(r.Context(), `
-		SELECT repo.tenant_id::text
-		FROM code_repository_snapshots snap
-		JOIN code_repositories repo ON repo.id = snap.repository_id
-		WHERE snap.id = $1`, req.SnapshotID).Scan(&owningTenant); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "snapshot not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "load snapshot: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if owningTenant != tenant {
+	// The identity check, parent resolution and symbol reads must share the
+	// authenticated tenant's RLS transaction, not a pooled connection.
+	diff, err := s.pgStore.DiffSnapshotScoped(r.Context(), tenant, req.SnapshotID)
+	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "snapshot not found", http.StatusNotFound)
 		return
 	}
-
-	diff, err := s.pgStore.DiffSnapshot(r.Context(), req.SnapshotID)
 	if err != nil {
-		http.Error(w, "diff snapshot: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("scoped snapshot diff: %v", err)
+		http.Error(w, "snapshot diff unavailable", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, diff)

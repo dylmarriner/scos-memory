@@ -1182,8 +1182,16 @@ type snapshotSymbolRow struct {
 	SCIPDocument bool // declaration-derived path fingerprint, not file bytes
 }
 
-func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+// codeSnapshotQuerier keeps every query in a snapshot diff on the same
+// connection. A scoped caller supplies *sql.Tx; legacy internal callers may
+// still use *sql.DB for non-runtime migration and test tooling.
+type codeSnapshotQuerier interface {
+	codeSQLQuerier
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, q codeSnapshotQuerier, snapshotID string) ([]snapshotSymbolRow, error) {
+	rows, err := q.QueryContext(ctx, `
         SELECT symbol_id, path, content_hash FROM code_symbol_versions
         WHERE snapshot_id = $1 AND kind = 'file' ORDER BY path, id`, snapshotID)
 	if err != nil {
@@ -1209,7 +1217,7 @@ func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string
 	// kind is "file", but its hash is still only the SCIP symbol identity,
 	// not source bytes. Prefer the complete SCIP document fingerprint whenever
 	// SCIP declarations exist, even if the index contains File-kind symbols.
-	scipRows, err := s.loadSCIPSnapshotDocuments(ctx, snapshotID)
+	scipRows, err := s.loadSCIPSnapshotDocuments(ctx, q, snapshotID)
 	if err != nil {
 		return nil, err
 	}
@@ -1223,8 +1231,8 @@ func (s *pgCodeStore) loadSnapshotSymbols(ctx context.Context, snapshotID string
 // content_hash is derived from symbol identity alone, so metadata must also
 // contribute to the fingerprint to detect changed declarations. This is a
 // semantic/index delta, not proof that every source-byte change was indexed.
-func (s *pgCodeStore) loadSCIPSnapshotDocuments(ctx context.Context, snapshotID string) ([]snapshotSymbolRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *pgCodeStore) loadSCIPSnapshotDocuments(ctx context.Context, q codeSnapshotQuerier, snapshotID string) ([]snapshotSymbolRow, error) {
+	rows, err := q.QueryContext(ctx, `
         SELECT symbol_id::text, path, content_hash, fully_qualified_name, kind,
                COALESCE(signature, ''), COALESCE(doc_comment, ''), COALESCE(extractor, '')
         FROM code_symbol_versions
@@ -1278,15 +1286,53 @@ func (s *pgCodeStore) loadSCIPSnapshotDocuments(ctx context.Context, snapshotID 
 // path disappeared, or Copied if the source survives unchanged. SCIP
 // snapshots lack file-byte hashes, so their document-level declaration
 // changes are reported by path without speculative rename/copy claims.
+// DiffSnapshotScoped requires an authenticated tenant and performs the entire
+// snapshot and parent comparison under one transaction-local RLS identity.
+// Missing and foreign-tenant snapshots deliberately have the same result.
+func (s *pgCodeStore) DiffSnapshotScoped(ctx context.Context, tenantID, snapshotID string) (SnapshotDiff, error) {
+	var result SnapshotDiff
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var repositoryID string
+		var parentID sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT snap.repository_id::text, snap.parent_snapshot_id::text
+			FROM code_repository_snapshots snap
+			JOIN code_repositories repo ON repo.id=snap.repository_id
+			WHERE snap.id=$1 AND snap.tenant_id=$2 AND repo.tenant_id=$2`,
+			snapshotID, tenantID).Scan(&repositoryID, &parentID)
+		if err != nil {
+			return err
+		}
+		if parentID.Valid {
+			var parentVisible bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+				SELECT 1 FROM code_repository_snapshots
+				WHERE id=$1 AND repository_id=$2 AND tenant_id=$3)`,
+				parentID.String, repositoryID, tenantID).Scan(&parentVisible); err != nil {
+				return err
+			}
+			if !parentVisible {
+				return fmt.Errorf("snapshot parent is outside the tenant/repository scope")
+			}
+		}
+		result, err = s.diffSnapshotQuery(ctx, tx, snapshotID)
+		return err
+	})
+	return result, err
+}
+
 func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (SnapshotDiff, error) {
+	return s.diffSnapshotQuery(ctx, s.db, snapshotID)
+}
+
+func (s *pgCodeStore) diffSnapshotQuery(ctx context.Context, q codeSnapshotQuerier, snapshotID string) (SnapshotDiff, error) {
 	var parentID sql.NullString
-	if err := s.db.QueryRowContext(ctx, `
+	if err := q.QueryRowContext(ctx, `
 		SELECT parent_snapshot_id FROM code_repository_snapshots WHERE id = $1`, snapshotID).Scan(&parentID); err != nil {
 		return SnapshotDiff{}, fmt.Errorf("load snapshot: %w", err)
 	}
 	diff := SnapshotDiff{SnapshotID: snapshotID, ParentSnapshotID: parentID.String}
 
-	newRows, err := s.loadSnapshotSymbols(ctx, snapshotID)
+	newRows, err := s.loadSnapshotSymbols(ctx, q, snapshotID)
 	if err != nil {
 		return diff, err
 	}
@@ -1297,7 +1343,7 @@ func (s *pgCodeStore) DiffSnapshot(ctx context.Context, snapshotID string) (Snap
 		return diff, nil
 	}
 
-	oldRows, err := s.loadSnapshotSymbols(ctx, parentID.String)
+	oldRows, err := s.loadSnapshotSymbols(ctx, q, parentID.String)
 	if err != nil {
 		return diff, err
 	}

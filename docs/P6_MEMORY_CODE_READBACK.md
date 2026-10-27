@@ -183,6 +183,20 @@ after implementation. On disposable PostgreSQL 17/pgvector with all 97
 migration/policy scripts, the complete code-intelligence integration package,
 uncached `go test -count=1 ./...`, `go vet ./...`, and diff checks passed.
 This is a scoped activation-path improvement, **not** a four-table RLS rollout.
+A subsequent RED→GREEN regression scopes **snapshot diff readback** and
+the scan/indexing response's diff to the authenticated tenant. The prior
+HTTP route used a context-free snapshot lookup and returned 404 for its
+owner under forced RLS. The new `DiffSnapshotScoped` validates snapshot
+ownership and parent repository/tenant lineage, then reads current and
+parent symbol versions through the same transaction-local tenant context.
+A restricted-role PostgreSQL 17 test with four forced-RLS shadow provenance
+tables proves authorized added/modified diffs, foreign/missing 404 denial,
+invalid UUID rejection and single-object JSON parsing. Legacy internal
+`DiffSnapshot` remains available for owner-level test tooling. All 97
+migration/policy scripts, the code-intelligence integration package,
+uncached Go suite and Go vet passed in a disposable test database.
+This is preparatory code hardening, **not** production forced-RLS activation.
+
 This does not make the Git commit label server-attested, and the remaining
 indexing, impact, activation and recovery paths still need RLS qualification.
 **This does not activate RLS on the four production code tables:**

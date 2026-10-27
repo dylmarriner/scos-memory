@@ -851,6 +851,19 @@ foreign-tenant denial. The method was absent (compile RED) before implementation
 Disposable PostgreSQL 17/pgvector applied all 97 migration/policy scripts;
 code-intelligence integration, uncached full Go tests, vet and diff checks
 passed. This does **not** qualify unscoped indexing, recovery or impact paths.
+An eighth RED→GREEN increment scopes the snapshot-diff HTTP endpoint and
+the scan/indexing response's diff calculation to the authenticated tenant.
+Snapshot ownership, parent lineage and both generations' symbol reads now
+run on a single transaction-local RLS connection. A real PostgreSQL 17
+restricted-role test with forced-RLS shadow tables first returned HTTP 404
+for an authorized snapshot; after the fix it returned the expected added
+file, preserved a modified-file diff against its parent, denied foreign
+and missing snapshots with identical 404 responses, and rejected malformed
+snapshot UUIDs and trailing JSON objects. The legacy owner-level diff
+helper remains for internal tests only. The full code-intelligence
+integration package, uncached Go suite and Go vet passed on a disposable
+97-migration/policy PostgreSQL 17/pgvector instance. No production RLS
+policy was enabled or live data migrated.
 This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.

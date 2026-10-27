@@ -3,14 +3,17 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dylmarriner/scos-memory/packages/auth"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -50,7 +53,7 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', error text, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
 		"CREATE TABLE " + schema + ".code_file_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), snapshot_id uuid NOT NULL, path text NOT NULL, content_hash text NOT NULL)",
-		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector)",
+		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector, extractor text NOT NULL DEFAULT '', signature text, doc_comment text)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
 		"GRANT SELECT,INSERT,UPDATE,DELETE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
 		"GRANT SELECT ON " + schema + ".code_file_versions TO scos_app",
@@ -148,6 +151,71 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,content_hash) VALUES($1,$2,'pkg/scope.go','pkg/scope.go','test-hash') RETURNING id::text", symbolID, snap).Scan(&versionID); err != nil {
 		t.Fatal(err)
 	}
+
+	// A snapshot diff must read the snapshot, parent and symbol versions
+	// under one tenant-local transaction. Under forced RLS the old handler's
+	// context-free identity query returned 404 even to the owning tenant.
+	diffServer := &server{pgStore: store}
+	diffPath := "/v2/code/snapshots/diff"
+	for _, tc := range []struct {
+		tenant string
+		id     string
+		want   int
+	}{
+		{tenantA, snap, http.StatusOK},
+		{tenantB, snap, http.StatusNotFound},
+		{tenantA, "00000000-0000-4000-8000-000000000001", http.StatusNotFound},
+		{tenantA, "not-a-uuid", http.StatusBadRequest},
+	} {
+		resp := pgRequest(t, diffServer, http.MethodPost, diffPath, tc.tenant,
+			map[string]any{"snapshot_id": tc.id})
+		if resp.Code != tc.want {
+			t.Errorf("forced-RLS diff tenant %s snapshot %s: got HTTP %d, want %d: %s",
+				tc.tenant, tc.id, resp.Code, tc.want, resp.Body.String())
+		}
+		if tc.want == http.StatusOK && resp.Code == http.StatusOK {
+			var result SnapshotDiff
+			if err := json.Unmarshal(resp.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.SnapshotID != snap || len(result.Added) != 1 || result.Added[0].Path != "pkg/scope.go" {
+				t.Errorf("own-tenant snapshot diff: %+v", result)
+			}
+		}
+	}
+	// A second JSON object must not be silently ignored by the diff route.
+	raw := httptest.NewRequest(http.MethodPost, diffPath, strings.NewReader(
+		fmt.Sprintf("{%q:%q}{%q:%q}", "snapshot_id", snap, "snapshot_id", snap)))
+	raw = raw.WithContext(auth.ContextWithClaims(raw.Context(),
+		auth.Claims{TenantID: tenantA, PrincipalID: "p"}))
+	rawResult := httptest.NewRecorder()
+	diffServer.handlePGSnapshotDiff(rawResult, raw)
+	if rawResult.Code != http.StatusBadRequest {
+		t.Fatalf("diff accepted multiple JSON objects: HTTP %d: %s", rawResult.Code, rawResult.Body.String())
+	}
+
+	// A second snapshot must read its parent in the same scoped transaction.
+	next, err := store.CreateSnapshot(ctx, repo, tenantA, "main", "commit2", "test-v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, "INSERT INTO "+schema+".code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,content_hash) VALUES($1,$2,'pkg/scope.go','pkg/scope.go','changed-hash')", symbolID, next); err != nil {
+		t.Fatal(err)
+	}
+	resp := pgRequest(t, diffServer, http.MethodPost, diffPath, tenantA,
+		map[string]any{"snapshot_id": next})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("parent diff under forced RLS: HTTP %d: %s", resp.Code, resp.Body.String())
+	}
+	var parentDiff SnapshotDiff
+	if err := json.Unmarshal(resp.Body.Bytes(), &parentDiff); err != nil {
+		t.Fatal(err)
+	}
+	if parentDiff.ParentSnapshotID != snap || len(parentDiff.Modified) != 1 ||
+		parentDiff.Modified[0].Path != "pkg/scope.go" {
+		t.Fatalf("parent snapshot diff lost lineage: %+v", parentDiff)
+	}
+
 	// Failed snapshot cleanup must not delete another tenant's generation.
 	failed, err := store.CreateSnapshot(ctx, repo, tenantA, "main", "failed-commit", "test-v1", "")
 	if err != nil {
