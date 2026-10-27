@@ -523,7 +523,7 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 	degradedSources := []string{}
 	if len(seedIDs) > 0 {
 		var ranks map[string]float64
-		structural, ranks, err = s.pgStore.QueryStructuralCandidates(r.Context(), req.RepositoryID, req.Branch, seedIDs, 2, limit)
+		structural, ranks, err = s.pgStore.QueryStructuralCandidatesScoped(r.Context(), tenant, req.RepositoryID, req.Branch, seedIDs, 2, limit)
 		if err != nil {
 			log.Printf("structural code retrieval degraded: %v", err)
 			degradedSources = append(degradedSources, "structural_graph")

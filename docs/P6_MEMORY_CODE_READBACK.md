@@ -281,6 +281,22 @@ integration. Direct context-free runtime-role reads were checked by the
 qualification test. This is runtime scoping only; production forced RLS
 remains blocked.
 
+**P4/P6 structural retrieval tenant scoping (2026-10-27, PR #92
+development):** the production code-query handler now calls
+`QueryStructuralCandidatesScoped`. Active snapshot resolution, every
+bounded structural-neighbor hop, edge loading and PageRank all use one
+authenticated transaction-local tenant context. Neighbor versions must
+belong to the resolved snapshot, preventing cross-generation graph
+contamination. The owner-level helper remains for legacy internal
+integration tests, not the authenticated HTTP path. A real restricted-role
+PostgreSQL 17 forced-RLS shadow-schema regression was RED before the
+scoped API existed and GREEN afterward, proving owner-visible caller
+evidence, graph centrality, foreign-tenant denial and invalid tenant
+rejection. The full code-intelligence integration suite passed with
+candidate four-table forced RLS on a disposable production-schema
+database, as did the uncached Go suite and Go vet. This is not
+production policy activation or P4/P6 completion.
+
 **No production policy migration was added or deployed.** Recovery,
 background maintenance and remaining unscoped callers still require
 qualification before those policies can be committed safely.

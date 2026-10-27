@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -31,11 +32,35 @@ func structuralConfidence(class string, score float64, depth int) float64 {
 	return weight * score / float64(depth)
 }
 
+// structuralQueryer is deliberately shared by sql.DB and sql.Tx. Scoped
+// retrieval must not switch back to the pool between graph expansion hops.
+type structuralQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 // QueryStructuralCandidates expands a bounded neighborhood around retrieval
 // seeds using edges in the currently active snapshot only. code_edges contains
 // CALLS from AST/Tree-sitter and REFERENCES/IMPLEMENTS from SCIP, so this lane
 // adds structural evidence without inventing a second graph store.
 func (s *pgCodeStore) QueryStructuralCandidates(ctx context.Context, repositoryID, branch string, seedIDs []string, maxDepth, limit int) ([]codeHybridResult, map[string]float64, error) {
+	return s.queryStructuralCandidates(ctx, s.db, "", repositoryID, branch, seedIDs, maxDepth, limit)
+}
+
+// QueryStructuralCandidatesScoped holds the authenticated tenant identity
+// across active snapshot selection, every neighbor hop and PageRank evidence.
+func (s *pgCodeStore) QueryStructuralCandidatesScoped(ctx context.Context, tenantID, repositoryID, branch string, seedIDs []string, maxDepth, limit int) ([]codeHybridResult, map[string]float64, error) {
+	var results []codeHybridResult
+	var ranks map[string]float64
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var queryErr error
+		results, ranks, queryErr = s.queryStructuralCandidates(ctx, tx, tenantID, repositoryID, branch, seedIDs, maxDepth, limit)
+		return queryErr
+	})
+	return results, ranks, err
+}
+
+func (s *pgCodeStore) queryStructuralCandidates(ctx context.Context, q structuralQueryer, tenantID, repositoryID, branch string, seedIDs []string, maxDepth, limit int) ([]codeHybridResult, map[string]float64, error) {
 	if len(seedIDs) == 0 {
 		return nil, map[string]float64{}, nil
 	}
@@ -51,9 +76,27 @@ func (s *pgCodeStore) QueryStructuralCandidates(ctx context.Context, repositoryI
 	if limit > 100 {
 		limit = 100
 	}
-	snapshotID, err := s.ActiveSnapshotID(ctx, repositoryID, branch)
-	if err != nil || snapshotID == "" {
-		return nil, map[string]float64{}, err
+	var snapshotID string
+	var err error
+	if tenantID == "" {
+		err = q.QueryRowContext(ctx, `
+			SELECT id FROM code_repository_snapshots
+			WHERE repository_id = $1 AND branch = $2 AND status = 'active'`,
+			repositoryID, branch).Scan(&snapshotID)
+	} else {
+		err = q.QueryRowContext(ctx, `
+			SELECT snap.id FROM code_repository_snapshots snap
+			JOIN code_repositories repo ON repo.id = snap.repository_id
+			WHERE snap.repository_id = $1 AND snap.branch = $2
+			  AND snap.status = 'active' AND snap.tenant_id = $3
+			  AND repo.tenant_id = $3`,
+			repositoryID, branch, tenantID).Scan(&snapshotID)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, map[string]float64{}, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve structural snapshot: %w", err)
 	}
 
 	visited := make(map[string]bool, len(seedIDs)+limit)
@@ -68,7 +111,7 @@ func (s *pgCodeStore) QueryStructuralCandidates(ctx context.Context, repositoryI
 	}
 	byID := make(map[string]codeHybridResult)
 	for depth := 1; depth <= maxDepth && len(frontier) > 0 && len(byID) < limit; depth++ {
-		neighbors, err := s.structuralNeighbors(ctx, snapshotID, repositoryID, branch, frontier)
+		neighbors, err := s.structuralNeighbors(ctx, q, snapshotID, repositoryID, branch, frontier)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -90,7 +133,7 @@ func (s *pgCodeStore) QueryStructuralCandidates(ctx context.Context, repositoryI
 	for id := range visited {
 		nodes = append(nodes, id)
 	}
-	edges, err := s.structuralEdgesAmong(ctx, snapshotID, nodes)
+	edges, err := s.structuralEdgesAmong(ctx, q, snapshotID, nodes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -116,7 +159,7 @@ type structuralNeighbor struct {
 	confidenceScore float64
 }
 
-func (s *pgCodeStore) structuralNeighbors(ctx context.Context, snapshotID, repositoryID, branch string, frontier []string) ([]structuralNeighbor, error) {
+func (s *pgCodeStore) structuralNeighbors(ctx context.Context, q structuralQueryer, snapshotID, repositoryID, branch string, frontier []string) ([]structuralNeighbor, error) {
 	if len(frontier) == 0 {
 		return nil, nil
 	}
@@ -149,9 +192,10 @@ func (s *pgCodeStore) structuralNeighbors(ctx context.Context, snapshotID, repos
 		JOIN code_symbol_versions sv ON sv.id = h.neighbor_id
 		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
 		WHERE snap.repository_id = $%d AND snap.branch = $%d
+		  AND sv.snapshot_id = $1
 		  AND snap.status = 'active' AND sv.status = 'active'`,
 		inList, inList, inList, repoArg, branchArg)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query structural neighbors: %w", err)
 	}
@@ -170,7 +214,7 @@ func (s *pgCodeStore) structuralNeighbors(ctx context.Context, snapshotID, repos
 	return out, rows.Err()
 }
 
-func (s *pgCodeStore) structuralEdgesAmong(ctx context.Context, snapshotID string, symbolVersionIDs []string) (map[string][]string, error) {
+func (s *pgCodeStore) structuralEdgesAmong(ctx context.Context, q structuralQueryer, snapshotID string, symbolVersionIDs []string) (map[string][]string, error) {
 	edges := make(map[string][]string, len(symbolVersionIDs))
 	if len(symbolVersionIDs) == 0 {
 		return edges, nil
@@ -189,7 +233,7 @@ func (s *pgCodeStore) structuralEdgesAmong(ctx context.Context, snapshotID strin
 		WHERE snapshot_id = $1
 		  AND source_symbol_version_id IN (%s)
 		  AND target_symbol_version_id IN (%s)`, inList, inList)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query structural edges: %w", err)
 	}
@@ -203,7 +247,3 @@ func (s *pgCodeStore) structuralEdgesAmong(ctx context.Context, snapshotID strin
 	}
 	return edges, rows.Err()
 }
-
-// keep database/sql in this file's import set honest if future nullable
-// structural columns are added without changing the query shape above.
-var _ = sql.ErrNoRows

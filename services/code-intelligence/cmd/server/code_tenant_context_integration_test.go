@@ -55,8 +55,8 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		"CREATE TABLE " + schema + ".code_repository_snapshots (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, tenant_id uuid NOT NULL, branch text NOT NULL, commit_id text NOT NULL, extractor_version text NOT NULL, configuration_hash text NOT NULL, parent_snapshot_id uuid, status text NOT NULL DEFAULT 'queued', error text, symbol_count integer NOT NULL DEFAULT 0, file_count integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now(), activated_at timestamptz, UNIQUE(repository_id,branch,commit_id,extractor_version,configuration_hash))",
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
 		"CREATE TABLE " + schema + ".code_file_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), snapshot_id uuid NOT NULL, path text NOT NULL, content_hash text NOT NULL)",
-		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector, extractor text NOT NULL DEFAULT '', signature text, doc_comment text)",
-		"CREATE TABLE " + schema + ".code_edges (snapshot_id uuid NOT NULL, source_symbol_version_id uuid NOT NULL, target_symbol_version_id uuid NOT NULL, relation text NOT NULL)",
+		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', range text, search_vector tsvector, extractor text NOT NULL DEFAULT '', signature text, doc_comment text)",
+		"CREATE TABLE " + schema + ".code_edges (snapshot_id uuid NOT NULL, source_symbol_version_id uuid NOT NULL, target_symbol_version_id uuid NOT NULL, relation text NOT NULL, confidence_class text NOT NULL DEFAULT 'deterministic', confidence_score double precision NOT NULL DEFAULT 1)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
 		"GRANT SELECT,INSERT,UPDATE,DELETE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
 		"GRANT SELECT ON " + schema + ".code_file_versions, " + schema + ".code_edges TO scos_app",
@@ -416,6 +416,27 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	}
 	if _, err := store.ChangeImpactHistorical(ctx, tenantA, repo, "main", "", "", "pkg/scope.go", 2); err == nil {
 		t.Fatal("historical impact accepted missing immutable snapshot selector")
+	}
+
+	// The structural retrieval lane must keep RLS identity across active
+	// snapshot resolution, neighbor expansion, and graph centrality reads.
+	// The legacy lane loses the identity on its pooled SQL connection.
+	structural, ranks, err := store.QueryStructuralCandidatesScoped(ctx, tenantA, repo, "main", []string{versionID}, 2, 20)
+	foundCaller := false
+	for _, candidate := range structural {
+		if candidate.SymbolVersionID == callerVersion && candidate.RawStructuralScore > 0 {
+			foundCaller = true
+		}
+	}
+	if err != nil || !foundCaller || ranks[versionID] <= 0 || ranks[callerVersion] <= 0 {
+		t.Fatalf("own tenant structural graph under forced RLS: %+v ranks=%v err=%v", structural, ranks, err)
+	}
+	structural, _, err = store.QueryStructuralCandidatesScoped(ctx, tenantB, repo, "main", []string{versionID}, 2, 20)
+	if err != nil || len(structural) != 0 {
+		t.Fatalf("foreign tenant structural graph leaked: %+v err=%v", structural, err)
+	}
+	if _, _, err := store.QueryStructuralCandidatesScoped(ctx, "not-a-uuid", repo, "main", []string{versionID}, 2, 20); err == nil {
+		t.Fatal("invalid tenant accepted for structural graph")
 	}
 
 	branch, err := store.LatestIndexedBranch(ctx, repo, tenantA)

@@ -926,6 +926,18 @@ code-intelligence integration package and tagged memory-intelligence
 PostgreSQL integration all passed. No production policy activation
 or main-branch qualification is implied.
 
+**P4/P6 structural code retrieval scoping (2026-10-27, PR #92
+development):** the HTTP hybrid query's structural graph lane now
+holds the authenticated tenant context through active snapshot selection,
+neighbor expansion, edge loading and PageRank. Neighbor versions must
+match the resolved snapshot. A restricted-role forced-RLS shadow-schema
+regression was RED before the scoped API and GREEN for owner-visible
+caller evidence, centrality and foreign-tenant denial. On disposable
+PostgreSQL 17 with candidate four-table forced RLS, the complete
+code-intelligence suite, uncached Go suite, Go vet and diff checks
+passed. Legacy owner-level helper remains for internal test callers.
+This does not enable production RLS or close P4/P6 acceptance.
+
 **No production RLS migration, merge or rollout.**
 Background recovery and other legacy operations still need scoping
 and acceptance before enabling production forced RLS.
