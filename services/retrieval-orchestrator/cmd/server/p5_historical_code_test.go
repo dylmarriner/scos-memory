@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -183,5 +184,36 @@ func TestP5HistoricalCodeClientAcceptsCanonicalUUIDCase(t *testing.T) {
 	got, err := client.QueryHistorical(context.Background(), "tenant", "principal", "repo", "main", "code", 5, "old", mixedCase)
 	if err != nil || got == nil || got.SnapshotID != canonical {
 		t.Fatalf("case-equivalent UUID rejected: %+v %v", got, err)
+	}
+}
+
+func TestP5HistoricalFailureLogsOnlyStatusOrProvenanceCategory(t *testing.T) {
+	const secret = "postgres://sensitive_operator:password@private-host:5432/private-db"
+	for _, tc := range []struct {
+		name         string
+		status       int
+		body, marker string
+	}{
+		{"downstream HTTP", http.StatusServiceUnavailable, secret, "HTTP 503"},
+		{"provenance mismatch", http.StatusOK, `{"historical":false,"results":[],"private":"` + secret + `"}`, "provenance mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer upstream.Close()
+			srv := &server{codeIntelligence: &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}}
+			var logs bytes.Buffer
+			prior := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(prior)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", strings.NewReader(`{"tenant_id":"t","principal_id":"p","query":"remember the old code","repository_id":"repo","branch":"main","as_of_commit":"old"}`))
+			srv.handleRetrieve(rec, req)
+			if rec.Code != http.StatusBadGateway || !strings.Contains(logs.String(), tc.marker) || strings.Contains(logs.String(), secret) || strings.Contains(rec.Body.String(), secret) {
+				t.Fatalf("unsafe or unhelpful failure: status=%d logs=%q", rec.Code, logs.String())
+			}
+		})
 	}
 }

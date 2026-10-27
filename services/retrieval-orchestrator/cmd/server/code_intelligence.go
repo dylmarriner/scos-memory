@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,6 +52,8 @@ type codeQueryResponse struct {
 
 // codeQueryHTTPError preserves only the downstream status, never the body.
 // Historical callers may distinguish not-found and ambiguous generations.
+var errHistoricalProvenanceMismatch = errors.New("code-intelligence historical provenance mismatch")
+
 type codeQueryHTTPError struct{ Status int }
 
 func (e *codeQueryHTTPError) Error() string {
@@ -171,11 +174,11 @@ func (c *codeIntelligenceClient) query(ctx context.Context, tenantID, principalI
 		if !out.Historical || out.SnapshotID == "" || out.CommitID == "" || out.Branch != branch ||
 			(asOfCommit != "" && out.CommitID != asOfCommit) ||
 			(snapshotID != "" && !strings.EqualFold(out.SnapshotID, snapshotID)) {
-			return nil, fmt.Errorf("code-intelligence historical provenance mismatch")
+			return nil, fmt.Errorf("%w: response metadata", errHistoricalProvenanceMismatch)
 		}
 		for _, item := range out.Results {
 			if item.SymbolVersionID == "" || item.SnapshotID != out.SnapshotID || item.CommitID != out.CommitID || item.Branch != branch {
-				return nil, fmt.Errorf("code-intelligence historical result provenance mismatch")
+				return nil, fmt.Errorf("%w: result metadata", errHistoricalProvenanceMismatch)
 			}
 		}
 	}

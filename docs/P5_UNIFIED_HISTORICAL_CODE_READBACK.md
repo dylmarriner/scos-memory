@@ -16,7 +16,8 @@ The orchestrator rejects missing/mismatched response and per-result provenance.
 An invalid selector returns a safe 400; an unknown snapshot returns a safe 404; an ambiguous commit returns a safe
 409 and asks for `snapshot_id`. Other downstream errors, unavailable services,
 and malformed provenance fail closed with 502, not a misleading empty/current
-code result. Downstream error bodies are never exposed.
+code result. Downstream error bodies are never exposed; diagnostics record
+only the HTTP status or a fixed provenance-mismatch category.
 
 `retrieval_runs.filters` records the requested immutable code selectors,
 repository UUID and branch (even on an empty result), and

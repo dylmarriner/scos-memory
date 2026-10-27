@@ -460,9 +460,9 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 			}
 			if codeErr != nil {
 				if historicalCode {
-					log.Printf("historical code retrieval failed (%T)", codeErr)
 					var statusErr *codeQueryHTTPError
 					if errors.As(codeErr, &statusErr) {
+						log.Printf("historical code retrieval failed: code-intelligence HTTP %d", statusErr.Status)
 						switch statusErr.Status {
 						case http.StatusBadRequest:
 							http.Error(w, "invalid historical code selector", http.StatusBadRequest)
@@ -474,6 +474,10 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 							http.Error(w, "historical commit is ambiguous; specify snapshot_id", http.StatusConflict)
 							return
 						}
+					} else if errors.Is(codeErr, errHistoricalProvenanceMismatch) {
+						log.Printf("historical code retrieval failed: code-intelligence provenance mismatch")
+					} else {
+						log.Printf("historical code retrieval failed (%T)", codeErr)
 					}
 					http.Error(w, "historical code retrieval unavailable", http.StatusBadGateway)
 					return
