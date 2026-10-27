@@ -162,3 +162,58 @@ func TestP5MemorySystemEventBaselineLockBlocksConcurrentInsert(t *testing.T) {
 		t.Fatalf("untracked post-lock memory insertion: %d events", events)
 	}
 }
+
+// Earlier ordered migrations provide owner-only FORCE-RLS access needed by
+// 000082. Losing those policies would silently omit baseline rows when the
+// migration owner is not a superuser, or block its tenant FOR UPDATE lock.
+func TestP5MemorySystemEventOwnerRLSPrerequisites(t *testing.T) {
+	ctx := context.Background()
+	admin := testRetrievalPool(t)
+	rows, err := admin.Query(ctx, `SELECT tablename, policyname, cmd
+        FROM pg_policies
+        WHERE schemaname = current_schema()
+          AND current_user = ANY(roles)
+          AND policyname IN (
+            'revalidation_owner_read_facts',
+            'revalidation_purge_owner_tenant_read',
+            'revalidation_purge_owner_tenant_lock')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	expected := map[string]bool{
+		"memory_items/revalidation_owner_read_facts/SELECT":   false,
+		"tenants/revalidation_purge_owner_tenant_read/SELECT": false,
+		"tenants/revalidation_purge_owner_tenant_lock/UPDATE": false,
+	}
+	for rows.Next() {
+		var table, policy, command string
+		if err := rows.Scan(&table, &policy, &command); err != nil {
+			t.Fatal(err)
+		}
+		key := table + "/" + policy + "/" + command
+		if _, ok := expected[key]; !ok {
+			t.Fatalf("unexpected owner RLS policy: %s", key)
+		}
+		expected[key] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for key, present := range expected {
+		if !present {
+			t.Fatalf("missing required owner FORCE-RLS prerequisite: %s", key)
+		}
+	}
+	for _, table := range []string{"memory_items", "tenants"} {
+		var forced bool
+		if err := admin.QueryRow(ctx, `SELECT c.relforcerowsecurity FROM pg_class c
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname=current_schema() AND c.relname=$1`, table).Scan(&forced); err != nil {
+			t.Fatal(err)
+		}
+		if !forced {
+			t.Fatalf("%s must FORCE RLS", table)
+		}
+	}
+}

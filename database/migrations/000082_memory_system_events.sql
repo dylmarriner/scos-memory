@@ -153,6 +153,13 @@ REVOKE ALL ON FUNCTION purge_memory_system_events_for_tenant(uuid,text)
     FROM PUBLIC;
 
 
+-- Earlier ordered migrations already grant the non-superuser migration
+-- owner context-free FORCE-RLS SELECT on memory_items (000064:
+-- revalidation_owner_read_facts), and SELECT/UPDATE on tenants (000071:
+-- revalidation_purge_owner_tenant_read/lock). Both policies are required
+-- for the baseline and the privileged purge's tenant FOR UPDATE lock.
+-- They remain owner-only; do not grant these bypasses to scos_app.
+--
 -- A concurrent writer must not commit between the baseline snapshot and
 -- trigger installation. SHARE ROW EXCLUSIVE conflicts with DML's ROW
 -- EXCLUSIVE lock, and is held through the end of this transaction.

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -80,9 +82,14 @@ func TestP5MemorySystemEventsAreAppendOnlyAndTenantIsolated(t *testing.T) {
 	tx := begin(tenant, principal)
 	assertCount(tx, `SELECT count(*) FROM memory_system_events WHERE memory_id=$1 AND operation='insert' AND status='candidate'`, 1, memory)
 	assertCount(tx, `SELECT count(*) FROM memory_system_events WHERE memory_id=$1`, 0, otherMemory)
-	if _, err := tx.Exec(ctx, `INSERT INTO memory_system_events(tenant_id,memory_id,namespace_id,sensitivity,status,operation)
-        VALUES($1,$2,$3,'internal','active','update')`, tenant, memory, ns); err == nil {
-		t.Fatal("untrusted role forged system event")
+	_, err = tx.Exec(ctx, `INSERT INTO memory_system_events(
+        tenant_id,memory_id,namespace_id,owner_principal_id,memory_type,status,
+        authority_level,confidence_score,sensitivity,operation)
+        VALUES($1,$2,$3,$4,'semantic','active',50,0.9,'internal','update')`,
+		tenant, memory, ns, principal)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("forged event not denied by privilege/RLS (42501): %v", err)
 	}
 	_ = tx.Rollback(ctx)
 
