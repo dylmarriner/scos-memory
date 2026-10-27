@@ -821,6 +821,14 @@ provenance tables, authorized exact/lexical hits, foreign-tenant empty results
 and no context-free symbol/version visibility. Legacy owner-level query
 helpers remain for existing callers/tests; impact, indexing and recovery
 paths are still unqualified for the future four-table policy migration.
+A fifth RED→GREEN increment scopes the snapshot-change-event API's
+snapshot-identity lookup and event readback to the same tenant-local
+transaction. The restricted-role, four-table forced-RLS shadow-schema
+regression first returned 404 for an authorized snapshot, then passed with
+own-tenant HTTP 200 and foreign-tenant HTTP 404. Fresh disposable PostgreSQL
+17/pgvector applied 97 migration/policy scripts; full code-intelligence
+integration, uncached Go tests, vet and diff checks passed. This is
+preparatory evidence, not a production RLS migration or a P6 completion gate.
 This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -102,6 +103,26 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,content_hash) VALUES($1,$2,'pkg/scope.go','pkg/scope.go','test-hash') RETURNING id::text", symbolID, snap).Scan(&versionID); err != nil {
 		t.Fatal(err)
 	}
+	// The event API must resolve snapshot identity under the same tenant
+	// transaction as its ledger read. Without this, forced RLS hides an
+	// authorized snapshot during the initial pooled-connection lookup.
+	eventServer := &server{pgStore: store}
+	for _, tc := range []struct {
+		tenant string
+		want   int
+	}{
+		{tenantA, http.StatusOK},
+		{tenantB, http.StatusNotFound},
+	} {
+		resp := pgRequest(t, eventServer, http.MethodPost,
+			"/v2/code/snapshots/events", tc.tenant,
+			map[string]any{"snapshot_id": snap})
+		if resp.Code != tc.want {
+			t.Fatalf("forced-RLS event read tenant %s: got HTTP %d, want %d: %s",
+				tc.tenant, resp.Code, tc.want, resp.Body.String())
+		}
+	}
+
 	// Historical resolution and its symbol read must share a tenant-scoped
 	// transaction. This test is RED if either query uses a bare pool connection.
 	history, err := store.QueryHistoricalCode(ctx, tenantA, repo, "main", "commit1", "", "pkg/scope.go", 10)

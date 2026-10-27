@@ -144,6 +144,16 @@ FORCE-RLS shadow tables. It checks the authorized exact and lexical symbol
 version, foreign-tenant empty results and context-free invisibility. The
 existing owner-level methods remain for legacy internal callers and tests;
 impact traversal and other code-indexer paths still require conversion.
+The snapshot-change-event HTTP readback now resolves its snapshot identity
+and reads its event ledger in **one transaction-local tenant context**. A
+restricted `scos_app` integration regression with four forced-RLS shadow
+provenance tables first failed RED (`404 snapshot not found` for the authorized
+tenant), then passed GREEN for authorized access and foreign-tenant 404.
+Fresh disposable PostgreSQL 17/pgvector applied 97 migration/policy scripts;
+the complete code-intelligence PostgreSQL integration package, uncached
+`go test -count=1 ./...`, `go vet ./...`, and `git diff --check` passed.
+This does not make the Git commit label server-attested, and the remaining
+indexing, impact, activation and recovery paths still need RLS qualification.
 **This does not activate RLS on the four production code tables:**
 indexing, activation, recovery, and other symbol-version query paths still
 require coordinated scoping and restricted-role integration before
