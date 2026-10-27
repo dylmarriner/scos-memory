@@ -4,6 +4,31 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P5 code-intelligence degradation diagnostic isolation (2026-10-28, development)
+
+The authenticated retrieval orchestrator's optional code-intelligence lane
+previously copied up to 4096 bytes of an upstream HTTP error body into its
+returned error and logged the complete error. A real HTTP 503 response carrying
+a PostgreSQL connection URI leaked the internal role, database and host into
+application logs (RED). The client now preserves the numeric upstream HTTP
+status without copying untrusted response bodies, while the orchestrator logs
+only the Go error type. The real HTTP regression exercises both the client
+and authenticated retrieval handler, with a real pgx connection-failure path
+rather than a simulated database. The regression also checks that transport
+errors containing credentials in a request URL do not enter logs. Mutating
+type-only logging back to raw error logging reproduced the transport URL
+leak (RED), and restoring the fix passed (GREEN). Five focused test
+repetitions, three race-enabled repetitions, the full uncached Go suite,
+`go vet ./...`, and seven DoD/P6 evidence regressions passed on AMD.
+Local Python consolidation tests could not run because the host Python 3.14
+environment lacks `pydantic`; GitHub CI must independently qualify the
+complete Python suite. The §41 DoD checker still correctly FAILS on PARTIAL.
+This is a bounded P5
+information-disclosure correction, **not** completion of the historical
+system-time ledger, governance §41, or the P0–P8 acceptance gates. Source
+merge, merged-main CI, and production rollout remain distinct gates. No live
+migration, deployment, or paid resources were used.
+
 ## P5 namespace lookup failure response isolation (2026-10-28, development)
 
 The authenticated `POST /v1/retrieve` namespace-authorization path previously
