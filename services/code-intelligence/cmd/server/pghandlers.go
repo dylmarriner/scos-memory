@@ -646,7 +646,7 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 			r.Context(), tenant, req.RepositoryID, req.Branch,
 			req.AsOfCommit, req.SnapshotID, req.Query, req.MaxDepth)
 	} else {
-		impact, err = s.pgStore.ChangeImpact(r.Context(), req.RepositoryID, req.Branch, req.Query, req.MaxDepth)
+		impact, err = s.pgStore.ChangeImpactScoped(r.Context(), tenant, req.RepositoryID, req.Branch, req.Query, req.MaxDepth)
 	}
 	if err != nil {
 		switch {

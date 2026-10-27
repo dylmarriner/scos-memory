@@ -1550,25 +1550,40 @@ const (
 // central symbol (a logging helper called from everywhere) can't turn one
 // request into a full-graph traversal.
 func (s *pgCodeStore) ChangeImpact(ctx context.Context, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
+	return changeImpactWithQuerier(ctx, s.db, repositoryID, branch, query, maxDepth)
+}
+
+// ChangeImpactScoped retains the authenticated tenant's transaction-local RLS
+// identity for seed resolution, every reverse-CALLS hop and ranking evidence.
+// A separate repository-ownership check cannot protect pooled SQL reads.
+func (s *pgCodeStore) ChangeImpactScoped(ctx context.Context, tenantID, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
+	var impact *PGImpact
+	err := s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		var queryErr error
+		impact, queryErr = changeImpactWithQuerier(ctx, tx, repositoryID, branch, query, maxDepth)
+		return queryErr
+	})
+	return impact, err
+}
+
+func changeImpactWithQuerier(ctx context.Context, q codeSQLQuerier, repositoryID, branch, query string, maxDepth int) (*PGImpact, error) {
 	if maxDepth > maxImpactDepth {
 		return nil, errImpactDepthTooLarge
 	}
 	if maxDepth <= 0 {
 		maxDepth = 3
 	}
-	matched, err := s.QueryByPathOrFQN(ctx, repositoryID, branch, query)
+	matched, err := queryByPathOrFQN(ctx, q, repositoryID, branch, query)
 	if err != nil {
 		return nil, fmt.Errorf("resolve query: %w", err)
 	}
 	if len(matched) == 0 && query != "" && !strings.ContainsAny(query, "./") {
-		// A bare name ("Sign") means every declaration of that name; each
-		// is listed in MatchedSymbols, so an ambiguous name is visible.
-		matched, err = s.QueryByPathOrFQN(ctx, repositoryID, branch, "%."+query)
+		matched, err = queryByPathOrFQN(ctx, q, repositoryID, branch, "%."+query)
 		if err != nil {
 			return nil, fmt.Errorf("resolve name: %w", err)
 		}
 	}
-	return s.changeImpactFromMatches(ctx, matched, maxDepth)
+	return changeImpactFromMatchesWithQuerier(ctx, q, matched, maxDepth)
 }
 
 // ChangeImpactHistorical traverses code edges only in the explicitly selected
@@ -1581,35 +1596,45 @@ func (s *pgCodeStore) ChangeImpactHistorical(
 	if maxDepth > maxImpactDepth {
 		return nil, errImpactDepthTooLarge
 	}
-	historical, err := s.QueryHistoricalCode(ctx, tenant, repository, branch, commit, snapshot, query, 100)
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(commit) == "" && strings.TrimSpace(snapshot) == "" {
+		return nil, fmt.Errorf("as_of_commit or snapshot_id is required")
 	}
-	matched, ok := historical["results"].([]PGSymbolVersion)
-	if !ok || len(matched) == 0 || historical["retrieval_mode"] != "historical_exact" {
-		return nil, ErrSymbolNotFound
-	}
-	// QueryHistoricalCode caps results at 100. Hitting that limit means
-	// the actual match count is unknown, so fail instead of hiding affected
-	// symbols behind a deceptively complete blast-radius response.
-	if len(matched) >= 100 {
-		return nil, errHistoricalImpactTooBroad
-	}
-	impact, err := s.changeImpactFromMatches(ctx, matched, maxDepth)
-	if err != nil {
-		return nil, err
-	}
-	impact.Historical = true
-	// Matched versions already carry the resolved immutable generation's
-	// identity; avoid unchecked assertions on the generic response map.
-	impact.SnapshotID = matched[0].SnapshotID
-	impact.CommitID = matched[0].CommitID
-	impact.Branch = matched[0].Branch
-	return impact, nil
+	var impact *PGImpact
+	err := s.withCodeTenantContext(ctx, tenant, func(tx *sql.Tx) error {
+		historical, err := queryHistoricalCodeScoped(ctx, tx, repository, tenant, branch, commit, snapshot, query, 100)
+		if err != nil {
+			return err
+		}
+		matched, ok := historical["results"].([]PGSymbolVersion)
+		if !ok || len(matched) == 0 || historical["retrieval_mode"] != "historical_exact" {
+			return ErrSymbolNotFound
+		}
+		// The historical query caps matches at 100. Never silently report
+		// a partial blast radius when more matches may exist.
+		if len(matched) >= 100 {
+			return errHistoricalImpactTooBroad
+		}
+		impact, err = changeImpactFromMatchesWithQuerier(ctx, tx, matched, maxDepth)
+		if err != nil {
+			return err
+		}
+		impact.Historical = true
+		impact.SnapshotID = matched[0].SnapshotID
+		impact.CommitID = matched[0].CommitID
+		impact.Branch = matched[0].Branch
+		return nil
+	})
+	return impact, err
 }
 
 func (s *pgCodeStore) changeImpactFromMatches(
 	ctx context.Context, matched []PGSymbolVersion, maxDepth int,
+) (*PGImpact, error) {
+	return changeImpactFromMatchesWithQuerier(ctx, s.db, matched, maxDepth)
+}
+
+func changeImpactFromMatchesWithQuerier(
+	ctx context.Context, q codeSQLQuerier, matched []PGSymbolVersion, maxDepth int,
 ) (*PGImpact, error) {
 	if maxDepth > maxImpactDepth {
 		return nil, errImpactDepthTooLarge
@@ -1644,7 +1669,7 @@ func (s *pgCodeStore) changeImpactFromMatches(
 
 	impact.CodeEvidencePaths = codeImpactEvidencePaths(seeds, nil)
 	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
-		next, err := s.callersOf(ctx, frontier, impact.SnapshotID)
+		next, err := callersOfWithQuerier(ctx, q, frontier, impact.SnapshotID)
 		if err != nil {
 			return nil, fmt.Errorf("callers at depth %d: %w", depth, err)
 		}
@@ -1680,7 +1705,7 @@ func (s *pgCodeStore) changeImpactFromMatches(
 		for id := range visited {
 			nodes = append(nodes, id)
 		}
-		edges, err := s.edgesAmong(ctx, nodes)
+		edges, err := edgesAmongWithQuerier(ctx, q, nodes)
 		if err != nil {
 			return nil, fmt.Errorf("load ranking edges: %w", err)
 		}
@@ -1714,6 +1739,10 @@ func (s *pgCodeStore) changeImpactFromMatches(
 // fail closed beyond 4096 CALLS rows rather than silently ranking a partial
 // graph. The SQL LIMIT bounds rows transferred before Go enforces the cap.
 func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string) (map[string][]string, error) {
+	return edgesAmongWithQuerier(ctx, s.db, symbolVersionIDs)
+}
+
+func edgesAmongWithQuerier(ctx context.Context, q codeSQLQuerier, symbolVersionIDs []string) (map[string][]string, error) {
 	edges := make(map[string][]string, len(symbolVersionIDs))
 	if len(symbolVersionIDs) == 0 {
 		return edges, nil
@@ -1733,7 +1762,7 @@ func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string)
 		  AND target_symbol_version_id IN (%s)
 		LIMIT %d`,
 		inList, inList, maxImpactEdges+1)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query edges among visited: %w", err)
 	}
@@ -1762,6 +1791,10 @@ func (s *pgCodeStore) edgesAmong(ctx context.Context, symbolVersionIDs []string)
 // capped at maxImpactNodes+1, with a snapshot filter, so a wide fan-in
 // is rejected rather than silently truncated or polluted by other snapshots.
 func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []string, snapshotID string) ([]PGSymbolVersion, error) {
+	return callersOfWithQuerier(ctx, s.db, targetSymbolVersionIDs, snapshotID)
+}
+
+func callersOfWithQuerier(ctx context.Context, q codeSQLQuerier, targetSymbolVersionIDs []string, snapshotID string) ([]PGSymbolVersion, error) {
 	if len(targetSymbolVersionIDs) == 0 {
 		return nil, nil
 	}
@@ -1781,7 +1814,7 @@ func (s *pgCodeStore) callersOf(ctx context.Context, targetSymbolVersionIDs []st
 		LIMIT %d`,
 		strings.Join(placeholders, ","), len(args)+1, maxImpactNodes+1)
 	args = append(args, snapshotID)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query callers: %w", err)
 	}

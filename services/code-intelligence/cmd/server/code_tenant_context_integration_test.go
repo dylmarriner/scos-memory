@@ -54,9 +54,13 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		"CREATE TABLE " + schema + ".code_symbols (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), repository_id uuid NOT NULL, stable_key text NOT NULL, kind text NOT NULL, first_snapshot_id uuid NOT NULL)",
 		"CREATE TABLE " + schema + ".code_file_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), snapshot_id uuid NOT NULL, path text NOT NULL, content_hash text NOT NULL)",
 		"CREATE TABLE " + schema + ".code_symbol_versions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), symbol_id uuid NOT NULL, snapshot_id uuid NOT NULL, fully_qualified_name text NOT NULL, path text NOT NULL, kind text NOT NULL DEFAULT 'file', content_hash text NOT NULL, status text NOT NULL DEFAULT 'active', search_vector tsvector, extractor text NOT NULL DEFAULT '', signature text, doc_comment text)",
+		"CREATE TABLE " + schema + ".code_edges (snapshot_id uuid NOT NULL, source_symbol_version_id uuid NOT NULL, target_symbol_version_id uuid NOT NULL, relation text NOT NULL)",
 		"GRANT USAGE ON SCHEMA " + schema + " TO scos_app",
 		"GRANT SELECT,INSERT,UPDATE,DELETE ON " + schema + ".code_repositories," + schema + ".code_repository_snapshots," + schema + ".code_symbols," + schema + ".code_symbol_versions TO scos_app",
-		"GRANT SELECT ON " + schema + ".code_file_versions TO scos_app",
+		"GRANT SELECT ON " + schema + ".code_file_versions, " + schema + ".code_edges TO scos_app",
+		"ALTER TABLE " + schema + ".code_edges ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE " + schema + ".code_edges FORCE ROW LEVEL SECURITY",
+		"CREATE POLICY edge_scope ON " + schema + ".code_edges USING (EXISTS (SELECT 1 FROM " + schema + ".code_repository_snapshots WHERE id=snapshot_id))",
 		"ALTER TABLE " + schema + ".code_repositories ENABLE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repositories FORCE ROW LEVEL SECURITY",
 		"ALTER TABLE " + schema + ".code_repository_snapshots ENABLE ROW LEVEL SECURITY",
@@ -312,6 +316,47 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 	if err != nil || len(lexical) != 0 {
 		t.Fatalf("foreign-tenant lexical readback: %+v, %v", lexical, err)
 	}
+	// The impact walk must keep the tenant identity across seed lookup,
+	// reverse-CALLS traversal, and graph ranking. Previously only the
+	// preliminary repository check was scoped; forced RLS hid the seeds.
+	var callerSymbol, callerVersion string
+	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,'scope-caller','function',$2) RETURNING id::text", repo, snap).Scan(&callerSymbol); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, "INSERT INTO "+schema+".code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,content_hash,kind) VALUES($1,$2,'pkg.Caller','pkg/caller.go','caller-hash','function') RETURNING id::text", callerSymbol, snap).Scan(&callerVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, "INSERT INTO "+schema+".code_edges(snapshot_id,source_symbol_version_id,target_symbol_version_id,relation) VALUES($1,$2,$3,'CALLS')", snap, callerVersion, versionID); err != nil {
+		t.Fatal(err)
+	}
+	impact, err := store.ChangeImpactScoped(ctx, tenantA, repo, "main", "pkg/scope.go", 2)
+	if err != nil {
+		t.Fatalf("own-tenant forced-RLS impact failed: %v", err)
+	}
+	if len(impact.DirectDependents) != 1 || impact.DirectDependents[0].SymbolVersionID != callerVersion ||
+		len(impact.CodeEvidencePaths[callerVersion]) != 2 {
+		t.Fatalf("own-tenant forced-RLS impact: %+v, %v", impact, err)
+	}
+	if _, err := store.ChangeImpactScoped(ctx, tenantB, repo, "main", "pkg/scope.go", 2); !errors.Is(err, ErrSymbolNotFound) {
+		t.Fatalf("foreign tenant impact should not find symbols: %v", err)
+	}
+	historicalImpact, err := store.ChangeImpactHistorical(ctx, tenantA, repo, "main", "commit1", "", "pkg/scope.go", 2)
+	if err != nil {
+		t.Fatalf("own-tenant historical forced-RLS impact failed: %v", err)
+	}
+	if len(historicalImpact.DirectDependents) != 1 || historicalImpact.DirectDependents[0].SymbolVersionID != callerVersion {
+		t.Fatalf("own-tenant historical forced-RLS impact: %+v, %v", historicalImpact, err)
+	}
+	if _, err := store.ChangeImpactHistorical(ctx, tenantB, repo, "main", "commit1", "", "pkg/scope.go", 2); !errors.Is(err, errHistoricalNotFound) {
+		t.Fatalf("foreign tenant historical impact: %v", err)
+	}
+	if _, err := store.ChangeImpactScoped(ctx, "not-a-uuid", repo, "main", "pkg/scope.go", 2); err == nil {
+		t.Fatal("invalid tenant accepted for impact")
+	}
+	if _, err := store.ChangeImpactHistorical(ctx, tenantA, repo, "main", "", "", "pkg/scope.go", 2); err == nil {
+		t.Fatal("historical impact accepted missing immutable snapshot selector")
+	}
+
 	branch, err := store.LatestIndexedBranch(ctx, repo, tenantA)
 	if err != nil || branch != "main" {
 		t.Fatalf("tenant-scoped latest branch = %q, %v; want main", branch, err)

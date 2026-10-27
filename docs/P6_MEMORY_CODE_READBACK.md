@@ -204,8 +204,31 @@ count and rejects foreign or invalid tenants (GREEN). The existing test
 database is disposable and production policies remain unchanged.
 
 
+**P8 current and historical impact traversal hardening (2026-10-27,
+PR #92 development):** `POST /v2/code/impact` now calls
+`ChangeImpactScoped` for current snapshots. Seed lookup, every bounded
+reverse-CALLS hop, graph evidence loading and PageRank all run in one
+authenticated transaction-local tenant context. Historical impact now keeps
+its immutable-snapshot resolution and graph traversal in the **same**
+transaction rather than losing RLS identity between the two phases.
+Existing owner-level helpers remain for legacy tests; they are not used
+by the current HTTP route. The historical selector requirement is preserved.
+
+A real PostgreSQL 17/pgvector regression uses an isolated shadow schema
+with forced RLS on repository, snapshot, symbol, version and CALLS-edge
+tables and the non-BYPASSRLS `scos_app` role. It checks a real caller edge
+and its two-node evidence path for the owner, both current and historical
+impact, foreign-tenant denial and invalid tenant/selector rejection.
+The new test was RED before implementation because `ChangeImpactScoped`
+did not exist and passed GREEN after implementation. All 97
+migration/policy scripts and the full code-intelligence integration
+package passed in a disposable database. This is preparatory runtime
+scoping only; the four legacy production provenance tables **still lack
+forced RLS**. Ingestion, SCIP indexing, recovery and other legacy paths
+remain unqualified. No live database was changed.
+
 This does not make the Git commit label server-attested, and the remaining
-indexing, impact, activation and recovery paths still need RLS qualification.
+indexing, activation and recovery paths still need RLS qualification.
 **This does not activate RLS on the four production code tables:**
 indexing, activation, recovery, and other symbol-version query paths still
 require coordinated scoping and restricted-role integration before

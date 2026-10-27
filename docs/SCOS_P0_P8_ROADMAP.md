@@ -874,6 +874,20 @@ policy or live database was changed.
 This is **preparatory only**, not a four-table RLS rollout: remaining
 code-indexer paths and production migrations are unqualified; PR #92 stays
 draft and the security review remains open.
+**P6/P8 current + historical impact tenant scoping (2026-10-27, PR #92
+development, not merged):** current impact now resolves seed symbols,
+traverses reverse-CALLS edges and ranks evidence through one transaction
+carrying the authenticated tenant's RLS context. Historical impact
+likewise resolves its immutable generation and traverses/ranks within
+one transaction, preserving ambiguous-generation and selector guards.
+A restricted-role PostgreSQL 17 shadow-schema regression with forced RLS
+on five code/edge tables verifies real owner-visible caller evidence,
+historical evidence, foreign-tenant denial and invalid selectors. The
+new test failed RED at compile time before the scoped API existed, then
+passed GREEN; 97 migration/policy scripts and the complete code-indexer
+integration suite passed in a disposable database. No production RLS
+policies were enabled; indexing, SCIP import and recovery remain blockers.
+
 See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
 expansion, multi-hop traversal, ranking, inference, server-attested Git
 provenance and production qualification remain open.
