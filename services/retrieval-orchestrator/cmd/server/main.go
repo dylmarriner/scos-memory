@@ -178,6 +178,28 @@ func (s *server) readinessCheck() error {
 
 const defaultMaxResults = 20
 const defaultTokenBudget = 4000
+
+// The candidate count is multiplied across independent retrieval lanes.
+// Keep caller-controlled work bounded before planning any database queries.
+const maxRetrievalResults = 100
+const maxRetrievalTokenBudget = 32768
+
+func validateRetrievalBudgets(requestedResults, requestedTokens int) (int, int, error) {
+	if requestedResults < 0 || requestedResults > maxRetrievalResults {
+		return 0, 0, fmt.Errorf("max_results must be between 0 and %d", maxRetrievalResults)
+	}
+	if requestedTokens < 0 || requestedTokens > maxRetrievalTokenBudget {
+		return 0, 0, fmt.Errorf("token_budget must be between 0 and %d", maxRetrievalTokenBudget)
+	}
+	if requestedResults == 0 {
+		requestedResults = defaultMaxResults
+	}
+	if requestedTokens == 0 {
+		requestedTokens = defaultTokenBudget
+	}
+	return requestedResults, requestedTokens, nil
+}
+
 const rrfK = 60.0
 
 const version = "0.1.0"
@@ -388,13 +410,10 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maxResults := req.MaxResults
-	if maxResults <= 0 {
-		maxResults = defaultMaxResults
-	}
-	tokenBudget := req.TokenBudget
-	if tokenBudget <= 0 {
-		tokenBudget = defaultTokenBudget
+	maxResults, tokenBudget, budgetErr := validateRetrievalBudgets(req.MaxResults, req.TokenBudget)
+	if budgetErr != nil {
+		http.Error(w, budgetErr.Error(), http.StatusBadRequest)
+		return
 	}
 
 	if len(req.Filters) > 0 {
