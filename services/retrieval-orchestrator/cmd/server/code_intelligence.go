@@ -20,6 +20,9 @@ import (
 )
 
 type codeQueryResult struct {
+	SnapshotID         string  `json:"SnapshotID,omitempty"`
+	CommitID           string  `json:"CommitID,omitempty"`
+	Branch             string  `json:"Branch,omitempty"`
 	SymbolID           string  `json:"SymbolID"`
 	SymbolVersionID    string  `json:"SymbolVersionID"`
 	FullyQualifiedName string  `json:"FullyQualifiedName"`
@@ -34,12 +37,24 @@ type codeQueryResult struct {
 }
 
 type codeQueryResponse struct {
+	Historical      bool              `json:"historical,omitempty"`
+	SnapshotID      string            `json:"snapshot_id,omitempty"`
+	CommitID        string            `json:"commit_id,omitempty"`
+	Branch          string            `json:"branch,omitempty"`
 	Results         []codeQueryResult `json:"results"`
 	RetrievalMode   string            `json:"retrieval_mode"`
 	Signals         []string          `json:"signals,omitempty"`
 	DegradedModels  []string          `json:"degraded_models,omitempty"`
 	DegradedSources []string          `json:"degraded_sources,omitempty"`
 	EmbeddingSpace  json.RawMessage   `json:"embedding_space,omitempty"`
+}
+
+// codeQueryHTTPError preserves only the downstream status, never the body.
+// Historical callers may distinguish not-found and ambiguous generations.
+type codeQueryHTTPError struct{ Status int }
+
+func (e *codeQueryHTTPError) Error() string {
+	return fmt.Sprintf("code-intelligence returned HTTP %d", e.Status)
 }
 
 type codeIntelligenceClient struct {
@@ -87,6 +102,19 @@ func newCodeIntelligenceClientFromEnvironment() (*codeIntelligenceClient, error)
 }
 
 func (c *codeIntelligenceClient) Query(ctx context.Context, tenantID, principalID, repositoryID, branch, query string, limit int) (*codeQueryResponse, error) {
+	return c.query(ctx, tenantID, principalID, repositoryID, branch, query, limit, "", "")
+}
+
+// QueryHistorical reads a concrete immutable code generation. It never falls
+// back to active code when the historical service rejects a selector.
+func (c *codeIntelligenceClient) QueryHistorical(ctx context.Context, tenantID, principalID, repositoryID, branch, query string, limit int, asOfCommit, snapshotID string) (*codeQueryResponse, error) {
+	if asOfCommit == "" && snapshotID == "" {
+		return nil, fmt.Errorf("historical query requires a commit or snapshot")
+	}
+	return c.query(ctx, tenantID, principalID, repositoryID, branch, query, limit, asOfCommit, snapshotID)
+}
+
+func (c *codeIntelligenceClient) query(ctx context.Context, tenantID, principalID, repositoryID, branch, query string, limit int, asOfCommit, snapshotID string) (*codeQueryResponse, error) {
 	if c == nil || c.httpClient == nil || c.baseURL == "" {
 		return nil, fmt.Errorf("code-intelligence is not configured")
 	}
@@ -96,7 +124,14 @@ func (c *codeIntelligenceClient) Query(ctx context.Context, tenantID, principalI
 	if limit <= 0 {
 		limit = 20
 	}
-	body, err := json.Marshal(map[string]any{"repository_id": repositoryID, "branch": branch, "query": query, "max_results": limit})
+	payload := map[string]any{"repository_id": repositoryID, "branch": branch, "query": query, "max_results": limit}
+	if asOfCommit != "" {
+		payload["as_of_commit"] = asOfCommit
+	}
+	if snapshotID != "" {
+		payload["snapshot_id"] = snapshotID
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -124,11 +159,25 @@ func (c *codeIntelligenceClient) Query(ctx context.Context, tenantID, principalI
 		// Drain a bounded amount so short error responses keep HTTP connections
 		// reusable. Larger responses are deliberately not read unboundedly.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("code-intelligence returned HTTP %d", resp.StatusCode)
+		return nil, &codeQueryHTTPError{Status: resp.StatusCode}
 	}
 	var out codeQueryResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode code-intelligence response: %w", err)
+	}
+	if asOfCommit != "" || snapshotID != "" {
+		// A 2xx response is insufficient: the code service must prove that
+		// it returned the requested immutable generation, not active code.
+		if !out.Historical || out.SnapshotID == "" || out.CommitID == "" || out.Branch != branch ||
+			(asOfCommit != "" && out.CommitID != asOfCommit) ||
+			(snapshotID != "" && out.SnapshotID != snapshotID) {
+			return nil, fmt.Errorf("code-intelligence historical provenance mismatch")
+		}
+		for _, item := range out.Results {
+			if item.SymbolVersionID == "" || item.SnapshotID != out.SnapshotID || item.CommitID != out.CommitID || item.Branch != branch {
+				return nil, fmt.Errorf("code-intelligence historical result provenance mismatch")
+			}
+		}
 	}
 	if out.Results == nil {
 		out.Results = []codeQueryResult{}

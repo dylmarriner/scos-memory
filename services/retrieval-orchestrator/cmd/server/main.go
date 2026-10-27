@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -57,6 +58,8 @@ type RetrieveRequest struct {
 	Branch              string            `json:"branch,omitempty"`
 	AsOfValidTime       string            `json:"as_of_valid_time,omitempty"`
 	AsOfSystemTime      string            `json:"as_of_system_time,omitempty"`
+	AsOfCommit          string            `json:"as_of_commit,omitempty"`
+	SnapshotID          string            `json:"snapshot_id,omitempty"`
 }
 
 type RetrievalResult struct {
@@ -409,6 +412,13 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query is required", http.StatusBadRequest)
 		return
 	}
+	// Historical selectors are code-only. Do not accept them without the
+	// repository/branch binding that makes the indexed generation unambiguous.
+	historicalCode := req.AsOfCommit != "" || req.SnapshotID != ""
+	if historicalCode && (strings.TrimSpace(req.RepositoryID) == "" || strings.TrimSpace(req.Branch) == "") {
+		http.Error(w, "historical code retrieval requires repository_id and branch", http.StatusBadRequest)
+		return
+	}
 
 	maxResults, tokenBudget, budgetErr := validateRetrievalBudgets(req.MaxResults, req.TokenBudget)
 	if budgetErr != nil {
@@ -422,6 +432,11 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	plan := planRetrieval(req, maxResults)
+	// A historical code selector is explicit intent even when the natural
+	// language planner classifies the query as memory-only.
+	if historicalCode {
+		plan.CodeLimit = maxResults
+	}
 	meta := retrievalExecutionMeta{TextSpace: s.textSpace, PlannerMode: plan.Mode}
 
 	// Repo-aware P4 code retrieval is independent from memory namespace
@@ -430,12 +445,39 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	var codeResponse *codeQueryResponse
 	if plan.CodeLimit > 0 {
 		if s.codeIntelligence == nil {
+			if historicalCode {
+				http.Error(w, "historical code retrieval unavailable", http.StatusBadGateway)
+				return
+			}
 			meta.DegradedSources = append(meta.DegradedSources, "code_intelligence")
 			codeResponse = &codeQueryResponse{Results: []codeQueryResult{}, RetrievalMode: "unavailable", DegradedSources: []string{"code_intelligence"}}
 		} else {
 			var codeErr error
-			codeResponse, codeErr = s.codeIntelligence.Query(ctx, req.TenantID, req.PrincipalID, req.RepositoryID, req.Branch, req.Query, plan.CodeLimit)
+			if historicalCode {
+				codeResponse, codeErr = s.codeIntelligence.QueryHistorical(ctx, req.TenantID, req.PrincipalID, req.RepositoryID, req.Branch, req.Query, plan.CodeLimit, req.AsOfCommit, req.SnapshotID)
+			} else {
+				codeResponse, codeErr = s.codeIntelligence.Query(ctx, req.TenantID, req.PrincipalID, req.RepositoryID, req.Branch, req.Query, plan.CodeLimit)
+			}
 			if codeErr != nil {
+				if historicalCode {
+					log.Printf("historical code retrieval failed (%T)", codeErr)
+					var statusErr *codeQueryHTTPError
+					if errors.As(codeErr, &statusErr) {
+						switch statusErr.Status {
+						case http.StatusBadRequest:
+							http.Error(w, "invalid historical code selector", http.StatusBadRequest)
+							return
+						case http.StatusNotFound:
+							http.Error(w, "historical code snapshot not found", http.StatusNotFound)
+							return
+						case http.StatusConflict:
+							http.Error(w, "historical commit is ambiguous; specify snapshot_id", http.StatusConflict)
+							return
+						}
+					}
+					http.Error(w, "historical code retrieval unavailable", http.StatusBadGateway)
+					return
+				}
 				log.Printf("code-intelligence retrieval degraded (%T)", codeErr)
 				meta.DegradedSources = append(meta.DegradedSources, "code_intelligence")
 				codeResponse = &codeQueryResponse{Results: []codeQueryResult{}, RetrievalMode: "unavailable", DegradedSources: []string{"code_intelligence"}}
@@ -1608,6 +1650,15 @@ func appliedRestrictions(req RetrieveRequest) map[string]any {
 	if req.AsOfValidTime != "" {
 		out["as_of_valid_time"] = req.AsOfValidTime
 		out["temporal_scope"] = temporalScopeFor(req.AsOfValidTime)
+	}
+	if req.AsOfCommit != "" || req.SnapshotID != "" {
+		out["code_temporal_scope"] = "immutable_snapshot"
+		if req.AsOfCommit != "" {
+			out["as_of_commit"] = req.AsOfCommit
+		}
+		if req.SnapshotID != "" {
+			out["snapshot_id"] = req.SnapshotID
+		}
 	}
 	if len(req.MemoryClasses) > 0 {
 		out["memory_classes"] = req.MemoryClasses
