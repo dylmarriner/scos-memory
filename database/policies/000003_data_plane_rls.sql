@@ -73,9 +73,21 @@ CREATE POLICY memory_candidates_namespace_access ON memory_candidates
 CREATE POLICY memory_evidence_item_access ON memory_evidence
     FOR ALL USING (EXISTS (SELECT 1 FROM memory_items i WHERE i.id = memory_evidence.memory_id))
     WITH CHECK (EXISTS (SELECT 1 FROM memory_items i WHERE i.id = memory_evidence.memory_id));
+-- A readable source does not grant visibility into a hidden target. Both
+-- endpoints must be visible to the same scoped principal and tenant.
 CREATE POLICY memory_relations_item_access ON memory_relations
-    FOR ALL USING (EXISTS (SELECT 1 FROM memory_items i WHERE i.id = memory_relations.source_memory_id))
-    WITH CHECK (EXISTS (SELECT 1 FROM memory_items i WHERE i.id = memory_relations.source_memory_id));
+    FOR ALL USING (EXISTS (
+        SELECT 1 FROM memory_items source
+        JOIN memory_items target ON target.id = memory_relations.target_memory_id
+        WHERE source.id = memory_relations.source_memory_id
+          AND source.tenant_id = target.tenant_id
+    ))
+    WITH CHECK (EXISTS (
+        SELECT 1 FROM memory_items source
+        JOIN memory_items target ON target.id = memory_relations.target_memory_id
+        WHERE source.id = memory_relations.source_memory_id
+          AND source.tenant_id = target.tenant_id
+    ));
 CREATE POLICY memory_embeddings_item_access ON memory_embeddings
     FOR ALL USING (EXISTS (SELECT 1 FROM memory_versions v WHERE v.id = memory_embeddings.memory_version_id))
     WITH CHECK (EXISTS (SELECT 1 FROM memory_versions v WHERE v.id = memory_embeddings.memory_version_id));

@@ -988,7 +988,18 @@ func loadRelations(ctx context.Context, db querier, tenantID string) ([]*Tempora
 		SELECT r.source_memory_id, r.target_memory_id, r.relation_type, r.confidence_score, r.created_at
 		FROM memory_relations r
 		JOIN memory_items mi ON mi.id = r.source_memory_id
+        JOIN memory_items target ON target.id = r.target_memory_id AND target.tenant_id = mi.tenant_id
+        JOIN namespaces source_ns ON source_ns.id = mi.namespace_id
+        JOIN namespaces target_ns ON target_ns.id = target.namespace_id
+        JOIN namespace_memberships source_member ON source_member.namespace_id = mi.namespace_id
+            AND source_member.principal_id = NULLIF(current_setting('scos.principal_id',true),'')::uuid
+            AND source_member.can_read
+        JOIN namespace_memberships target_member ON target_member.namespace_id = target.namespace_id
+            AND target_member.principal_id = NULLIF(current_setting('scos.principal_id',true),'')::uuid
+            AND target_member.can_read
 		WHERE mi.tenant_id = $1
+          AND mi.sensitivity <= source_ns.sensitivity_ceiling
+          AND target.sensitivity <= target_ns.sensitivity_ceiling
 		ORDER BY r.created_at DESC
 	`, tenantID)
 	if err != nil {

@@ -664,7 +664,24 @@ func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespace
 		       mi.namespace_id,
 		       1.0::double precision AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now())) AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+            'relation_type', rel.relation_type,
+            'target_memory_id', other.id,
+            'confidence_score', rel.confidence_score) ORDER BY rel.created_at)
+            FROM memory_relations rel
+            JOIN memory_items other ON other.id = CASE WHEN rel.source_memory_id=mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END
+            WHERE (rel.source_memory_id=mi.id OR rel.target_memory_id=mi.id)
+              AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
+              AND other.tenant_id=mi.tenant_id
+              AND other.status IN ('active')
+              AND other.namespace_id=ANY($2::uuid[])
+              AND other.sensitivity <= $3
+              AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
+              AND (other.valid_from IS NULL OR other.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.valid_until IS NULL OR other.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.expires_at IS NULL OR other.expires_at > now())
+              AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
@@ -691,7 +708,24 @@ func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namesp
 		       mi.namespace_id,
 		       ts_rank(to_tsvector('english', COALESCE(mi.title, '') || ' ' || COALESCE(mv.content, '')), to_tsquery('english', $4)) AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now())) AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+            'relation_type', rel.relation_type,
+            'target_memory_id', other.id,
+            'confidence_score', rel.confidence_score) ORDER BY rel.created_at)
+            FROM memory_relations rel
+            JOIN memory_items other ON other.id = CASE WHEN rel.source_memory_id=mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END
+            WHERE (rel.source_memory_id=mi.id OR rel.target_memory_id=mi.id)
+              AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
+              AND other.tenant_id=mi.tenant_id
+              AND other.status IN ('active')
+              AND other.namespace_id=ANY($2::uuid[])
+              AND other.sensitivity <= $3
+              AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
+              AND (other.valid_from IS NULL OR other.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.valid_until IS NULL OR other.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.expires_at IS NULL OR other.expires_at > now())
+              AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
@@ -760,11 +794,18 @@ func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespac
 				'content_hash', e.content_hash) ORDER BY e.created_at)
 			FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb) AS evidence,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object(
-				'relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END,
+				'relation_type', rel.relation_type, 'target_memory_id', other.id,
 				'confidence_score', rel.confidence_score) ORDER BY rel.created_at)
 			FROM memory_relations rel
+            JOIN memory_items other ON other.id = CASE WHEN rel.source_memory_id=mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END
 			WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id)
 			  AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%')
+              AND other.tenant_id=mi.tenant_id AND other.status='active'
+              AND other.namespace_id=ANY($2::uuid[]) AND other.sensitivity <= $3
+              AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
+              AND (other.valid_from IS NULL OR other.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.valid_until IS NULL OR other.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.expires_at IS NULL OR other.expires_at > now())
 			  AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
 			  AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb) AS conflicts
 		FROM memory_items mi
@@ -812,7 +853,24 @@ func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, na
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
 		       mi.namespace_id,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now())) AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+            'relation_type', rel.relation_type,
+            'target_memory_id', other.id,
+            'confidence_score', rel.confidence_score) ORDER BY rel.created_at)
+            FROM memory_relations rel
+            JOIN memory_items other ON other.id = CASE WHEN rel.source_memory_id=mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END
+            WHERE (rel.source_memory_id=mi.id OR rel.target_memory_id=mi.id)
+              AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
+              AND other.tenant_id=mi.tenant_id
+              AND other.status IN ('active', 'candidate')
+              AND other.namespace_id IN (SELECT n.id FROM namespaces n JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read WHERE n.tenant_id=$1 AND n.canonical_name=ANY($3::text[]))
+              AND other.sensitivity <= $6
+              AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
+              AND (other.valid_from IS NULL OR other.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.valid_until IS NULL OR other.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.expires_at IS NULL OR other.expires_at > now())
+              AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
@@ -888,7 +946,24 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 			SELECT DISTINCT ON (mi.id) mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary) AS content, mi.type,
 			       mi.authority_level, mi.confidence_score, mi.sensitivity, mi.namespace_id,
 			       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id=mi.id),'[]'::jsonb) AS evidence,
-			       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', r.relation_type, 'target_memory_id', CASE WHEN r.source_memory_id = mi.id THEN r.target_memory_id ELSE r.source_memory_id END, 'confidence_score', r.confidence_score) ORDER BY r.created_at) FROM memory_relations r WHERE (r.source_memory_id=mi.id OR r.target_memory_id=mi.id) AND (r.relation_type = 'contradicts' OR r.relation_type ILIKE '%conflict%') AND (r.valid_from IS NULL OR r.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now())) AND (r.valid_until IS NULL OR r.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))),'[]'::jsonb) AS conflicts,
+			       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+            'relation_type', r.relation_type,
+            'target_memory_id', other.id,
+            'confidence_score', r.confidence_score) ORDER BY r.created_at)
+            FROM memory_relations r
+            JOIN memory_items other ON other.id = CASE WHEN r.source_memory_id=mi.id THEN r.target_memory_id ELSE r.source_memory_id END
+            WHERE (r.source_memory_id=mi.id OR r.target_memory_id=mi.id)
+              AND (r.relation_type='contradicts' OR r.relation_type ILIKE '%conflict%')
+              AND other.tenant_id=mi.tenant_id
+              AND other.status IN ('active')
+              AND other.namespace_id IN (SELECT n.id FROM namespaces n JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read WHERE n.tenant_id=$1 AND n.canonical_name=ANY($5::text[]))
+              AND other.sensitivity <= $4
+              AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
+              AND (other.valid_from IS NULL OR other.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.valid_until IS NULL OR other.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.expires_at IS NULL OR other.expires_at > now())
+              AND (r.valid_from IS NULL OR r.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (r.valid_until IS NULL OR r.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb) AS conflicts,
 			       array_position($3::uuid[], rel.source_memory_id) AS seed_pos
 			FROM memory_relations rel
 			JOIN memory_items mi ON mi.id=rel.target_memory_id
@@ -1390,7 +1465,24 @@ func (s *server) recentMemories(ctx context.Context, req RetrieveRequest, namesp
 		       mi.namespace_id,
 		       0::double precision AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now())) AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+            'relation_type', rel.relation_type,
+            'target_memory_id', other.id,
+            'confidence_score', rel.confidence_score) ORDER BY rel.created_at)
+            FROM memory_relations rel
+            JOIN memory_items other ON other.id = CASE WHEN rel.source_memory_id=mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END
+            WHERE (rel.source_memory_id=mi.id OR rel.target_memory_id=mi.id)
+              AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
+              AND other.tenant_id=mi.tenant_id
+              AND other.status IN ('active')
+              AND other.namespace_id=ANY($2::uuid[])
+              AND other.sensitivity <= $3
+              AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
+              AND (other.valid_from IS NULL OR other.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.valid_until IS NULL OR other.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.expires_at IS NULL OR other.expires_at > now())
+              AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
@@ -1416,7 +1508,24 @@ func (s *server) activeTaskState(ctx context.Context, req RetrieveRequest, names
 		       mi.namespace_id,
 		       0::double precision AS lexical_score,
 		       COALESCE((SELECT jsonb_agg(jsonb_build_object('id', e.id, 'kind', e.evidence_kind, 'reference_id', e.reference_id, 'content_hash', e.content_hash) ORDER BY e.created_at) FROM memory_evidence e WHERE e.memory_id = mi.id), '[]'::jsonb),
-		       COALESCE((SELECT jsonb_agg(jsonb_build_object('relation_type', rel.relation_type, 'target_memory_id', CASE WHEN rel.source_memory_id = mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END, 'confidence_score', rel.confidence_score) ORDER BY rel.created_at) FROM memory_relations rel WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id) AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%') AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now())) AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
+		       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+            'relation_type', rel.relation_type,
+            'target_memory_id', other.id,
+            'confidence_score', rel.confidence_score) ORDER BY rel.created_at)
+            FROM memory_relations rel
+            JOIN memory_items other ON other.id = CASE WHEN rel.source_memory_id=mi.id THEN rel.target_memory_id ELSE rel.source_memory_id END
+            WHERE (rel.source_memory_id=mi.id OR rel.target_memory_id=mi.id)
+              AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
+              AND other.tenant_id=mi.tenant_id
+              AND other.status IN ('active')
+              AND other.namespace_id=ANY($2::uuid[])
+              AND other.sensitivity <= $3
+              AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
+              AND (other.valid_from IS NULL OR other.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.valid_until IS NULL OR other.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (other.expires_at IS NULL OR other.expires_at > now())
+              AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
+              AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))), '[]'::jsonb)
 		FROM memory_items mi
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
