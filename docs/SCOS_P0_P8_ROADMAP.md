@@ -886,7 +886,28 @@ historical evidence, foreign-tenant denial and invalid selectors. The
 new test failed RED at compile time before the scoped API existed, then
 passed GREEN; 97 migration/policy scripts and the complete code-indexer
 integration suite passed in a disposable database. No production RLS
-policies were enabled; indexing, SCIP import and recovery remain blockers.
+policies were enabled; file/SCIP indexing is scoped in a later increment,
+while recovery and remaining legacy paths remain blockers.
+
+**P6 file/SCIP indexing under tenant-local transactions (2026-10-27,
+PR #92 development, not merged):** production scan and SCIP handlers now
+invoke scoped indexers. Snapshot/repository ownership, symbol/version
+writes, change-event ledger, status transitions and activation share one
+authenticated tenant-local transaction. A real restricted-role PostgreSQL
+test first failed RED at compile time, then passed GREEN for actual Go
+file and SCIP indexing, foreign-tenant denial and connection-context
+cleanup. The existing event-ledger test fixture now uses the same scoped
+runtime method. In an isolated PostgreSQL 17 database with all 97
+migration/policy scripts, candidate forced-RLS policies on all four
+code-provenance tables denied direct context-free reads (0/0/0/0 rows)
+and permitted tenant-scoped reads. The opt-in
+`SCOS_EXPECT_CODE_PROVENANCE_RLS=1` integration gate and the full
+code-intelligence package passed under those **disposable-only**
+policies, as did the uncached full Go suite, Go vet and tagged
+memory-intelligence PostgreSQL integration tests.
+**No production RLS migration, merge or rollout.**
+Background recovery and other legacy operations still need scoping
+and acceptance before enabling production forced RLS.
 
 See `docs/P6_MEMORY_CODE_READBACK.md`. **Partial only:** reverse code→memory
 expansion, multi-hop traversal, ranking, inference, server-attested Git

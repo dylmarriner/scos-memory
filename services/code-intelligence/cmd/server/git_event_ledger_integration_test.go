@@ -153,7 +153,7 @@ func TestPGSnapshotChangeEventsEnforceRestrictedRole(t *testing.T) {
 	}
 	changed := "package guard\nfunc Guard(){println(1)}\n"
 	restrictedStore := newPGCodeStore(app)
-	if err := restrictedStore.IndexSnapshot(ctx, next, repo, []PGFileInput{{
+	if err := restrictedStore.IndexSnapshotScoped(ctx, tenant, next, repo, []PGFileInput{{
 		Path: "guard.go", Language: "go", Content: changed, ContentHash: hashContent(changed),
 	}}); err != nil {
 		t.Fatalf("runtime app-role indexing: %v", err)

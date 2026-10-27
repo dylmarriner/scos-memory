@@ -224,14 +224,43 @@ did not exist and passed GREEN after implementation. All 97
 migration/policy scripts and the full code-intelligence integration
 package passed in a disposable database. This is preparatory runtime
 scoping only; the four legacy production provenance tables **still lack
-forced RLS**. Ingestion, SCIP indexing, recovery and other legacy paths
-remain unqualified. No live database was changed.
+forced RLS**. File and SCIP ingestion receive additional scoping below;
+recovery and other legacy paths remain unqualified. No live database was changed.
 
-This does not make the Git commit label server-attested, and the remaining
-indexing, activation and recovery paths still need RLS qualification.
+**P6 file and SCIP indexing transaction scoping (2026-10-27, PR #92
+development):** production file indexing and SCIP import now share
+transaction-local tenant context across repository/snapshot ownership,
+symbol/version writes, change-ledger emission, status updates and atomic
+activation. Both paths use an explicit tenant+repository+snapshot ownership
+guard even before production code-table RLS is enabled. Legacy owner-level
+index helpers remain available to existing migration tests, while the
+runtime HTTP/scan entry points use the scoped variants. The restricted-role
+event-ledger integration fixture was updated to exercise the production
+scoped path rather than a context-free legacy helper.
+
+The new real-PostgreSQL integration test was RED before the scoped APIs
+existed and GREEN afterward. It exercises actual Go-source and SCIP
+indexing as `scos_app`, foreign-tenant denial and absence of leaked tenant
+context on the pooled connection. On a **disposable** PostgreSQL 17
+instance with all 97 migration/policy files, candidate forced-RLS
+policies were applied to the four code provenance tables for qualification
+only. Direct `scos_app` reads with no tenant context returned
+`0|0|0|0`; the new opt-in
+`TestPGCodeProvenanceForcedRLSQualification` verified all four policies
+were enabled/forced, denied unscoped reads and permitted scoped owner
+reads. The full code-intelligence integration suite passed under these
+temporary policies after its restricted-role event fixture was corrected.
+The uncached full Go suite, Go vet and tagged memory-intelligence PostgreSQL
+integration suite also passed on the same disposable forced-RLS database.
+**No production policy migration was added or deployed.** Recovery,
+background maintenance and remaining unscoped callers still require
+qualification before those policies can be committed safely.
+
+This does not make the Git commit label server-attested. Additional
+recovery and maintenance paths still need RLS qualification.
 **This does not activate RLS on the four production code tables:**
-indexing, activation, recovery, and other symbol-version query paths still
-require coordinated scoping and restricted-role integration before
+remaining legacy indexing/activation helpers, recovery and maintenance paths
+still require coordinated scoping and restricted-role integration before
 migration/merge. No production migration was attempted.
 
 

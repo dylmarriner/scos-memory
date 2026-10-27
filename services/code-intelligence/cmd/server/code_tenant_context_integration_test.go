@@ -443,3 +443,141 @@ func TestPGCodeRepositoryWritesRequireTransactionLocalTenant(t *testing.T) {
 		t.Fatalf("invalid tenant ID should be rejected before DB work: %v", err)
 	}
 }
+
+// TestPGScopedIndexingAsRestrictedRole exercises real file and SCIP indexing
+// using the non-BYPASSRLS runtime role, including foreign-tenant denial.
+// Unlike the shadow-schema read tests, this covers the full migrated schema.
+func TestPGScopedIndexingAsRestrictedRole(t *testing.T) {
+	adminDSN := os.Getenv("SCOS_CODE_STORE_TEST_DSN")
+	appDSN := os.Getenv("SCOS_APP_TEST_DATABASE_URL")
+	if adminDSN == "" || appDSN == "" {
+		t.Skip("requires owner and restricted-role disposable PostgreSQL DSNs")
+	}
+	ctx := context.Background()
+	admin, err := sql.Open("pgx", adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	app, err := sql.Open("pgx", appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	app.SetMaxOpenConns(1)
+	store := newPGCodeStore(app)
+	tenantA := testTenant(t, admin)
+	tenantB := testTenant(t, admin)
+	repo, err := store.EnsureRepository(ctx, tenantA, "/p6-scoped-index/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := store.CreateSnapshot(ctx, repo, tenantA, "main", "file-index", "go-parser", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "package pkg\nfunc ScopedIndex() {}\n"
+	files := []PGFileInput{{Path: "pkg/index.go", Language: "go", ContentHash: hashContent(source), Content: source}}
+	if err := store.IndexSnapshotScoped(ctx, tenantB, snap, repo, files); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign tenant indexed file snapshot: %v", err)
+	}
+	if err := store.IndexSnapshotScoped(ctx, tenantA, snap, repo, files); err != nil {
+		t.Fatalf("own tenant file indexing: %v", err)
+	}
+	results, err := store.QueryByPathOrFQNScoped(ctx, tenantA, repo, "main", "pkg/index.go")
+	if err != nil || len(results) == 0 {
+		t.Fatalf("file indexing lost owner-visible evidence: %+v, %v", results, err)
+	}
+	// Transaction-local context must not survive on the pooled connection.
+	var leaked sql.NullString
+	if err := app.QueryRowContext(ctx, "SELECT current_setting('scos.tenant_id',true)").Scan(&leaked); err != nil {
+		t.Fatal(err)
+	}
+	if leaked.Valid && leaked.String != "" {
+		t.Fatalf("tenant identity leaked outside indexing transaction")
+	}
+	scipSnap, err := store.CreateSnapshot(ctx, repo, tenantA, "main", "scip-index", "scip", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.IndexSnapshotFromSCIPScoped(ctx, tenantB, scipSnap, repo, sampleSCIPIndex()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("foreign tenant indexed SCIP snapshot: %v", err)
+	}
+	count, err := store.IndexSnapshotFromSCIPScoped(ctx, tenantA, scipSnap, repo, sampleSCIPIndex())
+	if err != nil || count == 0 {
+		t.Fatalf("own tenant SCIP indexing: count=%d err=%v", count, err)
+	}
+}
+
+// TestPGCodeProvenanceForcedRLSQualification is an opt-in release gate for a
+// disposable database with the candidate four-table policies installed.
+// It is intentionally not enabled by ordinary CI until the coordinated
+// production policy migration is ready for review.
+func TestPGCodeProvenanceForcedRLSQualification(t *testing.T) {
+	if os.Getenv("SCOS_EXPECT_CODE_PROVENANCE_RLS") != "1" {
+		t.Skip("candidate code-provenance RLS policies not yet in production migrations")
+	}
+	adminDSN := os.Getenv("SCOS_CODE_STORE_TEST_DSN")
+	appDSN := os.Getenv("SCOS_APP_TEST_DATABASE_URL")
+	if adminDSN == "" || appDSN == "" {
+		t.Fatal("forced-RLS qualification requires both owner and restricted-role DSNs")
+	}
+	ctx := context.Background()
+	admin, err := sql.Open("pgx", adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	app, err := sql.Open("pgx", appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	app.SetMaxOpenConns(1)
+	owner := newPGCodeStore(admin)
+	tenant := testTenant(t, admin)
+	repo, err := owner.EnsureRepository(ctx, tenant, "/p6-forced-rls/"+t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := owner.CreateSnapshot(ctx, repo, tenant, "main", "rls-qualification", "go-parser", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "package pkg\nfunc Provenance() {}\n"
+	if err := owner.IndexSnapshot(ctx, snap, repo, []PGFileInput{{Path: "pkg/rls.go", Language: "go", ContentHash: hashContent(source), Content: source}}); err != nil {
+		t.Fatal(err)
+	}
+	tables := []string{"code_repositories", "code_repository_snapshots", "code_symbols", "code_symbol_versions"}
+	for _, table := range tables {
+		var enabled, forced bool
+		if err := admin.QueryRowContext(ctx, "SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid=$1::regclass", table).Scan(&enabled, &forced); err != nil {
+			t.Fatal(err)
+		}
+		if !enabled || !forced {
+			t.Fatalf("%s missing enforced RLS", table)
+		}
+		var visible int
+		if err := app.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&visible); err != nil {
+			t.Fatal(err)
+		}
+		if visible != 0 {
+			t.Fatalf("unscoped scos_app can read %d %s rows", visible, table)
+		}
+	}
+	store := newPGCodeStore(app)
+	if err := store.withCodeTenantContext(ctx, tenant, func(tx *sql.Tx) error {
+		for _, table := range tables {
+			var visible int
+			if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&visible); err != nil {
+				return err
+			}
+			if visible == 0 {
+				return fmt.Errorf("owner cannot see %s under forced RLS", table)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -276,12 +276,44 @@ func lockSnapshotForMutation(ctx context.Context, tx *sql.Tx, snapshotID string)
 // partway through never leaves activate_code_snapshot to promote an
 // incomplete generation.
 func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryID string, files []PGFileInput) error {
-	started := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin index transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := s.indexSnapshotLocked(ctx, tx, snapshotID, repositoryID, files); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// verifyCodeSnapshotTenant is an explicit ownership guard even before the
+// legacy provenance tables acquire FORCE RLS. It runs in the same transaction
+// as the subsequent indexing, so tenant identity cannot be lost to pooling.
+func verifyCodeSnapshotTenant(ctx context.Context, tx *sql.Tx, tenantID, snapshotID, repositoryID string) error {
+	var owned int
+	return tx.QueryRowContext(ctx, `
+        SELECT 1 FROM code_repository_snapshots snap
+        JOIN code_repositories repo ON repo.id = snap.repository_id
+        WHERE snap.id=$1 AND snap.repository_id=$2
+          AND snap.tenant_id=$3 AND repo.tenant_id=$3`,
+		snapshotID, repositoryID, tenantID).Scan(&owned)
+}
+
+// IndexSnapshotScoped is the production file-indexing entry point. All
+// snapshot, symbol, version and activation SQL shares one authenticated
+// transaction-local tenant identity, including the ownership check.
+func (s *pgCodeStore) IndexSnapshotScoped(ctx context.Context, tenantID, snapshotID, repositoryID string, files []PGFileInput) error {
+	return s.withCodeTenantContext(ctx, tenantID, func(tx *sql.Tx) error {
+		if err := verifyCodeSnapshotTenant(ctx, tx, tenantID, snapshotID, repositoryID); err != nil {
+			return err
+		}
+		return s.indexSnapshotLocked(ctx, tx, snapshotID, repositoryID, files)
+	})
+}
+
+func (s *pgCodeStore) indexSnapshotLocked(ctx context.Context, tx *sql.Tx, snapshotID, repositoryID string, files []PGFileInput) error {
+	started := time.Now()
 
 	// Lock the repository before the snapshot. Activation and all indexing
 	// paths use this order to avoid a repository/snapshot deadlock.
@@ -470,7 +502,7 @@ func (s *pgCodeStore) IndexSnapshot(ctx context.Context, snapshotID, repositoryI
 	if _, err := tx.ExecContext(ctx, `SELECT activate_code_snapshot($1)`, snapshotID); err != nil {
 		return fmt.Errorf("activate snapshot: %w", err)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // indexedDecl is what indexFileLocked reports back about each declaration

@@ -496,7 +496,7 @@ func (s *server) indexDurableSnapshot(ctx context.Context, tenant, repositoryID,
 // buildSnapshot indexes, embeds (when a code model runtime is configured)
 // and diffs an already-created snapshot.
 func (s *server) buildSnapshot(ctx context.Context, tenant, repositoryID, snapshotID string, files []PGFileInput) (map[string]any, error) {
-	if err := s.pgStore.IndexSnapshot(ctx, snapshotID, repositoryID, files); err != nil {
+	if err := s.pgStore.IndexSnapshotScoped(ctx, tenant, snapshotID, repositoryID, files); err != nil {
 		return nil, fmt.Errorf("index snapshot: %w", err)
 	}
 	degradedModels := []string{}
