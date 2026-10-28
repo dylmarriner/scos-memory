@@ -34,6 +34,7 @@ from benchmarks.harness import (  # noqa: E402
     authority_accuracy,
     citation_accuracy,
     compute_scores,
+    compare_baseline,
     conflict_detection,
     create_default_frozen_suite,
     duplicate_rate,
@@ -186,6 +187,44 @@ class MetricFunctionTests(unittest.TestCase):
         scores = compute_scores({"a"}, ["a"])
         self.assertNotIn("citation_accuracy", scores)
         self.assertIn("recall@1", scores)
+
+
+class BenchmarkComparisonSafetyTests(unittest.TestCase):
+    def item(self, case, scores):
+        return BenchmarkResult(case_id=case, retrieved_ids=["a"], latency_ms=0, scores=scores)
+
+    def test_lower_stale_and_duplicate_rates_are_improvements(self):
+        baseline = [self.item("case", {"stale_hit_rate": 0.75, "duplicate_rate": 0.5,
+                                       "conflict_detection": 0.25, "recall@5": 0.6})]
+        changed = [self.item("case", {"stale_hit_rate": 0.25, "duplicate_rate": 0.0,
+                                      "conflict_detection": 0.75, "recall@5": 0.7})]
+        verdict = compare_baseline(changed, baseline)
+        for metric in ("stale_hit_rate", "duplicate_rate", "conflict_detection", "recall@5"):
+            self.assertEqual(verdict[metric]["improvements"], 1, metric)
+            self.assertEqual(verdict[metric]["regressions"], 0, metric)
+
+    def test_increased_stale_and_duplicate_rates_are_regressions(self):
+        baseline = [self.item("case", {"stale_hit_rate": 0.0, "duplicate_rate": 0.1})]
+        changed = [self.item("case", {"stale_hit_rate": 1.0, "duplicate_rate": 0.9})]
+        verdict = compare_baseline(changed, baseline)
+        for metric in ("stale_hit_rate", "duplicate_rate"):
+            self.assertEqual(verdict[metric]["regressions"], 1, metric)
+            self.assertEqual(verdict[metric]["improvements"], 0, metric)
+
+    def test_missing_optional_metric_is_reported_as_coverage_loss(self):
+        baseline = [self.item("case", {"recall@5": 0.75, "citation_accuracy": 0.9})]
+        changed = [self.item("case", {"recall@5": 0.75})]
+        verdict = compare_baseline(changed, baseline)
+        self.assertEqual(verdict["citation_accuracy"]["coverage_lost"], 1)
+        self.assertEqual(verdict["citation_accuracy"]["regressions"], 0)
+        self.assertEqual(verdict["recall@5"]["unchanged"], 1)
+
+    def test_newly_measured_optional_metric_is_coverage_gain(self):
+        baseline = [self.item("case", {"recall@5": 0.75})]
+        changed = [self.item("case", {"recall@5": 0.75, "citation_accuracy": 0.9})]
+        verdict = compare_baseline(changed, baseline)
+        self.assertEqual(verdict["citation_accuracy"]["coverage_gained"], 1)
+        self.assertEqual(verdict["citation_accuracy"]["improvements"], 0)
 
 
 class SuiteFileTests(unittest.TestCase):
