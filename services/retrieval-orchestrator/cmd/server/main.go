@@ -392,12 +392,9 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 	req.TenantID = tenantID
 	req.PrincipalID = principalID
-	// System-time travel requires reconstructing historical approvals,
-	// revocations and supersessions. Current rows cannot do so safely.
-	if req.AsOfSystemTime != "" {
-		http.Error(w, "as_of_system_time requires the historical belief ledger", http.StatusNotImplemented)
-		return
-	}
+	// Validate both temporal selectors before reporting unsupported historical
+	// reconstruction. Malformed timestamps are bad requests, not a capability
+	// limitation, even when the request supplies both temporal dimensions.
 	if req.AsOfValidTime != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, req.AsOfValidTime)
 		if err != nil {
@@ -405,6 +402,18 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.AsOfValidTime = parsed.UTC().Format(time.RFC3339Nano)
+	}
+	if req.AsOfSystemTime != "" {
+		if _, err := time.Parse(time.RFC3339Nano, req.AsOfSystemTime); err != nil {
+			http.Error(w, "as_of_system_time must be an RFC3339 timestamp with timezone", http.StatusBadRequest)
+			return
+		}
+		// System-time travel requires reconstructing historical approvals,
+		// revocations and supersessions. Current rows cannot do so safely.
+		http.Error(w, "as_of_system_time requires the historical belief ledger", http.StatusNotImplemented)
+		return
+	}
+	if req.AsOfValidTime != "" {
 		r = r.WithContext(withRequestedValidTime(r.Context(), req.AsOfValidTime))
 	}
 	if req.Query == "" {

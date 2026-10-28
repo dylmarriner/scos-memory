@@ -18,6 +18,9 @@ func TestP5TemporalRequestValidationFailsClosed(t *testing.T) {
 		{"invalid timestamp", map[string]any{"as_of_valid_time": "yesterday"}, http.StatusBadRequest},
 		{"timestamp missing timezone", map[string]any{"as_of_valid_time": "2021-07-01T00:00:00"}, http.StatusBadRequest},
 		{"system time unavailable", map[string]any{"as_of_system_time": "2021-07-01T00:00:00Z"}, http.StatusNotImplemented},
+		{"invalid system time", map[string]any{"as_of_system_time": "yesterday"}, http.StatusBadRequest},
+		{"system time missing timezone", map[string]any{"as_of_system_time": "2021-07-01T00:00:00"}, http.StatusBadRequest},
+		{"invalid valid time with valid system time", map[string]any{"as_of_system_time": "2021-07-01T00:00:00Z", "as_of_valid_time": "yesterday"}, http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.payload["tenant_id"] = "not-used"
