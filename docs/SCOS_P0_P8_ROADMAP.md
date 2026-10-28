@@ -4,6 +4,32 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 retrieval/context lifecycle hook coverage (2026-10-28; source candidate)
+
+The autonomous control plane already dispatched turn, model, tool and
+checkpoint hooks, but its actual memory retrieval and context-optimisation
+stages skipped the four §22.6 boundaries `on_before_retrieval`,
+`on_after_retrieval`, `on_before_context_compile`, and
+`on_after_context_compile`. An isolated real-HTTP execution regression
+recorded calls to the extension-manager dispatch endpoint and the actual
+retrieval/context service paths. Before the change it failed with the missing
+hook events (RED), and a second regression demonstrated that a failed
+pre-retrieval hook did not stop the upstream retrieval call (RED).
+
+The source now dispatches those hooks in stage order. Pre-hook failure
+prevents the corresponding upstream call, while post-hook failure degrades
+the stage and does not release retrieved evidence to downstream context
+compilation. Post-hooks carry the actual stage status, including upstream
+failure or invalid/unvalidated compiled capsules, without copying sensitive
+retrieval/context content into extension payloads. An invalid-capsule
+regression also reproduced a falsely successful post-hook status before
+validation was moved ahead of dispatch (RED/GREEN). These are source-level
+stage and HTTP integration tests; they do not prove installed extension
+execution, full §22.6 hook coverage (including turn-received, code retrieval,
+agent/session and memory mutation hooks), fleet-wide hook telemetry,
+production deployment or governance §41 completion. CI and merged-main
+qualification remain separate acceptance gates.
+
 ## P5 memory-event history TRUNCATE guard (2026-10-28; merged PR #106)
 
 Migration `000082` protects the append-only memory-state ledger and its purge

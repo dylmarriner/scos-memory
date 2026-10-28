@@ -292,15 +292,30 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 	case "capability-router":
 		return authoritativeSourceStage(decision)
 	case "memory-gateway":
+		if err := c.dispatchHook(ctx, "on_before_retrieval", map[string]any{"interaction_id": req.InteractionID}, req); err != nil {
+			return degradedStage("on_before_retrieval hook: " + err.Error())
+		}
 		memory, err := c.callService(ctx, step.System, "/v1/retrieve", map[string]any{
 			"tenant_id": req.TenantID, "principal_id": req.ActorID, "query": req.Input,
 			"agent_id": req.AgentID, "session_id": req.SessionID, "include_recent": true, "include_session": true,
 		}, req)
+		result := degradedStage("retrieval unavailable")
+		if err == nil {
+			result = retrievalStageResult(memory)
+		}
+		// Emit the post-hook even on an upstream failure. Do not pass raw
+		// retrieval contents or upstream error bodies to extension endpoints.
+		hookErr := c.dispatchHook(ctx, "on_after_retrieval", map[string]any{
+			"interaction_id": req.InteractionID, "status": result.status,
+		}, req)
 		if err != nil {
 			return degradedStage(err.Error())
 		}
+		if hookErr != nil {
+			return degradedStage("on_after_retrieval hook: " + hookErr.Error())
+		}
 		state.memory = memory
-		return retrievalStageResult(memory)
+		return result
 	case "code-intelligence":
 		// Code context comes from the durable (v2) index of the named
 		// repository -- the one scos_code_index builds -- resolved by its
@@ -327,6 +342,9 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 		state.code = code
 		return completedStage("")
 	case "context-optimisation":
+		if err := c.dispatchHook(ctx, "on_before_context_compile", map[string]any{"interaction_id": req.InteractionID}, req); err != nil {
+			return degradedStage("on_before_context_compile hook: " + err.Error())
+		}
 		parts := []string{req.Input, string(state.memory), string(state.code)}
 		// Sensitivity and risk travel with the request so the optimiser can
 		// apply its §18 profile floor; a hardcoded "balanced" here would
@@ -336,9 +354,6 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 			"profile": "", "token_budget": 8000,
 			"risk_class": decision.RiskClass, "sensitivity": dataClassificationFor(req),
 		}, req)
-		if err != nil {
-			return degradedStage(err.Error())
-		}
 		var out struct {
 			CompiledText string `json:"compiled_text"`
 			Validated    bool   `json:"validated"`
@@ -348,12 +363,31 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 				CompiledTokens int    `json:"compiled_token_count"`
 			} `json:"capsule"`
 		}
-		if err := json.Unmarshal(compiled, &out); err != nil {
-			return degradedStage("compile response: " + err.Error())
+		var parseErr error
+		if err == nil {
+			parseErr = json.Unmarshal(compiled, &out)
+		}
+		status := stageCompleted
+		if err != nil || parseErr != nil || !out.Validated || strings.TrimSpace(out.CompiledText) == "" {
+			status = stageDegraded
+		}
+		// Context contents may contain sensitive retrieval evidence; emit
+		// only the verified outcome, never the context or upstream body.
+		hookErr := c.dispatchHook(ctx, "on_after_context_compile", map[string]any{
+			"interaction_id": req.InteractionID, "status": status,
+		}, req)
+		if err != nil {
+			return degradedStage(err.Error())
+		}
+		if hookErr != nil {
+			return degradedStage("on_after_context_compile hook: " + hookErr.Error())
+		}
+		if parseErr != nil {
+			return degradedStage("compile response: " + parseErr.Error())
 		}
 		// An unvalidated capsule is not handed to the agent: the agent gets
 		// the raw retrieval results and the stage reports why.
-		if !out.Validated || strings.TrimSpace(out.CompiledText) == "" {
+		if status == stageDegraded {
 			return degradedStage("the compiled context did not pass the optimiser's validation; the agent receives the uncompiled context")
 		}
 		state.context = out.CompiledText
