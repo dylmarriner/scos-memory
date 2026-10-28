@@ -143,7 +143,26 @@ func TestP4RetrieveIncludesCodeAndPersistsSelectedSymbolVersions(t *testing.T) {
 		})
 	}))
 	defer upstream.Close()
-	srv := &server{db: pool, codeIntelligence: &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}}
+	appDSN := os.Getenv("SCOS_APP_TEST_DATABASE_URL")
+	if appDSN == "" {
+		t.Skip("restricted-role database required")
+	}
+	app, err := pgxpool.New(ctx, appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	if err := app.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var superuser, bypassRLS bool
+	if err := app.QueryRow(ctx, "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user").Scan(&superuser, &bypassRLS); err != nil {
+		t.Fatal(err)
+	}
+	if superuser || bypassRLS {
+		t.Fatal("HTTP acceptance must use a non-superuser, non-BYPASSRLS role")
+	}
+	srv := &server{db: app, codeIntelligence: &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}}
 	body, _ := json.Marshal(RetrieveRequest{TenantID: tenantID, PrincipalID: principalID, Query: "find the code function that performs dense retrieval", RepositoryID: "repo-1", Branch: "main", Namespaces: []string{"p4-code"}, MaxResults: 10})
 	req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
