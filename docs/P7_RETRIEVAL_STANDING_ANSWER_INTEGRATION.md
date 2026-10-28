@@ -79,7 +79,7 @@ suite and two focused race-enabled repetitions on a disposable database
 with all 86 migrations and 21 RLS policy files. This is not production
 rollout evidence or general answer generation.
 
-## All-lane retrieval audit integrity (2026-10-28, source candidate)
+## All-lane retrieval audit integrity (2026-10-28, merged PR #129)
 
 An ordinary `POST /v1/retrieve` request (without the cache opt-in) could
 return HTTP 200 with an empty `retrieval_run_id` when the durable
@@ -95,9 +95,11 @@ including errors, not only opt-in cache requests. The corrected HTTP test
 passed with the same restricted role (GREEN); the complete tagged retrieval
 suite, five focused repetitions, two race-enabled repetitions, full Go suite
 and `go vet` passed on a disposable database with 86 migrations and 21
-policies. The canonical §41 DoD gate still fails. This does not establish
-production rollout/recovery, a complete historical belief ledger, or
-representative P7 latency qualification.
+policies. PR #129 was squash-merged into `dbb35b693a6d30ce318d5c192374b2b8a785ceb6`
+with passing merged-main CI (5/5) and P4 integration (9/9), and independent
+merged-main Go, vet and tagged retrieval checks. The canonical §41 DoD gate
+still fails. This does not establish production rollout/recovery, a complete
+historical belief ledger, or representative P7 latency qualification.
 
 This is **not** general answer generation, contradiction adjudication,
 historical belief reconstruction, proof of commit-order history, full
