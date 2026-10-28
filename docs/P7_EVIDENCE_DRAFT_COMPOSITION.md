@@ -119,3 +119,16 @@ suite passed five repetitions, full memory-intelligence and retrieval-orchestrat
 integration suites passed, the 52-package Go suite passed, focused race tests
 passed twice, and Go vet passed. This remains a review-drift detection
 primitive, not general governed answer generation or P7 acceptance.
+
+## P7 source fingerprint security-context binding (2026-10-29)
+
+The v1 digest pinned fact/version/summary/confidence but not the security
+context in which the draft was reviewed. Moving otherwise unchanged evidence
+to a different namespace could therefore leave its digest identical, allowing
+a future approval workflow to mistake a previous review for a review in the
+new context. The v2 digest now includes the authenticated tenant UUID and
+requested canonical namespace UUID before the fact fields, with NUL-separated
+encoding and domain prefix `scos:p7:source:v2\0`. Old v1 fingerprints must
+be treated as stale by future approval implementations, not silently upgraded.
+The SHA-256 value is still a drift detector, not an authorization token or
+signature; every approval must re-check source state and access rights.

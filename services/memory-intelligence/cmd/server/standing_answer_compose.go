@@ -34,12 +34,13 @@ type standingAnswerComposeEvidence struct {
 	SourceFingerprint string  `json:"source_fingerprint"`
 }
 
-// Versioned, domain-separated digest of precisely the source fields shown to
-// a reviewer. Null current_version_id is encoded as the empty string. The
+// Versioned, domain-separated digest of the source fields and its tenant/
+// namespace security boundary. Null current_version_id is encoded as empty. The
 // source summary cannot contain NUL; UUIDs and decimal floats cannot either.
 // This is a drift detector, not a signature or a substitute for approval.
-func standingAnswerComposeFingerprint(ev standingAnswerComposeEvidence) string {
-	data := "scos:p7:source:v1\x00" + ev.FactID + "\x00" + ev.VersionID + "\x00" +
+func standingAnswerComposeFingerprint(ev standingAnswerComposeEvidence, tenantID, namespaceID string) string {
+	data := "scos:p7:source:v2\x00" + tenantID + "\x00" + namespaceID + "\x00" +
+		ev.FactID + "\x00" + ev.VersionID + "\x00" +
 		ev.Summary + "\x00" + strconv.FormatFloat(ev.Confidence, 'g', -1, 64)
 	sum := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(sum[:])
@@ -162,7 +163,7 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 				ev.Confidence < 0 || ev.Confidence > 1 {
 				return out, errStandingAnswerComposeUnsafe
 			}
-			ev.SourceFingerprint = standingAnswerComposeFingerprint(ev)
+			ev.SourceFingerprint = standingAnswerComposeFingerprint(ev, identity.TenantID, input.NamespaceID)
 			out.Evidence = append(out.Evidence, ev)
 			// Escape line breaks and control bytes in untrusted source prose.
 			// Otherwise a source could forge a second "Source fact" header

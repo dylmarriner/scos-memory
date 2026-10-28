@@ -4,6 +4,21 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 composition fingerprint security-context binding (2026-10-29; PR candidate)
+
+The P7 evidence draft source fingerprint v1 omitted the tenant and namespace
+security boundary. A fact moved to another authorized namespace without a
+summary/version/confidence change could retain the same fingerprint, allowing
+a future review/approval implementation to mistake the previous review for
+one in the new context. A unit regression first failed compilation (RED);
+the versioned v2 digest binds the authenticated tenant and canonical namespace
+UUIDs before the fact fields (GREEN). A restricted-role PostgreSQL HTTP
+regression checks that moving unchanged facts revokes access from the old
+namespace and changes both fingerprints in the new namespace. v1 digests
+are not interchangeable with v2; a future approval workflow must re-read
+authorized evidence and compare fresh v2 fingerprints. This does not implement
+approval, governed answer generation, P7 acceptance, or production rollout.
+
 ## P7 standing-answer dependency-unavailable fail-closed regression (2026-10-29; PR candidate)
 
 A valid authenticated `GET /v1/standing-answers` with an unavailable
