@@ -1095,7 +1095,8 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 			LEFT JOIN memory_versions mv ON mv.id=mi.current_version_id
 			JOIN namespaces n ON n.id=mi.namespace_id
 			JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read=true
-			WHERE mi.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
+			JOIN principals p ON p.id=m.principal_id AND p.tenant_id=n.tenant_id AND p.disabled_at IS NULL
+			WHERE mi.tenant_id=$1 AND n.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
                 AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
                 AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
 			  AND mi.sensitivity <= $4 AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
