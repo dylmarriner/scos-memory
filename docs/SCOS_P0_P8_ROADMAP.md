@@ -1343,7 +1343,7 @@ integration exists. Merged source is not a deployed cache service:
 - [x] Typed evidence dependency tracking and transactional invalidation (migration 000084, merged PR #111).
 - [x] Restricted-role, read-time evidence/clock freshness projection (migration 000085, merged PR #112; not deployed).
 - [ ] Governed writer and refresh generation with a real retrieval/answer pipeline.
-- [x] Authorized read-only serving endpoint merged (2026-10-28, PR #114): `GET /v1/standing-answers` uses authenticated tenant/principal RLS, bounded normalized exact keys and the security-invoker current-evidence view. RED/GREEN unit and real PostgreSQL HTTP tests cover tenant denial, membership/fact revocation and clock expiry. Exact-head CI/P4 and merged-main CI/P4 passed at `d243e4fff571b2ad848e9eff10649cb4f40db939`, with 51 Go packages, vet and restricted-role P7 PostgreSQL tests independently passing on AMD. Production rollout and retrieval-orchestrator integration remain open.
+- [x] Authorized read-only serving endpoint merged (2026-10-28, PR #114): `GET /v1/standing-answers` uses authenticated tenant/principal RLS, bounded normalized exact keys and the security-invoker current-evidence view. RED/GREEN unit and real PostgreSQL HTTP tests cover tenant denial, membership/fact revocation and clock expiry. Exact-head CI/P4 passed at `5b7d3029dc56c6f3ea0b74ec004578382b794d31`; merged-main CI/P4 passed at `d243e4fff571b2ad848e9eff10649cb4f40db939`, with 51 Go packages, vet and restricted-role P7 PostgreSQL tests independently passing on AMD. Production rollout and retrieval-orchestrator integration remain open.
 - [ ] End-to-end expiry/revocation and stale-answer benchmark coverage.
 
 ## Agent execution-trace consolidation

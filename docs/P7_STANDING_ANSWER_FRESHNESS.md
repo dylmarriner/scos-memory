@@ -146,7 +146,7 @@ expiry. The writer, retrieval integration, latency qualification and
 production rollout remain open.
 
 PR #114 merged at `d243e4fff571b2ad848e9eff10649cb4f40db939`.
-Exact-head [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40606584143)
+Exact-head `5b7d3029dc56c6f3ea0b74ec004578382b794d31` [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40606584143)
 and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40606584266)
 passed. The merged-main
 [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40607257176)
