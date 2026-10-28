@@ -4,6 +4,32 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 review-draft classification drift integrity (2026-10-29; PR candidate)
+
+A P7 source's `sensitivity` could change from `public` to `internal`
+within a readable namespace without changing its summary, confidence or
+version. The v2 source fingerprint and whole-draft manifest stayed identical,
+so `expected_draft_fingerprint` accepted an outdated review (HTTP 200).
+A restricted-role PostgreSQL HTTP regression reproduced that unsafe response
+with the source still readable (RED), not merely revoked. The source digest
+now uses `scos:p7:source:v3\0` and binds the current source sensitivity,
+which is also explicitly returned in `evidence[].sensitivity`. The entire
+draft manifest therefore changes and a pinned request fails HTTP 409 without
+returning the stale evidence (GREEN). Old v2 fingerprints are intentionally
+incompatible with v3 and must not be treated as valid review preconditions.
+
+Unit TDD first failed compilation for the missing sensitivity evidence field;
+behavioral RED was reproduced by removing sensitivity from the new digest
+while preserving the rest of the implementation. Five focused restricted-role
+PostgreSQL 17/pgvector HTTP repetitions passed on an isolated instance with
+86 migrations and 21 policies. The full memory-intelligence and retrieval
+restricted-role integration suites passed when run serially; a parallel
+shared-fixture attempt hit a PostgreSQL test deadlock and was rerun serially.
+Two race-enabled focused repetitions, the full 52-package Go suite, Go vet
+and `git diff --check` passed. The independent §41 checker still reports
+FAIL/PARTIAL. This is a read-time review-drift detector, not a persisted
+approval, signature, general answer generator or production qualification. Governance §41 and the broader P0–P8 gates remain open.
+
 ## P7 review-time draft integrity precondition (2026-10-29; source candidate)
 
 The read-only `POST /v1/standing-answers/compose` now accepts an optional

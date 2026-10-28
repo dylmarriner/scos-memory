@@ -181,3 +181,23 @@ repetitions, the full memory-intelligence and retrieval-orchestrator
 integration suites, 52-package Go tests and Go vet passed on a disposable
 PostgreSQL 17/pgvector instance with 86 migrations and 21 policies. No
 production deployment, migration or cache publication was performed.
+
+## P7 sensitivity-aware source review fingerprints (2026-10-29; PR candidate)
+
+The source fingerprint v2 covered tenant/namespace, fact UUID, current version,
+summary and confidence, but omitted the source sensitivity classification.
+Changing a still-readable source from `public` to `internal` therefore left
+`expected_draft_fingerprint` valid even though the security context of the
+reviewed evidence had changed. The regression demonstrated HTTP 200 with an
+outdated pinned digest before correction.
+
+`evidence[].sensitivity` now exposes the current classification and the
+versioned `scos:p7:source:v3\0` digest binds it before the source summary.
+The whole-draft manifest transitively binds the classification as well.
+Old v2 fingerprints must fail the new precondition, not be silently accepted.
+A restricted-role PostgreSQL integration test confirms unchanged pinned
+drafts still pass, classification changes within the same readable namespace
+return HTTP 409 without evidence leakage, and a fresh draft exposes both
+current classifications. A separate fixed SHA-256 vector and unit regression
+cover digest determinism and classification sensitivity. This does not
+implement approval, publishing or transactionally atomic review-and-write.

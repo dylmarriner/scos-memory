@@ -33,6 +33,7 @@ type standingAnswerComposeEvidence struct {
 	Summary           string  `json:"summary"`
 	Confidence        float64 `json:"confidence"`
 	VersionID         string  `json:"version_id,omitempty"`
+	Sensitivity       string  `json:"sensitivity"`
 	SourceFingerprint string  `json:"source_fingerprint"`
 }
 
@@ -41,8 +42,8 @@ type standingAnswerComposeEvidence struct {
 // source summary cannot contain NUL; UUIDs and decimal floats cannot either.
 // This is a drift detector, not a signature or a substitute for approval.
 func standingAnswerComposeFingerprint(ev standingAnswerComposeEvidence, tenantID, namespaceID string) string {
-	data := "scos:p7:source:v2\x00" + tenantID + "\x00" + namespaceID + "\x00" +
-		ev.FactID + "\x00" + ev.VersionID + "\x00" +
+	data := "scos:p7:source:v3\x00" + tenantID + "\x00" + namespaceID + "\x00" +
+		ev.FactID + "\x00" + ev.VersionID + "\x00" + ev.Sensitivity + "\x00" +
 		ev.Summary + "\x00" + strconv.FormatFloat(ev.Confidence, 'g', -1, 64)
 	sum := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(sum[:])
@@ -148,7 +149,7 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		// the ENTIRE draft; there is no partial evidence fallback.
 		rows, err := tx.QueryContext(r.Context(), `
             SELECT f.id::text, f.canonical_summary, f.confidence_score,
-                   COALESCE(f.current_version_id::text, '')
+                   COALESCE(f.current_version_id::text, ''), f.sensitivity::text
             FROM public.memory_items f
             JOIN public.namespaces ns
               ON ns.id=f.namespace_id AND ns.tenant_id=f.tenant_id
@@ -186,7 +187,7 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		summaries := make([]string, 0, len(ids))
 		for rows.Next() {
 			var ev standingAnswerComposeEvidence
-			if err := rows.Scan(&ev.FactID, &ev.Summary, &ev.Confidence, &ev.VersionID); err != nil {
+			if err := rows.Scan(&ev.FactID, &ev.Summary, &ev.Confidence, &ev.VersionID, &ev.Sensitivity); err != nil {
 				return out, err
 			}
 			if strings.TrimSpace(ev.Summary) == "" || !utf8.ValidString(ev.Summary) ||
