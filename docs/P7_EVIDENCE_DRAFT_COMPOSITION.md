@@ -68,5 +68,6 @@ Quoting untrusted source text in `draft_text` prevents the spoof while leaving
 `evidence[].summary` byte-for-byte intact (GREEN, five focused repetitions,
 two race-enabled repetitions). The full memory-intelligence and retrieval
 PostgreSQL integration suites passed against a disposable PostgreSQL 17/pgvector
-instance with 86 SQL migrations and 21 policies. This remains unmerged source
-until the PR is reviewed, checked and merged; it is not production evidence.
+instance with 86 SQL migrations and 21 policies. PR #141 was merged into `7daa74e2c36deeee5bf4f2cebba5704f8d48e0ab`
+after CI and review, with merged-main CI/P4 passing 5/5 and 9/9 jobs.
+This is verified merged source, not production evidence.
