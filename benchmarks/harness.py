@@ -177,7 +177,9 @@ def authority_accuracy(authoritative_ids: list[str], retrieved: list[str], k: in
     top_k = retrieved[:k]
     if not top_k:
         return 0.0
-    authoritative_hits = sum(1 for r in top_k if r in authoritative_ids)
+    # Duplicate IDs still occupy ranking slots, but a single trusted
+    # source must not earn multiple authority hits merely by being repeated.
+    authoritative_hits = len(set(top_k) & set(authoritative_ids))
     return authoritative_hits / len(top_k)
 
 def conflict_detection(conflicting_ids: list[str], retrieved: list[str]) -> float | None:
