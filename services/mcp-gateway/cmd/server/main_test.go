@@ -468,6 +468,10 @@ func TestSCOSRetrieveSchemaExposesDurableRepositoryContext(t *testing.T) {
 		if _, ok := props["as_of_valid_time"]; !ok {
 			t.Fatal("scos_retrieve missing valid-time selector")
 		}
+		if prop, ok := props["include_standing_answers"]; !ok || prop.(map[string]any)["type"] != "boolean" {
+			t.Fatal("scos_retrieve missing opt-in standing-answer boolean")
+		}
+
 		for _, selector := range []string{"as_of_commit", "snapshot_id"} {
 			if _, ok := props[selector]; !ok {
 				t.Fatalf("scos_retrieve missing immutable code selector %s", selector)
@@ -476,6 +480,39 @@ func TestSCOSRetrieveSchemaExposesDurableRepositoryContext(t *testing.T) {
 		return
 	}
 	t.Fatal("scos_retrieve not found")
+}
+
+func TestSCOSRetrieveForwardsStandingAnswerOptInAndVerifiedIdentity(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/retrieve" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("X-SCOS-Tenant-ID") != "tenant-real" ||
+			r.Header.Get("X-SCOS-Principal-ID") != "principal-real" {
+			t.Fatal("authenticated identity not forwarded")
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["include_standing_answers"] != true || body["query"] != "where is the report?" ||
+			body["tenant_id"] != "tenant-real" || body["principal_id"] != "principal-real" {
+			t.Fatalf("standing-answer request or identity altered: %+v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"standing_answers": []any{}})
+	}))
+	defer upstream.Close()
+	srv := &gatewayServer{retrievalOrchestratorURL: upstream.URL, client: upstream.Client()}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	_, err := srv.dispatchTool(req.Context(), req, requestIdentity{
+		TenantID: "tenant-real", PrincipalID: "principal-real",
+	}, "scos_retrieve", map[string]any{
+		"tenant_id": "tenant-real", "principal_id": "principal-real",
+		"query": "where is the report?", "include_standing_answers": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDispatchRememberSavesAnExplicitFact(t *testing.T) {

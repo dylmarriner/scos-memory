@@ -10,6 +10,10 @@ complete supporting memory UUIDs, confidence, and refresh timestamp. This
 array is **not** mixed into ordinary ranked memory sections or represented as
 a new model-generated answer.
 
+The MCP gateway's `scos_retrieve` tool schema exposes the same optional
+boolean and forwards it with the gateway-verified identity; it does not
+fabricate a tenant or bypass the orchestrator's validation.
+
 The retrieval orchestrator queries only
 `public.memory_standing_answers_current`, the security-invoker,
 security-barrier view introduced by migration 000085. The query runs with
