@@ -128,7 +128,7 @@ to a different namespace could therefore leave its digest identical, allowing
 a future approval workflow to mistake a previous review for a review in the
 new context. The v2 digest now includes the authenticated tenant UUID and
 requested canonical namespace UUID before the fact fields, with NUL-separated
-encoding and domain prefix `scos:p7:source:v2\\0`. Old v1 fingerprints must
+encoding and domain prefix `scos:p7:source:v2\0`. Old v1 fingerprints must
 be treated as stale by future approval implementations, not silently upgraded.
 The SHA-256 value is still a drift detector, not an authorization token or
 signature; every approval must re-check source state and access rights.
