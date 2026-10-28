@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -143,7 +144,11 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 				return out, errStandingAnswerComposeUnsafe
 			}
 			out.Evidence = append(out.Evidence, ev)
-			summaries = append(summaries, "Source fact "+ev.FactID+":\n"+ev.Summary)
+			// Escape line breaks and control bytes in untrusted source prose.
+			// Otherwise a source could forge a second "Source fact" header
+			// or terminal formatting in the human review draft. The exact
+			// original summary remains available in structured Evidence.
+			summaries = append(summaries, "Source fact "+ev.FactID+":\n"+strconv.Quote(ev.Summary))
 			if ev.Confidence < out.Confidence {
 				out.Confidence = ev.Confidence
 			}
