@@ -4,7 +4,7 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## §22 retrieval/context lifecycle hook coverage (2026-10-28; source candidate)
+## §22 retrieval/context lifecycle hook coverage (2026-10-28; merged PR #117)
 
 The autonomous control plane already dispatched turn, model, tool and
 checkpoint hooks, but its actual memory retrieval and context-optimisation
@@ -27,8 +27,22 @@ validation was moved ahead of dispatch (RED/GREEN). These are source-level
 stage and HTTP integration tests; they do not prove installed extension
 execution, full §22.6 hook coverage (including turn-received, code retrieval,
 agent/session and memory mutation hooks), fleet-wide hook telemetry,
-production deployment or governance §41 completion. CI and merged-main
-qualification remain separate acceptance gates.
+production deployment or governance §41 completion.
+
+PR [#117](https://github.com/dylmarriner/scos-memory/pull/117) merged with
+expected head `a300ef086320a8c226e07045fcb29f797f0a4639` into
+`main` commit `eb47ae4a4bdf76962442329c86c329420e7c0329`. The PR-head
+CI/P4 checks passed, and Codex, CodeRabbit and Kilo reported no actionable
+review findings; Claude review was unavailable without extra credits.
+Independent verification on the exact merged-main SHA passed 51 Go packages,
+`go vet`, three complete race-enabled ACP package repetitions and 90 Python
+regressions. Merged-main P4 integration
+[run 40616073909](https://github.com/dylmarriner/scos-memory/actions/runs/40616073909)
+passed 9/9 jobs. Merged-main CI
+[run 40616074156](https://github.com/dylmarriner/scos-memory/actions/runs/40616074156)
+passed 5/5 jobs on the exact merged-main SHA.
+The governance §41 DoD checker still fails with PARTIAL; no production
+rollout, live migration or paid-resource activation was performed.
 
 ## P5 memory-event history TRUNCATE guard (2026-10-28; merged PR #106)
 
