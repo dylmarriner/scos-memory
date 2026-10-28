@@ -242,3 +242,63 @@ func TestP7ComposeRejectsCrossTenantPrincipalWithMembership(t *testing.T) {
 		t.Fatalf("foreign-tenant principal with membership accessed evidence: HTTP %d", code)
 	}
 }
+
+// A draft is not approved, but its provenance must be independently
+// re-checkable. A source mutation must change the returned digest without
+// creating or modifying a published standing-answer cache entry.
+func TestP7ComposeEvidenceDigestChangesAfterSourceMutation(t *testing.T) {
+	f := newBehaviourFixture(t)
+	makeFact := func(summary string) string {
+		return f.scalar(`INSERT INTO memory_items (
+            tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+            authority_level,confidence_score,sensitivity)
+            VALUES ($1,$2,$3,'semantic','active','Digest evidence',$4,80,0.8,'internal')
+            RETURNING id::text`, f.tenant, f.ns, f.owner, summary)
+	}
+	a, b := makeFact("Original fact"), makeFact("Independent fact")
+	body := fmt.Sprintf(`{"namespace_id":%q,"fact_ids":[%q,%q]}`, f.ns, a, b)
+	get := func() map[string]string {
+		t.Helper()
+		code, result, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
+			"/v1/standing-answers/compose", body)
+		if code != http.StatusOK {
+			t.Fatalf("compose HTTP %d: %v", code, result)
+		}
+		hashes := map[string]string{}
+		for _, raw := range result["evidence"].([]any) {
+			ev := raw.(map[string]any)
+			hash, ok := ev["source_fingerprint"].(string)
+			if !ok || len(hash) != 64 {
+				t.Fatalf("missing bounded source fingerprint: %v", ev)
+			}
+			hashes[ev["fact_id"].(string)] = hash
+		}
+		return hashes
+	}
+	before := get()
+	if _, err := f.admin.ExecContext(context.Background(),
+		"UPDATE memory_items SET canonical_summary='Revised fact' WHERE id=$1", a); err != nil {
+		t.Fatal(err)
+	}
+	after := get()
+	if before[a] == after[a] || before[b] != after[b] {
+		t.Fatalf("digest did not track exactly the mutated source: before=%v after=%v", before, after)
+	}
+	version := f.scalar(`INSERT INTO memory_versions(
+		memory_id,version_number,content,content_hash,change_reason,created_by)
+		VALUES ($1,1,'Revised fact','test-content-hash','reviewed correction',$2)
+		RETURNING id::text`, a, f.owner)
+	if _, err := f.admin.ExecContext(context.Background(),
+		"UPDATE memory_items SET current_version_id=$1 WHERE id=$2", version, a); err != nil {
+		t.Fatal(err)
+	}
+	versioned := get()
+	if versioned[a] == after[a] || versioned[b] != after[b] {
+		t.Fatalf("digest did not track source version pin: after=%v versioned=%v", after, versioned)
+	}
+	var cacheCount int
+	if err := f.admin.QueryRowContext(context.Background(),
+		"SELECT count(*) FROM memory_standing_answers WHERE tenant_id=$1", f.tenant).Scan(&cacheCount); err != nil || cacheCount != 0 {
+		t.Fatalf("draft wrote trusted cache: count=%d err=%v", cacheCount, err)
+	}
+}

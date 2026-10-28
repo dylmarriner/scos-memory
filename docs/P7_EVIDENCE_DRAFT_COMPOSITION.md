@@ -91,3 +91,31 @@ disposable PostgreSQL 17/pgvector instance. The governance §41 definition-of-
 done checker still returns FAIL (PARTIAL). This change is
 limited to the P7 composition endpoint and does not replace central identity
 revocation, fix cross-tenant memberships elsewhere, or qualify production.
+
+
+## 2026-10-29 source fingerprint and version pinning (source candidate)
+
+A draft's source UUID alone cannot prove which version of the canonical summary
+a reviewer saw. Each `evidence[]` entry now includes the optional
+`version_id` from `memory_items.current_version_id` and a lowercase
+64-character `source_fingerprint` SHA-256. The versioned digest is computed
+over the exact source fact UUID, current version UUID (empty for NULL), summary
+bytes and Go round-trip decimal confidence, separated by NUL and prefixed
+`scos:p7:source:v1\0`. This binds the fingerprint to the evidence presented,
+including unversioned facts, without changing the draft's stable ordering or
+creating an approved answer. A future review/publish operation must re-read
+current evidence under authorization and compare the fingerprint before
+approving anything; the digest alone is **not** a signature, proof of factual
+truth, or a complete approval protocol.
+
+TDD first failed compilation because the fingerprint and version fields were
+missing (RED), then passed (GREEN). A fixed SHA-256 test vector guards the
+encoding contract. Real PostgreSQL restricted-role HTTP regressions verify
+that changing the canonical summary or current version changes only the
+affected source's digest, while other source digests remain stable and no
+standing-answer cache entry is written. On a disposable PostgreSQL 17/pgvector
+instance, all 86 migrations and 21 policies applied; the focused integration
+suite passed five repetitions, full memory-intelligence and retrieval-orchestrator
+integration suites passed, the 52-package Go suite passed, focused race tests
+passed twice, and Go vet passed. This remains a review-drift detection
+primitive, not general governed answer generation or P7 acceptance.

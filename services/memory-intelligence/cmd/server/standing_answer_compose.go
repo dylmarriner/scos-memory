@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -25,9 +27,22 @@ type standingAnswerComposeRequest struct {
 }
 
 type standingAnswerComposeEvidence struct {
-	FactID     string  `json:"fact_id"`
-	Summary    string  `json:"summary"`
-	Confidence float64 `json:"confidence"`
+	FactID            string  `json:"fact_id"`
+	Summary           string  `json:"summary"`
+	Confidence        float64 `json:"confidence"`
+	VersionID         string  `json:"version_id,omitempty"`
+	SourceFingerprint string  `json:"source_fingerprint"`
+}
+
+// Versioned, domain-separated digest of precisely the source fields shown to
+// a reviewer. Null current_version_id is encoded as the empty string. The
+// source summary cannot contain NUL; UUIDs and decimal floats cannot either.
+// This is a drift detector, not a signature or a substitute for approval.
+func standingAnswerComposeFingerprint(ev standingAnswerComposeEvidence) string {
+	data := "scos:p7:source:v1\x00" + ev.FactID + "\x00" + ev.VersionID + "\x00" +
+		ev.Summary + "\x00" + strconv.FormatFloat(ev.Confidence, 'g', -1, 64)
+	sum := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(sum[:])
 }
 
 type standingAnswerComposeResult struct {
@@ -101,7 +116,8 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		// and free of unresolved P7 revalidation. Missing any source rejects
 		// the ENTIRE draft; there is no partial evidence fallback.
 		rows, err := tx.QueryContext(r.Context(), `
-            SELECT f.id::text, f.canonical_summary, f.confidence_score
+            SELECT f.id::text, f.canonical_summary, f.confidence_score,
+                   COALESCE(f.current_version_id::text, '')
             FROM public.memory_items f
             JOIN public.namespaces ns
               ON ns.id=f.namespace_id AND ns.tenant_id=f.tenant_id
@@ -137,7 +153,7 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		summaries := make([]string, 0, len(ids))
 		for rows.Next() {
 			var ev standingAnswerComposeEvidence
-			if err := rows.Scan(&ev.FactID, &ev.Summary, &ev.Confidence); err != nil {
+			if err := rows.Scan(&ev.FactID, &ev.Summary, &ev.Confidence, &ev.VersionID); err != nil {
 				return out, err
 			}
 			if strings.TrimSpace(ev.Summary) == "" || !utf8.ValidString(ev.Summary) ||
@@ -146,6 +162,7 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 				ev.Confidence < 0 || ev.Confidence > 1 {
 				return out, errStandingAnswerComposeUnsafe
 			}
+			ev.SourceFingerprint = standingAnswerComposeFingerprint(ev)
 			out.Evidence = append(out.Evidence, ev)
 			// Escape line breaks and control bytes in untrusted source prose.
 			// Otherwise a source could forge a second "Source fact" header
