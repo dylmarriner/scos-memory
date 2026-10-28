@@ -4,6 +4,23 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P0 authority accuracy: repeated evidence must not earn repeated credit (2026-10-29; source candidate)
+
+`authority_accuracy` previously counted duplicate occurrences of the same
+trusted source as separate authoritative hits, overstating ranking quality:
+`[a,a,x]` with only `a` authoritative incorrectly scored 2/3. Two
+RED-before-fix tests reproduced the inflated score in the metric and the
+full per-case score bundle. The corrected scorer counts each authoritative
+ID once while repeated result slots still consume denominator positions
+(GREEN, 1/3). A second case `[a,a,b]` with both `a` and `b` authoritative
+now scores 2/3. The 24 harness tests and 31 P4 fixture/gate tests pass.
+The frozen seven-case P4 baseline was requalified for the changed harness
+source digest: rankings, quality scores and forbidden hits were identical;
+only the harness hash and Git base SHA changed. This is source-level P0
+measurement integrity, not representative live retrieval benchmarks, §41
+completion, merged-main verification or production acceptance. See
+`docs/P0_UNIQUE_RANKING_INTEGRITY.md`.
+
 ## P7 review-draft classification drift integrity (2026-10-29; PR candidate)
 
 A P7 source's `sensitivity` could change from `public` to `internal`
