@@ -4,7 +4,7 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## P4/P7 retrieval audit fail-closed and cache isolation (2026-10-28; source candidate)
+## P4/P7 retrieval audit fail-closed and cache isolation (2026-10-28; merged PR #129)
 
 Ordinary tenant-scoped `POST /v1/retrieve` previously returned HTTP 200
 with `retrieval_run_id: ""` after a failed durable audit INSERT. A real
@@ -18,10 +18,18 @@ retrieval responses, including errors, carry `Cache-Control: no-store`.
 Both defects passed GREEN on a disposable PostgreSQL 17/pgvector database
 with all 86 migrations and 21 policy files. The complete tagged retrieval
 suite, five focused repetitions, two race-enabled repetitions, 51-package
-Go suite, `go vet` and `git diff --check` passed on AMD. This is source
-qualification, **not** a completed PR review/merge, production deployment,
-representative latency gate or §41 acceptance. The DoD checker still
-returns FAIL (PARTIAL). See `docs/P7_RETRIEVAL_STANDING_ANSWER_INTEGRATION.md`.
+Go suite, `go vet` and `git diff --check` passed on AMD. [PR #129](https://github.com/dylmarriner/scos-memory/pull/129)
+was squash-merged using exact expected head `20095e32b9dabcb2eb0cb9696651033fdf31a9ad`
+into `dbb35b693a6d30ce318d5c192374b2b8a785ceb6` after Kilo and Codex
+reported no findings and no unresolved review threads remained. The PR-head
+CI and P4 integration checks passed; independent exact merged-main verification
+passed the 51-package Go suite, vet and tagged restricted-role PostgreSQL
+retrieval tests. Merged-main [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40644322513)
+passed 5/5 and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40644322704)
+passed 9/9 on the same SHA. CodeRabbit and Claude reviews were unavailable
+due to usage limits. This is **not** production deployment, representative
+latency qualification or §41 acceptance. The DoD checker still returns FAIL
+(PARTIAL). See `docs/P7_RETRIEVAL_STANDING_ANSWER_INTEGRATION.md`.
 
 ## P7 restricted-role standing-answer write integrity (2026-10-28; merged PR #124)
 
