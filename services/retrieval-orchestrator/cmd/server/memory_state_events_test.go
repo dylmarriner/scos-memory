@@ -38,6 +38,9 @@ func TestP5MemoryEventReadbackRejectsMalformedSelectorsBeforeDatabase(t *testing
 			req.Header.Set("X-SCOS-Principal-ID", id)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
+			if rec.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("sensitive event readback must not be cached: %q", rec.Header().Get("Cache-Control"))
+			}
 			if rec.Code != tc.status {
 				t.Fatalf("HTTP %d want %d, body %s", rec.Code, tc.status, rec.Body.String())
 			}

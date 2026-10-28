@@ -8,7 +8,7 @@
 
 The response includes `memory_id`, `events`, optional `next_after_id`, and `ordering: "event_id_not_commit_order"`. Each event carries its immutable ID, operation, status, namespace, type, current-version/supersession identifiers, authority, confidence, sensitivity, valid-time bounds, expiry and `observed_at`. No memory content or purge-audit reason is returned. Pagination uses ascending event IDs, with `next_after_id` set only when another row was observed.
 
-All SQL executes inside the existing tenant/principal-scoped transaction as the restricted runtime database role. `memory_system_events` FORCE RLS requires both current-memory visibility and event-namespace membership/sensitivity visibility. Unauthorized event rows are not returned. Database errors are sanitized; no connection string or SQL diagnostic is returned to clients.
+All SQL executes inside the existing tenant/principal-scoped transaction as the restricted runtime database role. `memory_system_events` FORCE RLS requires both current-memory visibility and event-namespace membership/sensitivity visibility. Unauthorized event rows are not returned. Database errors are sanitized; no connection string or SQL diagnostic is returned to clients. All endpoint responses carry `Cache-Control: no-store` to prevent private history being retained by HTTP caches.
 
 ## What this does not prove
 

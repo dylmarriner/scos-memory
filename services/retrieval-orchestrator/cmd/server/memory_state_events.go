@@ -75,6 +75,8 @@ func parseMemoryEventSelectors(r *http.Request) (string, int, int64, error) {
 }
 
 func (s *server) handleMemoryStateEvents(w http.ResponseWriter, r *http.Request) {
+	// Even authorized responses contain sensitive historical state.
+	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
