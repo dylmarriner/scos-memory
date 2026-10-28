@@ -46,8 +46,8 @@ fails. The cache remains stale until an authorized, evidence-valid refresh.
 The mutation triggers alone cannot detect when the wall clock passes a
 previously future `valid_until` or `expires_at`. Migration `000085`
 provides a read-time projection that checks those bounds without relying on
-an UPDATE or a scheduled job. A new read-only HTTP endpoint is a source
-candidate, but no writer/refresh generator or retrieval-orchestrator integration
+an UPDATE or a scheduled job. A read-only HTTP endpoint is merged
+into main (PR #114), but no writer/refresh generator or retrieval-orchestrator integration
 is implemented, so this does not close P7 acceptance.
 
 ## Read-time projection (migration 000085)
@@ -126,7 +126,7 @@ Kilo review passed; the Codex statement-time finding was reproduced RED,
 fixed and regression-tested GREEN before merge. No production database has
 been changed; live rollout and recovery qualification require separate approval.
 
-## HTTP read-only serving slice (source candidate; not deployed)
+## HTTP read-only serving slice (merged source; not deployed)
 
 `GET /v1/standing-answers?namespace_id=<UUID>&question_key=<text>` on
 memory-intelligence reads only `public.memory_standing_answers_current` in a
@@ -144,3 +144,15 @@ Real restricted-role PostgreSQL HTTP regressions cover valid readback,
 tenant isolation, membership revocation, memory revocation and clock-only
 expiry. The writer, retrieval integration, latency qualification and
 production rollout remain open.
+
+PR #114 merged at `d243e4fff571b2ad848e9eff10649cb4f40db939`.
+Exact-head [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40606584143)
+and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40606584266)
+passed. The merged-main
+[CI](https://github.com/dylmarriner/scos-memory/actions/runs/40607257176)
+(5/5 jobs) and
+[P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40607257004)
+(9/9 jobs) passed. Independently on AMD, 51 Go packages, `go vet` and
+the restricted-role PostgreSQL P7 integration suite passed on merged main.
+The HTTP no-store regression was reproduced RED and verified GREEN before
+merge. No live migration, deployment or production recovery was performed.
