@@ -54,8 +54,11 @@ BEGIN
     WHERE f.id = source_id AND f.tenant_id = NEW.tenant_id
       AND f.namespace_id = NEW.namespace_id
     FOR SHARE OF f;
+    -- Go's strings.TrimSpace includes Unicode White_Space, not just the
+    -- ASCII space removed by PostgreSQL's default btrim(). Keep this
+    -- boundary consistent with the HTTP refresh normalizer.
     IF NOT FOUND
-       OR NEW.question_key IS DISTINCT FROM lower(btrim(source_title))
+       OR NEW.question_key IS DISTINCT FROM lower(btrim(source_title, E' \t\n\r\f\v' || U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'))
        OR NEW.answer IS DISTINCT FROM source_summary
        OR NEW.confidence IS DISTINCT FROM source_confidence
        OR NEW.stale_reason IS NOT NULL THEN

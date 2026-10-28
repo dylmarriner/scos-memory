@@ -25,7 +25,12 @@ reintroduce DELETE. Real PostgreSQL integration tests verify direct answer
 forgery, provenance downgrade, stale-source resurrection, arbitrary fresh
 INSERT, confidence inflation, DELETE denial, and governed HTTP refresh.
 Legacy/curated test fixtures now seed via the schema owner while retaining
-restricted-role HTTP/RLS read coverage. This migration does not establish
+restricted-role HTTP/RLS read coverage.
+Review identified a Go `strings.TrimSpace` versus PostgreSQL `btrim`
+mismatch for boundary Unicode whitespace. Restricted-role HTTP regressions
+reproduced HTTP 500 for tab/NBSP-padded titles (RED); migration `000087`
+now matches Unicode White_Space trimming (GREEN). This migration does not
+establish
 general natural-language answer generation, provenance of the underlying
 memory's original creation, fleet rollout/recovery qualification, or P7/P0-P8
 completion. **PR review, exact merged-main SHA and CI evidence are pending.**

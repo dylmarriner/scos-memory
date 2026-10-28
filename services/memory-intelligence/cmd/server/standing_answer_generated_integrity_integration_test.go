@@ -193,3 +193,25 @@ func TestP7RuntimeCannotSquatOnGovernedQuestionWithStaleLegacyRow(t *testing.T) 
 		t.Fatalf("governed refresh blocked by stale-row squatting: HTTP %d", code)
 	}
 }
+
+func TestP7GeneratedRefreshNormalizesUnicodeAndWhitespaceTitle(t *testing.T) {
+	for _, title := range []string{
+		" \t Where is the archive? \t ",
+		"\u00a0 Where is the archive? \u00a0",
+		"  WİTH Ünicode  ",
+	} {
+		t.Run(fmt.Sprintf("%q", title), func(t *testing.T) {
+			f := newBehaviourFixture(t)
+			fact := f.scalar(`INSERT INTO memory_items (
+                tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+                authority_level,confidence_score,sensitivity)
+                VALUES ($1,$2,$3,'semantic','active',$4,'Verified summary',80,0.8,'internal')
+                RETURNING id::text`, f.tenant, f.ns, f.owner, title)
+			code, result, _ := f.call(f.srv.handleStandingAnswerRefresh, http.MethodPost,
+				"/v1/standing-answers/refresh", fmt.Sprintf(`{"fact_id":%q}`, fact))
+			if code != http.StatusOK {
+				t.Fatalf("valid normalized title rejected: HTTP %d %v", code, result)
+			}
+		})
+	}
+}
