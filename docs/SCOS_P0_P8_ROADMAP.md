@@ -677,6 +677,9 @@ Git provenance attestation, P3 scaling acceptance, or production readiness.
 
 # P0 — Benchmark and Evidence Baseline
 
+**P0 duplicate-result metric integrity (2026-10-29, source candidate):** Three RED/GREEN regressions prove repeated relevant evidence previously inflated Precision@K (2/3 reported as 1) and nDCG (1.6309 for one relevant item). Precision now counts actual ranking slots, and nDCG rewards each distinct evidence ID once. The fresh P4 lexical baseline has unchanged rankings, scores and forbidden counts; only harness/base SHA metadata changed. See docs/P0_UNIQUE_RANKING_INTEGRITY.md. This is not live BGE, latency, deployment or full P0–P8 acceptance.
+
+
 **P0 benchmark comparator direction and coverage (2026-10-29, development):** the paired-run comparator now treats stale-hit/duplicate rates (and answer regression) as lower-is-better rather than falsely rewarding increased exposure; disappearance or appearance of optional measurements is reported separately as coverage loss/gain instead of silently ignored or scored as zero. Four RED/GREEN unit regressions cover both polarity and coverage. P4 lexical baseline was requalified after the harness source hash changed; the seven observed rankings, quality metrics and forbidden counts remain unchanged. This is offline score-integrity hardening, not live BGE quality or P0 acceptance. See `docs/P0_BENCHMARK_COMPARISON_INTEGRITY.md`.
 
 
