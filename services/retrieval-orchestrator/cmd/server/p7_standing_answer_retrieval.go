@@ -53,6 +53,11 @@ func (s *server) readStandingAnswers(ctx context.Context, req RetrieveRequest, n
             WHERE a.tenant_id=$1::uuid
               AND n.canonical_name=ANY($2::text[])
               AND a.question_key=$3
+              AND EXISTS (
+                  SELECT 1 FROM public.principals p
+                  WHERE p.id=$6::uuid AND p.tenant_id=a.tenant_id
+                    AND p.disabled_at IS NULL
+              )
               AND NOT EXISTS (
                   SELECT 1
                   FROM jsonb_array_elements_text(a.evidence_fact_ids::jsonb) AS cited(fact_id)
@@ -64,7 +69,7 @@ func (s *server) readStandingAnswers(ctx context.Context, req RetrieveRequest, n
               )
             ORDER BY a.namespace_id, a.id
             LIMIT $5
-        `, req.TenantID, namespaces, key, sensitivityMax, limit)
+        `, req.TenantID, namespaces, key, sensitivityMax, limit, req.PrincipalID)
 		if err != nil {
 			return err
 		}

@@ -39,6 +39,18 @@ requires an explicit operator-approved migration window, lock/duration
 qualification, rollback/recovery plan and controlled refresh**. No live
 migration is authorized by merging this source.
 
+## Principal lifecycle and tenant identity (2026-10-29 source candidate)
+
+An old namespace membership may survive principal suspension, and a malformed
+cross-tenant membership may exist independently of the authenticated tenant.
+The refresh authorization and its not-found fallback therefore require a
+principal row belonging to the fact's tenant with `disabled_at IS NULL`.
+The existing standing-answer HTTP read and opt-in retrieval path now apply
+the same identity/lifecycle check before serving cached evidence. Disabled or
+cross-tenant principals cannot use an otherwise valid membership to refresh
+or read a standing answer. These checks do not replace an account-wide
+revocation audit across every retrieval and write surface.
+
 ## Verification and limits
 
 Real PostgreSQL 17/pgvector restricted-role HTTP tests cover source-derived
