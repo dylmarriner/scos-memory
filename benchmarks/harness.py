@@ -124,11 +124,13 @@ def recall_at_k(expected: set[str], retrieved: list[str], k: int) -> float:
     return hits / len(expected)
 
 def precision_at_k(expected: set[str], retrieved: list[str], k: int) -> float:
-    if not retrieved[:k]:
+    slots = retrieved[:k]
+    if not slots:
         return 0.0
-    retrieved_k = set(retrieved[:k])
-    hits = len(expected & retrieved_k)
-    return hits / len(retrieved_k)
+    # A repeated ID consumes another result slot; do not shrink the
+    # denominator to reward duplicate evidence as perfect precision.
+    hits = len(expected & set(slots))
+    return hits / len(slots)
 
 def mean_reciprocal_rank(expected: set[str], retrieved: list[str]) -> float:
     for i, r in enumerate(retrieved):
@@ -137,10 +139,12 @@ def mean_reciprocal_rank(expected: set[str], retrieved: list[str]) -> float:
     return 0.0
 
 def ndcg(expected: set[str], retrieved: list[str], k: int) -> float:
-    """Normalised Discounted Cumulative Gain at k."""
+    """Normalised Discounted Cumulative Gain at k, one gain per evidence ID."""
     dcg = 0.0
+    seen: set[str] = set()
     for i, r in enumerate(retrieved[:k]):
-        rel = 1.0 if r in expected else 0.0
+        rel = 1.0 if r in expected and r not in seen else 0.0
+        seen.add(r)
         dcg += rel / math.log2(i + 2) if i > 0 else rel
 
     idcg = 0.0
