@@ -187,3 +187,58 @@ func TestP7ComposeDraftEscapesSourceProvenanceSpoofing(t *testing.T) {
 		t.Fatalf("source fact not present in structured evidence: %v", evidence)
 	}
 }
+
+// A valid token may outlive an account suspension. Keeping a namespace
+// membership must not let a disabled principal compose current evidence.
+func TestP7ComposeRejectsDisabledPrincipalWithRetainedMembership(t *testing.T) {
+	f := newBehaviourFixture(t)
+	makeFact := func(title string) string {
+		return f.scalar(`INSERT INTO memory_items (
+            tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+            authority_level,confidence_score,sensitivity)
+            VALUES ($1,$2,$3,'semantic','active',$4,$4,80,0.9,'internal')
+            RETURNING id::text`, f.tenant, f.ns, f.owner, title)
+	}
+	a, b := makeFact("Current A"), makeFact("Current B")
+	body := fmt.Sprintf(`{"namespace_id":%q,"fact_ids":[%q,%q]}`, f.ns, a, b)
+	call := func() int {
+		code, _, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
+			"/v1/standing-answers/compose", body)
+		return code
+	}
+	if code := call(); code != http.StatusOK {
+		t.Fatalf("precondition: enabled principal HTTP %d", code)
+	}
+	if _, err := f.admin.ExecContext(context.Background(),
+		"UPDATE principals SET disabled_at=statement_timestamp() WHERE id=$1", f.owner); err != nil {
+		t.Fatal(err)
+	}
+	if code := call(); code != http.StatusNotFound {
+		t.Fatalf("disabled principal retained evidence access: HTTP %d", code)
+	}
+}
+
+// Namespace memberships are independent foreign keys. A principal from
+// another tenant must not acquire access through a malformed tenant/principal
+// identity pair, even if such a cross-tenant membership was mistakenly added.
+func TestP7ComposeRejectsCrossTenantPrincipalWithMembership(t *testing.T) {
+	f := newBehaviourFixture(t)
+	makeFact := func(title string) string {
+		return f.scalar(`INSERT INTO memory_items (
+            tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+            authority_level,confidence_score,sensitivity)
+            VALUES ($1,$2,$3,'semantic','active',$4,$4,80,0.9,'internal')
+            RETURNING id::text`, f.tenant, f.ns, f.owner, title)
+	}
+	a, b := makeFact("Current A"), makeFact("Current B")
+	body := fmt.Sprintf(`{"namespace_id":%q,"fact_ids":[%q,%q]}`, f.ns, a, b)
+	if _, err := f.admin.ExecContext(context.Background(),
+		"INSERT INTO namespace_memberships(namespace_id,principal_id,can_read) VALUES($1,$2,true)", f.ns, f.other); err != nil {
+		t.Fatal(err)
+	}
+	code, _, _ := f.callAs(f.tenant, f.other, f.srv.handleStandingAnswerCompose,
+		http.MethodPost, "/v1/standing-answers/compose", body)
+	if code != http.StatusNotFound {
+		t.Fatalf("foreign-tenant principal with membership accessed evidence: HTTP %d", code)
+	}
+}

@@ -108,6 +108,9 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
             JOIN public.namespace_memberships m
               ON m.namespace_id=f.namespace_id
              AND m.principal_id=$4::uuid AND m.can_read
+            JOIN public.principals p
+              ON p.id=m.principal_id AND p.tenant_id=f.tenant_id
+             AND p.disabled_at IS NULL
             WHERE f.tenant_id=$1::uuid AND f.namespace_id=$2::uuid
               AND f.id IN (
                   SELECT value::uuid FROM jsonb_array_elements_text($3::jsonb) AS v(value)

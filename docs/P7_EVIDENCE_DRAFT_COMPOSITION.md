@@ -71,3 +71,23 @@ PostgreSQL integration suites passed against a disposable PostgreSQL 17/pgvector
 instance with 86 SQL migrations and 21 policies. PR #141 was merged into `7daa74e2c36deeee5bf4f2cebba5704f8d48e0ab`
 after CI and review, with merged-main CI/P4 passing 5/5 and 9/9 jobs.
 This is verified merged source, not production evidence.
+
+## 2026-10-29 disabled and cross-tenant principal guard (source candidate)
+
+A restricted-role PostgreSQL HTTP regression exposed two membership edge
+cases: a principal with `disabled_at` set could still compose a draft using
+its retained membership, and a principal from a different tenant could
+compose evidence if an erroneous cross-tenant namespace membership existed
+and the identity pair named the namespace's tenant. Both cases returned
+HTTP 200 before the fix (RED). The composition query now joins the
+`principals` table and requires a matching tenant and an enabled principal,
+in addition to the existing namespace membership, RLS, and source checks.
+Both cases return HTTP 404 (no partial evidence) after the fix (GREEN),
+including five focused restricted-role test repetitions, two race-enabled
+repetitions, the full memory-intelligence and retrieval-orchestrator
+integration-tagged PostgreSQL suites, 52 Go packages, `go vet ./...`, and
+`git diff --check`. All 86 migrations and 21 policies were applied to a
+disposable PostgreSQL 17/pgvector instance. The governance §41 definition-of-
+done checker still returns FAIL (PARTIAL). This change is
+limited to the P7 composition endpoint and does not replace central identity
+revocation, fix cross-tenant memberships elsewhere, or qualify production.
