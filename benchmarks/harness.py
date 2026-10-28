@@ -310,27 +310,47 @@ def runtime_metadata() -> dict[str, Any]:
 
 # ── comparison baselines ─────────────────────────────────────────────────
 
+# These metrics count *undesirable* outcomes. Comparisons of P0 evidence
+# must not interpret increasing stale/duplicate exposure as an improvement.
+LOWER_IS_BETTER_METRICS = frozenset({
+    "duplicate_rate", "stale_hit_rate", "answer_regression",
+})
+
+
 def compare_baseline(results: list[BenchmarkResult],
                      baseline_results: list[BenchmarkResult]) -> dict[str, Any]:
-    """Compare per-case scores against a baseline run."""
+    """Compare per-case metrics with explicit direction and measurement coverage.
+
+    Optional metrics that disappear or appear are tracked as coverage changes,
+    not silently ignored or fabricated as score zero. No latency metrics are
+    claimed here: latency_ms remains separately reported with deployment class.
+    """
     comparisons: dict[str, dict[str, int]] = {}
     baseline_by_id = {b.case_id: b for b in baseline_results}
-    for r in results:
-        base = baseline_by_id.get(r.case_id)
-        if base is None:
+    for current in results:
+        previous = baseline_by_id.get(current.case_id)
+        if previous is None:
             continue
-        for metric, value in r.scores.items():
-            if metric not in base.scores:
+        for metric in current.scores.keys() | previous.scores.keys():
+            counts = comparisons.setdefault(metric, {
+                "improvements": 0, "regressions": 0, "unchanged": 0,
+                "coverage_lost": 0, "coverage_gained": 0,
+            })
+            if metric not in current.scores:
+                counts["coverage_lost"] += 1
                 continue
-            base_val = base.scores[metric]
-            counts = comparisons.setdefault(metric, {"improvements": 0, "regressions": 0, "unchanged": 0})
-            if value > base_val:
-                counts["improvements"] += 1
-            elif value < base_val:
-                counts["regressions"] += 1
-            else:
+            if metric not in previous.scores:
+                counts["coverage_gained"] += 1
+                continue
+            new_value, old_value = current.scores[metric], previous.scores[metric]
+            if new_value == old_value:
                 counts["unchanged"] += 1
+            elif (new_value < old_value) == (metric in LOWER_IS_BETTER_METRICS):
+                counts["improvements"] += 1
+            else:
+                counts["regressions"] += 1
     return comparisons
+
 
 # ── candidate runner ─────────────────────────────────────────────────────
 
