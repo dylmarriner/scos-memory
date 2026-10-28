@@ -4,16 +4,19 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## P0/P4/P7 cross-lane retrieval token accounting (2026-10-28; review candidate)
+## P0/P4/P7 cross-lane retrieval token accounting (2026-10-28; merged PR #131)
 
 A real authenticated code-retrieval HTTP integration previously returned a
 complete code symbol-version record under `token_budget: 1`, while reporting
 zero tokens and persisting the selected symbol version without charging its
 metadata against the budget. This left P0 cost accounting and P4/P7 shared
-retrieval budgeting incomplete. A new RED compile regression and restricted-role
-PostgreSQL HTTP acceptance test cover the gap.
+retrieval budgeting incomplete. A new unit test failed compilation before the helper existed (RED).
+On an isolated baseline-main worktree, the new real PostgreSQL HTTP test
+failed RED with `code-only retrieval must account for evidence tokens, got 0`.
+The corrected handler passed GREEN using a non-superuser, non-BYPASSRLS
+application role.
 
-The candidate now charges each **complete serialized code result** (including
+Merged source now charges each **complete serialized code result** (including
 symbol-version, path and immutable snapshot/commit provenance) at an estimated
 four bytes per token, rounded up. After budgeted memory sections, code
 results are admitted in downstream order only if they fit whole; opt-in
@@ -31,8 +34,25 @@ and `git diff --check` passed. The canonical §41 DoD checker still
 correctly reports FAIL (PARTIAL). This is approximate evidence-token
 accounting, **not** an exact tokenizer, full wire-response byte cap,
 representative P0 model-cost qualification, a production rollout or
-completion of P0–P8. PR review, exact-head checks, merge and merged-main
-verification remain to be recorded.
+completion of P0–P8. [PR #131](https://github.com/dylmarriner/scos-memory/pull/131)
+was squash-merged with exact expected head
+`fb2a52122d2fee280e136a9818aa9dc89260f2d8` into
+`6fbcf9a903d4ad6ab1280636015c90f7775f8cba`.
+The final PR-head [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40650636335)
+passed 5/5 and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40650636340)
+passed 9/9. Kilo reported no findings on the final head; Codex reported no
+findings on the initial implementation commit, followed by a test-only
+restricted-role hardening commit. Claude skipped for usage limits, and
+CodeRabbit had not completed its review at merge time; it subsequently
+rated merge risk minimal with no actionable inline findings, while noting a
+non-blocking docstring-coverage warning. No unresolved inline review
+threads were present at merge. Independent merged-main AMD
+verification passed 51 Go packages, vet and the complete tagged
+PostgreSQL retrieval suite. Merged-main
+[CI](https://github.com/dylmarriner/scos-memory/actions/runs/40651142473)
+passed 5/5 and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40651142501)
+passed 9/9 at the exact merge SHA. Production rollout and the §41 acceptance
+gate remain open.
 
 ## P4/P7 retrieval audit fail-closed and cache isolation (2026-10-28; merged PR #129)
 
