@@ -132,3 +132,24 @@ encoding and domain prefix `scos:p7:source:v2\0`. Old v1 fingerprints must
 be treated as stale by future approval implementations, not silently upgraded.
 The SHA-256 value is still a drift detector, not an authorization token or
 signature; every approval must re-check source state and access rights.
+
+## Agent maximum-sensitivity enforcement (2026-10-29; source candidate)
+
+Namespace membership and its sensitivity ceiling do not override an agent's
+independent `agents.maximum_sensitivity` capability. The composition query
+now joins the agent capability row for `principals.kind='agent'` and rejects
+sources above that capability; a missing capability row fails closed. Human
+principals remain governed by their existing namespace permissions and
+sensitivity ceiling. Mixed-sensitivity drafts are rejected as a whole rather
+than silently omitting the restricted source.
+
+A restricted `scos_app` PostgreSQL HTTP integration test reproduced HTTP 200
+for an `internal`-limited agent composing an `internal` and `confidential`
+source in a `confidential` namespace (RED). The same test verifies HTTP 404
+for the over-limit draft, HTTP 200 after an explicit agent capability upgrade,
+and HTTP 404 after removing the capability row (GREEN). Five repetitions of
+the focused P7 composition suite and two race-enabled repetitions of the
+agent-clearance regression passed on a disposable PostgreSQL 17/pgvector
+instance with 86 migrations and 21 policies. This protects the P7 draft
+composition path only; it does not prove that all other SCOS read paths
+consistently enforce agent clearance or complete governed approval.

@@ -4,6 +4,22 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 agent capability ceiling for evidence drafts (2026-10-29; PR candidate)
+
+The P7 composition endpoint previously allowed a namespace-readable agent to
+compose facts above its `agents.maximum_sensitivity` when the namespace's
+ceiling was more permissive. A restricted-role PostgreSQL HTTP regression
+reproduced HTTP 200 for an `internal` agent composing a `confidential` source
+(RED). The SQL now enforces both the namespace ceiling and the agent's
+independent maximum sensitivity, failing closed if an agent capability row is
+missing (GREEN). Tests also verify that an explicit capability upgrade permits
+the same evidence and that removing the capability record revokes it. Five
+focused composition integration repetitions and two race-enabled agent tests
+passed against disposable PostgreSQL 17/pgvector with all 86 migrations and
+21 policies. This does not complete general P7 approval/generation, prove
+agent clearance in other services, or authorize production deployment.
+See `docs/P7_EVIDENCE_DRAFT_COMPOSITION.md`.
+
 ## P7 whole-draft review manifest and canonical identity (2026-10-29; PR candidate)
 
 P7 `POST /v1/standing-answers/compose` previously returned per-source v2
