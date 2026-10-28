@@ -46,8 +46,9 @@ fails. The cache remains stale until an authorized, evidence-valid refresh.
 The mutation triggers alone cannot detect when the wall clock passes a
 previously future `valid_until` or `expires_at`. Migration `000085`
 provides a read-time projection that checks those bounds without relying on
-an UPDATE or a scheduled job. No active HTTP cache-serving endpoint or
-writer/refresh generator is implemented, so this does not close P7 acceptance.
+an UPDATE or a scheduled job. A new read-only HTTP endpoint is a source
+candidate, but no writer/refresh generator or retrieval-orchestrator integration
+is implemented, so this does not close P7 acceptance.
 
 ## Read-time projection (migration 000085)
 
@@ -66,8 +67,8 @@ when time passes, so it is safe for historical audit and future read services.
 A stale legacy row with malformed free-text evidence is excluded without
 parsing that text. Tests use a real PostgreSQL clock transition and a
 restricted-role membership revocation. The service integration, answer
-generation, query-key matching, authorization at HTTP ingress and read-path
-benchmarking remain separate acceptance gates.
+generation, retrieval-orchestrator integration, and read-path benchmarking
+remain separate acceptance gates.
 
 ## Isolation and recovery
 
@@ -124,3 +125,22 @@ memory-intelligence PostgreSQL integration suite passed independently on AMD.
 Kilo review passed; the Codex statement-time finding was reproduced RED,
 fixed and regression-tested GREEN before merge. No production database has
 been changed; live rollout and recovery qualification require separate approval.
+
+## HTTP read-only serving slice (source candidate; not deployed)
+
+`GET /v1/standing-answers?namespace_id=<UUID>&question_key=<text>` on
+memory-intelligence reads only `public.memory_standing_answers_current` in a
+transaction with authenticated tenant/principal RLS context. Question keys are
+trimmed and lowercased. Unknown or repeated parameters, invalid UUIDs,
+empty or oversized keys are rejected before database access. Missing,
+expired, revoked, stale or inaccessible answers return HTTP 404.
+Only previously generated answers are returned; there is no generation,
+refresh or write API. Connection details are never included in HTTP 500
+responses. Responses include `Cache-Control: no-store` so intermediaries cannot
+reuse an answer after expiry or access revocation. The existing HTTP
+authentication middleware remains mandatory.
+
+Real restricted-role PostgreSQL HTTP regressions cover valid readback,
+tenant isolation, membership revocation, memory revocation and clock-only
+expiry. The writer, retrieval integration, latency qualification and
+production rollout remain open.

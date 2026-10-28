@@ -1335,14 +1335,15 @@ merge or deployment.
 
 ## Standing-answer completion
 
-The standing-answer **table** exists, but no active HTTP serving path or
-answer-generation/refresh writer was found. Database-level safeguards are
-not equivalent to a deployed cache service:
+The standing-answer table and database safeguards exist. A new read-only
+HTTP serving source candidate queries the restricted-role evidence-current
+projection, but no answer-generation/refresh writer or retrieval-orchestrator
+integration exists. Source code is not a deployed cache service:
 
 - [x] Typed evidence dependency tracking and transactional invalidation (migration 000084, merged PR #111).
 - [x] Restricted-role, read-time evidence/clock freshness projection (migration 000085, merged PR #112; not deployed).
 - [ ] Governed writer and refresh generation with a real retrieval/answer pipeline.
-- [ ] Authorized cache-serving endpoint using the read-time projection.
+- [x] Authorized read-only serving endpoint source candidate (2026-10-28): `GET /v1/standing-answers` uses authenticated tenant/principal RLS, bounded normalized exact keys and the security-invoker current-evidence view. RED/GREEN unit and real PostgreSQL HTTP tests cover tenant denial, membership/fact revocation and clock expiry. PR review, exact-head CI, merged-main qualification and rollout remain separate. No retrieval-orchestrator integration exists.
 - [ ] End-to-end expiry/revocation and stale-answer benchmark coverage.
 
 ## Agent execution-trace consolidation
