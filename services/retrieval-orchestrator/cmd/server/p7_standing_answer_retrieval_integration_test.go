@@ -117,6 +117,27 @@ func TestP7RetrievalStandingAnswerCurrentEvidenceAndAudit(t *testing.T) {
 		t.Fatal("unaudited cache miss exposed a retrieval response")
 	}
 
+	// Ordinary memory retrieval is governed evidence too. It must not
+	// return a successful, unaudited payload when the retrieval-run write
+	// fails (here, an invalid session foreign key).
+	unauditableOrdinary := unauditable
+	unauditableOrdinary.IncludeStandingAnswers = false
+	ordinaryBody, _ := json.Marshal(unauditableOrdinary)
+	ordinaryResponse := httptest.NewRecorder()
+	srv.handleRetrieve(ordinaryResponse, httptest.NewRequest(
+		http.MethodPost, "/v1/retrieve", bytes.NewReader(ordinaryBody)))
+	if ordinaryResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unaudited ordinary retrieval returned HTTP %d, want 503: %s",
+			ordinaryResponse.Code, ordinaryResponse.Body.String())
+	}
+	if bytes.Contains(ordinaryResponse.Body.Bytes(), []byte("retrieval_run_id")) {
+		t.Fatal("unaudited ordinary retrieval exposed a retrieval response")
+	}
+
+	if recNoCache.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("ordinary tenant-scoped retrieval must not be cached")
+	}
+
 	got := call(request)
 	if len(got.StandingAnswers) != 1 || got.StandingAnswers[0].ID != answerID ||
 		got.StandingAnswers[0].Answer != "verified answer" ||

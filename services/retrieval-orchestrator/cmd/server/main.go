@@ -368,6 +368,9 @@ func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (tenantI
 
 func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	// All retrieval results are principal-scoped governed evidence, not just
+	// opt-in standing answers. Never permit shared/client cache persistence.
+	w.Header().Set("Cache-Control", "no-store")
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -417,7 +420,6 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 	// A current evidence cache must never answer historical or class-filtered queries.
 	if req.IncludeStandingAnswers {
-		w.Header().Set("Cache-Control", "no-store")
 		if standingAnswerQuestionKey(req.Query) == "" {
 			http.Error(w, "standing-answer query must be nonempty UTF-8 (max 1024 bytes)", http.StatusBadRequest)
 			return
@@ -676,14 +678,12 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		"standing_answers": len(standingAnswers),
 	}, int(time.Since(start).Milliseconds()), meta)
 	if err != nil {
-		log.Printf("record retrieval run: %v", err)
-		// An explicit governed-cache lookup requires an audit even when no
-		// answer matched. Otherwise an audit failure silently becomes an
-		// unaudited successful cache miss (HTTP 200).
-		if req.IncludeStandingAnswers {
-			http.Error(w, "standing-answer audit unavailable", http.StatusServiceUnavailable)
-			return
-		}
+		log.Printf("record retrieval run failed (%T)", err)
+		// No retrieval lane may return an unaudited HTTP 200. This applies
+		// to ordinary memory/code evidence and empty results as well as
+		// opt-in standing answers. Never release evidence after audit failure.
+		http.Error(w, "retrieval audit unavailable", http.StatusServiceUnavailable)
+		return
 	}
 
 	totalTokens := standingTokens
