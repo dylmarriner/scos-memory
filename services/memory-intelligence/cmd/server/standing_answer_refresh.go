@@ -140,7 +140,20 @@ func (s *engineServer) handleStandingAnswerRefresh(w http.ResponseWriter, r *htt
                 refresh_reason=EXCLUDED.refresh_reason,stale_at=NULL,stale_reason=NULL
             WHERE memory_standing_answers.refresh_reason='verified_fact_title_summary'
               AND (memory_standing_answers.evidence_fact_ids=EXCLUDED.evidence_fact_ids
-                   OR memory_standing_answers.stale_at IS NOT NULL)
+                   OR memory_standing_answers.stale_at IS NOT NULL
+                   -- A clock-only expiry cannot fire a row-change invalidation
+                   -- trigger. Allow replacing only a verified single-source
+                   -- generated cache whose ORIGINAL source has objectively
+                   -- expired, not a merely unreadable/restricted cache.
+                   OR EXISTS (
+                       SELECT 1 FROM memory_items old_source
+                       WHERE old_source.tenant_id=memory_standing_answers.tenant_id
+                         AND old_source.namespace_id=memory_standing_answers.namespace_id
+                         AND memory_standing_answers.evidence_fact_ids=
+                             ('["' || old_source.id::text || '"]')
+                         AND (old_source.expires_at<=statement_timestamp()
+                              OR old_source.valid_until<=statement_timestamp())
+                   ))
             RETURNING id::text`, identity.TenantID, out.NamespaceID, out.QuestionKey,
 			out.Answer, string(evidence), out.Confidence).Scan(&out.ID)
 		if errors.Is(err, sql.ErrNoRows) {
