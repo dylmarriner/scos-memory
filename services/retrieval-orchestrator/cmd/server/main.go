@@ -396,7 +396,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// reconstruction. Malformed timestamps are bad requests, not a capability
 	// limitation, even when the request supplies both temporal dimensions.
 	if req.AsOfValidTime != "" {
-		parsed, err := time.Parse(time.RFC3339Nano, req.AsOfValidTime)
+		parsed, err := parseStrictRFC3339Timestamp(req.AsOfValidTime)
 		if err != nil {
 			http.Error(w, "as_of_valid_time must be an RFC3339 timestamp with timezone", http.StatusBadRequest)
 			return
@@ -404,7 +404,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		req.AsOfValidTime = parsed.UTC().Format(time.RFC3339Nano)
 	}
 	if req.AsOfSystemTime != "" {
-		if _, err := time.Parse(time.RFC3339Nano, req.AsOfSystemTime); err != nil {
+		if _, err := parseStrictRFC3339Timestamp(req.AsOfSystemTime); err != nil {
 			http.Error(w, "as_of_system_time must be an RFC3339 timestamp with timezone", http.StatusBadRequest)
 			return
 		}
