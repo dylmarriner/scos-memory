@@ -47,11 +47,12 @@ func standingAnswerComposeFingerprint(ev standingAnswerComposeEvidence, tenantID
 }
 
 type standingAnswerComposeResult struct {
-	Status      string                          `json:"status"`
-	NamespaceID string                          `json:"namespace_id"`
-	DraftText   string                          `json:"draft_text"`
-	Evidence    []standingAnswerComposeEvidence `json:"evidence"`
-	Confidence  float64                         `json:"confidence"`
+	Status           string                          `json:"status"`
+	NamespaceID      string                          `json:"namespace_id"`
+	DraftText        string                          `json:"draft_text"`
+	DraftFingerprint string                          `json:"draft_fingerprint"`
+	Evidence         []standingAnswerComposeEvidence `json:"evidence"`
+	Confidence       float64                         `json:"confidence"`
 }
 
 var errStandingAnswerComposeUnavailable = errors.New("one or more evidence facts are unavailable")
@@ -96,6 +97,17 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		http.Error(w, "authenticated tenant and principal required", http.StatusUnauthorized)
 		return
 	}
+	// PostgreSQL UUID identity is case-insensitive, but evidence fingerprints
+	// are byte-sensitive. Canonicalize authenticated UUIDs before both the
+	// RLS query and source/draft fingerprint calculation.
+	tenantID, tenantErr := uuid.Parse(identity.TenantID)
+	principalID, principalErr := uuid.Parse(identity.PrincipalID)
+	if tenantErr != nil || principalErr != nil || tenantID == uuid.Nil || principalID == uuid.Nil {
+		http.Error(w, "authenticated tenant and principal must be nonzero UUIDs", http.StatusUnauthorized)
+		return
+	}
+	identity.TenantID = tenantID.String()
+	identity.PrincipalID = principalID.String()
 	if s.db == nil {
 		http.Error(w, "evidence composition unavailable", http.StatusServiceUnavailable)
 		return
@@ -184,6 +196,7 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		if len(out.DraftText) > 16384 {
 			return out, errStandingAnswerComposeUnsafe
 		}
+		out.DraftFingerprint = standingAnswerComposeDraftFingerprint(identity.TenantID, out)
 		return out, nil
 	})
 	switch {

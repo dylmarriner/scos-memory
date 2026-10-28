@@ -4,6 +4,39 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 whole-draft review manifest and canonical identity (2026-10-29; PR candidate)
+
+P7 `POST /v1/standing-answers/compose` previously returned per-source v2
+fingerprints but no digest binding the **entire** reviewable evidence set and
+exact displayed draft. A reviewer could not pin one whole composition for
+later revalidation. A real restricted-role PostgreSQL RED regression showed
+the `draft_fingerprint` field missing; a second RED regression showed that
+uppercase and lowercase textual spellings of the *same* authenticated UUID
+produced different source fingerprints and draft hashes despite identical
+authorized database evidence.
+
+The read-only composition now returns a domain-separated SHA-256
+`draft_fingerprint` over canonical tenant/namespace identity, draft
+review status, overall confidence, exact escaped review text and every
+sorted source ID plus its v2 fingerprint.
+Authenticated tenant/principal UUIDs are validated as nonzero and normalized
+before RLS queries and fingerprinting. The digest changes when source content,
+source set, security boundary or displayed text changes, and remains stable
+under reordered requests and equivalent UUID casing. It is **not** a
+signature, approval, standing-answer publication or proof of transaction
+commit order. A future approval path must independently re-read the governed
+sources, recompose and compare the manifest under current authorization.
+
+TDD evidence: real PostgreSQL 17/pgvector with 86 migrations and 21
+restricted-role policies; RED missing-manifest and equivalent-UUID mismatch
+regressions; GREEN five focused PostgreSQL repetitions; the full
+restricted-role memory-intelligence PostgreSQL integration suite; two
+race-enabled focused integration repetitions; the full 52-package Go suite,
+`go vet ./...` and `git diff --check` passed on AMD. PR review, PR-head CI
+and merged-main acceptance are separate pending gates, not implied by this
+source candidate. Governance §41 remains PARTIAL/FAIL; no production
+deployment, live migration or paid resource activation was performed.
+
 ## P7 composition fingerprint security-context binding (2026-10-29; merged PR #147)
 
 The P7 evidence draft source fingerprint v1 omitted the tenant and namespace
