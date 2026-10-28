@@ -1,6 +1,6 @@
 # P5 forward-only memory-state event readback
 
-**Status:** Source implementation awaiting independent review, merge and merged-main qualification. Not deployed. This is **not** `as_of_system_time` reconstruction.
+**Status:** Merged source in PR #119 (main `9ef2b438a9be833f725e7fac75aa82fda3c5e1cd`); exact-head and merged-main CI/P4 integration passed on 2026-10-28. Not deployed. This is **not** `as_of_system_time` reconstruction.
 
 ## Contract
 
@@ -21,6 +21,7 @@ Tenant offboarding still requires the existing privileged, audited purge. This e
 - RED: tests failed to compile before the handler/response type existed.
 - GREEN: authenticated selector validation and unit tests pass.
 - Restricted-role PostgreSQL integration test covers insert→update readback, keyset pagination, same-tenant nonmember denial, cross-tenant denial, membership revocation and connection-context cleanup. It runs in the existing P4 PostgreSQL CI job using `SCOS_APP_TEST_DATABASE_URL` and must pass before merging.
-- Pending: exact-head CI, independent review, merged-main CI, deployment/recovery and complete P5 historical semantics.
+- Exact-head CI/P4 passed; Kilo reported no issues, Codex no findings on the initial commit, and no unresolved review threads remained. CodeRabbit/Claude were unavailable due to usage limits. PR #119 was merged with exact expected head SHA `dbeb058942d247ba65d5502f08957fd93b2bea3c`. Merged-main [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40619890844) (5/5) and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40619890968) (9/9) passed. Independent AMD Go suite and vet passed. Local full Python suite could not run because system Python lacks pydantic; GitHub Python CI passed.
+- Pending: production deployment/recovery qualification and complete P5 historical semantics.
 
 No production database or live service is modified by this source-only change.
