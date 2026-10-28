@@ -22,16 +22,11 @@ func TestP7StandingAnswerCurrentViewRequiresLiveEvidence(t *testing.T) {
 		VALUES($1,$2,$3,'semantic','active','expiring evidence','expiring evidence',
 		80,0.9,'internal',$4) RETURNING id::text`,
 		f.tenant, f.ns, f.owner, expires)
-	answer, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{
-		TenantID: f.tenant, PrincipalID: f.owner,
-	}, func(tx querier) (string, error) {
-		var id string
-		err := tx.QueryRowContext(ctx, `INSERT INTO memory_standing_answers(
+	var answer string
+	err := f.admin.QueryRowContext(ctx, `INSERT INTO memory_standing_answers(
 			tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
 			VALUES($1,$2,'readtime expiry','supported',$3) RETURNING id::text`,
-			f.tenant, f.ns, fmt.Sprintf("[%q]", fact)).Scan(&id)
-		return id, err
-	})
+		f.tenant, f.ns, fmt.Sprintf("[%q]", fact)).Scan(&answer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,15 +96,10 @@ func TestP7StandingAnswerCurrentViewRequiresMembership(t *testing.T) {
 		authority_level,confidence_score,sensitivity)
 		VALUES($1,$2,$3,'semantic','active','membership evidence','membership evidence',
 		80,0.9,'internal') RETURNING id::text`, f.tenant, f.ns, f.owner)
-	_, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{
-		TenantID: f.tenant, PrincipalID: f.owner,
-	}, func(tx querier) (bool, error) {
-		_, err := tx.ExecContext(ctx, `INSERT INTO memory_standing_answers(
+	_, err := f.admin.ExecContext(ctx, `INSERT INTO memory_standing_answers(
 			tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
 			VALUES($1,$2,'membership read','supported',$3)`,
-			f.tenant, f.ns, fmt.Sprintf("[%q]", fact))
-		return true, err
-	})
+		f.tenant, f.ns, fmt.Sprintf("[%q]", fact))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -44,15 +44,10 @@ func setupP7ReadBenchmarkCases(tb testing.TB) (*behaviourFixture, []p7ReadBenchm
 		{"p7 bench revoked", revoked},
 		{"p7 bench expired", expiring},
 	} {
-		_, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{
-			TenantID: f.tenant, PrincipalID: f.owner,
-		}, func(tx querier) (bool, error) {
-			_, e := tx.ExecContext(ctx, `INSERT INTO memory_standing_answers(
+		_, err := f.admin.ExecContext(ctx, `INSERT INTO memory_standing_answers(
                 tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
                 VALUES($1,$2,$3,'verified benchmark answer',$4)`,
-				f.tenant, f.ns, item.key, fmt.Sprintf("[%q]", item.fact))
-			return true, e
-		})
+			f.tenant, f.ns, item.key, fmt.Sprintf("[%q]", item.fact))
 		if err != nil {
 			tb.Fatal(err)
 		}
