@@ -1,6 +1,6 @@
 # P7 opt-in standing-answer retrieval integration
 
-**Status:** Source candidate, not production deployed. The canonical P7 acceptance gate remains open.
+**Status:** PR #126 merged at `7b38ee57a4fd9e5a58ea2316b0bdb09e865004a7` with passing merged-main CI/P4; follow-up audit/CI correction is a source candidate. Not production deployed. The canonical P7 acceptance gate remains open.
 
 `POST /v1/retrieve` accepts `include_standing_answers: true` as an explicit
 opt-in to the already materialized, exact-title standing-answer cache. A
@@ -35,8 +35,10 @@ Cache output shares the request's token budget with selected memory
 sections. Answers are either returned in full with their evidence or
 omitted, never truncated into misleading fragments. The response has
 `Cache-Control: no-store`. Cache database errors fail closed with HTTP 503.
-When cache evidence is returned, failure to persist the retrieval audit
-also fails closed. `retrieval_runs.filters` records the selected cache UUIDs,
+For every explicit cache lookup, including a cache miss, failure to persist
+the retrieval audit fails closed with HTTP 503. An earlier implementation
+returned HTTP 200 with an empty audit ID when the cache was empty; this
+was reproduced and corrected with a restricted-role PostgreSQL HTTP regression. `retrieval_runs.filters` records the selected cache UUIDs,
 namespace UUIDs, supporting memory UUIDs, SHA-256 of each exact answer and
 refresh timestamp; `candidate_counts` and `token_estimate` account for
 returned cache answers.
@@ -52,6 +54,27 @@ non-superuser, non-BYPASSRLS `scos_app` role. It checks exact answer/evidence
 readback, opt-in requirement, durable audit, a narrower sensitivity ceiling,
 mixed-sensitivity evidence, token exhaustion, membership revocation and
 source revocation. No production database is modified.
+
+## Audit-failure and CI-coverage correction (2026-10-28)
+
+A cache miss with a syntactically valid but nonexistent `session_id` caused
+`retrieval_runs` to reject its audit INSERT on a foreign-key constraint. The
+P7 handler previously returned HTTP 200 with `retrieval_run_id: ""` because
+its fail-closed check only applied when `standing_answers` was nonempty. A
+new full-handler test reproduced the defect (RED) against a disposable
+restricted-role PostgreSQL 17/pgvector database; the fix now returns HTTP
+503 for any opt-in lookup whose audit cannot be committed (GREEN). The test
+also checks that no unaudited retrieval payload is returned. Ordinary
+non-cache retrieval retains its existing best-effort audit behavior.
+
+The P4 PostgreSQL workflow previously invoked `go test` without the
+`integration` build tag for the retrieval package, excluding this P7 HTTP
+test. A Python workflow-contract test failed RED and now passes after the
+workflow was changed to run `go test -tags=integration -count=1` for the
+retrieval package. Local verification passed the complete tagged retrieval
+suite and two focused race-enabled repetitions on a disposable database
+with all 86 migrations and 21 RLS policy files. This is not production
+rollout evidence or general answer generation.
 
 This is **not** general answer generation, contradiction adjudication,
 historical belief reconstruction, proof of commit-order history, full
