@@ -71,7 +71,9 @@ The P4 PostgreSQL workflow previously invoked `go test` without the
 `integration` build tag for the retrieval package, excluding this P7 HTTP
 test. A Python workflow-contract test failed RED and now passes after the
 workflow was changed to run `go test -tags=integration -count=1` for the
-retrieval package. Local verification passed the complete tagged retrieval
+retrieval package. CodeRabbit additionally found that policy-only PRs would
+not trigger this PostgreSQL job. A second RED/GREEN workflow-contract test
+now requires `database/policies/**` in both pull-request and push filters. Local verification passed the complete tagged retrieval
 suite and two focused race-enabled repetitions on a disposable database
 with all 86 migrations and 21 RLS policy files. This is not production
 rollout evidence or general answer generation.

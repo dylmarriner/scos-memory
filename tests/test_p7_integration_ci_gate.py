@@ -14,6 +14,13 @@ class P7IntegrationCIGateTests(unittest.TestCase):
         self.assertIn('SCOS_APP_TEST_DATABASE_URL:', job)
         self.assertIn('SCOS_REQUIRE_APP_RLS_TESTS:', job)
 
+    def test_policy_only_changes_trigger_restricted_role_postgres_suite(self):
+        workflow = (ROOT / '.github/workflows/p4-hybrid-retrieval.yml').read_text()
+        # Both pull_request and push filters must include RLS policy changes.
+        self.assertEqual(2, len(re.findall(
+            r'(?m)^\s+- "database/policies/\*\*"\s*$', workflow
+        )))
+
 
 if __name__ == '__main__':
     unittest.main()

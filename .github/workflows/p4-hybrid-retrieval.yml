@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "database/migrations/**"
+      - "database/policies/**"
       - "services/retrieval-orchestrator/**"
       - "services/code-intelligence/**"
       - "services/mcp-gateway/**"
@@ -24,6 +25,7 @@ on:
       - "main"
     paths:
       - "database/migrations/**"
+      - "database/policies/**"
       - "services/retrieval-orchestrator/**"
       - "services/code-intelligence/**"
       - "services/mcp-gateway/**"
