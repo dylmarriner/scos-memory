@@ -1,6 +1,6 @@
 # P7 opt-in standing-answer retrieval integration
 
-**Status:** Source candidate, not production deployed. The canonical P7 acceptance gate remains open.
+**Status:** Merged in PR #126 at `7b38ee57a4fd9e5a58ea2316b0bdb09e865004a7`. Merged-main CI (5/5) and P4 integration (9/9) passed on 2026-10-28. **Not deployed.** The canonical P7 acceptance gate remains open.
 
 `POST /v1/retrieve` accepts `include_standing_answers: true` as an explicit
 opt-in to the already materialized, exact-title standing-answer cache. A
@@ -61,3 +61,18 @@ A transaction ending before the HTTP response cannot guarantee that no
 revocation commits in the intervening network interval; the response must
 not be treated as a durable authorization grant. Further concurrency,
 representative latency, and fleet-wide integration evidence remain open.
+
+## Merged-main evidence
+
+[PR #126](https://github.com/dylmarriner/scos-memory/pull/126)
+was merged using the exact expected head SHA
+`1d86044c039d7802c481c38283cfba74cc931430`.
+[CI](https://github.com/dylmarriner/scos-memory/actions/runs/40639348752)
+passed 5/5 jobs and
+[P4 Hybrid Retrieval](https://github.com/dylmarriner/scos-memory/actions/runs/40639348800)
+passed 9/9 jobs on the merged commit. Independent merged-main AMD verification
+passed 51 Go packages, `go vet ./...`, and the tagged retrieval-orchestrator
+PostgreSQL integration suite against a disposable restricted-role database.
+Kilo review passed; Codex reported no findings on the initial PR head.
+CodeRabbit and Claude reviews were skipped due to usage limits. These are
+source and test results, not production authorization or rollout evidence.
