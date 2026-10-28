@@ -4,7 +4,7 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## P7 restricted-role standing-answer write integrity (2026-10-28; source candidate)
+## P7 restricted-role standing-answer write integrity (2026-10-28; merged PR #124)
 
 A restricted `scos_app` SQL writer could previously rewrite a freshly
 materialized standing answer to arbitrary text while retaining a valid
@@ -33,7 +33,24 @@ now matches Unicode White_Space trimming (GREEN). This migration does not
 establish
 general natural-language answer generation, provenance of the underlying
 memory's original creation, fleet rollout/recovery qualification, or P7/P0-P8
-completion. **PR review, exact merged-main SHA and CI evidence are pending.**
+completion.
+
+**Exact-head merge and merged-main verification:** [PR #124](https://github.com/dylmarriner/scos-memory/pull/124)
+head `41501531e9dc242dc7da74936c6d79dc84d530f7` was
+squash-merged using its exact expected head SHA into
+`ab1d634265c10efa526a11387ab916ca9a0bdfc1`.
+The substantive Codex review finding (Unicode boundary normalization)
+was reproduced RED, corrected and its thread resolved before merge.
+Kilo review and all required PR-head checks passed; CodeRabbit and
+Claude did not perform a substantive review due to usage limits.
+Independent merged-main verification on AMD passed the complete Go
+suite (`go test ./...`) and `go vet ./...`; the canonical §41
+definition-of-done checker still correctly reports FAIL.
+Merged-main [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40634770031)
+passed 5/5 jobs and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40634770055)
+passed 9/9 jobs, both at the exact merged-main SHA.
+These results do not qualify a live migration, production cache
+invalidation/recovery, or general P7 answer generation.
 
 ## P7 deterministic single-fact standing-answer refresh (2026-10-28; merged PR #122)
 
