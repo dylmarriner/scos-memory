@@ -20,6 +20,8 @@ func TestP7StandingAnswerReadRejectsInvalidSelectorsBeforeDatabase(t *testing.T)
 		"/v1/standing-answers?namespace_id=" + ns + "&question_key=%20%20",
 		"/v1/standing-answers?namespace_id=" + ns + "&question_key=hello&question_key=world",
 		"/v1/standing-answers?namespace_id=" + ns + "&question_key=hello&unknown=1",
+		"/v1/standing-answers?namespace_id=" + ns + "&question_key=hello&unknown=%zz",
+		"/v1/standing-answers?namespace_id=" + ns + "&question_key=hello%zz",
 		"/v1/standing-answers?namespace_id=" + ns + "&namespace_id=" + ns + "&question_key=hello",
 		"/v1/standing-answers?namespace_id=" + ns + "&question_key=" + strings.Repeat("a", 1025),
 	}
