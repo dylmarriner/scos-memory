@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/dylmarriner/scos-memory/packages/release"
+	"github.com/dylmarriner/scos-memory/packages/strictjson"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5"
@@ -378,17 +378,10 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RetrieveRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	// Reject a second JSON value or malformed trailing bytes before any
-	// identity, temporal, or database processing. Whitespace alone is valid.
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		http.Error(w, "request must contain exactly one JSON value", http.StatusBadRequest)
+	// Reject ambiguous duplicate JSON selectors at any depth, as well as
+	// trailing values and unknown fields, before identity resolution.
+	if err := strictjson.DecodeObject(http.MaxBytesReader(w, r.Body, 1<<20), &req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 

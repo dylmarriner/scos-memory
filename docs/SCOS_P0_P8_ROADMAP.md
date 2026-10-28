@@ -1554,6 +1554,9 @@ merge or deployment.
 
 ## Standing-answer completion
 
+**P7 authenticated JSON-selector ambiguity guard (2026-10-28; isolated AMD source candidate, NOT deployed):** Both the retrieval-orchestrator POST `/v1/retrieve` and the deterministic standing-answer refresh POST previously accepted duplicate JSON keys, including conflicting tenant, query, system-time and fact selectors, because Go's default decoder silently retained the final value. Real HTTP handler tests reproduced HTTP 501 or 401 instead of rejecting those ambiguous requests (RED). A shared size-bounded strict-object decoder now rejects repeated member names, including nested, escaped and Unicode case-folded aliases, before identity resolution or database work; it retains unknown-field and trailing-document rejection. The same HTTP regressions passed GREEN five times, and the complete Go suite, vet and two focused race-enabled runs passed. A disposable PostgreSQL 17/pgvector instance with all 86 SQL migration files and 21 policy files passed both full integration-tagged retrieval-orchestrator and memory-intelligence suites with restricted-role RLS. This is request-integrity hardening, not P7 answer generation, P5 historical reconstruction, representative performance qualification or production rollout. No production configuration, live data or paid resources were changed.
+
+
 The standing-answer table, deterministic exact-title refresh, read-only
 HTTP serving endpoint and opt-in retrieval-orchestrator integration exist in
 merged source. General governed natural-language answer generation, full
