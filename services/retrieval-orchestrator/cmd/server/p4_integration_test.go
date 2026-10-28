@@ -143,7 +143,26 @@ func TestP4RetrieveIncludesCodeAndPersistsSelectedSymbolVersions(t *testing.T) {
 		})
 	}))
 	defer upstream.Close()
-	srv := &server{db: pool, codeIntelligence: &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}}
+	appDSN := os.Getenv("SCOS_APP_TEST_DATABASE_URL")
+	if appDSN == "" {
+		t.Skip("restricted-role database required")
+	}
+	app, err := pgxpool.New(ctx, appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	if err := app.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var superuser, bypassRLS bool
+	if err := app.QueryRow(ctx, "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user").Scan(&superuser, &bypassRLS); err != nil {
+		t.Fatal(err)
+	}
+	if superuser || bypassRLS {
+		t.Fatal("HTTP acceptance must use a non-superuser, non-BYPASSRLS role")
+	}
+	srv := &server{db: app, codeIntelligence: &codeIntelligenceClient{baseURL: upstream.URL, httpClient: upstream.Client()}}
 	body, _ := json.Marshal(RetrieveRequest{TenantID: tenantID, PrincipalID: principalID, Query: "find the code function that performs dense retrieval", RepositoryID: "repo-1", Branch: "main", Namespaces: []string{"p4-code"}, MaxResults: 10})
 	req := httptest.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -174,6 +193,51 @@ func TestP4RetrieveIncludesCodeAndPersistsSelectedSymbolVersions(t *testing.T) {
 	}
 	if len(selected) != 1 || selected[0] != "sv-p4-1" {
 		t.Fatalf("persisted code evidence = %#v", selected)
+	}
+	if out.TotalTokens <= 0 {
+		t.Fatalf("code-only retrieval must account for evidence tokens, got %d", out.TotalTokens)
+	}
+	var auditedTokens int
+	if err := pool.QueryRow(ctx, "SELECT token_estimate FROM retrieval_runs WHERE id=$1", out.RetrievalRunID).Scan(&auditedTokens); err != nil {
+		t.Fatal(err)
+	}
+	if auditedTokens != out.TotalTokens {
+		t.Fatalf("audit tokens %d differ from response %d", auditedTokens, out.TotalTokens)
+	}
+
+	// The same authenticated HTTP request with a one-token ceiling must
+	// omit the entire code version rather than leaking unbudgeted metadata.
+	// The durable audit must distinguish fetched candidates from selected
+	// evidence, and must not record an omitted version as selected.
+	tinyBody, _ := json.Marshal(RetrieveRequest{
+		TenantID: tenantID, PrincipalID: principalID,
+		Query:        "find the code function that performs dense retrieval",
+		RepositoryID: "repo-1", Branch: "main", Namespaces: []string{"p4-code"},
+		MaxResults: 10, TokenBudget: 1,
+	})
+	tinyRec := httptest.NewRecorder()
+	srv.handleRetrieve(tinyRec, httptest.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(tinyBody)))
+	if tinyRec.Code != http.StatusOK {
+		t.Fatalf("tiny-budget retrieve = %d: %s", tinyRec.Code, tinyRec.Body.String())
+	}
+	var tiny RetrieveResponse
+	if err := json.Unmarshal(tinyRec.Body.Bytes(), &tiny); err != nil {
+		t.Fatal(err)
+	}
+	if tiny.Code == nil || len(tiny.Code.Results) != 0 || tiny.TotalTokens > 1 {
+		t.Fatalf("unbudgeted code evidence escaped: %+v", tiny)
+	}
+	var selectedTiny []byte
+	var candidateCount, tinyAuditedTokens int
+	if err := pool.QueryRow(ctx, `SELECT selected_code_symbol_version_ids,
+        (candidate_counts->>'code')::int, token_estimate
+        FROM retrieval_runs WHERE id=$1`, tiny.RetrievalRunID).
+		Scan(&selectedTiny, &candidateCount, &tinyAuditedTokens); err != nil {
+		t.Fatal(err)
+	}
+	if string(selectedTiny) != "[]" || candidateCount != 1 || tinyAuditedTokens != tiny.TotalTokens {
+		t.Fatalf("incorrect budget audit: selected=%s candidates=%d tokens=%d response=%d",
+			selectedTiny, candidateCount, tinyAuditedTokens, tiny.TotalTokens)
 	}
 }
 

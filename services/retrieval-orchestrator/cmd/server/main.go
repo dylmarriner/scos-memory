@@ -654,6 +654,14 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// ── 12. Assemble into sections per §17 ─────────────────────────
 	sections := assembleSections(allocated)
 
+	// Code versions are evidence too: their full serialized identifiers,
+	// paths and provenance must share the same caller token budget.
+	codeCandidates := 0
+	if codeResponse != nil {
+		codeCandidates = len(codeResponse.Results)
+	}
+	codeResponse, codeTokens := budgetCodeEvidence(codeResponse, tokenBudget-estimateSectionsTokens(sections))
+
 	// ── 12.5. Optional, evidence-current exact-title cache read ─────
 	var standingAnswers []StandingAnswerEvidence
 	standingTokens := 0
@@ -664,17 +672,13 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "standing-answer retrieval unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		standingAnswers, standingTokens = selectBudgetedStandingAnswers(candidates, tokenBudget-estimateSectionsTokens(sections))
+		standingAnswers, standingTokens = selectBudgetedStandingAnswers(candidates, tokenBudget-estimateSectionsTokens(sections)-codeTokens)
 	}
 
 	// ── 13. Record retrieval run ────────────────────────────────────
-	codeCount := 0
-	if codeResponse != nil {
-		codeCount = len(codeResponse.Results)
-	}
 	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, codeResponse, standingAnswers, map[string]int{
 		"exact": len(exactResults), "fulltext": len(ftsResults), "vector": len(vectorResults), "session_state": len(sessionResults),
-		"relation": len(relationResults), "code": codeCount, "recent": len(recentResults), "task_state": len(stateResults),
+		"relation": len(relationResults), "code": codeCandidates, "recent": len(recentResults), "task_state": len(stateResults),
 		"standing_answers": len(standingAnswers),
 	}, int(time.Since(start).Milliseconds()), meta)
 	if err != nil {
@@ -686,7 +690,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	totalTokens := standingTokens
+	totalTokens := standingTokens + codeTokens
 	for _, sec := range sections {
 		for _, item := range sec.Items {
 			totalTokens += estimateTokens(item.Content)
@@ -1406,7 +1410,7 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 		}
 	}
 	selectedJSON := toJSONB(selectedIDs)
-	var selectedCodeIDs []string
+	selectedCodeIDs := make([]string, 0)
 	if code != nil {
 		for _, item := range code.Results {
 			if item.SymbolVersionID != "" {
@@ -1460,7 +1464,7 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 			RETURNING id
 		`, req.TenantID, req.PrincipalID, nullIfBlank(req.AgentID), nullIfBlank(req.SessionID), nullIfBlank(req.TurnID),
 			queryHash, toJSONB(namespaces), toJSONB(filters), rankingConfig, selectedJSON, selectedCodeJSON, latencyMs,
-			toJSONB(candidateCounts), estimateSectionsTokens(sections)+standingAnswerAuditTokens(standing), modelVersions).Scan(&runID); err != nil {
+			toJSONB(candidateCounts), estimateSectionsTokens(sections)+codeEvidenceTokens(code)+standingAnswerAuditTokens(standing), modelVersions).Scan(&runID); err != nil {
 			return err
 		}
 

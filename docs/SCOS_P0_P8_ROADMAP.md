@@ -4,6 +4,36 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P0/P4/P7 cross-lane retrieval token accounting (2026-10-28; review candidate)
+
+A real authenticated code-retrieval HTTP integration previously returned a
+complete code symbol-version record under `token_budget: 1`, while reporting
+zero tokens and persisting the selected symbol version without charging its
+metadata against the budget. This left P0 cost accounting and P4/P7 shared
+retrieval budgeting incomplete. A new RED compile regression and restricted-role
+PostgreSQL HTTP acceptance test cover the gap.
+
+The candidate now charges each **complete serialized code result** (including
+symbol-version, path and immutable snapshot/commit provenance) at an estimated
+four bytes per token, rounded up. After budgeted memory sections, code
+results are admitted in downstream order only if they fit whole; opt-in
+standing answers use the remaining shared budget. The retrieval response and
+durable `retrieval_runs.token_estimate` include code evidence cost, while
+`candidate_counts.code` retains the pre-budget candidate count and
+`selected_code_symbol_version_ids` contains only emitted evidence (an empty
+JSON array when none fits). No downstream code result is mutated.
+
+On a disposable PostgreSQL 17/pgvector instance with all 86 migrations and
+21 policies, the focused restricted-role HTTP regression passed, the complete
+tagged retrieval integration suite passed, and two race-enabled focused
+repetitions passed. The uncached Go suite passed 51 packages, `go vet ./...`
+and `git diff --check` passed. The canonical §41 DoD checker still
+correctly reports FAIL (PARTIAL). This is approximate evidence-token
+accounting, **not** an exact tokenizer, full wire-response byte cap,
+representative P0 model-cost qualification, a production rollout or
+completion of P0–P8. PR review, exact-head checks, merge and merged-main
+verification remain to be recorded.
+
 ## P4/P7 retrieval audit fail-closed and cache isolation (2026-10-28; merged PR #129)
 
 Ordinary tenant-scoped `POST /v1/retrieve` previously returned HTTP 200
