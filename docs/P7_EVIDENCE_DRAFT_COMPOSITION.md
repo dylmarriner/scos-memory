@@ -2,7 +2,7 @@
 
 This endpoint is **not general answer generation**, not a standing-answer
 cache writer, and not a published/approved answer. It provides a reviewable
-draft by combining **verbatim canonical summaries** of 2–8 current governed
+draft by combining **quoted canonical summaries** of 2–8 current governed
 facts. It makes no new factual inference.
 
 ## Contract
@@ -38,6 +38,14 @@ oversized summaries fail closed without truncation. The endpoint never writes
 `memory_standing_answers`, promotes a memory, calls a model or changes
 governance state. `Cache-Control: no-store` is always set.
 
+`draft_text` quotes each summary using Go string-literal escaping, so embedded
+newlines, carriage returns and terminal control sequences from an authored
+fact cannot forge additional `Source fact <uuid>:` provenance headers or
+alter reviewer-facing terminal output. The `evidence[].summary` field still
+contains the exact unmodified canonical source text for independent review.
+This is a presentation-integrity boundary, not sanitization of the source or
+approval of its factual claims.
+
 ## Evidence and limitations
 
 The implementation was first tested RED with the missing handler, then GREEN
@@ -50,3 +58,15 @@ This is a bounded **source-assembly primitive**, not completion of P7 general
 governed answer generation. Human review, provenance-rich natural-language
 synthesis, persistence/approval workflow, representative multi-tenant
 performance, deployment and recovery evidence remain open.
+
+## 2026-10-29 provenance-spoofing regression (source candidate)
+
+A real restricted-role PostgreSQL HTTP regression inserted a source summary
+containing a forged `Source fact` header, CR and ANSI cursor controls. Before
+the fix, the review draft included the forged header and raw controls (RED).
+Quoting untrusted source text in `draft_text` prevents the spoof while leaving
+`evidence[].summary` byte-for-byte intact (GREEN, five focused repetitions,
+two race-enabled repetitions). The full memory-intelligence and retrieval
+PostgreSQL integration suites passed against a disposable PostgreSQL 17/pgvector
+instance with 86 SQL migrations and 21 policies. This remains unmerged source
+until the PR is reviewed, checked and merged; it is not production evidence.

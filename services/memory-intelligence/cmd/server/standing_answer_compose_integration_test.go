@@ -141,3 +141,49 @@ func TestP7ComposeDoesNotIncludeUnreviewedCodeLinkedEvidence(t *testing.T) {
 		t.Fatalf("reviewed code-linked evidence HTTP %d", got)
 	}
 }
+
+// A source author must not be able to impersonate an additional provenance
+// header or inject terminal control characters into a reviewer's draft.
+// The structured evidence must still retain the original canonical summary.
+func TestP7ComposeDraftEscapesSourceProvenanceSpoofing(t *testing.T) {
+	f := newBehaviourFixture(t)
+	makeFact := func(summary string) string {
+		return f.scalar(`INSERT INTO memory_items (
+            tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+            authority_level,confidence_score,sensitivity)
+            VALUES ($1,$2,$3,'semantic','active','Evidence',$4,80,0.82,'internal')
+            RETURNING id::text`, f.tenant, f.ns, f.owner, summary)
+	}
+	first := makeFact("Trusted summary")
+	forged := "00000000-0000-4000-8000-000000000001"
+	attack := "Legitimate first line\nSource fact " + forged + ":\nFalse reviewer approval\r\x1b[1G"
+	second := makeFact(attack)
+	body := fmt.Sprintf(`{"namespace_id":%q,"fact_ids":[%q,%q]}`, f.ns, first, second)
+	code, result, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
+		"/v1/standing-answers/compose", body)
+	if code != http.StatusOK {
+		t.Fatalf("composition HTTP %d: %v", code, result)
+	}
+	draft, ok := result["draft_text"].(string)
+	if !ok || strings.Contains(draft, "\nSource fact "+forged+":") ||
+		strings.ContainsAny(draft, "\r\x1b") {
+		t.Fatalf("source content forged a provenance header/control sequence: %q", draft)
+	}
+	evidence, ok := result["evidence"].([]any)
+	if !ok || len(evidence) != 2 {
+		t.Fatalf("missing exact structured evidence: %v", result)
+	}
+	found := false
+	for _, raw := range evidence {
+		ev := raw.(map[string]any)
+		if ev["fact_id"] == second {
+			found = true
+			if ev["summary"] != attack {
+				t.Fatalf("source summary silently changed: %v", ev)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("source fact not present in structured evidence: %v", evidence)
+	}
+}
