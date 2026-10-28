@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -36,7 +37,13 @@ func (s *engineServer) handleStandingAnswerRead(w http.ResponseWriter, r *http.R
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	q := r.URL.Query()
+	// URL.Query silently discards malformed percent-encoded pairs. Reject
+	// the entire request rather than interpreting only its valid subset.
+	q, parseErr := url.ParseQuery(r.URL.RawQuery)
+	if parseErr != nil {
+		http.Error(w, "malformed standing-answer query", http.StatusBadRequest)
+		return
+	}
 	for key, values := range q {
 		if (key != "namespace_id" && key != "question_key") || len(values) != 1 {
 			http.Error(w, "unsupported or repeated standing-answer selector", http.StatusBadRequest)
