@@ -4,7 +4,7 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## P7 deterministic single-fact standing-answer refresh (2026-10-28; source candidate)
+## P7 deterministic single-fact standing-answer refresh (2026-10-28; merged PR #122)
 
 A restricted-role HTTP refresh path now derives an exact-title cache entry
 from a current memory fact's canonical summary, never from caller-supplied
@@ -31,8 +31,23 @@ materialization does not infer answers to arbitrary questions, existing direct
 SQL standing-cache writes are not yet fenced into this governed endpoint,
 retrieval integration is absent, and production migration locks, invalidation
 blast radius, rollout and recovery require separate approval and qualification.
-See `docs/P7_DETERMINISTIC_STANDING_ANSWER_REFRESH.md`. Source candidate,
-PR review, merged-main CI and production evidence must be distinguished.
+See `docs/P7_DETERMINISTIC_STANDING_ANSWER_REFRESH.md`.
+
+**Source and merged-main evidence:** PR [#122](https://github.com/dylmarriner/scos-memory/pull/122)
+head `9d22b7c04eb777beca118a1a76e30df668996cd3` passed 5/5 CI and
+9/9 P4 integration jobs after the two substantive review findings were
+reproduced and fixed. Both review threads were resolved and Kilo passed.
+The PR was squash-merged using its exact expected head SHA into
+`e82978012fe3ad8b7784f2b039aebb8556742dfa`. Independent merged-main
+verification on AMD passed 51 Go packages, `go vet ./...`, and both full
+tagged memory-intelligence and retrieval-orchestrator PostgreSQL suites.
+Merged-main [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40630189957)
+passed 5/5 and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40630189981)
+passed 9/9. The disposable database included migration 000086 and the
+restricted runtime role. Local Python without the database connection
+passed 94 tests but had six fixture setup errors; GitHub's Python CI
+passed. None of this qualifies the live migration, general P7 answer
+generation, retrieval integration, or production recovery.
 
 ## §22 retrieval/context lifecycle hook coverage (2026-10-28; merged PR #117)
 
