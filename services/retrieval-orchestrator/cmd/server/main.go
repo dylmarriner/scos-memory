@@ -305,6 +305,7 @@ func newRetrievalMux(s *server) http.Handler {
 	mux.HandleFunc("/health/version", release.Handler("retrieval-orchestrator"))
 	mux.HandleFunc("/v1/retrieve", s.handleRetrieve)
 	mux.HandleFunc("/v1/retrieval-runs", s.handleRetrieve)
+	mux.HandleFunc("/v1/memory-state-events", s.handleMemoryStateEvents)
 	mux.HandleFunc("/v1/version", handleVersion)
 	return mux
 }
