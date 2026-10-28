@@ -156,3 +156,35 @@ passed. The merged-main
 the restricted-role PostgreSQL P7 integration suite passed on merged main.
 The HTTP no-store regression was reproduced RED and verified GREEN before
 merge. No live migration, deployment or production recovery was performed.
+
+## Restricted-role HTTP benchmark fixture (source candidate, 2026-10-28)
+
+`standing_answer_http_benchmark_test.go` provides a reproducible
+`BenchmarkP7StandingAnswerHTTPRead` with three measured handler paths: a fresh
+evidence-backed HTTP 200, a revoked supporting fact returning HTTP 404, and
+a fact that expired solely by passage of time returning HTTP 404. The
+`TestP7StandingAnswerBenchmarkCasesFailClosed` integration regression checks
+all three before any latency measurement. The fixture uses the actual
+restricted `scos_app` PostgreSQL role, authenticated principal context and
+`memory_standing_answers_current` security-invoker view.
+
+After applying migrations and RLS policies to a **disposable** PostgreSQL
+17/pgvector database and setting `DATABASE_URL` and
+`SCOS_APP_TEST_DATABASE_URL`, run:
+
+```bash
+go test -tags=integration -count=1 ./services/memory-intelligence/cmd/server \
+  -run '^TestP7StandingAnswerBenchmarkCasesFailClosed$'
+go test -tags=integration -run '^$' \
+  -bench '^BenchmarkP7StandingAnswerHTTPRead$' -benchtime=20x -benchmem \
+  ./services/memory-intelligence/cmd/server
+```
+
+A local AMD Ryzen 5 2600 diagnostic run (20 operations per case) measured
+3.0 ms/op fresh, 1.6 ms/op revoked and 1.5 ms/op clock-expired. A deliberate
+mutation to read the raw standing-answer table reproduced HTTP 200 instead
+of 404 for both revoked and clock-expired evidence, confirming the regression
+would detect bypassing the view. The mutation was restored. These small local
+samples are **not** a performance SLA, production benchmark or P7 acceptance.
+Representative multi-tenant load, recovery and rollout qualification remain
+open and require separately approved production work.

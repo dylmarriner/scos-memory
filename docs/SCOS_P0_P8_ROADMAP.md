@@ -1344,7 +1344,8 @@ integration exists. Merged source is not a deployed cache service:
 - [x] Restricted-role, read-time evidence/clock freshness projection (migration 000085, merged PR #112; not deployed).
 - [ ] Governed writer and refresh generation with a real retrieval/answer pipeline.
 - [x] Authorized read-only serving endpoint merged (2026-10-28, PR #114): `GET /v1/standing-answers` uses authenticated tenant/principal RLS, bounded normalized exact keys and the security-invoker current-evidence view. RED/GREEN unit and real PostgreSQL HTTP tests cover tenant denial, membership/fact revocation and clock expiry. Exact-head CI/P4 passed at `5b7d3029dc56c6f3ea0b74ec004578382b794d31`; merged-main CI/P4 passed at `d243e4fff571b2ad848e9eff10649cb4f40db939`, with 51 Go packages, vet and restricted-role P7 PostgreSQL tests independently passing on AMD. Production rollout and retrieval-orchestrator integration remain open.
-- [ ] End-to-end expiry/revocation and stale-answer benchmark coverage.
+- [x] Restricted-role P7 HTTP benchmark fixture (source candidate, 2026-10-28): integration-tagged fresh, revoked-fact and clock-expired read cases exercise the actual handler and security-invoker view. A mutation replacing the view with the raw table fails the revocation and expiry regressions. On a disposable PostgreSQL 17/pgvector database on AMD, 20 measured requests per case took approximately 3.0 ms/op fresh, 1.6 ms/op revoked and 1.5 ms/op clock-expired. These are local diagnostic samples, not representative latency acceptance.
+- [ ] Representative multi-tenant end-to-end expiry/revocation and stale-answer latency qualification, including production rollout and recovery evidence.
 
 ## Agent execution-trace consolidation
 
