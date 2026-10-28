@@ -76,3 +76,16 @@ func TestP7StandingAnswerReadDoesNotExposeDatabaseErrors(t *testing.T) {
 		t.Fatalf("database details exposed: status=%d body=%q", w.Code, w.Body.String())
 	}
 }
+
+// A browser or shared intermediary must not reuse an answer after its fact
+// expires or its reader loses namespace membership.
+func TestP7StandingAnswerReadForbidsHTTPCaching(t *testing.T) {
+	srv := &engineServer{}
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/standing-answers?namespace_id=4cbe32c6-891c-4155-a9ec-6aa39e66704a&question_key=hello", nil)
+	w := httptest.NewRecorder()
+	srv.handleStandingAnswerRead(w, req)
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache control=%q, want no-store", got)
+	}
+}

@@ -29,6 +29,8 @@ type standingAnswerRead struct {
 // standing-answer table. Authentication is enforced by the server's auth
 // middleware; tenant/principal claims are re-resolved for transaction-local RLS.
 func (s *engineServer) handleStandingAnswerRead(w http.ResponseWriter, r *http.Request) {
+	// HTTP intermediaries must not outlive evidence expiry or access revocation.
+	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

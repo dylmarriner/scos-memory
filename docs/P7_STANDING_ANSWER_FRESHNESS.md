@@ -136,7 +136,9 @@ empty or oversized keys are rejected before database access. Missing,
 expired, revoked, stale or inaccessible answers return HTTP 404.
 Only previously generated answers are returned; there is no generation,
 refresh or write API. Connection details are never included in HTTP 500
-responses. The existing HTTP authentication middleware remains mandatory.
+responses. Responses include `Cache-Control: no-store` so intermediaries cannot
+reuse an answer after expiry or access revocation. The existing HTTP
+authentication middleware remains mandatory.
 
 Real restricted-role PostgreSQL HTTP regressions cover valid readback,
 tenant isolation, membership revocation, memory revocation and clock-only
