@@ -91,3 +91,27 @@ func TestP7StandingAnswerReadForbidsHTTPCaching(t *testing.T) {
 		t.Fatalf("cache control=%q, want no-store", got)
 	}
 }
+
+// A temporary loss of the database must fail closed rather than panic and
+// terminate the HTTP handler. This can occur during startup or dependency
+// recovery, before an engineServer has an attached pool.
+func TestP7StandingAnswerReadWithoutDatabaseFailsClosed(t *testing.T) {
+	srv := &engineServer{}
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/standing-answers?namespace_id=4cbe32c6-891c-4155-a9ec-6aa39e66704a&question_key=hello", nil)
+	req = req.WithContext(auth.ContextWithClaims(req.Context(), auth.Claims{
+		TenantID:    "4cbe32c6-891c-4155-a9ec-6aa39e66704a",
+		PrincipalID: "5cbe32c6-891c-4155-a9ec-6aa39e66704a",
+	}))
+	w := httptest.NewRecorder()
+	srv.handleStandingAnswerRead(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("database-unavailable status=%d body=%q; want 503", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache control=%q; want no-store", got)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "panic") {
+		t.Fatalf("internal failure leaked: %q", w.Body.String())
+	}
+}
