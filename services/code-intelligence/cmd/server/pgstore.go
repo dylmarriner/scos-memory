@@ -1770,8 +1770,8 @@ func changeImpactFromMatchesWithQuerier(
 }
 
 // edgesAmong returns the CALLS adjacency (source -> targets) restricted to
-// edges whose source and target are both in symbolVersionIDs -- the
-// subgraph ChangeImpact's BFS already visited, not the whole repository
+// edges whose source and target are both in symbolVersionIDs and whose
+// immutable snapshot matches both endpoints -- the subgraph ChangeImpact's BFS already visited, not the whole repository
 // graph. Even 512 nodes can contain hundreds of thousands of edges, so
 // fail closed beyond 4096 CALLS rows rather than silently ranking a partial
 // graph. The SQL LIMIT bounds rows transferred before Go enforces the cap.
@@ -1792,11 +1792,15 @@ func edgesAmongWithQuerier(ctx context.Context, q codeSQLQuerier, symbolVersionI
 	}
 	inList := strings.Join(placeholders, ",")
 	query := fmt.Sprintf(`
-		SELECT source_symbol_version_id, target_symbol_version_id
-		FROM code_edges
-		WHERE relation = 'CALLS'
-		  AND source_symbol_version_id IN (%s)
-		  AND target_symbol_version_id IN (%s)
+		SELECT e.source_symbol_version_id, e.target_symbol_version_id
+		FROM code_edges e
+		JOIN code_symbol_versions source
+		  ON source.id=e.source_symbol_version_id AND source.snapshot_id=e.snapshot_id
+		JOIN code_symbol_versions target
+		  ON target.id=e.target_symbol_version_id AND target.snapshot_id=e.snapshot_id
+		WHERE e.relation = 'CALLS'
+		  AND e.source_symbol_version_id IN (%s)
+		  AND e.target_symbol_version_id IN (%s)
 		LIMIT %d`,
 		inList, inList, maxImpactEdges+1)
 	rows, err := q.QueryContext(ctx, query, args...)
@@ -1844,10 +1848,13 @@ func callersOfWithQuerier(ctx context.Context, q codeSQLQuerier, targetSymbolVer
 	query := fmt.Sprintf(`
 		SELECT DISTINCT sv.id, sv.symbol_id, sv.fully_qualified_name, sv.path, sv.content_hash, sv.snapshot_id, snap.commit_id, snap.branch
 		FROM code_edges e
-		JOIN code_symbol_versions sv ON sv.id = e.source_symbol_version_id
-		JOIN code_repository_snapshots snap ON snap.id = sv.snapshot_id
+		JOIN code_symbol_versions sv
+		  ON sv.id = e.source_symbol_version_id AND sv.snapshot_id=e.snapshot_id
+		JOIN code_symbol_versions target
+		  ON target.id=e.target_symbol_version_id AND target.snapshot_id=e.snapshot_id
+		JOIN code_repository_snapshots snap ON snap.id = e.snapshot_id
 		WHERE e.relation = 'CALLS' AND e.target_symbol_version_id IN (%s)
-		  AND sv.snapshot_id = $%d
+		  AND e.snapshot_id = $%d
 		LIMIT %d`,
 		strings.Join(placeholders, ","), len(args)+1, maxImpactNodes+1)
 	args = append(args, snapshotID)

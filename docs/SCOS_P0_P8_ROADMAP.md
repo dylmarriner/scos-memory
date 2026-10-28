@@ -1489,6 +1489,10 @@ serialization; unit tests cover tie-breaking, cycles and unreachable symbols.
 This is **partial P8 path evidence only**, not P7 revalidation, relation-type
 coverage, production qualification, or permission to merge/deploy.
 
+## P8 immutable snapshot edge isolation (2026-10-28; source candidate)
+
+A real PostgreSQL regression reproduced a cross-generation graph-integrity defect: a CALLS edge whose own snapshot_id named another immutable generation, but whose endpoints belonged to the selected snapshot, appeared as a direct dependent in both current and historical impact, with a fabricated provenance path and PageRank score (RED). Impact BFS and the bounded ranking/evidence adjacency query now require each CALLS edge snapshot to match both endpoint symbol versions and the selected generation (GREEN). Five focused repetitions, two race-enabled repetitions, the relevant real PostgreSQL ChangeImpact/KnowledgeImpact suites, the 51-package Go suite and Go vet passed on AMD. The disposable PostgreSQL 17 instance had all 87 migrations but not the restricted-role policy installation; full restricted-role CI/P4 tests remain a PR gate. This is source-level P8 integrity hardening, not general relation expansion, P5 system-time reconstruction, §41 completion, production rollout or recovery qualification.
+
 ## Remaining
 
 - [ ] Expand impact relationships beyond CALLS where extraction confidence permits: references/types, implementation/inheritance, tests, configuration ownership and generated links.
