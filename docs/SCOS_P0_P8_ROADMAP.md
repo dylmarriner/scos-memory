@@ -4,6 +4,36 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 deterministic single-fact standing-answer refresh (2026-10-28; source candidate)
+
+A restricted-role HTTP refresh path now derives an exact-title cache entry
+from a current memory fact's canonical summary, never from caller-supplied
+answer prose. It holds a source SHARE lock, enforces namespace candidate-write
+permission, validates supporting evidence through the existing trigger and
+security-invoker current-evidence view, and refuses to overwrite curated or
+foreign-source answers. The new migration `000086` invalidates cached answers
+on source title/summary changes without a version bump and marks all pre-upgrade
+fresh entries stale because earlier text drift was not tracked. Real PostgreSQL
+RED/GREEN regressions cover that stale-answer path, cross-tenant isolation,
+read-only membership, revocation, collisions and UUID canonicalization.
+PR #122 review uncovered two additional defects: a stale generated same-title
+entry could not be replaced by a new eligible fact, and unresolved P7 code
+revalidation was surfaced as HTTP 500 instead of a deterministic 409.
+Both failures were reproduced against a separate disposable PostgreSQL 17
+instance before correction and passed five repeated RED/GREEN-focused runs
+after correction. The fix still rejects fresh different-source collisions and
+stale curated answers, and requires governed still_valid review decisions
+before refreshing code-affected evidence. Full tagged memory-intelligence and
+retrieval-orchestrator integration suites passed after the review correction.
+
+This is **not** a complete governed answer-generation pipeline: exact-title
+materialization does not infer answers to arbitrary questions, existing direct
+SQL standing-cache writes are not yet fenced into this governed endpoint,
+retrieval integration is absent, and production migration locks, invalidation
+blast radius, rollout and recovery require separate approval and qualification.
+See `docs/P7_DETERMINISTIC_STANDING_ANSWER_REFRESH.md`. Source candidate,
+PR review, merged-main CI and production evidence must be distinguished.
+
 ## §22 retrieval/context lifecycle hook coverage (2026-10-28; merged PR #117)
 
 The autonomous control plane already dispatched turn, model, tool and

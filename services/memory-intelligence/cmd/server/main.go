@@ -453,6 +453,7 @@ func main() {
 	mux.HandleFunc("/v1/evidence-links", srv.handleEvidenceLinks)
 	mux.HandleFunc("/v1/evidence-links/by-code", srv.handleCodeEvidenceLinksRead)
 	mux.HandleFunc("/v1/standing-answers", srv.handleStandingAnswerRead)
+	mux.HandleFunc("/v1/standing-answers/refresh", srv.handleStandingAnswerRefresh)
 	mux.HandleFunc("/v1/diary", srv.handleDiary)
 	mux.HandleFunc("/v1/stream", srv.handleStream) // SSE
 	mux.HandleFunc("/v1/transparency/stream", srv.handleStream)
