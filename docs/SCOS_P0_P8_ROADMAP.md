@@ -16,8 +16,9 @@ produced different source fingerprints and draft hashes despite identical
 authorized database evidence.
 
 The read-only composition now returns a domain-separated SHA-256
-`draft_fingerprint` over canonical tenant/namespace identity, exact
-escaped review text and every sorted source ID plus its v2 fingerprint.
+`draft_fingerprint` over canonical tenant/namespace identity, draft
+review status, overall confidence, exact escaped review text and every
+sorted source ID plus its v2 fingerprint.
 Authenticated tenant/principal UUIDs are validated as nonzero and normalized
 before RLS queries and fingerprinting. The digest changes when source content,
 source set, security boundary or displayed text changes, and remains stable

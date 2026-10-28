@@ -5,6 +5,7 @@ import "testing"
 func TestP7ComposeDraftManifestBindsDisplayedTextEvidenceAndBoundary(t *testing.T) {
 	draft := standingAnswerComposeResult{
 		Status:      "draft_requires_review",
+		Confidence:  0.8,
 		NamespaceID: "4cbe32c6-891c-4155-a9ec-6aa39e66704a",
 		DraftText:   "Source fact A:\n\"Alpha\"\n\nSource fact B:\n\"Beta\"",
 		Evidence: []standingAnswerComposeEvidence{
@@ -20,6 +21,16 @@ func TestP7ComposeDraftManifestBindsDisplayedTextEvidenceAndBoundary(t *testing.
 	if standingAnswerComposeDraftFingerprint("8cbe32c6-891c-4155-a9ec-6aa39e66704a", draft) == original {
 		t.Fatal("tenant boundary not bound")
 	}
+	draft.Status = "approved"
+	if standingAnswerComposeDraftFingerprint(tenant, draft) == original {
+		t.Fatal("review status not bound")
+	}
+	draft.Status = "draft_requires_review"
+	draft.Confidence = 0.7
+	if standingAnswerComposeDraftFingerprint(tenant, draft) == original {
+		t.Fatal("overall confidence not bound")
+	}
+	draft.Confidence = 0.8
 	draft.NamespaceID = "9cbe32c6-891c-4155-a9ec-6aa39e66704a"
 	if standingAnswerComposeDraftFingerprint(tenant, draft) == original {
 		t.Fatal("namespace boundary not bound")

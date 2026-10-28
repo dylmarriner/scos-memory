@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 )
 
 // standingAnswerComposeDraftFingerprint pins the entire human-review draft:
@@ -15,6 +16,10 @@ func standingAnswerComposeDraftFingerprint(tenantID string, draft standingAnswer
 	_, _ = h.Write([]byte(tenantID))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(draft.NamespaceID))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(draft.Status))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(strconv.FormatFloat(draft.Confidence, 'g', -1, 64)))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(draft.DraftText))
 	_, _ = h.Write([]byte{0})
