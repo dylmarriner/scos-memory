@@ -302,3 +302,53 @@ func TestP7ComposeEvidenceDigestChangesAfterSourceMutation(t *testing.T) {
 		t.Fatalf("draft wrote trusted cache: count=%d err=%v", cacheCount, err)
 	}
 }
+
+// Moving unchanged source facts into a newly authorized namespace must not
+// permit a review decision pinned to the old namespace to be replayed.
+func TestP7ComposeFingerprintChangesAcrossNamespaceMove(t *testing.T) {
+	f := newBehaviourFixture(t)
+	makeFact := func(summary string) string {
+		return f.scalar(`INSERT INTO memory_items (
+            tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+            authority_level,confidence_score,sensitivity)
+            VALUES ($1,$2,$3,'semantic','active','Move evidence',$4,80,0.8,'internal')
+            RETURNING id::text`, f.tenant, f.ns, f.owner, summary)
+	}
+	a, b := makeFact("Unchanged A"), makeFact("Unchanged B")
+	get := func(ns string) (int, map[string]string) {
+		f.t.Helper()
+		body := fmt.Sprintf(`{"namespace_id":%q,"fact_ids":[%q,%q]}`, ns, a, b)
+		code, result, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
+			"/v1/standing-answers/compose", body)
+		hashes := make(map[string]string)
+		if code == http.StatusOK {
+			for _, raw := range result["evidence"].([]any) {
+				ev := raw.(map[string]any)
+				hashes[ev["fact_id"].(string)] = ev["source_fingerprint"].(string)
+			}
+		}
+		return code, hashes
+	}
+	code, before := get(f.ns)
+	if code != http.StatusOK || len(before) != 2 {
+		t.Fatalf("original namespace draft: HTTP %d hashes=%v", code, before)
+	}
+	newNS := f.scalar(`INSERT INTO namespaces (tenant_id,owner_principal_id,canonical_name,sensitivity_ceiling)
+        VALUES ($1,$2,'p7-moved-'||gen_random_uuid(),'internal') RETURNING id::text`, f.tenant, f.owner)
+	if _, err := f.admin.ExecContext(context.Background(),
+		`INSERT INTO namespace_memberships(namespace_id,principal_id,can_read)
+         VALUES ($1,$2,true)`, newNS, f.owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.admin.ExecContext(context.Background(),
+		`UPDATE memory_items SET namespace_id=$1 WHERE id IN ($2,$3)`, newNS, a, b); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := get(f.ns); code != http.StatusNotFound {
+		t.Fatalf("old namespace still served moved evidence: HTTP %d", code)
+	}
+	code, after := get(newNS)
+	if code != http.StatusOK || len(after) != 2 || before[a] == after[a] || before[b] == after[b] {
+		t.Fatalf("namespace move did not invalidate fingerprints: HTTP %d before=%v after=%v", code, before, after)
+	}
+}

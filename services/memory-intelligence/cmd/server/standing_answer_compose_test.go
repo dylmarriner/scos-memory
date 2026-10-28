@@ -65,22 +65,46 @@ func TestP7ComposeEvidenceFingerprintTracksVersionAndContent(t *testing.T) {
 		Summary:    "A verified fact.",
 		Confidence: 0.75,
 	}
-	first := standingAnswerComposeFingerprint(ev)
-	if first != "d9e601342ffa2f0fe1b155e14ae26cd69f6be5cf0b4ff73a332c081242d0e85f" || first != standingAnswerComposeFingerprint(ev) {
+	first := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a")
+	if first != "3ed482dfa9ac4683d1ee233529ecb774bba32fd03ce5de6d8bec9a21785ed5fb" || first != standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a") {
 		t.Fatalf("fingerprint not stable SHA-256: %q", first)
 	}
 	ev.Summary = "A revised fact."
-	if got := standingAnswerComposeFingerprint(ev); got == first {
+	if got := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a"); got == first {
 		t.Fatal("source summary changed without fingerprint changing")
 	}
 	ev.Summary = "A verified fact."
 	ev.Confidence = 0.76
-	if got := standingAnswerComposeFingerprint(ev); got == first {
+	if got := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a"); got == first {
 		t.Fatal("confidence changed without fingerprint changing")
 	}
 	ev.Confidence = 0.75
 	ev.VersionID = "8cbe32c6-891c-4155-a9ec-6aa39e66704a"
-	if got := standingAnswerComposeFingerprint(ev); got == first {
+	if got := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a"); got == first {
 		t.Fatal("source version changed without fingerprint changing")
+	}
+}
+
+// A draft reviewed in one tenant/namespace must not retain the same source
+// fingerprint after its evidence is moved to another security boundary.
+func TestP7ComposeFingerprintBindsTenantAndNamespace(t *testing.T) {
+	ev := standingAnswerComposeEvidence{
+		FactID:     "5cbe32c6-891c-4155-a9ec-6aa39e66704a",
+		Summary:    "Same source bytes",
+		Confidence: 0.8,
+	}
+	tenantA := "7cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	tenantB := "8cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	namespaceA := "4cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	namespaceB := "9cbe32c6-891c-4155-a9ec-6aa39e66704a"
+	original := standingAnswerComposeFingerprint(ev, tenantA, namespaceA)
+	if original == standingAnswerComposeFingerprint(ev, tenantB, namespaceA) {
+		t.Fatal("fingerprint is not tenant-bound")
+	}
+	if original == standingAnswerComposeFingerprint(ev, tenantA, namespaceB) {
+		t.Fatal("fingerprint is not namespace-bound")
+	}
+	if original != standingAnswerComposeFingerprint(ev, tenantA, namespaceA) {
+		t.Fatal("fingerprint is not deterministic")
 	}
 }
