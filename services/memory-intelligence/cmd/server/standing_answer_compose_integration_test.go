@@ -352,3 +352,54 @@ func TestP7ComposeFingerprintChangesAcrossNamespaceMove(t *testing.T) {
 		t.Fatalf("namespace move did not invalidate fingerprints: HTTP %d before=%v after=%v", code, before, after)
 	}
 }
+
+// Agent capabilities are an additional security boundary beyond namespace
+// membership. A permissive namespace cannot grant an agent access to facts
+// above its maximum_sensitivity, even if its token and membership are valid.
+func TestP7ComposeEnforcesAgentMaximumSensitivity(t *testing.T) {
+	f := newBehaviourFixture(t)
+	agent := f.scalar(`INSERT INTO principals(tenant_id,kind,external_id,display_name)
+        VALUES($1,'agent','compose-agent-'||gen_random_uuid(),'Compose agent') RETURNING id::text`, f.tenant)
+	if _, err := f.admin.ExecContext(context.Background(),
+		`INSERT INTO agents(id,version,maximum_sensitivity) VALUES($1,'v1','internal')`, agent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.admin.ExecContext(context.Background(),
+		`INSERT INTO namespace_memberships(namespace_id,principal_id,can_read) VALUES($1,$2,true)`, f.ns, agent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.admin.ExecContext(context.Background(),
+		`UPDATE namespaces SET sensitivity_ceiling='confidential' WHERE id=$1`, f.ns); err != nil {
+		t.Fatal(err)
+	}
+	makeFact := func(summary, sensitivity string) string {
+		return f.scalar(`INSERT INTO memory_items (
+            tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+            authority_level,confidence_score,sensitivity)
+            VALUES ($1,$2,$3,'semantic','active','Agent evidence',$4,80,0.8,$5::sensitivity_class)
+            RETURNING id::text`, f.tenant, f.ns, f.owner, summary, sensitivity)
+	}
+	internal, confidential := makeFact("Public to this agent", "internal"), makeFact("Above agent clearance", "confidential")
+	body := fmt.Sprintf(`{"namespace_id":%q,"fact_ids":[%q,%q]}`, f.ns, internal, confidential)
+	call := func() int {
+		code, _, _ := f.callAs(f.tenant, agent, f.srv.handleStandingAnswerCompose,
+			http.MethodPost, "/v1/standing-answers/compose", body)
+		return code
+	}
+	if code := call(); code != http.StatusNotFound {
+		t.Fatalf("agent exceeded maximum_sensitivity: HTTP %d", code)
+	}
+	if _, err := f.admin.ExecContext(context.Background(),
+		`UPDATE agents SET maximum_sensitivity='confidential' WHERE id=$1`, agent); err != nil {
+		t.Fatal(err)
+	}
+	if code := call(); code != http.StatusOK {
+		t.Fatalf("authorized agent cannot compose: HTTP %d", code)
+	}
+	if _, err := f.admin.ExecContext(context.Background(), `DELETE FROM agents WHERE id=$1`, agent); err != nil {
+		t.Fatal(err)
+	}
+	if code := call(); code != http.StatusNotFound {
+		t.Fatalf("agent without capability record accessed evidence: HTTP %d", code)
+	}
+}
