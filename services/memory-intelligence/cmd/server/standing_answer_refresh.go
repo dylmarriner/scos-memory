@@ -4,12 +4,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dylmarriner/scos-memory/packages/strictjson"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -47,15 +47,10 @@ func (s *engineServer) handleStandingAnswerRefresh(w http.ResponseWriter, r *htt
 		return
 	}
 	var input standingAnswerRefreshRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
+	// A duplicate fact_id must not be interpreted differently by a gateway
+	// and the authenticated writer. Reject all ambiguous JSON objects.
+	if err := strictjson.DecodeObject(http.MaxBytesReader(w, r.Body, 4096), &input); err != nil {
 		http.Error(w, "invalid refresh request", http.StatusBadRequest)
-		return
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		http.Error(w, "exactly one JSON object with a fact_id UUID is required", http.StatusBadRequest)
 		return
 	}
 	factUUID, err := uuid.Parse(input.FactID)
