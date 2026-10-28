@@ -61,12 +61,13 @@ func TestP7ComposeRequiresAuthenticationAndFailsClosedWithoutDatabase(t *testing
 // and compare this digest before accepting a draft.
 func TestP7ComposeEvidenceFingerprintTracksVersionAndContent(t *testing.T) {
 	ev := standingAnswerComposeEvidence{
-		FactID:     "5cbe32c6-891c-4155-a9ec-6aa39e66704a",
-		Summary:    "A verified fact.",
-		Confidence: 0.75,
+		FactID:      "5cbe32c6-891c-4155-a9ec-6aa39e66704a",
+		Summary:     "A verified fact.",
+		Confidence:  0.75,
+		Sensitivity: "internal",
 	}
 	first := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a")
-	if first != "3ed482dfa9ac4683d1ee233529ecb774bba32fd03ce5de6d8bec9a21785ed5fb" || first != standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a") {
+	if first != "7ad17188a08bf84fcda5ee4a9c7b8c94e1315fe81f8cd58acc42f38778a7f167" || first != standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a") {
 		t.Fatalf("fingerprint not stable SHA-256: %q", first)
 	}
 	ev.Summary = "A revised fact."
