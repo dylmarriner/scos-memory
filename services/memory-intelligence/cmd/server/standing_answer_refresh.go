@@ -81,6 +81,8 @@ func (s *engineServer) handleStandingAnswerRefresh(w http.ResponseWriter, r *htt
 		err := tx.QueryRowContext(r.Context(), `SELECT EXISTS (
             SELECT 1 FROM memory_items f
             JOIN namespace_memberships m ON m.namespace_id=f.namespace_id
+            JOIN principals p ON p.id=m.principal_id AND p.tenant_id=f.tenant_id
+                             AND p.disabled_at IS NULL
             WHERE f.id=$1::uuid AND f.tenant_id=$2::uuid
               AND m.principal_id=$3::uuid AND m.can_read AND m.can_write_candidates
         )`, input.FactID, identity.TenantID, identity.PrincipalID).Scan(&canWrite)
@@ -92,8 +94,11 @@ func (s *engineServer) handleStandingAnswerRefresh(w http.ResponseWriter, r *htt
 			// the principal is not allowed to read.
 			var readable bool
 			err = tx.QueryRowContext(r.Context(), `SELECT EXISTS (
-                SELECT 1 FROM memory_items f WHERE f.id=$1::uuid AND f.tenant_id=$2::uuid
-            )`, input.FactID, identity.TenantID).Scan(&readable)
+                SELECT 1 FROM memory_items f
+                JOIN principals p ON p.id=$3::uuid AND p.tenant_id=f.tenant_id
+                                 AND p.disabled_at IS NULL
+                WHERE f.id=$1::uuid AND f.tenant_id=$2::uuid
+            )`, input.FactID, identity.TenantID, identity.PrincipalID).Scan(&readable)
 			if err != nil {
 				return out, err
 			}

@@ -81,7 +81,12 @@ func (s *engineServer) handleStandingAnswerRead(w http.ResponseWriter, r *http.R
                    evidence_fact_ids,confidence,last_refreshed_at
             FROM public.memory_standing_answers_current
             WHERE tenant_id=$1::uuid AND namespace_id=$2::uuid AND question_key=$3
-            LIMIT 1`, identity.TenantID, namespaceID, question).
+              AND EXISTS (
+                  SELECT 1 FROM public.principals p
+                  WHERE p.id=$4::uuid AND p.tenant_id=$1::uuid
+                    AND p.disabled_at IS NULL
+              )
+            LIMIT 1`, identity.TenantID, namespaceID, question, identity.PrincipalID).
 			Scan(&answer.ID, &answer.NamespaceID, &answer.QuestionKey, &answer.Answer,
 				&evidence, &answer.Confidence, &answer.LastRefreshedAt)
 		if err != nil {
