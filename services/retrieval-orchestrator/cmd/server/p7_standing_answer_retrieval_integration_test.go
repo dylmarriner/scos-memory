@@ -150,6 +150,20 @@ func TestP7RetrievalStandingAnswerCurrentEvidenceAndAudit(t *testing.T) {
 		t.Fatalf("mixed valid evidence disappeared: %+v", out.StandingAnswers)
 	}
 
+	// An old malformed legacy cache row must not be parsed by the outer
+	// sensitivity predicate; the security-barrier view excludes it first.
+	if _, err := admin.Exec(ctx, `INSERT INTO memory_standing_answers(
+        tenant_id,namespace_id,question_key,answer,evidence_fact_ids,refresh_reason,stale_at)
+        VALUES($1,$2,'broken cache','never serve','{not-json','curated',statement_timestamp())`,
+		tenant, ns); err != nil {
+		t.Fatal(err)
+	}
+	malformed := request
+	malformed.Query = "broken cache"
+	if out := call(malformed); len(out.StandingAnswers) != 0 {
+		t.Fatalf("malformed legacy cache exposed: %+v", out.StandingAnswers)
+	}
+
 	if _, err := admin.Exec(ctx, "UPDATE namespace_memberships SET can_read=false WHERE namespace_id=$1 AND principal_id=$2", ns, principal); err != nil {
 		t.Fatal(err)
 	}
