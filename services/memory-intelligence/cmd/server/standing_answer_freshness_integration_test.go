@@ -24,14 +24,13 @@ func TestP7StandingAnswerEvidenceInvalidation(t *testing.T) {
 	cache := func(key string, factID string) string {
 		t.Helper()
 		raw := fmt.Sprintf("[%q]", factID)
-		result, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner}, func(tx querier) (string, error) {
-			var id string
-			err := tx.QueryRowContext(ctx, `INSERT INTO memory_standing_answers(
+		// Seed an owner-curated cache to exercise dependency invalidation.
+		// Restricted runtime SQL can no longer author arbitrary cache prose.
+		var result string
+		err := f.admin.QueryRowContext(ctx, `INSERT INTO memory_standing_answers(
        tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
        VALUES($1,$2,$3,'verified answer',$4) RETURNING id::text`,
-				f.tenant, f.ns, key, raw).Scan(&id)
-			return id, err
-		})
+			f.tenant, f.ns, key, raw).Scan(&result)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,12 +91,10 @@ func TestP7StandingAnswerEvidenceInvalidation(t *testing.T) {
 	}
 	// A new active fact and an explicit refresh can replace the evidence.
 	replacement := makeFact("replacement evidence")
-	_, err = withPrincipalContext(ctx, f.srv.db, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner}, func(tx querier) (bool, error) {
-		_, err := tx.ExecContext(ctx,
-			"UPDATE memory_standing_answers SET evidence_fact_ids=$2,answer='refreshed',stale_at=NULL,last_refreshed_at=now() WHERE id=$1",
-			primary, fmt.Sprintf("[%q]", replacement))
-		return true, err
-	})
+	// Owner-controlled curated refresh still validates dependencies.
+	_, err = f.admin.ExecContext(ctx,
+		"UPDATE memory_standing_answers SET evidence_fact_ids=$2,answer='refreshed',stale_at=NULL,last_refreshed_at=now() WHERE id=$1",
+		primary, fmt.Sprintf("[%q]", replacement))
 	if err != nil {
 		t.Fatalf("valid evidence refresh failed: %v", err)
 	}
@@ -137,14 +134,11 @@ func TestP7StandingAnswerStalesOnUnreviewedCodeChange(t *testing.T) {
    authority_level,confidence_score,sensitivity)
    VALUES($1,$2,$3,'semantic','active','code dependent','code dependent',80,0.9,'internal') RETURNING id::text`,
 		f.tenant, f.ns, f.owner)
-	answer, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner}, func(tx querier) (string, error) {
-		var id string
-		e := tx.QueryRowContext(ctx, `INSERT INTO memory_standing_answers(
+	var answer string
+	err := f.admin.QueryRowContext(ctx, `INSERT INTO memory_standing_answers(
      tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
      VALUES ($1,$2,'p7 code change','supported',$3) RETURNING id::text`,
-			f.tenant, f.ns, fmt.Sprintf("[%q]", fact)).Scan(&id)
-		return id, e
-	})
+		f.tenant, f.ns, fmt.Sprintf("[%q]", fact)).Scan(&answer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,13 +174,8 @@ func TestP7StandingAnswerStalesOnUnreviewedCodeChange(t *testing.T) {
 		t.Fatalf("code event mutated approved memory status: %s", status)
 	}
 	tryRefresh := func() error {
-		_, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{
-			TenantID: f.tenant, PrincipalID: f.owner,
-		}, func(tx querier) (bool, error) {
-			_, e := tx.ExecContext(ctx,
-				"UPDATE memory_standing_answers SET stale_at=NULL WHERE id=$1", answer)
-			return true, e
-		})
+		_, err := f.admin.ExecContext(ctx,
+			"UPDATE memory_standing_answers SET stale_at=NULL WHERE id=$1", answer)
 		return err
 	}
 	if err := tryRefresh(); err == nil {
@@ -235,8 +224,8 @@ func TestP7StandingAnswerRefreshSerializesWithMemoryChange(t *testing.T) {
 			TenantID: f.tenant, PrincipalID: f.owner,
 		}, func(appTx querier) (bool, error) {
 			_, e := appTx.ExecContext(ctx, `INSERT INTO memory_standing_answers(
-            tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
-            VALUES($1,$2,'racing refresh','would be stale',$3)`,
+            tenant_id,namespace_id,question_key,answer,evidence_fact_ids,confidence,refresh_reason)
+            VALUES($1,$2,'concurrent','concurrent',$3,0.9,'verified_fact_title_summary')`,
 				f.tenant, f.ns, fmt.Sprintf("[%q]", fact))
 			return true, e
 		})
@@ -286,8 +275,8 @@ func TestP7StandingAnswerRejectsTemporaryDependencyShadowing(t *testing.T) {
 		}
 		var id string
 		err := tx.QueryRowContext(ctx, `INSERT INTO public.memory_standing_answers(
-        tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
-        VALUES($1,$2,'temp shadow','should register real evidence',$3)
+        tenant_id,namespace_id,question_key,answer,evidence_fact_ids,confidence,refresh_reason)
+        VALUES($1,$2,'shadow source','shadow source',$3,0.9,'verified_fact_title_summary')
         RETURNING id::text`, f.tenant, f.ns, fmt.Sprintf("[%q]", fact)).Scan(&id)
 		return id, err
 	})

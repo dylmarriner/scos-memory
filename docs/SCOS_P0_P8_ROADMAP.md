@@ -4,6 +4,32 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 restricted-role standing-answer write integrity (2026-10-28; source candidate)
+
+A restricted `scos_app` SQL writer could previously rewrite a freshly
+materialized standing answer to arbitrary text while retaining a valid
+supporting fact UUID. A second real-PostgreSQL reproduction changed the source
+summary and then cleared `stale_at`, causing the old generated answer to be
+served as fresh. Both were observed RED through authenticated HTTP reads on a
+disposable PostgreSQL 17/pgvector instance before the fix.
+
+Migration `000087` adds a restricted-role BEFORE-write integrity gate:
+**fresh runtime cache rows must use `verified_fact_title_summary` and match
+one same-tenant/namespace fact's normalized title, exact canonical summary and
+confidence**. It prevents downgrading generated provenance, blocks runtime
+DELETE, and invalidates all previously fresh cache rows under a migration
+lock because historical direct writes cannot be retroactively verified.
+Owner-curated legacy answers remain a privileged maintenance operation.
+The runtime blanket-grant policy is also updated so fresh installs do not
+reintroduce DELETE. Real PostgreSQL integration tests verify direct answer
+forgery, provenance downgrade, stale-source resurrection, arbitrary fresh
+INSERT, confidence inflation, DELETE denial, and governed HTTP refresh.
+Legacy/curated test fixtures now seed via the schema owner while retaining
+restricted-role HTTP/RLS read coverage. This migration does not establish
+general natural-language answer generation, provenance of the underlying
+memory's original creation, fleet rollout/recovery qualification, or P7/P0-P8
+completion. **PR review, exact merged-main SHA and CI evidence are pending.**
+
 ## P7 deterministic single-fact standing-answer refresh (2026-10-28; merged PR #122)
 
 A restricted-role HTTP refresh path now derives an exact-title cache entry

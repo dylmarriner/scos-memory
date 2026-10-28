@@ -34,6 +34,9 @@ GRANT USAGE ON SCHEMA public TO scos_app;
 -- Minimal DML only -- no DDL, no ALL PRIVILEGES. Matches
 -- database/integration/rls_test.go's fixture grant exactly.
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO scos_app;
+-- P7: runtime cache deletion is not an application API. Revoke AFTER the
+-- blanket grants on fresh installations (migration 000087 covers upgrades).
+REVOKE DELETE, TRUNCATE ON memory_standing_answers FROM scos_app;
 -- Revalidation decisions are authoritative append-only reviewer evidence.
 -- This must follow the blanket grants on fresh installs; migration 000070
 -- also revokes these rights when upgrading an existing scos_app role.

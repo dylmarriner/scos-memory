@@ -19,12 +19,9 @@ func TestP7StandingAnswerHTTPReadFailsClosedOnRevocationAndExpiry(t *testing.T) 
         authority_level,confidence_score,sensitivity)
         VALUES($1,$2,$3,'semantic','active','answer evidence','answer evidence',80,0.9,'internal')
         RETURNING id::text`, f.tenant, f.ns, f.owner)
-	_, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner}, func(tx querier) (bool, error) {
-		_, e := tx.ExecContext(ctx, `INSERT INTO memory_standing_answers(
+	_, err := f.admin.ExecContext(ctx, `INSERT INTO memory_standing_answers(
             tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
             VALUES($1,$2,'where is the evidence?','verified answer',$3)`, f.tenant, f.ns, fmt.Sprintf("[%q]", fact))
-		return true, e
-	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,12 +61,9 @@ func TestP7StandingAnswerHTTPReadFailsClosedOnRevocationAndExpiry(t *testing.T) 
         authority_level,confidence_score,sensitivity,expires_at)
         VALUES($1,$2,$3,'semantic','active','expiring evidence','expiring evidence',80,0.9,'internal',$4)
         RETURNING id::text`, f.tenant, f.ns, f.owner, expires)
-	_, err = withPrincipalContext(ctx, f.srv.db, requestIdentity{TenantID: f.tenant, PrincipalID: f.owner}, func(tx querier) (bool, error) {
-		_, e := tx.ExecContext(ctx, `INSERT INTO memory_standing_answers(
+	_, err = f.admin.ExecContext(ctx, `INSERT INTO memory_standing_answers(
             tenant_id,namespace_id,question_key,answer,evidence_fact_ids)
             VALUES($1,$2,'expiring question','temporary answer',$3)`, f.tenant, f.ns, fmt.Sprintf("[%q]", expiring))
-		return true, e
-	})
 	if err != nil {
 		t.Fatal(err)
 	}

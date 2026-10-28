@@ -12,15 +12,12 @@ import (
 func TestP7StandingAnswerCurrentViewIgnoresMalformedLegacyEvidence(t *testing.T) {
 	f := newBehaviourFixture(t)
 	ctx := context.Background()
-	_, err := withPrincipalContext(ctx, f.srv.db, requestIdentity{
-		TenantID: f.tenant, PrincipalID: f.owner,
-	}, func(tx querier) (bool, error) {
-		_, err := tx.ExecContext(ctx, `INSERT INTO memory_standing_answers(
+	// Only the migration owner may seed a stale legacy fixture. Restricted
+	// runtime SQL cannot squat on a governed cache key, even while stale.
+	_, err := f.admin.ExecContext(ctx, `INSERT INTO memory_standing_answers(
 			tenant_id,namespace_id,question_key,answer,evidence_fact_ids,stale_at,stale_reason)
 			VALUES($1,$2,'malformed legacy','unverified','not valid json',now(),'unverified_legacy_evidence')`,
-			f.tenant, f.ns)
-		return true, err
-	})
+		f.tenant, f.ns)
 	if err != nil {
 		t.Fatal(err)
 	}
