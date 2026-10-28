@@ -99,6 +99,24 @@ func TestP7RetrievalStandingAnswerCurrentEvidenceAndAudit(t *testing.T) {
 		t.Fatal("cache served without opt-in")
 	}
 
+	// The cache is explicitly requested even when no matching answer exists.
+	// An invalid audit FK must never produce an apparently successful,
+	// unaudited HTTP 200 merely because the selected cache array is empty.
+	unauditable := request
+	unauditable.Query = "no standing answer for this title"
+	unauditable.SessionID = "00000000-0000-4000-8000-000000000001"
+	unauditableBody, _ := json.Marshal(unauditable)
+	unauditableResponse := httptest.NewRecorder()
+	srv.handleRetrieve(unauditableResponse, httptest.NewRequest(
+		http.MethodPost, "/v1/retrieve", bytes.NewReader(unauditableBody)))
+	if unauditableResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unaudited cache miss returned HTTP %d, want 503: %s",
+			unauditableResponse.Code, unauditableResponse.Body.String())
+	}
+	if bytes.Contains(unauditableResponse.Body.Bytes(), []byte("retrieval_run_id")) {
+		t.Fatal("unaudited cache miss exposed a retrieval response")
+	}
+
 	got := call(request)
 	if len(got.StandingAnswers) != 1 || got.StandingAnswers[0].ID != answerID ||
 		got.StandingAnswers[0].Answer != "verified answer" ||

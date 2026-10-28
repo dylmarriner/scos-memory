@@ -677,7 +677,10 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}, int(time.Since(start).Milliseconds()), meta)
 	if err != nil {
 		log.Printf("record retrieval run: %v", err)
-		if len(standingAnswers) > 0 {
+		// An explicit governed-cache lookup requires an audit even when no
+		// answer matched. Otherwise an audit failure silently becomes an
+		// unaudited successful cache miss (HTTP 200).
+		if req.IncludeStandingAnswers {
 			http.Error(w, "standing-answer audit unavailable", http.StatusServiceUnavailable)
 			return
 		}

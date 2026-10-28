@@ -58,6 +58,7 @@ jobs:
             scripts/test_scos_verify_snapshot_bundle.py -v
           python3 -m unittest discover -s tests -p test_definition_of_done_evidence.py -v
           python3 -m unittest discover -s tests -p test_p6_rls_source_evidence.py -v
+          python3 -m unittest discover -s tests -p test_p7_integration_ci_gate.py -v
           python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
           python3 -m unittest discover -s integrations/hermes/plugins/scos -p "test_*.py" -v
           python3 tests/failure-injection/test_runner.py -v
