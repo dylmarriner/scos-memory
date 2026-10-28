@@ -22,7 +22,7 @@ import (
 // behaviourFixture is one tenant with an owner principal and namespace,
 // driven through the handlers as the restricted runtime role under RLS.
 type behaviourFixture struct {
-	t                  *testing.T
+	t                  testing.TB
 	admin              *sql.DB
 	srv                *engineServer
 	tenant, owner, ns  string
@@ -30,7 +30,7 @@ type behaviourFixture struct {
 	otherTenant, other string
 }
 
-func newBehaviourFixture(t *testing.T) *behaviourFixture {
+func newBehaviourFixture(t testing.TB) *behaviourFixture {
 	t.Helper()
 	adminURL, appURL := os.Getenv("DATABASE_URL"), os.Getenv("SCOS_APP_TEST_DATABASE_URL")
 	if adminURL == "" || appURL == "" {
