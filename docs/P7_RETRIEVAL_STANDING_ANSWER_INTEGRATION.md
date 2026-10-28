@@ -65,7 +65,8 @@ new full-handler test reproduced the defect (RED) against a disposable
 restricted-role PostgreSQL 17/pgvector database; the fix now returns HTTP
 503 for any opt-in lookup whose audit cannot be committed (GREEN). The test
 also checks that no unaudited retrieval payload is returned. Ordinary
-non-cache retrieval retains its existing best-effort audit behavior.
+non-cache retrieval originally retained best-effort audit behavior; that
+remaining gap is addressed in the subsequent source change below.
 
 The P4 PostgreSQL workflow previously invoked `go test` without the
 `integration` build tag for the retrieval package, excluding this P7 HTTP
@@ -77,6 +78,26 @@ now requires `database/policies/**` in both pull-request and push filters. Local
 suite and two focused race-enabled repetitions on a disposable database
 with all 86 migrations and 21 RLS policy files. This is not production
 rollout evidence or general answer generation.
+
+## All-lane retrieval audit integrity (2026-10-28, source candidate)
+
+An ordinary `POST /v1/retrieve` request (without the cache opt-in) could
+return HTTP 200 with an empty `retrieval_run_id` when the durable
+`retrieval_runs` INSERT failed. The restricted-role PostgreSQL HTTP test
+reproduced this with an invalid session FK (RED), independently of the
+previous cache-miss case. Ordinary retrieval also lacked a `no-store`
+response header (RED), despite containing principal-scoped memory evidence.
+
+The handler now fails closed with HTTP 503 on **any** retrieval audit write
+failure, including ordinary, code and empty-result paths, without releasing
+a retrieval payload. It sets `Cache-Control: no-store` for all requests,
+including errors, not only opt-in cache requests. The corrected HTTP test
+passed with the same restricted role (GREEN); the complete tagged retrieval
+suite, five focused repetitions, two race-enabled repetitions, full Go suite
+and `go vet` passed on a disposable database with 86 migrations and 21
+policies. The canonical §41 DoD gate still fails. This does not establish
+production rollout/recovery, a complete historical belief ledger, or
+representative P7 latency qualification.
 
 This is **not** general answer generation, contradiction adjudication,
 historical belief reconstruction, proof of commit-order history, full
