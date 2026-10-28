@@ -4,6 +4,32 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 review-time draft integrity precondition (2026-10-29; source candidate)
+
+The read-only `POST /v1/standing-answers/compose` now accepts an optional
+`expected_draft_fingerprint` to revalidate a previously reviewed composition
+under **current** tenant/principal authorization and current evidence. It
+requires an explicit canonical 64-character lowercase SHA-256 digest; malformed,
+empty and uppercase values fail HTTP 400. When the digest no longer matches
+the recomposed draft, HTTP 409 is returned **without** a draft or evidence
+payload. Missing/inaccessible sources still fail HTTP 404 before comparison.
+The unchanged digest returns the ordinary unapproved review draft (HTTP 200).
+This is an optimistic read-time integrity check, not a persisted approval,
+a cryptographic signature, a publication operation or a transactionally
+locked approval-and-write protocol.
+
+TDD: a well-formed expected digest initially failed HTTP 400 because the
+request contract did not support it (RED); an explicitly empty digest was
+subsequently demonstrated to bypass validation (RED) and now fails closed.
+Restricted-role PostgreSQL 17/pgvector integration tests verify stable
+recomposition, source-summary drift rejection, no stale draft leakage,
+cross-tenant denial, and zero standing-answer cache writes. All 86 migrations
+and 21 policies were applied on a disposable database; five focused and two
+race-enabled repetitions, full memory-intelligence and retrieval-orchestrator
+integration suites, 52-package Go tests, Go vet and diff checks passed (GREEN).
+The §41 definition-of-done gate still reports FAIL/PARTIAL. PR review,
+merged-main verification and production rollout/recovery remain separate gates.
+
 ## P7 agent capability ceiling for evidence drafts (2026-10-29; PR candidate)
 
 The P7 composition endpoint previously allowed a namespace-readable agent to

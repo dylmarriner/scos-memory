@@ -153,3 +153,31 @@ agent-clearance regression passed on a disposable PostgreSQL 17/pgvector
 instance with 86 migrations and 21 policies. This protects the P7 draft
 composition path only; it does not prove that all other SCOS read paths
 consistently enforce agent clearance or complete governed approval.
+
+## 2026-10-29 review-time expected fingerprint (source candidate)
+
+A caller that has independently reviewed a previous draft can resubmit the
+same `namespace_id` and `fact_ids` with
+`"expected_draft_fingerprint": "<64 lowercase hex SHA-256 characters>"`.
+The server performs the ordinary current restricted-role/RLS read and
+recomputes the entire review manifest. Matching digests return HTTP 200 and
+the normal `draft_requires_review` response. Changed evidence or display text
+returns HTTP 409 with no draft or source payload. An inaccessible or revoked
+source returns HTTP 404 before digest comparison, and invalid/empty/uppercase
+digests return HTTP 400. The field is optional for initial composition, but
+when present must be valid; `null` is not an opt-out. No state is persisted.
+
+The precondition helps reject stale review evidence. It does not authenticate
+a reviewer, approve a fact, publish an answer, prevent future changes after
+this read, or establish atomic compare-and-publish semantics. A future
+approval path must repeat authorization and manifest validation in the same
+transaction as its governed write.
+
+TDD: unsupported well-formed field and empty-value bypass failed RED, then
+passed GREEN. Restricted-role PostgreSQL integration tested unchanged and
+changed evidence, cross-tenant denial, no stale-draft disclosure and no
+standing-answer writes. Five focused repetitions, two race-enabled
+repetitions, the full memory-intelligence and retrieval-orchestrator
+integration suites, 52-package Go tests and Go vet passed on a disposable
+PostgreSQL 17/pgvector instance with 86 migrations and 21 policies. No
+production deployment, migration or cache publication was performed.

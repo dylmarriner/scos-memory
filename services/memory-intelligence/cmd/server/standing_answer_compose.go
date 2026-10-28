@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -22,8 +23,9 @@ import (
 // answer. No model, unverified prose, or cache mutation is involved. A human
 // review must still precede publication of any composed answer.
 type standingAnswerComposeRequest struct {
-	NamespaceID string   `json:"namespace_id"`
-	FactIDs     []string `json:"fact_ids"`
+	NamespaceID              string          `json:"namespace_id"`
+	FactIDs                  []string        `json:"fact_ids"`
+	ExpectedDraftFingerprint json.RawMessage `json:"expected_draft_fingerprint,omitempty"`
 }
 
 type standingAnswerComposeEvidence struct {
@@ -74,6 +76,22 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 	if err != nil || namespace == uuid.Nil || len(input.FactIDs) < 2 || len(input.FactIDs) > 8 {
 		http.Error(w, "namespace_id and 2 to 8 unique fact_ids are required", http.StatusBadRequest)
 		return
+	}
+	// Optional review-time optimistic precondition. Require the canonical
+	// lowercase SHA-256 representation to avoid multiple spellings of one
+	// approval candidate. A stale digest never returns draft evidence.
+	var expectedDraftFingerprint string
+	if len(input.ExpectedDraftFingerprint) != 0 {
+		if err := json.Unmarshal(input.ExpectedDraftFingerprint, &expectedDraftFingerprint); err != nil || len(expectedDraftFingerprint) != 64 {
+			http.Error(w, "expected_draft_fingerprint must be lowercase SHA-256", http.StatusBadRequest)
+			return
+		}
+		for _, ch := range expectedDraftFingerprint {
+			if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+				http.Error(w, "expected_draft_fingerprint must be lowercase SHA-256", http.StatusBadRequest)
+				return
+			}
+		}
 	}
 	ids := make([]string, 0, len(input.FactIDs))
 	seen := make(map[string]bool, len(input.FactIDs))
@@ -209,6 +227,9 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 	case err != nil:
 		log.Printf("evidence composition failed (%T)", err)
 		http.Error(w, "evidence composition failed", http.StatusInternalServerError)
+	case expectedDraftFingerprint != "" && subtle.ConstantTimeCompare(
+		[]byte(expectedDraftFingerprint), []byte(result.DraftFingerprint)) != 1:
+		http.Error(w, "evidence draft changed; recompose before review", http.StatusConflict)
 	default:
 		writeJSON(w, result)
 	}
