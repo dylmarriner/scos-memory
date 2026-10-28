@@ -4,6 +4,20 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 standing-answer dependency-unavailable fail-closed regression (2026-10-29; PR candidate)
+
+A valid authenticated `GET /v1/standing-answers` with an unavailable
+`engineServer.db` previously dereferenced a nil `*sql.DB` in the RLS
+transaction helper and panicked. An HTTP handler regression reproduced the
+nil-pointer panic before the fix (RED). The handler now returns HTTP 503
+with `Cache-Control: no-store` before attempting a transaction (GREEN).
+Five focused repetitions, two race-enabled repetitions, the full Go suite
+and `go vet ./...` passed on an isolated AMD worktree. The existing
+restricted-role PostgreSQL read/revocation/expiry tests remain in CI; they
+are separate from this no-database regression. This is a bounded P7
+availability and fail-closed correction, **not** general answer generation,
+representative latency qualification, §41 completion or production rollout.
+
 ## P0/P4/P7 cross-lane retrieval token accounting (2026-10-28; merged PR #131)
 
 A real authenticated code-retrieval HTTP integration previously returned a

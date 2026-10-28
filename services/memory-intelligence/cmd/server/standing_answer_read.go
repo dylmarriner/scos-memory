@@ -66,6 +66,13 @@ func (s *engineServer) handleStandingAnswerRead(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// A missing database must not panic after successful authentication.
+	// Fail closed until the dependency is available again.
+	if s.db == nil {
+		http.Error(w, "standing-answer read unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	result, err := withPrincipalContext(r.Context(), s.db, identity, func(tx querier) (standingAnswerRead, error) {
 		var answer standingAnswerRead
 		var evidence string
