@@ -1,6 +1,6 @@
 # P7 opt-in standing-answer retrieval integration
 
-**Status:** PR #126 merged at `7b38ee57a4fd9e5a58ea2316b0bdb09e865004a7` with passing merged-main CI/P4; follow-up audit/CI correction is a source candidate. Not production deployed. The canonical P7 acceptance gate remains open.
+**Status:** PR #126 merged at `7b38ee57a4fd9e5a58ea2316b0bdb09e865004a7` with passing merged-main CI/P4; follow-up audit/CI correction merged in PR #127 at `1a91f216f9a66124575e87c04297158481f8ff7f` after CodeRabbit policy-path review remediation, passing final-head and merged-main CI/P4. Not production deployed. The canonical P7 acceptance gate remains open.
 
 `POST /v1/retrieve` accepts `include_standing_answers: true` as an explicit
 opt-in to the already materialized, exact-title standing-answer cache. A
