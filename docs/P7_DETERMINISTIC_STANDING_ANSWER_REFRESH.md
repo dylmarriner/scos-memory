@@ -17,10 +17,14 @@ The source memory is selected under transaction-local FORCE RLS and a row
 SHARE lock. It must be active, not superseded, within valid/expiry bounds and
 under the namespace sensitivity ceiling. The existing dependency trigger
 checks supporting evidence, version, and unresolved P7 code revalidation.
+Its specific SQLSTATE 23514 evidence-ineligible rejection is mapped to HTTP
+409, not a misleading HTTP 500; unrelated database errors still fail closed.
 Before committing, the writer checks the security-invoker current-evidence
 view in the same transaction. It returns no answer on failed evidence
 validation. Refresh is idempotent for the same canonical UUID and refuses
-to overwrite a curated answer or an answer with a different source fact.
+to overwrite a curated answer or a fresh answer with a different source fact.
+A stale, previously machine-generated exact-title entry may be refreshed from a
+new current same-title source; even stale curated entries remain protected.
 `Cache-Control: no-store` prevents stale intermediary reuse.
 
 Migration `000086_standing_answer_source_text_invalidation.sql` extends the
@@ -45,8 +49,15 @@ curated/different-source answers. The source-text mutation test returned HTTP
 200 for a stale answer before migration `000086` (RED), and HTTP 404 after
 migration (GREEN). A separate uppercase-UUID regression failed with HTTP 409
 before canonicalization and passed after. The handler's initial test failed
-to compile before implementation, then passed. The full integration suite,
-uncached Go suite and vet must be re-run after the final code change.
+to compile before implementation, then passed. Two PR review regressions failed RED on the original candidate: an invalidated
+machine-generated same-title cache could not switch to its current successor
+(HTTP 409 instead of 200), and unresolved P7 code review returned HTTP 500
+instead of an evidence-ineligible 409. Both passed GREEN five consecutive
+focused PostgreSQL runs; a stale curated entry remains unreplaceable and a
+reviewer still_valid decision restores refresh eligibility. The full
+memory-intelligence/retrieval-orchestrator integration suites passed on a
+separate disposable PostgreSQL 17/pgvector database after the correction.
+Uncached Go suite, vet and race verification are tracked separately in the PR.
 
 This does **not** close the full governed-writer requirement: existing
 `memory_standing_answers` direct-SQL INSERT/UPDATE permissions for the

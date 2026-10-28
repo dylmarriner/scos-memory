@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // standingAnswerRefreshRequest intentionally accepts only an existing fact
@@ -143,13 +144,22 @@ func (s *engineServer) handleStandingAnswerRefresh(w http.ResponseWriter, r *htt
                 confidence=EXCLUDED.confidence,last_refreshed_at=EXCLUDED.last_refreshed_at,
                 refresh_reason=EXCLUDED.refresh_reason,stale_at=NULL,stale_reason=NULL
             WHERE memory_standing_answers.refresh_reason='verified_fact_title_summary'
-              AND memory_standing_answers.evidence_fact_ids=EXCLUDED.evidence_fact_ids
+              AND (memory_standing_answers.evidence_fact_ids=EXCLUDED.evidence_fact_ids
+                   OR memory_standing_answers.stale_at IS NOT NULL)
             RETURNING id::text`, identity.TenantID, out.NamespaceID, out.QuestionKey,
 			out.Answer, string(evidence), out.Confidence).Scan(&out.ID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return out, errStandingAnswerConflict
 		}
 		if err != nil {
+			// The dependency trigger rejects facts with unresolved code
+			// revalidation. Map only its exact, expected integrity denial;
+			// unrelated constraint failures must remain server errors.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23514" &&
+				pgErr.Message == "standing answer references inaccessible or stale evidence" {
+				return out, errStandingAnswerEvidenceStale
+			}
 			return out, err
 		}
 		// Never report success for an answer that the current-evidence view

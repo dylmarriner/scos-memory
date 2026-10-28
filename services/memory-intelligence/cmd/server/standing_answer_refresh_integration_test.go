@@ -185,3 +185,89 @@ func TestP7StandingAnswerRefreshCannotOverwriteCuratedOrDifferentSource(t *testi
 		t.Fatalf("curated answer overwritten: %d", code)
 	}
 }
+
+// A stale machine-generated cache must be replaceable by a newly governed
+// same-title source; fresh collisions and curated answers remain protected.
+func TestP7RefreshReplacesStaleSameTitleSourceButNotCurated(t *testing.T) {
+	f := newBehaviourFixture(t)
+	create := func(summary string) string {
+		return f.scalar(`INSERT INTO memory_items (
+            tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+            authority_level,confidence_score,sensitivity)
+            VALUES ($1,$2,$3,'semantic','active','Successor title',$4,80,0.8,'internal')
+            RETURNING id::text`, f.tenant, f.ns, f.owner, summary)
+	}
+	first, second := create("original source"), create("successor source")
+	path := "/v1/standing-answers/refresh"
+	refresh := func(id string) (int, map[string]any) {
+		status, out, _ := f.call(f.srv.handleStandingAnswerRefresh, http.MethodPost, path,
+			fmt.Sprintf(`{"fact_id":%q}`, id))
+		return status, out
+	}
+	code, initial := refresh(first)
+	if code != http.StatusOK {
+		t.Fatalf("initial refresh: %d %v", code, initial)
+	}
+	if code, _ = refresh(second); code != http.StatusConflict {
+		t.Fatalf("fresh different-source answer overwritten: %d", code)
+	}
+	if _, err := f.admin.ExecContext(context.Background(),
+		"UPDATE memory_items SET status='revoked' WHERE id=$1", first); err != nil {
+		t.Fatal(err)
+	}
+	code, replacement := refresh(second)
+	if code != http.StatusOK || replacement["id"] != initial["id"] || replacement["source_fact_id"] != second {
+		t.Fatalf("stale generated answer not replaced by current successor: %d %v", code, replacement)
+	}
+	readPath := "/v1/standing-answers?namespace_id=" + f.ns + "&question_key=successor%20title"
+	code, answer, _ := f.call(f.srv.handleStandingAnswerRead, http.MethodGet, readPath, "")
+	if code != http.StatusOK || answer["answer"] != "successor source" {
+		t.Fatalf("replacement evidence not readable: %d %v", code, answer)
+	}
+	if _, err := f.admin.ExecContext(context.Background(),
+		"UPDATE memory_standing_answers SET refresh_reason='curated', stale_at=statement_timestamp() WHERE id=$1", initial["id"]); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ = refresh(second); code != http.StatusConflict {
+		t.Fatalf("stale curated answer overwritten: %d", code)
+	}
+}
+
+// Active facts can be ineligible when historical code continuity has not
+// been reviewed. The trigger must not turn that expected denial into HTTP 500.
+func TestP7RefreshPendingCodeReviewReturnsConflictAndRecoversAfterApproval(t *testing.T) {
+	f := newBehaviourFixture(t)
+	ctx := context.Background()
+	fact := f.scalar(`INSERT INTO memory_items(
+        tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+        authority_level,confidence_score,sensitivity)
+        VALUES($1,$2,$3,'semantic','active','Review pending','unverified code dependency',80,0.9,'internal')
+        RETURNING id::text`, f.tenant, f.ns, f.owner)
+	repo := f.scalar("INSERT INTO code_repositories(tenant_id,canonical_path) VALUES($1,$2) RETURNING id::text", f.tenant, "/p7-refresh-review/"+fact)
+	old := f.scalar("INSERT INTO code_repository_snapshots(tenant_id,repository_id,branch,commit_id,status) VALUES($1,$2,'main','before','active') RETURNING id::text", f.tenant, repo)
+	newest := f.scalar("INSERT INTO code_repository_snapshots(tenant_id,repository_id,branch,commit_id,status) VALUES($1,$2,'main','after','ready') RETURNING id::text", f.tenant, repo)
+	symbol := f.scalar("INSERT INTO code_symbols(repository_id,stable_key,kind,first_snapshot_id) VALUES($1,$2,'file',$3) RETURNING id::text", repo, "review-pending-"+fact, old)
+	version := f.scalar("INSERT INTO code_symbol_versions(symbol_id,snapshot_id,fully_qualified_name,path,kind,content_hash) VALUES($1,$2,'review.pending','src/pending.go','file','abc') RETURNING id::text", symbol, old)
+	link := f.scalar("INSERT INTO memory_code_links(tenant_id,fact_id,code_symbol_version_id,link_type,source) VALUES($1,$2,$3,'evidences','explicit') RETURNING id::text", f.tenant, fact, version)
+	event := f.scalar(`INSERT INTO memory_revalidation_events(
+        tenant_id,fact_id,link_id,old_snapshot_id,new_snapshot_id,
+        old_symbol_version_id,continuity,review_status)
+        VALUES ($1,$2,$3,$4,$5,$6,'changed','needs_review') RETURNING id::text`,
+		f.tenant, fact, link, old, newest, version)
+	payload := fmt.Sprintf(`{"fact_id":%q}`, fact)
+	code, result, _ := f.call(f.srv.handleStandingAnswerRefresh, http.MethodPost,
+		"/v1/standing-answers/refresh", payload)
+	if code != http.StatusConflict || result["error"] != "source evidence is not eligible for refresh" {
+		t.Fatalf("pending code review leaked internal failure: %d %v", code, result)
+	}
+	if _, err := f.admin.ExecContext(ctx,
+		"INSERT INTO memory_revalidation_decisions(event_id,tenant_id,reviewer_id,outcome,reason) VALUES($1,$2,$3,'still_valid','Reviewer verified code continuity')",
+		event, f.tenant, f.owner); err != nil {
+		t.Fatal(err)
+	}
+	code, result, _ = f.call(f.srv.handleStandingAnswerRefresh, http.MethodPost,
+		"/v1/standing-answers/refresh", payload)
+	if code != http.StatusOK || result["source_fact_id"] != fact {
+		t.Fatalf("approved evidence could not refresh: %d %v", code, result)
+	}
+}
