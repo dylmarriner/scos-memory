@@ -37,29 +37,30 @@ var serviceMetrics = telemetry.FromEnvironment("retrieval-orchestrator")
 // ── request / response types ─────────────────────────────────────────────
 
 type RetrieveRequest struct {
-	TenantID            string            `json:"tenant_id"`
-	PrincipalID         string            `json:"principal_id"`
-	Query               string            `json:"query"`
-	QueryEmbedding      []float64         `json:"query_embedding,omitempty"`
-	QueryEmbeddingSpace *embeddingSpace   `json:"query_embedding_space,omitempty"`
-	AgentID             string            `json:"agent_id,omitempty"`
-	SessionID           string            `json:"session_id,omitempty"`
-	TurnID              string            `json:"turn_id,omitempty"`
-	Namespaces          []string          `json:"namespaces,omitempty"`
-	MemoryClasses       []string          `json:"memory_classes,omitempty"`
-	SensitivityMax      string            `json:"sensitivity_max,omitempty"`
-	MaxResults          int               `json:"max_results,omitempty"`
-	TokenBudget         int               `json:"token_budget,omitempty"`
-	IncludeRecent       bool              `json:"include_recent,omitempty"`
-	IncludeSession      bool              `json:"include_session,omitempty"`
-	IncludeState        bool              `json:"include_state,omitempty"`
-	Filters             map[string]string `json:"filters,omitempty"`
-	RepositoryID        string            `json:"repository_id,omitempty"`
-	Branch              string            `json:"branch,omitempty"`
-	AsOfValidTime       string            `json:"as_of_valid_time,omitempty"`
-	AsOfSystemTime      string            `json:"as_of_system_time,omitempty"`
-	AsOfCommit          string            `json:"as_of_commit,omitempty"`
-	SnapshotID          string            `json:"snapshot_id,omitempty"`
+	TenantID               string            `json:"tenant_id"`
+	PrincipalID            string            `json:"principal_id"`
+	Query                  string            `json:"query"`
+	QueryEmbedding         []float64         `json:"query_embedding,omitempty"`
+	QueryEmbeddingSpace    *embeddingSpace   `json:"query_embedding_space,omitempty"`
+	AgentID                string            `json:"agent_id,omitempty"`
+	SessionID              string            `json:"session_id,omitempty"`
+	TurnID                 string            `json:"turn_id,omitempty"`
+	Namespaces             []string          `json:"namespaces,omitempty"`
+	MemoryClasses          []string          `json:"memory_classes,omitempty"`
+	SensitivityMax         string            `json:"sensitivity_max,omitempty"`
+	MaxResults             int               `json:"max_results,omitempty"`
+	TokenBudget            int               `json:"token_budget,omitempty"`
+	IncludeRecent          bool              `json:"include_recent,omitempty"`
+	IncludeSession         bool              `json:"include_session,omitempty"`
+	IncludeState           bool              `json:"include_state,omitempty"`
+	IncludeStandingAnswers bool              `json:"include_standing_answers,omitempty"`
+	Filters                map[string]string `json:"filters,omitempty"`
+	RepositoryID           string            `json:"repository_id,omitempty"`
+	Branch                 string            `json:"branch,omitempty"`
+	AsOfValidTime          string            `json:"as_of_valid_time,omitempty"`
+	AsOfSystemTime         string            `json:"as_of_system_time,omitempty"`
+	AsOfCommit             string            `json:"as_of_commit,omitempty"`
+	SnapshotID             string            `json:"snapshot_id,omitempty"`
 }
 
 type RetrievalResult struct {
@@ -91,14 +92,15 @@ type ContextSection struct {
 }
 
 type RetrieveResponse struct {
-	RetrievalRunID string             `json:"retrieval_run_id"`
-	QueryHash      string             `json:"query_hash"`
-	Sections       []ContextSection   `json:"sections"`
-	Code           *codeQueryResponse `json:"code,omitempty"`
-	AsOfValidTime  string             `json:"as_of_valid_time,omitempty"`
-	TemporalScope  string             `json:"temporal_scope,omitempty"`
-	TotalTokens    int                `json:"total_tokens"`
-	LatencyMs      int                `json:"latency_ms"`
+	RetrievalRunID  string                   `json:"retrieval_run_id"`
+	QueryHash       string                   `json:"query_hash"`
+	Sections        []ContextSection         `json:"sections"`
+	Code            *codeQueryResponse       `json:"code,omitempty"`
+	StandingAnswers []StandingAnswerEvidence `json:"standing_answers,omitempty"`
+	AsOfValidTime   string                   `json:"as_of_valid_time,omitempty"`
+	TemporalScope   string                   `json:"temporal_scope,omitempty"`
+	TotalTokens     int                      `json:"total_tokens"`
+	LatencyMs       int                      `json:"latency_ms"`
 	// DegradedSources names every retrieval lane that failed for this
 	// request, so a database or service failure never reads as "no
 	// matches"; DegradedModels names models that were unavailable.
@@ -413,6 +415,18 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query is required", http.StatusBadRequest)
 		return
 	}
+	// A current evidence cache must never answer historical or class-filtered queries.
+	if req.IncludeStandingAnswers {
+		w.Header().Set("Cache-Control", "no-store")
+		if standingAnswerQuestionKey(req.Query) == "" {
+			http.Error(w, "standing-answer query must be nonempty UTF-8 (max 1024 bytes)", http.StatusBadRequest)
+			return
+		}
+		if req.AsOfValidTime != "" || req.AsOfCommit != "" || req.SnapshotID != "" || len(req.MemoryClasses) > 0 {
+			http.Error(w, "standing answers support only current unfiltered memory-class retrieval", http.StatusBadRequest)
+			return
+		}
+	}
 	// Historical selectors are code-only. Do not accept them without the
 	// repository/branch binding that makes the indexed generation unambiguous.
 	historicalCode := req.AsOfCommit != "" || req.SnapshotID != ""
@@ -638,20 +652,38 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// ── 12. Assemble into sections per §17 ─────────────────────────
 	sections := assembleSections(allocated)
 
+	// ── 12.5. Optional, evidence-current exact-title cache read ─────
+	var standingAnswers []StandingAnswerEvidence
+	standingTokens := 0
+	if req.IncludeStandingAnswers && len(namespaces) > 0 {
+		candidates, cacheErr := s.readStandingAnswers(ctx, req, namespaces, sensitivityFilter, maxResults)
+		if cacheErr != nil {
+			log.Printf("standing-answer retrieval unavailable (%T)", cacheErr)
+			http.Error(w, "standing-answer retrieval unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		standingAnswers, standingTokens = selectBudgetedStandingAnswers(candidates, tokenBudget-estimateSectionsTokens(sections))
+	}
+
 	// ── 13. Record retrieval run ────────────────────────────────────
 	codeCount := 0
 	if codeResponse != nil {
 		codeCount = len(codeResponse.Results)
 	}
-	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, codeResponse, map[string]int{
+	retrievalRunID, err := s.recordRetrieval(ctx, req, queryHash, namespaces, sections, codeResponse, standingAnswers, map[string]int{
 		"exact": len(exactResults), "fulltext": len(ftsResults), "vector": len(vectorResults), "session_state": len(sessionResults),
 		"relation": len(relationResults), "code": codeCount, "recent": len(recentResults), "task_state": len(stateResults),
+		"standing_answers": len(standingAnswers),
 	}, int(time.Since(start).Milliseconds()), meta)
 	if err != nil {
 		log.Printf("record retrieval run: %v", err)
+		if len(standingAnswers) > 0 {
+			http.Error(w, "standing-answer audit unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 
-	totalTokens := 0
+	totalTokens := standingTokens
 	for _, sec := range sections {
 		for _, item := range sec.Items {
 			totalTokens += estimateTokens(item.Content)
@@ -663,6 +695,7 @@ func (s *server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		QueryHash:       queryHash,
 		Sections:        sections,
 		Code:            codeResponse,
+		StandingAnswers: standingAnswers,
 		AsOfValidTime:   req.AsOfValidTime,
 		TemporalScope:   temporalScopeFor(req.AsOfValidTime),
 		TotalTokens:     totalTokens,
@@ -1360,7 +1393,7 @@ func assembleSections(results []RetrievalResult) []ContextSection {
 
 // ── persistence ──────────────────────────────────────────────────────────
 
-func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, queryHash string, namespaces []string, sections []ContextSection, code *codeQueryResponse, candidateCounts map[string]int, latencyMs int, meta retrievalExecutionMeta) (string, error) {
+func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, queryHash string, namespaces []string, sections []ContextSection, code *codeQueryResponse, standing []StandingAnswerEvidence, candidateCounts map[string]int, latencyMs int, meta retrievalExecutionMeta) (string, error) {
 	var selectedIDs []string
 	var selected []RetrievalResult
 	for _, sec := range sections {
@@ -1397,6 +1430,22 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 		}(),
 	})
 
+	filters := appliedRestrictions(req)
+	if req.IncludeStandingAnswers {
+		evidence := make([]map[string]any, 0, len(standing))
+		for _, a := range standing {
+			digest := sha256.Sum256([]byte(a.Answer))
+			evidence = append(evidence, map[string]any{
+				"id": a.ID, "namespace_id": a.NamespaceID,
+				"evidence_fact_ids": a.EvidenceFactIDs,
+				"answer_sha256":     hex.EncodeToString(digest[:]),
+				"last_refreshed_at": a.LastRefreshedAt.UTC().Format(time.RFC3339Nano),
+			})
+		}
+		filters["include_standing_answers"] = true
+		filters["selected_standing_answers"] = evidence
+	}
+
 	var runID string
 	err := s.withPrincipalContext(ctx, req.TenantID, req.PrincipalID, func(q pgxQuerier) error {
 		if err := q.QueryRow(ctx, `
@@ -1407,8 +1456,8 @@ func (s *server) recordRetrieval(ctx context.Context, req RetrieveRequest, query
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 			RETURNING id
 		`, req.TenantID, req.PrincipalID, nullIfBlank(req.AgentID), nullIfBlank(req.SessionID), nullIfBlank(req.TurnID),
-			queryHash, toJSONB(namespaces), toJSONB(appliedRestrictions(req)), rankingConfig, selectedJSON, selectedCodeJSON, latencyMs,
-			toJSONB(candidateCounts), estimateSectionsTokens(sections), modelVersions).Scan(&runID); err != nil {
+			queryHash, toJSONB(namespaces), toJSONB(filters), rankingConfig, selectedJSON, selectedCodeJSON, latencyMs,
+			toJSONB(candidateCounts), estimateSectionsTokens(sections)+standingAnswerAuditTokens(standing), modelVersions).Scan(&runID); err != nil {
 			return err
 		}
 
