@@ -4,7 +4,7 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## P7 composition fingerprint security-context binding (2026-10-29; PR candidate)
+## P7 composition fingerprint security-context binding (2026-10-29; merged PR #147)
 
 The P7 evidence draft source fingerprint v1 omitted the tenant and namespace
 security boundary. A fact moved to another authorized namespace without a
@@ -18,6 +18,24 @@ namespace and changes both fingerprints in the new namespace. v1 digests
 are not interchangeable with v2; a future approval workflow must re-read
 authorized evidence and compare fresh v2 fingerprints. This does not implement
 approval, governed answer generation, P7 acceptance, or production rollout.
+
+**Merge and acceptance evidence:** [PR #147](https://github.com/dylmarriner/scos-memory/pull/147)
+was squash-merged with exact expected head
+`e7416e665946c5462dc4dd7c7764fb7721592e19` into
+`63b7a9374780bdb4523ae50c271220b852d1338c`, with no conflicts,
+draft status or unresolved review threads. CodeRabbit identified a real
+NUL-prefix documentation typo, corrected in the final head and its thread
+resolved. Kilo passed; Claude review was unavailable without paid credits.
+Final PR-head [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40747141254)
+passed 5/5 and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40747141080)
+passed 9/9, including restricted-role PostgreSQL composition integration.
+Independent exact merged-main AMD verification passed 52 Go packages,
+`go vet ./...` and `git diff --check`. Merged-main
+[CI](https://github.com/dylmarriner/scos-memory/actions/runs/40747756928)
+passed 5/5 and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40747756969)
+passed 9/9 at the exact merge SHA. §41 remains PARTIAL and the definition-of-
+done checker still reports FAIL. No production deployment, live migration or
+paid resources were used.
 
 ## P7 standing-answer dependency-unavailable fail-closed regression (2026-10-29; PR candidate)
 
