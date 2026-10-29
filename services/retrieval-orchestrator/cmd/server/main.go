@@ -783,6 +783,8 @@ func containsAllNamespaces(requested, authorized []string) bool {
 }
 
 func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, limit int) ([]RetrievalResult, error) {
+	// Use literal substring matching: LIKE would interpret caller-controlled
+	// %, _ and backslash as pattern syntax and return unrelated evidence.
 	query := `
 		SELECT mi.id, mi.title, mi.canonical_summary, COALESCE(mv.content, mi.canonical_summary),
 		       mi.type, mi.authority_level, mi.confidence_score, mi.sensitivity,
@@ -818,11 +820,11 @@ func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespace
 		AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
 		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
 		  AND (mi.valid_until IS NULL OR mi.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
-		  AND (LOWER(mi.title) LIKE LOWER($4) OR LOWER(mv.content) LIKE LOWER($4))
+		  AND (STRPOS(LOWER(mi.title), LOWER($4)) > 0 OR STRPOS(LOWER(mv.content), LOWER($4)) > 0)
 		ORDER BY mi.authority_level DESC, mi.confidence_score DESC
 		LIMIT $5
 	`
-	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, "%"+req.Query+"%", "exact")
+	return s.queryResults(ctx, req, namespaces, sensitivityMax, limit, query, req.Query, "exact")
 }
 
 func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namespaces []string, sensitivityMax string, tsQuery string, limit int) ([]RetrievalResult, error) {

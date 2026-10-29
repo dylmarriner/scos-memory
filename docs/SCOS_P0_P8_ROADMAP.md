@@ -4,6 +4,29 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P0 literal exact-retrieval integrity (2026-10-29; source candidate)
+
+The P4 exact lexical lane previously interpolated the caller's query into a
+parameterized SQL `LIKE` pattern. Although SQL injection was prevented, the
+`%`, `_` and backslash pattern metacharacters were still interpreted rather
+than matched literally: a `%` or `_` query retrieved every eligible memory,
+while a backslash query missed its matching evidence. A real PostgreSQL 17/
+pgvector regression reproduced all three errors under both the owner and
+restricted `scos_app` roles (RED). The exact lane now uses case-insensitive
+`STRPOS` with the raw parameterized query, preserving ordinary substring
+search without SQL wildcard semantics (GREEN, five focused repetitions).
+CodeRabbit review exposed a test coverage escape: required-mode tests could
+silently skip without an owner DSN. That guard now fails closed (reproduced
+as SKIP before the fix, FAIL afterward), and a version-content-only fixture
+covers the second exact-search SQL branch, including literal `%` and `_`.
+Five focused repetitions and two race-enabled repetitions passed after the
+review correction. All 87 ordered SQL migrations and 21 RLS policies applied to an isolated
+PostgreSQL instance; the complete tagged retrieval and memory-intelligence
+integration suites passed, along with 52 Go packages, Go vet and two focused
+race-enabled repetitions. The §41 definition-of-done checker still reports
+FAIL/PARTIAL. This improves lexical evidence precision, **not** representative P0 quality,
+P5 historical reconstruction, §41 acceptance or production rollout.
+
 ## P5 current-belief supersession exclusion (2026-10-29; source candidate)
 
 A real PostgreSQL 17/pgvector regression showed that a memory with
