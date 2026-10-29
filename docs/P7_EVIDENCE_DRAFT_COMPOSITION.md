@@ -243,3 +243,88 @@ two focused race-enabled repetitions passed, 52 Go packages passed and
 TLS-enabled database URL; it passed with the test-only insecure DSN removed.
 This is a review-time source-drift safeguard only; it does not provide approval, model generation,
 transaction-ordered historical reconstruction or production acceptance.
+
+## P7 source-ownership provenance fingerprint v5 (2026-10-30; development)
+
+A source fact's `owner_principal_id` could change without changing its
+summary, selected version, confidence or other v4 fingerprint fields. A
+previously reviewed `expected_draft_fingerprint` therefore still matched
+although the fact's accountable owner had changed. A restricted-role
+PostgreSQL HTTP regression first reproduced this failure (RED): the review
+digest stayed unchanged after transferring ownership of one of two active
+sources while the displayed draft text remained identical.
+
+The composition response now includes `evidence[].owner_principal_id`, read
+from the same authorized statement snapshot as the rest of the source. The
+versioned, domain-separated source digest `scos:p7:source:v5` binds the owner
+UUID in addition to all v4 fields, and the whole-draft manifest inherits the
+new source digest. A source-owner transfer now invalidates the previous review
+precondition with HTTP 409 and no evidence payload, while a fresh draft
+identifies the current owner. Prior v4 fingerprints are intentionally not
+accepted as v5. A fixed-vector unit test pins the new digest format.
+
+This is a source-provenance and review-drift safeguard, **not** a governed
+approval/publishing workflow, a signature, immutable ownership evidence,
+transactionally atomic compare-and-publish, general generation, production
+rollout or P7/§41 acceptance. The owner is the current database principal ID,
+not independent proof of real-world authorship.
+
+**Development verification (2026-10-30):** On a newly isolated, disposable
+PostgreSQL 17/pgvector container, 89 ordered SQL migrations and 23 policy files
+applied successfully. The restricted-role HTTP owner-transfer test failed
+before implementation with the unchanged draft fingerprint and passed after
+the v5 change. The full tagged memory-intelligence integration package and
+tagged retrieval-orchestrator package passed, as did the complete uncached Go
+suite (52 tested packages), `go vet ./...`, two race-enabled owner-transfer
+repetitions, and `git diff --check`. The §41 checker still reports FAIL because
+the governance master table is PARTIAL. PR review, merge, merged-main CI and
+production rollout are separate gates, not implied by these local results.
+
+
+**PR review hardening:** CodeRabbit identified that the existing schema can
+contain a cross-tenant `owner_principal_id` after an administrative/import
+write. The new evidence response would then disclose that foreign principal
+UUID as trusted ownership provenance. A second restricted-role PostgreSQL
+HTTP regression reproduced HTTP 200 with the foreign owner (RED). The
+composition query now joins the owner principal by both ID **and tenant**, so
+any such malformed source makes the entire draft unavailable (HTTP 404,
+GREEN, five repeated owner-transfer and foreign-owner test runs). The test
+also confirms that a freshly recomposed post-transfer digest succeeds as a
+review precondition. A global same-tenant composite FK for historical
+`memory_items` remains separate schema-integrity debt: it requires an
+existing-row inventory, safe rollout and recovery qualification before
+introducing a production constraint. This endpoint guard does not claim to
+repair historical rows or other services.
+
+## P7 cross-tenant owner database integrity (2026-10-30; PR #168 review hardening)
+
+The owner-ID read guard in the compose handler is not a substitute for a
+database invariant. A new restricted-role PostgreSQL regression first proved
+that a privileged writer could transfer a memory item to a principal from
+another tenant despite the existing UUID-only FK (RED). Append-only migration
+`000091_memory_item_owner_tenant_fk.sql` adds a unique tenant/ID key on
+`principals` and a composite `(tenant_id, owner_principal_id)` FK on
+`memory_items`, enforcing same-tenant ownership on new writes. Legitimate
+same-tenant transfers remain possible. The isolated RLS fixture now creates a
+real owner for its second tenant instead of relying on corrupt provenance.
+
+The FK is installed `NOT VALID` deliberately: existing malformed rows are
+not silently repaired or deleted, and the P7 read guard continues to reject
+them. Production rollout needs a prior cross-tenant ownership inventory,
+remediation/recovery plan, lock/latency qualification and explicit approval,
+followed by separately qualified `VALIDATE CONSTRAINT`. This source change
+does not constitute a live migration, historical data cleanup, P7 approval or
+§41 acceptance.
+
+**Local verification:** A new privileged-owner PostgreSQL regression failed before
+the FK (cross-tenant UPDATE succeeded), then passed after applying migration
+000091 to an isolated PostgreSQL 17/pgvector database. Both cross-tenant
+INSERT and UPDATE now fail with SQLSTATE 23503, and a same-tenant owner
+transfer succeeds. The source-owner review regression, old-pin rejection and
+fresh-pin acceptance also pass. Full tagged memory-intelligence and retrieval
+integration packages pass; 52 Go packages pass with package parallelism
+disabled to avoid shared-database deadlocks; Go vet, diff checks and two
+race-enabled focused repetitions pass. A separate legacy schema-isolation
+fixture remains blocked before reaching migration 000091: migration 000081
+expects a policy not yet installed in that fixture's ordering. This is an
+open integration-fixture qualification gap, not a successful §25 gate.

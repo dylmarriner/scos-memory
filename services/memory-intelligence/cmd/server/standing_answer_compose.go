@@ -31,6 +31,7 @@ type standingAnswerComposeRequest struct {
 
 type standingAnswerComposeEvidence struct {
 	FactID            string  `json:"fact_id"`
+	OwnerPrincipalID  string  `json:"owner_principal_id"`
 	Summary           string  `json:"summary"`
 	Confidence        float64 `json:"confidence"`
 	VersionID         string  `json:"version_id,omitempty"`
@@ -47,8 +48,8 @@ type standingAnswerComposeEvidence struct {
 // source summary cannot contain NUL; UUIDs and decimal floats cannot either.
 // This is a drift detector, not a signature or a substitute for approval.
 func standingAnswerComposeFingerprint(ev standingAnswerComposeEvidence, tenantID, namespaceID string) string {
-	data := "scos:p7:source:v4\x00" + tenantID + "\x00" + namespaceID + "\x00" +
-		ev.FactID + "\x00" + ev.VersionID + "\x00" + ev.Sensitivity + "\x00" +
+	data := "scos:p7:source:v5\x00" + tenantID + "\x00" + namespaceID + "\x00" +
+		ev.FactID + "\x00" + ev.OwnerPrincipalID + "\x00" + ev.VersionID + "\x00" + ev.Sensitivity + "\x00" +
 		strconv.Itoa(ev.AuthorityLevel) + "\x00" + ev.ValidFrom + "\x00" +
 		ev.ValidUntil + "\x00" + ev.ExpiresAt + "\x00" +
 		ev.Summary + "\x00" + strconv.FormatFloat(ev.Confidence, 'g', -1, 64)
@@ -173,10 +174,14 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		// and free of unresolved P7 revalidation. Missing any source rejects
 		// the ENTIRE draft; there is no partial evidence fallback.
 		rows, err := tx.QueryContext(r.Context(), `
-            SELECT f.id::text, f.canonical_summary, f.confidence_score,
+            SELECT f.id::text, source_owner.id::text, f.canonical_summary, f.confidence_score,
                    COALESCE(f.current_version_id::text, ''), f.sensitivity::text,
                    f.authority_level, f.valid_from, f.valid_until, f.expires_at
             FROM public.memory_items f
+            -- Fail closed on cross-tenant owner IDs from privileged imports.
+            JOIN public.principals source_owner
+              ON source_owner.id=f.owner_principal_id
+             AND source_owner.tenant_id=f.tenant_id
             JOIN public.namespaces ns
               ON ns.id=f.namespace_id AND ns.tenant_id=f.tenant_id
             JOIN public.namespace_memberships m
@@ -217,7 +222,7 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 			// but PostgreSQL infinity values arrive as strings. Scanning
 			// directly into sql.NullTime rejects eligible infinite bounds.
 			var validFrom, validUntil, expiresAt any
-			if err := rows.Scan(&ev.FactID, &ev.Summary, &ev.Confidence, &ev.VersionID,
+			if err := rows.Scan(&ev.FactID, &ev.OwnerPrincipalID, &ev.Summary, &ev.Confidence, &ev.VersionID,
 				&ev.Sensitivity, &ev.AuthorityLevel, &validFrom, &validUntil, &expiresAt); err != nil {
 				return out, err
 			}

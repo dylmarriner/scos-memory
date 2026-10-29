@@ -61,13 +61,14 @@ func TestP7ComposeRequiresAuthenticationAndFailsClosedWithoutDatabase(t *testing
 // and compare this digest before accepting a draft.
 func TestP7ComposeEvidenceFingerprintTracksVersionAndContent(t *testing.T) {
 	ev := standingAnswerComposeEvidence{
-		FactID:      "5cbe32c6-891c-4155-a9ec-6aa39e66704a",
-		Summary:     "A verified fact.",
-		Confidence:  0.75,
-		Sensitivity: "internal",
+		FactID:           "5cbe32c6-891c-4155-a9ec-6aa39e66704a",
+		OwnerPrincipalID: "9cbe32c6-891c-4155-a9ec-6aa39e66704a",
+		Summary:          "A verified fact.",
+		Confidence:       0.75,
+		Sensitivity:      "internal",
 	}
 	first := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a")
-	if first != "f172f513cec091f30f7e28c126344d91f4e53cd7a97cbb2fedebd92fda7d55a0" || first != standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a") {
+	if first != "5129cb313ba1c2d52f0d230bf7def5ed603e54c43a239e16ef3125064369a0e9" || first != standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a") {
 		t.Fatalf("fingerprint not stable SHA-256: %q", first)
 	}
 	ev.Summary = "A revised fact."
@@ -75,6 +76,11 @@ func TestP7ComposeEvidenceFingerprintTracksVersionAndContent(t *testing.T) {
 		t.Fatal("source summary changed without fingerprint changing")
 	}
 	ev.Summary = "A verified fact."
+	ev.OwnerPrincipalID = "acbe32c6-891c-4155-a9ec-6aa39e66704a"
+	if got := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a"); got == first {
+		t.Fatal("source owner changed without fingerprint changing")
+	}
+	ev.OwnerPrincipalID = "9cbe32c6-891c-4155-a9ec-6aa39e66704a"
 	ev.Confidence = 0.76
 	if got := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a"); got == first {
 		t.Fatal("confidence changed without fingerprint changing")
