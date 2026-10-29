@@ -834,6 +834,8 @@ This closes a narrow offline reproducibility gap only; deployed BGE/FTS/RRF,
 latency/cost, tenant/temporal correctness, independent approval and deployment
 gates remain outstanding. No merge or deployment authorized.
 
+**P0 standalone Python metric parity (2026-10-29, TDD source candidate, not deployed):** `packages/benchmark-harness/python/scos_benchmark/metrics.py` counted duplicate returned evidence as extra precision/nDCG gains and duplicate ground-truth labels as extra recall obligations. Three real regression cases failed RED (precision 1.0 instead of 2/3; nDCG 1.30657 above its mathematical ceiling; recall 0.5 instead of 1.0). The standalone package now uses unique relevant IDs, ranking-slot denominators and one gain per evidence ID; four focused tests pass GREEN. CI now runs the package and canonical ranking-integrity tests. This is P0 scorer correctness, **not** representative deployed model benchmarking, performance qualification, P0 completion or production rollout. See `docs/P0_BENCHMARK_COMPARISON_INTEGRITY.md`.
+
 ## Remaining
 
 - [ ] Expand the versioned memory-retrieval corpus for paraphrase, long-history noise, conflicts, supersession, temporal queries and scope isolation.
