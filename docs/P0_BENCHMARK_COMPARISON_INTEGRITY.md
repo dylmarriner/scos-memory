@@ -57,3 +57,23 @@ count, matching the canonical Python harness (GREEN: 0.6131471928).
 
 This corrects **metric integrity only**. It is not a deployed benchmark, a
 representative quality/latency/cost measurement, or P0 completion evidence.
+
+## Whole-case coverage integrity (2026-10-29; source candidate)
+
+The comparator previously skipped a baseline case if its ID disappeared
+from the candidate run, and skipped new candidate cases when no baseline ID
+matched. This silently hid entire cases, including their mandatory retrieval
+metrics, while comparing only the survivors. It also allowed duplicate
+case IDs to be counted inconsistently or overwritten.
+
+`compare_baseline` now compares the union of case IDs: missing candidate
+cases increment `coverage_lost` for every previously measured metric; new
+candidate cases increment `coverage_gained`. Duplicate case IDs in either
+run raise `ValueError` instead of producing ambiguous benchmark evidence.
+This records coverage drift, not a measured quality regression for absent
+cases. Three focused RED/GREEN tests cover missing, added and duplicate
+cases. The frozen P4 seven-case lexical baseline was requalified because the
+shared harness digest changed; only `harness_sha256` and `git_base_sha`
+changed, with rankings, quality metrics and forbidden-hit totals identical.
+This is offline P0 evidence integrity, not representative model
+quality, production latency or P0 completion.

@@ -745,6 +745,17 @@ Git provenance attestation, P3 scaling acceptance, or production readiness.
 
 **P0 benchmark comparator direction and coverage (2026-10-29, development):** the paired-run comparator now treats stale-hit/duplicate rates (and answer regression) as lower-is-better rather than falsely rewarding increased exposure; disappearance or appearance of optional measurements is reported separately as coverage loss/gain instead of silently ignored or scored as zero. Four RED/GREEN unit regressions cover both polarity and coverage. P4 lexical baseline was requalified after the harness source hash changed; the seven observed rankings, quality metrics and forbidden counts remain unchanged. This is offline score-integrity hardening, not live BGE quality or P0 acceptance. See `docs/P0_BENCHMARK_COMPARISON_INTEGRITY.md`.
 
+**P0 whole-case comparison coverage (2026-10-29, source candidate):**
+TDD exposed that removing an entire benchmark case or introducing a new case
+was silently ignored by the paired-run comparator, and duplicate case IDs
+were ambiguous. The comparator now indexes unique case IDs and measures the
+union: absent baseline cases count as metric coverage loss, new cases as
+coverage gain, and duplicate IDs fail closed. Three RED/GREEN regressions
+cover the failure modes. The P4 lexical baseline was re-recorded after
+verifying that only harness/base SHA metadata changed; all seven rankings,
+quality metrics and forbidden counts remain identical. This improves offline
+benchmark evidence integrity but does not qualify representative P0 model/latency performance or close §41.
+See `docs/P0_BENCHMARK_COMPARISON_INTEGRITY.md`.
 
 **Objective:** make every retrieval/indexing/model change measurable.
 
@@ -835,6 +846,8 @@ latency/cost, tenant/temporal correctness, independent approval and deployment
 gates remain outstanding. No merge or deployment authorized.
 
 **P0 standalone Python metric parity (2026-10-29, TDD source candidate, not deployed):** `packages/benchmark-harness/python/scos_benchmark/metrics.py` counted duplicate returned evidence as extra precision/nDCG gains and duplicate ground-truth labels as extra recall obligations. Three real regression cases failed RED (precision 1.0 instead of 2/3; nDCG 1.30657 above its mathematical ceiling; recall 0.5 instead of 1.0). The standalone package now uses unique relevant IDs, ranking-slot denominators and one gain per evidence ID; four focused tests pass GREEN. CI now runs the package and canonical ranking-integrity tests. This is P0 scorer correctness, **not** representative deployed model benchmarking, performance qualification, P0 completion or production rollout. See `docs/P0_BENCHMARK_COMPARISON_INTEGRITY.md`.
+**Merged-main evidence for P0 parity:** [PR #157](https://github.com/dylmarriner/scos-memory/pull/157) merged at `5c028d1dce7f2e7473299a6c6961adc754496541`; [main CI](https://github.com/dylmarriner/scos-memory/actions/runs/40798568766) and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40798568781) both passed. This is source/CI evidence only, not production qualification.
+
 
 ## Remaining
 
