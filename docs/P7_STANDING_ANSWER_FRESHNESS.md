@@ -225,3 +225,42 @@ would detect bypassing the view. The mutation was restored. These small local
 samples are **not** a performance SLA, production benchmark or P7 acceptance.
 Representative multi-tenant load, recovery and rollout qualification remain
 open and require separately approved production work.
+
+## P7 restricted agent refresh after cache invalidation (2026-10-29, PR #166 follow-up)
+
+The `000089` migration and `000021` policy enforce an agent's maximum
+sensitivity on direct standing-cache SELECT. This is essential because the
+security-invoker view alone cannot prevent a restricted runtime role from
+querying the base table. However, PostgreSQL's `INSERT ... ON CONFLICT DO
+UPDATE` requires access to the conflicting row. When a source change marks a
+previously authorized generated answer stale, the restrictive SELECT policy
+hides that row, making a legitimate agent refresh fail with HTTP 500.
+
+**TDD:** A real PostgreSQL 17 `scos_app` integration regression in
+`standing_answer_stale_agent_refresh_integration_test.go` failed RED with
+HTTP 500 on the original handler after a source-summary change. It passed
+GREEN after introducing migration `000090_standing_answer_restricted_refresh.sql`
+and fresh-install grant `policies/000022_standing_answer_restricted_refresh.sql`.
+The existing restrictive SELECT policy is not relaxed. The handler delegates
+the conflict update to `scos_refresh_verified_standing_answer(uuid,text)`, a
+schema-qualified, owner-executed, source-derived operation. Its caller supplies
+only the fact ID and normalized question key; the function derives answer,
+evidence, confidence, namespace and tenant from the authenticated, eligible
+source. It rechecks tenant/principal lifecycle, agent clearance, namespace
+read/write membership, source validity, code revalidation, and the exact
+normalized title. A source SHARE lock protects the update. The function
+returns no answer text. Direct restricted-role SQL tests deny missing agent
+capabilities, read-only memberships, forged question keys, insufficient
+clearance and disabled principals. A stale raw SELECT remains invisible even
+while authorized refresh can repair the row; a later sensitivity increase
+prevents both reading and refreshing it.
+
+The original pending-code-review HTTP 409 evidence-ineligible contract is
+preserved rather than misclassified as a cache-key conflict. The full tagged
+PostgreSQL memory-intelligence and retrieval integration suites passed; the
+uncached Go suite passed in 52 packages, `go vet ./...` passed, and two
+race-enabled focused repetitions passed. A fresh disposable PostgreSQL 17
+instance installed all 112 migration/policy files, with the helper present,
+the restrictive policy present, and `scos_app` EXECUTE granted. No live
+migration, production deployment, recovery qualification, or §41 closure
+was performed. PR-head and merged-main CI evidence must be added after merge.
