@@ -77,3 +77,27 @@ shared harness digest changed; only `harness_sha256` and `git_base_sha`
 changed, with rankings, quality metrics and forbidden-hit totals identical.
 This is offline P0 evidence integrity, not representative model
 quality, production latency or P0 completion.
+
+## Summary answer-regression case-set integrity (2026-10-29)
+
+`BenchmarkRunner.summary(baseline_results=...)` previously computed
+`answer_regression` only over case IDs present in both runs. Removing a
+failed current case or omitting a baseline case silently changed the
+denominator; duplicate IDs were also accepted, letting the summary count
+ambiguous observations. This disagreed with the strict whole-case coverage
+comparison and could make a partial benchmark look healthier.
+
+Five new tests reproduced all five failures before the fix (RED): removed
+current case, missing baseline case, duplicate baseline ID, duplicate
+current ID and a substituted foreign case. The summary now rejects duplicate
+case IDs and requires exactly equal case sets before reporting baseline
+answer regression (GREEN). The shared uniqueness check also continues to
+protect `compare_baseline`, which intentionally reports coverage drift
+instead of rejecting unequal case sets.
+
+The Python benchmark suite, independent Python metric package and frozen P4
+lexical smoke suite passed. The P4 baseline was explicitly requalified
+for the changed harness digest: all seven case rankings, quality metrics
+and forbidden-hit counts were unchanged; only `harness_sha256` and
+`git_base_sha` metadata changed. This is offline measurement integrity,
+not representative P0 performance, production qualification or §41 completion.

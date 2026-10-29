@@ -703,6 +703,19 @@ generator digest was requalified. This strengthens **only** offline smoke
 evidence integrity. Representative live P0/P4 retrieval, tenant and temporal
 isolation, latency, model-space qualification and production gates remain open.
 
+## P0 summary baseline case-set integrity (2026-10-29; source candidate)
+
+Five RED-before-fix tests showed that `BenchmarkRunner.summary` silently
+excluded missing cases when computing `answer_regression`, and accepted
+duplicate case IDs in either run. The summary now rejects duplicates and
+requires equal current/baseline case sets before reporting that metric.
+`compare_baseline` still reports missing-case coverage losses explicitly.
+The standalone benchmark package and frozen P4 lexical tests passed; the
+seven-case lexical baseline was requalified with identical rankings, scores
+and forbidden counts, changing only harness/base provenance metadata.
+This is source-level P0 evidence integrity, not representative performance
+qualification, deployment or completion of the §41 acceptance gates.
+
 ## Definition-of-done evidence pointer correction (2026-10-27)
 
 The §41 checker previously named two **nonexistent** test functions and reported

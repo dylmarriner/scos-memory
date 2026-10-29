@@ -130,6 +130,40 @@ class DefaultSuiteCoversAllCategoriesTests(unittest.TestCase):
         self.assertFalse(result.answer_correct)
 
 
+class SummaryBaselineIntegrityTests(unittest.TestCase):
+    """A missing/duplicated case cannot improve reported answer regression."""
+
+    def setUp(self):
+        suite = create_default_frozen_suite()
+        self.runner = BenchmarkRunner(suite)
+        self.runner.run(DeterministicLexicalBaseline(suite.corpus))
+        self.baseline = list(self.runner.results)
+
+    def test_removed_current_case_fails_closed(self):
+        self.runner.results = self.runner.results[:-1]
+        with self.assertRaisesRegex(ValueError, "baseline.*case.*match"):
+            self.runner.summary(baseline_results=self.baseline)
+
+    def test_missing_baseline_case_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "baseline.*case.*match"):
+            self.runner.summary(baseline_results=self.baseline[:-1])
+
+    def test_duplicate_baseline_case_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "duplicate.*case_id"):
+            self.runner.summary(baseline_results=self.baseline + [self.baseline[0]])
+
+    def test_duplicate_current_case_fails_closed(self):
+        self.runner.results.append(self.runner.results[0])
+        with self.assertRaisesRegex(ValueError, "duplicate.*case_id"):
+            self.runner.summary(baseline_results=self.baseline)
+
+    def test_foreign_case_fails_closed(self):
+        from dataclasses import replace
+        replaced = [replace(self.baseline[0], case_id="foreign_case"), *self.baseline[1:]]
+        with self.assertRaisesRegex(ValueError, "baseline.*case.*match"):
+            self.runner.summary(baseline_results=replaced)
+
+
 class MetricFunctionTests(unittest.TestCase):
     def test_citation_accuracy_none_when_no_assertion_or_no_report(self):
         self.assertIsNone(citation_accuracy([], ["a"]))
