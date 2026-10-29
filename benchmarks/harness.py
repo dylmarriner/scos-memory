@@ -325,30 +325,40 @@ LOWER_IS_BETTER_METRICS = frozenset({
 
 def compare_baseline(results: list[BenchmarkResult],
                      baseline_results: list[BenchmarkResult]) -> dict[str, Any]:
-    """Compare per-case metrics with explicit direction and measurement coverage.
+    """Compare metrics by case ID, including cases missing from either run.
 
-    Optional metrics that disappear or appear are tracked as coverage changes,
-    not silently ignored or fabricated as score zero. No latency metrics are
-    claimed here: latency_ms remains separately reported with deployment class.
+    Dropping an entire benchmark case is a coverage loss, not a way to
+    erase its previous regression. Duplicate IDs are ambiguous and rejected
+    instead of allowing a later result to overwrite an earlier one.
     """
+    def index_unique(items: list[BenchmarkResult]) -> dict[str, BenchmarkResult]:
+        indexed: dict[str, BenchmarkResult] = {}
+        for item in items:
+            if item.case_id in indexed:
+                raise ValueError(f"duplicate benchmark case_id: {item.case_id}")
+            indexed[item.case_id] = item
+        return indexed
+
+    current_by_id = index_unique(results)
+    baseline_by_id = index_unique(baseline_results)
     comparisons: dict[str, dict[str, int]] = {}
-    baseline_by_id = {b.case_id: b for b in baseline_results}
-    for current in results:
-        previous = baseline_by_id.get(current.case_id)
-        if previous is None:
-            continue
-        for metric in current.scores.keys() | previous.scores.keys():
+    for case_id in sorted(current_by_id.keys() | baseline_by_id.keys()):
+        current = current_by_id.get(case_id)
+        previous = baseline_by_id.get(case_id)
+        current_scores = current.scores if current is not None else {}
+        previous_scores = previous.scores if previous is not None else {}
+        for metric in sorted(current_scores.keys() | previous_scores.keys()):
             counts = comparisons.setdefault(metric, {
                 "improvements": 0, "regressions": 0, "unchanged": 0,
                 "coverage_lost": 0, "coverage_gained": 0,
             })
-            if metric not in current.scores:
+            if metric not in current_scores:
                 counts["coverage_lost"] += 1
                 continue
-            if metric not in previous.scores:
+            if metric not in previous_scores:
                 counts["coverage_gained"] += 1
                 continue
-            new_value, old_value = current.scores[metric], previous.scores[metric]
+            new_value, old_value = current_scores[metric], previous_scores[metric]
             if new_value == old_value:
                 counts["unchanged"] += 1
             elif (new_value < old_value) == (metric in LOWER_IS_BETTER_METRICS):

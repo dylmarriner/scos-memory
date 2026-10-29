@@ -219,6 +219,33 @@ class BenchmarkComparisonSafetyTests(unittest.TestCase):
         self.assertEqual(verdict["citation_accuracy"]["regressions"], 0)
         self.assertEqual(verdict["recall@5"]["unchanged"], 1)
 
+    def test_removed_case_is_not_silently_excluded_from_comparison(self):
+        baseline = [self.item("retained", {"recall@5": 0.5}),
+                    self.item("removed", {"recall@5": 0.0, "citation_accuracy": 0.0})]
+        changed = [self.item("retained", {"recall@5": 0.6})]
+        verdict = compare_baseline(changed, baseline)
+        self.assertEqual(verdict["recall@5"]["improvements"], 1)
+        self.assertEqual(verdict["recall@5"]["coverage_lost"], 1)
+        self.assertEqual(verdict["citation_accuracy"]["coverage_lost"], 1)
+
+    def test_added_case_is_reported_as_coverage_gain(self):
+        baseline = [self.item("retained", {"recall@5": 0.5})]
+        changed = [self.item("retained", {"recall@5": 0.5}),
+                   self.item("added", {"recall@5": 1.0, "citation_accuracy": 1.0})]
+        verdict = compare_baseline(changed, baseline)
+        self.assertEqual(verdict["recall@5"]["unchanged"], 1)
+        self.assertEqual(verdict["recall@5"]["coverage_gained"], 1)
+        self.assertEqual(verdict["citation_accuracy"]["coverage_gained"], 1)
+
+    def test_duplicate_case_ids_fail_closed_in_either_run(self):
+        baseline = [self.item("same", {"recall@5": 0.1})]
+        changed = [self.item("same", {"recall@5": 0.8}),
+                   self.item("same", {"recall@5": 0.9})]
+        with self.assertRaisesRegex(ValueError, "duplicate.*case_id"):
+            compare_baseline(changed, baseline)
+        with self.assertRaisesRegex(ValueError, "duplicate.*case_id"):
+            compare_baseline(baseline, changed)
+
     def test_newly_measured_optional_metric_is_coverage_gain(self):
         baseline = [self.item("case", {"recall@5": 0.75})]
         changed = [self.item("case", {"recall@5": 0.75, "citation_accuracy": 0.9})]
