@@ -4,6 +4,45 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 legacy owner/tenant integrity preflight (2026-10-30; source candidate)
+
+The new `tools/owner-integrity-audit` is an aggregate-only, read-only,
+TLS-required PostgreSQL inventory of historical `memory_items` whose owner
+principal is missing or belongs to a different tenant. It verifies the exact
+shape and validation state of migration `000091`'s composite FK; a misleading
+same-named FK is rejected. Repeatable-read, `row_security=off`, and a
+statement timeout prevent silently accepting RLS-filtered or unbounded scans.
+No identities or memory content are emitted. Exit 2 reports violations or
+missing constraint; a clean exit still distinguishes `NOT VALID` from
+validated and **does not authorize validation**.
+
+Disposable PostgreSQL 17/pgvector: 90 migrations and 23 policy files installed;
+a deliberately malformed pre-000091 cross-tenant owner was detected after the
+`NOT VALID` migration (one violation, exit 2), and a test-only correction
+returned zero violations without validating the FK (exit 0). Transactional
+integration fixtures cover missing owners, cross-tenant owners, repaired and
+validated states, forged FK definitions and FORCE RLS filtering. Five focused
+repetitions passed; a deliberate query mutation failed the regression.
+The complete Go suite passed in 53 tested packages, Go vet and diff checks
+passed. The P4 PostgreSQL CI workflow now invokes the real audit integration
+regressions; PR-head and merged-main CI acceptance remain mandatory. See
+`docs/P7_OWNER_TENANT_INTEGRITY_AUDIT.md`.
+
+**Still open:** inventory of any actual deployment, authorized remediation,
+constraint validation, recovery/lock qualification, P7 approval/generation,
+P5 historical belief reconstruction, §25 fixture-order qualification and
+governance §41 acceptance. No live database or production service was touched.
+
+**PR #169 review hardening, 2026-10-30:** A same-named FK with
+`ON DELETE CASCADE` previously passed the catalog audit (PostgreSQL RED).
+The audit now compares delete/update actions and match type against migration
+000091 (GREEN). An independent connection test verifies read-only,
+repeatable-read transactions, and a built-binary subprocess test against a
+separate TLS-enabled disposable database verifies exit 2 for a committed
+legacy cross-tenant violation and exit 0 after synthetic test-only cleanup.
+Production inventory, FK validation, rollout/recovery and §41 remain open.
+See `docs/P7_OWNER_TENANT_INTEGRITY_AUDIT.md`.
+
 ## P7 source-owner tenant integrity (2026-10-30; PR #168 review hardening)
 
 Review found that a UUID-only FK on `memory_items.owner_principal_id`

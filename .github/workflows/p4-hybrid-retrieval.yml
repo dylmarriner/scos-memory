@@ -159,6 +159,8 @@ jobs:
           for policy in database/policies/*.sql; do
             psql -h 127.0.0.1 -U scos -d scos_memory -v ON_ERROR_STOP=1 -v app_password=scos-app-ci -f "$policy"
           done
+      - name: Run P7 legacy owner tenant integrity audit regression
+        run: go test -tags=integration -count=1 ./tools/owner-integrity-audit
       - name: Run code-intelligence integration tests
         run: go test -count=1 ./services/code-intelligence/cmd/server
       - name: Run retrieval integration tests (including P7 restricted-role HTTP)

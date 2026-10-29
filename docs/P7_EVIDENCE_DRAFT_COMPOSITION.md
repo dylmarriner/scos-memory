@@ -328,3 +328,16 @@ race-enabled focused repetitions pass. A separate legacy schema-isolation
 fixture remains blocked before reaching migration 000091: migration 000081
 expects a policy not yet installed in that fixture's ordering. This is an
 open integration-fixture qualification gap, not a successful §25 gate.
+
+
+## Legacy owner/tenant FK audit preflight (2026-10-30; source candidate)
+
+The read-only `tools/owner-integrity-audit` now inventories missing and
+cross-tenant owner principals, checks the **exact** composite FK definition
+and distinguishes `NOT VALID` from validated state. A real disposable
+PostgreSQL 17/pgvector test injected a cross-tenant owner before migration
+000091 and confirmed the audit reports one violation (exit 2), then zero
+after test-only remediation while the constraint remains unvalidated.
+Five integration repetitions, FORCE RLS fail-closed and forged-FK regression,
+53-package Go suite and Go vet passed. No actual deployment was inventoried,
+repaired or validated. See `docs/P7_OWNER_TENANT_INTEGRITY_AUDIT.md`.
