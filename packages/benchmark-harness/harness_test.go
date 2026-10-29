@@ -65,3 +65,14 @@ func TestMetricsDeduplicateGroundTruthAndBoundK(t *testing.T) {
 		}
 	}
 }
+
+// Missing ranking slots must not shrink the ideal ranking: a single relevant
+// result cannot earn perfect nDCG when another relevant result was omitted.
+func TestNDCGDoesNotNormalizeAwayMissingResults(t *testing.T) {
+	expected := []string{"a", "b"}
+	retrieved := []string{"a"}
+	want := 1 / (1 + 1/math.Log2(3))
+	if got := ComputeNDCGAtK(expected, retrieved, 5); math.Abs(got-want) > 1e-12 {
+		t.Fatalf("incomplete ranking nDCG@5 = %v, want %v", got, want)
+	}
+}

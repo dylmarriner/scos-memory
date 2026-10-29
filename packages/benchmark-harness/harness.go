@@ -80,8 +80,7 @@ func ComputeMRR(expected, retrieved []string) float64 {
 // A duplicate result never contributes additional gain. The ideal order
 // contains only the distinct ground-truth documents.
 func ComputeNDCGAtK(expected, retrieved []string, k int) float64 {
-	k = boundedK(retrieved, k)
-	if k == 0 {
+	if k <= 0 {
 		return 0
 	}
 	relevant := relevantIDs(expected)
@@ -90,7 +89,7 @@ func ComputeNDCGAtK(expected, retrieved []string, k int) float64 {
 	}
 	seen := make(map[string]struct{})
 	dcg := 0.0
-	for i, id := range retrieved[:k] {
+	for i, id := range retrieved[:boundedK(retrieved, k)] {
 		if _, already := seen[id]; already {
 			continue
 		}

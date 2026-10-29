@@ -32,3 +32,28 @@ coverage losses as well as directional quality regressions.
 This is **score interpretation integrity**, not a new model-quality result.
 It does not measure actual BGE-M3/BGE-Code backend accuracy, real latency,
 full conflict/supersession retrieval, or live production effectiveness.
+
+## Shared Python benchmark package parity (2026-10-29)
+
+The standalone `packages/benchmark-harness/python/scos_benchmark/metrics.py`
+implementation still diverged from the Go and `benchmarks/harness.py`
+scorers. A repeated relevant result inflated its precision denominator by
+collapsing repeated ranking slots, and nDCG credited the same source twice.
+A ranking `[a, a, b]` against `{a, b}` scored **1.0 precision** rather
+than **2/3**, and **1.30657 nDCG**, an impossible score above 1. Repeated
+truth labels also reduced recall (0.5 instead of 1.0).
+
+Four Python unit regression cases were added. Three failed against the original
+implementation (RED); all passed after using unique truth sets, retaining
+all returned ranking slots for precision, and counting each relevant source
+once for nDCG (GREEN). The fourth checks nonpositive K. The repository CI
+Python job now runs the standalone package's tests and the canonical harness
+ranking-integrity tests so the two implementations cannot silently drift.
+A separate Go regression also failed RED: `ComputeNDCGAtK` returned 1.0
+for a single relevant hit when two distinct relevant IDs were expected and
+`k=5`, because it shortened the ideal ranking to the number of returned
+results. The corrected denominator uses the requested K and the unique truth
+count, matching the canonical Python harness (GREEN: 0.6131471928).
+
+This corrects **metric integrity only**. It is not a deployed benchmark, a
+representative quality/latency/cost measurement, or P0 completion evidence.
