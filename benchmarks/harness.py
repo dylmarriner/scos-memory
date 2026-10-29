@@ -422,6 +422,15 @@ class BenchmarkRunner:
             baseline_by_id = index_unique_benchmark_results(baseline_results)
             if current_by_id.keys() != baseline_by_id.keys():
                 raise ValueError("baseline and current benchmark case IDs must match for answer regression")
+        # The suite, not a caller-supplied result list (or a matching but
+        # equally incomplete baseline), defines the required evaluation set.
+        # Otherwise dropping a failing case can inflate task success and all
+        # reported quality metrics even when no baseline is supplied.
+        suite_ids = [case.id for case in self.suite.cases]
+        if len(suite_ids) != len(set(suite_ids)):
+            raise ValueError("duplicate suite case IDs")
+        if current_by_id.keys() != set(suite_ids):
+            raise ValueError("suite and current benchmark case IDs must match")
         collected: dict[str, list[float]] = {}
         for r in self.results:
             for metric, value in r.scores.items():

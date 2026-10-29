@@ -4,6 +4,21 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P0 summary-to-suite identity integrity (2026-10-29; development)
+
+`BenchmarkRunner.summary()` could report healthy quality/task-success averages
+from an incomplete or foreign case set whenever no baseline was supplied.
+Even a matching but equally forged baseline bypassed the prior pairwise
+comparison, and programmatic suites could contain duplicate case IDs. Four
+RED-before-fix regressions now pass: the summary requires a unique suite
+case set and an exact current-result match independently of baseline
+comparison. The 67 Python benchmark tests and 31 frozen P4 tests pass; the
+seven lexical rankings, metrics and forbidden-hit counts are unchanged.
+Only harness hash and Git base SHA were requalified in the frozen baseline.
+See `docs/P0_BENCHMARK_COMPARISON_INTEGRITY.md`. This is offline integrity
+hardening, not representative P0 acceptance, §41 completion or production
+rollout.
+
 ## P0 conflict coverage and suite JSON integrity (2026-10-29; development)
 
 The §33 conflict-detection scorer awarded a false 1.0 to empty or unrelated
