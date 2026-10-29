@@ -243,3 +243,39 @@ two focused race-enabled repetitions passed, 52 Go packages passed and
 TLS-enabled database URL; it passed with the test-only insecure DSN removed.
 This is a review-time source-drift safeguard only; it does not provide approval, model generation,
 transaction-ordered historical reconstruction or production acceptance.
+
+## P7 source-ownership provenance fingerprint v5 (2026-10-30; development)
+
+A source fact's `owner_principal_id` could change without changing its
+summary, selected version, confidence or other v4 fingerprint fields. A
+previously reviewed `expected_draft_fingerprint` therefore still matched
+although the fact's accountable owner had changed. A restricted-role
+PostgreSQL HTTP regression first reproduced this failure (RED): the review
+digest stayed unchanged after transferring ownership of one of two active
+sources while the displayed draft text remained identical.
+
+The composition response now includes `evidence[].owner_principal_id`, read
+from the same authorized statement snapshot as the rest of the source. The
+versioned, domain-separated source digest `scos:p7:source:v5` binds the owner
+UUID in addition to all v4 fields, and the whole-draft manifest inherits the
+new source digest. A source-owner transfer now invalidates the previous review
+precondition with HTTP 409 and no evidence payload, while a fresh draft
+identifies the current owner. Prior v4 fingerprints are intentionally not
+accepted as v5. A fixed-vector unit test pins the new digest format.
+
+This is a source-provenance and review-drift safeguard, **not** a governed
+approval/publishing workflow, a signature, immutable ownership evidence,
+transactionally atomic compare-and-publish, general generation, production
+rollout or P7/§41 acceptance. The owner is the current database principal ID,
+not independent proof of real-world authorship.
+
+**Development verification (2026-10-30):** On a newly isolated, disposable
+PostgreSQL 17/pgvector container, 89 ordered SQL migrations and 23 policy files
+applied successfully. The restricted-role HTTP owner-transfer test failed
+before implementation with the unchanged draft fingerprint and passed after
+the v5 change. The full tagged memory-intelligence integration package and
+tagged retrieval-orchestrator package passed, as did the complete uncached Go
+suite (52 tested packages), `go vet ./...`, two race-enabled owner-transfer
+repetitions, and `git diff --check`. The §41 checker still reports FAIL because
+the governance master table is PARTIAL. PR review, merge, merged-main CI and
+production rollout are separate gates, not implied by these local results.
