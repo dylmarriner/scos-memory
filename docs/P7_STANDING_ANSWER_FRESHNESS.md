@@ -70,6 +70,43 @@ restricted-role membership revocation. The service integration, answer
 generation, retrieval-orchestrator integration, and read-path benchmarking
 remain separate acceptance gates.
 
+## Read-time principal and agent clearance (migration 000089)
+
+The security-invoker view must also enforce identity lifecycle and agent
+clearance, not merely namespace membership and source freshness. Prior to
+000089, a restricted `scos_app` caller with an agent principal and an
+otherwise valid membership could read a cached answer above the agent's
+`maximum_sensitivity`, including when the agent had no capability row.
+A real PostgreSQL test reproduced the unauthorized row (RED).
+
+Migration 000089 replaces the view with a same-tenant, enabled-principal
+check and an agent capability join. It also installs a restrictive SELECT
+policy on the underlying cache table for existing `scos_app` deployments;
+`database/policies/000021` installs the same policy after role creation on
+fresh databases. This prevents direct table SELECT from bypassing the view.
+Every cited fact must be visible and below both the namespace ceiling and
+the agent's maximum sensitivity; a multi-fact answer fails closed if even
+one source is above clearance.
+Missing agent capabilities, disabled principals and cross-tenant identities
+with malformed memberships receive no cached answer. The change preserves
+`security_invoker` and `security_barrier`, the legacy malformed-evidence
+CASE guard, statement-time expiry checks and unresolved revalidation checks.
+It neither rewrites existing cache rows nor grants additional runtime
+privileges. No production migration is authorized by this source change.
+
+The initial view-only fix still leaked through direct table SELECT (second
+RED regression); the restrictive policy closes that bypass. A clean
+PostgreSQL 17/pgvector installation applied 88 migrations and 22 RLS policy
+files before passing both focused tests.
+
+Real restricted-role integration exercises direct SQL table and view reads,
+the memory-intelligence HTTP read endpoint and retrieval-orchestrator opt-in
+standing-answer selection. Five focused repetitions per suite, two
+race-enabled repetitions, full tagged PostgreSQL integration suites, the
+52-package Go suite and Go vet passed on an isolated disposable database.
+This closes a specific authorization defect; governed answer generation,
+performance acceptance, live rollout and recovery drills remain open.
+
 ## Isolation and recovery
 
 - Migration `000084` is append-only and does not modify any production data
