@@ -345,5 +345,63 @@ class OfflineGateTests(unittest.TestCase):
                 self.assertIn("non-finite JSON", result.stderr)
 
 
+class FixtureLabelIntegrityTests(unittest.TestCase):
+    """Frozen quality evidence must not normalize malformed labels silently."""
+
+    def assert_rejected(self, change, message):
+        from benchmarks.p4.offline_gate import load_fixture
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = json.loads(FIXTURE.read_text())
+            change(fixture)
+            path = pathlib.Path(directory) / "fixture.json"
+            path.write_text(json.dumps(fixture))
+            with self.assertRaisesRegex(ValueError, message):
+                load_fixture(path)
+
+    def test_duplicate_expected_label_is_rejected(self):
+        def change(fixture):
+            case = fixture["cases"][0]
+            case["expected_ids"].append(case["expected_ids"][0])
+        self.assert_rejected(change, "duplicate.*expected_ids")
+
+    def test_duplicate_forbidden_label_is_rejected(self):
+        def change(fixture):
+            case = next(c for c in fixture["cases"] if c.get("forbidden_ids"))
+            case["forbidden_ids"].append(case["forbidden_ids"][0])
+        self.assert_rejected(change, "duplicate.*forbidden_ids")
+
+    def test_blank_query_cannot_create_healthy_ranking(self):
+        def change(fixture):
+            fixture["cases"][0]["query"] = "  "
+        self.assert_rejected(change, "nonempty.*query")
+
+    def test_string_semantic_flag_is_not_coerced_to_true(self):
+        def change(fixture):
+            fixture["cases"][0]["requires_semantic"] = "false"
+        self.assert_rejected(change, "requires_semantic.*boolean")
+
+    def test_empty_case_id_is_rejected(self):
+        def change(fixture):
+            fixture["cases"][0]["id"] = ""
+        self.assert_rejected(change, "case id.*nonempty")
+
+    def test_nonstring_document_text_is_not_silently_coerced(self):
+        def change(fixture):
+            fixture["corpus"][0]["text"] = 123
+        self.assert_rejected(change, "document text must be a string")
+
+    def test_cli_refuses_to_record_a_blank_query_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = json.loads(FIXTURE.read_text())
+            fixture["cases"][0]["query"] = " "
+            fixture_path = pathlib.Path(directory) / "invalid.json"
+            baseline_path = pathlib.Path(directory) / "unsafe-baseline.json"
+            fixture_path.write_text(json.dumps(fixture))
+            result = run_gate("--fixture", fixture_path, "--record-baseline", baseline_path)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("nonempty query", result.stderr)
+            self.assertFalse(baseline_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
