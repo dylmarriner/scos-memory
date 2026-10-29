@@ -5,6 +5,7 @@ on:
     paths:
       - "database/migrations/**"
       - "database/policies/**"
+      - "database/integration/**"
       - "services/retrieval-orchestrator/**"
       - "services/code-intelligence/**"
       - "services/mcp-gateway/**"
@@ -26,6 +27,7 @@ on:
     paths:
       - "database/migrations/**"
       - "database/policies/**"
+      - "database/integration/**"
       - "services/retrieval-orchestrator/**"
       - "services/code-intelligence/**"
       - "services/mcp-gateway/**"
@@ -167,6 +169,36 @@ jobs:
         run: go test -tags=integration -count=1 ./services/retrieval-orchestrator/cmd/server
       - name: Run P6 memory-code readback and memory-intelligence RLS integration tests
         run: go test -tags=integration -count=1 ./services/memory-intelligence/cmd/server
+      - name: Enable TLS on disposable CI PostgreSQL for governance RLS fixture
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter ancestor=pgvector/pgvector:pg17 --format '{{.ID}}' | head -n 1)"
+          test -n "$cid"
+          certdir="$(mktemp -d)"
+          trap 'rm -rf "$certdir"' EXIT
+          openssl req -new -x509 -nodes -days 1 -subj '/CN=localhost' -keyout "$certdir/server.key" -out "$certdir/server.crt"
+          docker cp "$certdir/server.key" "$cid:/var/lib/postgresql/server.key"
+          docker cp "$certdir/server.crt" "$cid:/var/lib/postgresql/server.crt"
+          docker exec -u 0 "$cid" chown postgres:postgres /var/lib/postgresql/server.key /var/lib/postgresql/server.crt
+          docker exec -u 0 "$cid" chmod 600 /var/lib/postgresql/server.key
+          docker exec "$cid" psql -U scos -d scos_memory -c "ALTER SYSTEM SET ssl='on'"
+          docker exec "$cid" psql -U scos -d scos_memory -c "ALTER SYSTEM SET ssl_cert_file='/var/lib/postgresql/server.crt'"
+          docker exec "$cid" psql -U scos -d scos_memory -c "ALTER SYSTEM SET ssl_key_file='/var/lib/postgresql/server.key'"
+          docker restart "$cid"
+          ready=0
+          for attempt in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -U scos -d scos_memory; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+      - name: Run governance RLS fixture against isolated TLS database
+        env:
+          SCOS_RLS_TEST_CREATE_DATABASE: "1"
+          DATABASE_URL: postgresql://scos:scos-ci@127.0.0.1:5432/scos_memory?sslmode=require
+        run: go test -tags=integration -run '^TestGovernanceRLSAndIsolation$' -count=1 ./database/integration
 
   embeddings-worker:
     name: Embeddings worker

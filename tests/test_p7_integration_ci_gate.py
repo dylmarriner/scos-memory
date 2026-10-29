@@ -22,5 +22,17 @@ class P7IntegrationCIGateTests(unittest.TestCase):
         )))
 
 
+    def test_governance_rls_fixture_is_required_in_postgres_ci(self):
+        workflow = (ROOT / '.github/workflows/p4-hybrid-retrieval.yml').read_text()
+        job = workflow.split('  postgres-integration:', 1)[1].split('  embeddings-worker:', 1)[0]
+        self.assertIn('Run governance RLS fixture against isolated TLS database', job)
+        self.assertIn('SCOS_RLS_TEST_CREATE_DATABASE: "1"', job)
+        self.assertIn('sslmode=require', job)
+        self.assertIn("go test -tags=integration -run '^TestGovernanceRLSAndIsolation$'", job)
+        self.assertEqual(2, len(re.findall(
+            r'(?m)^\s+- "database/integration/\*\*"\s*$', workflow
+        )))
+
+
 if __name__ == '__main__':
     unittest.main()

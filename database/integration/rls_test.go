@@ -19,8 +19,9 @@ import (
 )
 
 type fixture struct {
-	admin, app                             *pgxpool.Pool
-	schema, role                           string
+	root, admin, app                       *pgxpool.Pool
+	databaseName, schema, role             string
+	createdDatabase, createdRuntimeRole    bool
 	tenantA, tenantB                       string
 	principalA                             string
 	namespaceA, namespaceOther, namespaceB string
@@ -43,6 +44,30 @@ func TestGovernanceRLSAndIsolation(t *testing.T) {
 	}
 	f := newFixture(t, url)
 	defer f.close(t)
+
+	t.Run("production public schema and security-invoker view", func(t *testing.T) {
+		if f.schema != "public" {
+			t.Fatalf("fixture schema = %q, want public", f.schema)
+		}
+		var secure bool
+		err := f.admin.QueryRow(context.Background(), `
+			SELECT coalesce('security_invoker=true' = ANY(c.reloptions), false)
+			   AND coalesce('security_barrier=true' = ANY(c.reloptions), false)
+			FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = 'public' AND c.relname = 'memory_standing_answers_current'
+			  AND c.relkind = 'v'`).Scan(&secure)
+		if err != nil || !secure {
+			t.Fatalf("production security-invoker view missing or insecure: secure=%v err=%v", secure, err)
+		}
+		var policyCount int
+		err = f.admin.QueryRow(context.Background(), `
+			SELECT count(*) FROM pg_policies
+			WHERE schemaname = 'public' AND tablename = 'memory_relations'
+			  AND policyname = 'memory_relations_item_access'`).Scan(&policyCount)
+		if err != nil || policyCount != 1 {
+			t.Fatalf("production relation policy missing: count=%d err=%v", policyCount, err)
+		}
+	})
 
 	t.Run("cross tenant and namespace", func(t *testing.T) {
 		tx := f.beginAs(t, f.tenantA, f.principalA, "service-a")
@@ -186,22 +211,64 @@ func newFixture(t *testing.T, url string) *fixture {
 	if err := database.RequireTLS(url); err != nil {
 		t.Fatalf("integration database URL is not TLS-enabled: %v", err)
 	}
-	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("connect admin database: %v", err)
+	if os.Getenv("SCOS_RLS_TEST_CREATE_DATABASE") != "1" {
+		t.Fatal("SCOS_RLS_TEST_CREATE_DATABASE=1 is required: RLS fixture creates and drops a disposable PostgreSQL database")
 	}
-	if err := admin.Ping(ctx); err != nil {
-		admin.Close()
-		t.Fatalf("ping admin database: %v", err)
+	ctx := context.Background()
+	root, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatalf("connect root test database: %v", err)
+	}
+	if err := root.Ping(ctx); err != nil {
+		root.Close()
+		t.Fatalf("ping root test database: %v", err)
+	}
+	var tlsEnabled bool
+	if err := root.QueryRow(ctx, "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&tlsEnabled); err != nil || !tlsEnabled {
+		root.Close()
+		t.Fatalf("RLS fixture requires a real TLS PostgreSQL connection: enabled=%v err=%v", tlsEnabled, err)
 	}
 	f := &fixture{
-		admin: admin, schema: "it_" + token(), tenantA: token(), tenantB: token(), principalA: token(),
-		namespaceA: token(), namespaceOther: token(), namespaceB: token(), memoryA: token(), memoryB: token(), runA: token(),
+		root: root, databaseName: "it_rls_" + strings.ReplaceAll(token(), "-", ""), schema: "public",
+		tenantA: token(), tenantB: token(), principalA: token(),
+		namespaceA: token(), namespaceOther: token(), namespaceB: token(),
+		memoryA: token(), memoryB: token(), runA: token(),
 	}
-	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+quoteIdent(f.schema)); err != nil {
-		admin.Close()
-		t.Fatalf("create integration schema: %v", err)
+	if _, err := root.Exec(ctx, `CREATE DATABASE `+quoteIdent(f.databaseName)); err != nil {
+		f.close(t)
+		t.Fatalf("create disposable RLS database: %v", err)
+	}
+	f.createdDatabase = true
+	adminConfig, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		f.close(t)
+		t.Fatalf("parse root database URL: %v", err)
+	}
+	adminConfig.ConnConfig.Database = f.databaseName
+	admin, err := pgxpool.NewWithConfig(ctx, adminConfig)
+	if err != nil {
+		f.close(t)
+		t.Fatalf("connect disposable RLS database: %v", err)
+	}
+	f.admin = admin
+	if err := admin.Ping(ctx); err != nil {
+		f.close(t)
+		t.Fatalf("ping disposable RLS database: %v", err)
+	}
+	// The production policy sequence expects scos_app to exist when
+	// restrictive standing-answer policies are installed. Provision it only
+	// when this disposable test cluster does not already have the role.
+	var hasRuntimeRole bool
+	if err := root.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'scos_app')").Scan(&hasRuntimeRole); err != nil {
+		f.close(t)
+		t.Fatalf("inspect runtime role: %v", err)
+	}
+	if !hasRuntimeRole {
+		if _, err := root.Exec(ctx, "CREATE ROLE scos_app NOLOGIN NOSUPERUSER NOBYPASSRLS"); err != nil {
+			f.close(t)
+			t.Fatalf("create fixture runtime role: %v", err)
+		}
+		f.createdRuntimeRole = true
 	}
 	if err := applySQL(t, admin, f.schema); err != nil {
 		f.close(t)
@@ -230,6 +297,7 @@ func newFixture(t *testing.T, url string) *fixture {
 		f.close(t)
 		t.Fatalf("parse database URL: %v", err)
 	}
+	config.ConnConfig.Database = f.databaseName
 	config.ConnConfig.User, config.ConnConfig.Password = f.role, password
 	config.ConnConfig.RuntimeParams["search_path"] = f.schema + ",public"
 	f.app, err = pgxpool.NewWithConfig(ctx, config)
@@ -266,11 +334,25 @@ func (f *fixture) close(t *testing.T) {
 		f.app.Close()
 	}
 	if f.admin != nil {
-		if f.role != "" {
-			_, _ = f.admin.Exec(ctx, `DROP ROLE `+quoteIdent(f.role))
-		}
-		_, _ = f.admin.Exec(ctx, `DROP SCHEMA `+quoteIdent(f.schema)+` CASCADE`)
 		f.admin.Close()
+	}
+	if f.root != nil {
+		if f.createdDatabase {
+			if _, err := f.root.Exec(ctx, `DROP DATABASE IF EXISTS `+quoteIdent(f.databaseName)+` WITH (FORCE)`); err != nil {
+				t.Errorf("drop disposable RLS database: %v", err)
+			}
+		}
+		if f.role != "" {
+			if _, err := f.root.Exec(ctx, `DROP ROLE IF EXISTS `+quoteIdent(f.role)); err != nil {
+				t.Errorf("drop disposable RLS role: %v", err)
+			}
+		}
+		if f.createdRuntimeRole {
+			if _, err := f.root.Exec(ctx, "DROP ROLE IF EXISTS scos_app"); err != nil {
+				t.Errorf("drop fixture runtime role: %v", err)
+			}
+		}
+		f.root.Close()
 	}
 }
 
