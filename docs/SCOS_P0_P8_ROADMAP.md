@@ -13,8 +13,12 @@ window shortened without invalidating a prior review digest. The v4 digest
 now binds all four governance fields, with UTC-normalized optional timestamps,
 and the HTTP response exposes those fields for reviewers. The existing
 whole-draft manifest inherits source-digest changes; an old expected digest
-returns HTTP 409 without draft evidence. RED-before-fix compile tests and a
-real restricted-role PostgreSQL HTTP regression passed three focused repetitions. The 52-package Go suite, vet,
+returns HTTP 409 without draft evidence when all sources remain readable.
+Expired or not-yet-valid evidence returns HTTP 404 before comparison. RED-before-fix compile tests and a
+real restricted-role PostgreSQL HTTP regression passed focused repetitions.
+A second RED-before-fix integration reproduced an HTTP 500 for PostgreSQL
+`infinity` timestamps; finite UTC and both infinity sentinels are now
+encoded distinctly from NULL. The 52-package Go suite, vet,
 full memory-intelligence and retrieval-orchestrator PostgreSQL integration
 suites, and two race-enabled focused repetitions passed. See
 `docs/P7_EVIDENCE_DRAFT_COMPOSITION.md`.

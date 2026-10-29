@@ -80,9 +80,59 @@ func TestP7ComposePinnedDraftRejectsAuthorityAndValidityDrift(t *testing.T) {
 			expected = refreshed["draft_fingerprint"].(string)
 		})
 	}
+	// An expired source is not eligible for review. Authorization and
+	// validity filtering take precedence over fingerprint comparison (404).
+	if _, err := f.admin.ExecContext(context.Background(),
+		"UPDATE memory_items SET valid_until=$2 WHERE id=$1", a, anchor.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	status, unavailable := compose(expected)
+	if status != http.StatusNotFound || unavailable["evidence"] != nil || unavailable["draft_text"] != nil {
+		t.Fatalf("expired source disclosed review evidence: HTTP %d %v", status, unavailable)
+	}
 	var count int
 	if err := f.admin.QueryRowContext(context.Background(),
 		"SELECT count(*) FROM memory_standing_answers WHERE tenant_id=$1", f.tenant).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("unapproved composition persisted: count=%d err=%v", count, err)
+	}
+}
+
+func TestP7ComposeSupportsPostgresInfinityValidity(t *testing.T) {
+	f := newBehaviourFixture(t)
+	makeFact := func(summary string) string {
+		return f.scalar(`INSERT INTO memory_items
+            (tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+             authority_level,confidence_score,sensitivity,valid_from,valid_until,expires_at)
+            VALUES ($1,$2,$3,'semantic','active','Infinite window',$4,80,0.8,'internal',
+                    '-infinity'::timestamptz,'infinity'::timestamptz,'infinity'::timestamptz)
+            RETURNING id::text`, f.tenant, f.ns, f.owner, summary)
+	}
+	a, b := makeFact("Infinite window A"), makeFact("Infinite window B")
+	compose := func(expected string) (int, map[string]any) {
+		suffix := ""
+		if expected != "" {
+			suffix = fmt.Sprintf(`,"expected_draft_fingerprint":%q`, expected)
+		}
+		body := fmt.Sprintf(`{"namespace_id":%q,"fact_ids":[%q,%q]%s}`, f.ns, a, b, suffix)
+		status, result, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
+			"/v1/standing-answers/compose", body)
+		return status, result
+	}
+	status, first := compose("")
+	if status != http.StatusOK {
+		t.Fatalf("infinity source rejected: HTTP %d %v", status, first)
+	}
+	evidence := first["evidence"].([]any)[0].(map[string]any)
+	if evidence["valid_from"] != "-infinity" || evidence["valid_until"] != "infinity" || evidence["expires_at"] != "infinity" {
+		t.Fatalf("infinity bounds lost in review metadata: %v", evidence)
+	}
+	pinned := first["draft_fingerprint"].(string)
+	if _, err := f.admin.ExecContext(context.Background(),
+		"UPDATE memory_items SET expires_at=statement_timestamp()+interval '90 days' WHERE id=$1", a); err != nil {
+		t.Fatal(err)
+	}
+	status, stale := compose(pinned)
+	if status != http.StatusConflict || stale["draft_text"] != nil || stale["evidence"] != nil {
+		t.Fatalf("infinity-to-finite change did not invalidate review: HTTP %d %v", status, stale)
 	}
 }

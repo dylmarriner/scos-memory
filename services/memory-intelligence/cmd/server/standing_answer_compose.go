@@ -56,6 +56,24 @@ func standingAnswerComposeFingerprint(ev standingAnswerComposeEvidence, tenantID
 	return hex.EncodeToString(sum[:])
 }
 
+// Distinguish NULL from both PostgreSQL infinity sentinels, and normalize
+// finite timestamps to UTC independently of connection/session timezone.
+func standingAnswerComposeCanonicalTime(raw any) (string, error) {
+	switch v := raw.(type) {
+	case nil:
+		return "", nil
+	case time.Time:
+		return v.UTC().Format(time.RFC3339Nano), nil
+	case string:
+		if v == "infinity" || v == "-infinity" {
+			return v, nil
+		}
+	case []byte:
+		return standingAnswerComposeCanonicalTime(string(v))
+	}
+	return "", errStandingAnswerComposeUnsafe
+}
+
 type standingAnswerComposeResult struct {
 	Status           string                          `json:"status"`
 	NamespaceID      string                          `json:"namespace_id"`
@@ -195,21 +213,22 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		summaries := make([]string, 0, len(ids))
 		for rows.Next() {
 			var ev standingAnswerComposeEvidence
-			var validFrom, validUntil, expiresAt sql.NullTime
+			// pgx/database/sql yields time.Time for finite timestamptz,
+			// but PostgreSQL infinity values arrive as strings. Scanning
+			// directly into sql.NullTime rejects eligible infinite bounds.
+			var validFrom, validUntil, expiresAt any
 			if err := rows.Scan(&ev.FactID, &ev.Summary, &ev.Confidence, &ev.VersionID,
 				&ev.Sensitivity, &ev.AuthorityLevel, &validFrom, &validUntil, &expiresAt); err != nil {
 				return out, err
 			}
-			// Normalize timestamptz to UTC so the digest does not depend on
-			// the database connection's session timezone or Go location.
-			if validFrom.Valid {
-				ev.ValidFrom = validFrom.Time.UTC().Format(time.RFC3339Nano)
+			if ev.ValidFrom, err = standingAnswerComposeCanonicalTime(validFrom); err != nil {
+				return out, err
 			}
-			if validUntil.Valid {
-				ev.ValidUntil = validUntil.Time.UTC().Format(time.RFC3339Nano)
+			if ev.ValidUntil, err = standingAnswerComposeCanonicalTime(validUntil); err != nil {
+				return out, err
 			}
-			if expiresAt.Valid {
-				ev.ExpiresAt = expiresAt.Time.UTC().Format(time.RFC3339Nano)
+			if ev.ExpiresAt, err = standingAnswerComposeCanonicalTime(expiresAt); err != nil {
+				return out, err
 			}
 			if ev.AuthorityLevel < 0 || ev.AuthorityLevel > 100 || strings.TrimSpace(ev.Summary) == "" || !utf8.ValidString(ev.Summary) ||
 				strings.ContainsRune(ev.Summary, '\x00') || len(ev.Summary) > 8192 ||
