@@ -201,3 +201,45 @@ return HTTP 409 without evidence leakage, and a fresh draft exposes both
 current classifications. A separate fixed SHA-256 vector and unit regression
 cover digest determinism and classification sensitivity. This does not
 implement approval, publishing or transactionally atomic review-and-write.
+
+## P7 source trust and validity-window fingerprint v4 (2026-10-29; development)
+
+The v3 source fingerprint bound identity, version, sensitivity, summary and
+confidence, but **not** `authority_level`, `valid_from`, `valid_until`, or
+`expires_at`. A source could lose authority or have its validity/expiry window
+changed while remaining currently readable, leaving a previously reviewed
+`expected_draft_fingerprint` valid. This is a review-integrity defect, not a
+claim that an unapproved answer was published.
+
+The v4 source digest adds the numeric authority level and all three validity
+fields, with NUL-separated, domain-separated SHA-256 encoding. Nullable
+`timestamptz` values use an empty field; finite timestamps are normalized
+to UTC RFC3339Nano, while PostgreSQL `infinity` and `-infinity` are
+preserved as distinct literal sentinel values. The authenticated tenant and namespace, source UUID,
+version, sensitivity, summary and confidence remain bound. The response
+exposes `authority_level` and, when present, `valid_from`, `valid_until`, and
+`expires_at` for independent review. Whole-draft fingerprints already bind
+source fingerprints. A governance change on a **still-readable** source
+causes the old review precondition to fail with HTTP 409 without returning
+the draft. An expired or not-yet-valid source is unavailable and returns
+HTTP 404 before fingerprint comparison. Existing v3
+digests must not be treated as v4 approvals.
+
+TDD first failed compilation for the missing metadata fields (RED). Unit
+regressions cover each field, including removing expiry. Restricted-role
+PostgreSQL HTTP regression covers successive authority downgrade and
+validity-window changes with unchanged source prose, 409 rejection while
+readable, 404 rejection after expiry, fresh manifest generation and no
+standing-answer writes. A separate RED-before-fix PostgreSQL HTTP test
+reproduced HTTP 500 for eligible `infinity` bounds scanned into `sql.NullTime`;
+normalizing driver-returned finite times and infinity sentinels fixes this
+without conflating NULL, `infinity` and `-infinity`. On a disposable
+PostgreSQL 17/pgvector database, all 86 migrations and 21 RLS policies
+were applied; the focused HTTP test passed three repetitions, the complete
+memory-intelligence and retrieval-orchestrator integration suites passed,
+two focused race-enabled repetitions passed, 52 Go packages passed and
+`go vet ./...` passed. The initial full Go run was retried without
+`DATABASE_URL` because service-state unit tests deliberately require a
+TLS-enabled database URL; it passed with the test-only insecure DSN removed.
+This is a review-time source-drift safeguard only; it does not provide approval, model generation,
+transaction-ordered historical reconstruction or production acceptance.

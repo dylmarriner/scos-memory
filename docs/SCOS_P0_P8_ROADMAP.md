@@ -4,6 +4,26 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 source governance drift detection (2026-10-29; development)
+
+The deterministic P7 composition source fingerprint v3 did not bind
+`authority_level`, `valid_from`, `valid_until`, or `expires_at`. An otherwise
+unchanged, still-readable source could lose authority or have its validity
+window shortened without invalidating a prior review digest. The v4 digest
+now binds all four governance fields, with UTC-normalized optional timestamps,
+and the HTTP response exposes those fields for reviewers. The existing
+whole-draft manifest inherits source-digest changes; an old expected digest
+returns HTTP 409 without draft evidence when all sources remain readable.
+Expired or not-yet-valid evidence returns HTTP 404 before comparison. RED-before-fix compile tests and a
+real restricted-role PostgreSQL HTTP regression passed focused repetitions.
+A second RED-before-fix integration reproduced an HTTP 500 for PostgreSQL
+`infinity` timestamps; finite UTC and both infinity sentinels are now
+encoded distinctly from NULL. The 52-package Go suite, vet,
+full memory-intelligence and retrieval-orchestrator PostgreSQL integration
+suites, and two race-enabled focused repetitions passed. See
+`docs/P7_EVIDENCE_DRAFT_COMPOSITION.md`.
+This is not an approval workflow or production rollout. §41 remains PARTIAL.
+
 ## P0 authority accuracy: repeated evidence must not earn repeated credit (2026-10-29; source candidate)
 
 `authority_accuracy` previously counted duplicate occurrences of the same

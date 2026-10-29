@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dylmarriner/scos-memory/packages/strictjson"
@@ -34,6 +35,10 @@ type standingAnswerComposeEvidence struct {
 	Confidence        float64 `json:"confidence"`
 	VersionID         string  `json:"version_id,omitempty"`
 	Sensitivity       string  `json:"sensitivity"`
+	AuthorityLevel    int     `json:"authority_level"`
+	ValidFrom         string  `json:"valid_from,omitempty"`
+	ValidUntil        string  `json:"valid_until,omitempty"`
+	ExpiresAt         string  `json:"expires_at,omitempty"`
 	SourceFingerprint string  `json:"source_fingerprint"`
 }
 
@@ -42,11 +47,31 @@ type standingAnswerComposeEvidence struct {
 // source summary cannot contain NUL; UUIDs and decimal floats cannot either.
 // This is a drift detector, not a signature or a substitute for approval.
 func standingAnswerComposeFingerprint(ev standingAnswerComposeEvidence, tenantID, namespaceID string) string {
-	data := "scos:p7:source:v3\x00" + tenantID + "\x00" + namespaceID + "\x00" +
+	data := "scos:p7:source:v4\x00" + tenantID + "\x00" + namespaceID + "\x00" +
 		ev.FactID + "\x00" + ev.VersionID + "\x00" + ev.Sensitivity + "\x00" +
+		strconv.Itoa(ev.AuthorityLevel) + "\x00" + ev.ValidFrom + "\x00" +
+		ev.ValidUntil + "\x00" + ev.ExpiresAt + "\x00" +
 		ev.Summary + "\x00" + strconv.FormatFloat(ev.Confidence, 'g', -1, 64)
 	sum := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(sum[:])
+}
+
+// Distinguish NULL from both PostgreSQL infinity sentinels, and normalize
+// finite timestamps to UTC independently of connection/session timezone.
+func standingAnswerComposeCanonicalTime(raw any) (string, error) {
+	switch v := raw.(type) {
+	case nil:
+		return "", nil
+	case time.Time:
+		return v.UTC().Format(time.RFC3339Nano), nil
+	case string:
+		if v == "infinity" || v == "-infinity" {
+			return v, nil
+		}
+	case []byte:
+		return standingAnswerComposeCanonicalTime(string(v))
+	}
+	return "", errStandingAnswerComposeUnsafe
 }
 
 type standingAnswerComposeResult struct {
@@ -149,7 +174,8 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		// the ENTIRE draft; there is no partial evidence fallback.
 		rows, err := tx.QueryContext(r.Context(), `
             SELECT f.id::text, f.canonical_summary, f.confidence_score,
-                   COALESCE(f.current_version_id::text, ''), f.sensitivity::text
+                   COALESCE(f.current_version_id::text, ''), f.sensitivity::text,
+                   f.authority_level, f.valid_from, f.valid_until, f.expires_at
             FROM public.memory_items f
             JOIN public.namespaces ns
               ON ns.id=f.namespace_id AND ns.tenant_id=f.tenant_id
@@ -187,10 +213,24 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		summaries := make([]string, 0, len(ids))
 		for rows.Next() {
 			var ev standingAnswerComposeEvidence
-			if err := rows.Scan(&ev.FactID, &ev.Summary, &ev.Confidence, &ev.VersionID, &ev.Sensitivity); err != nil {
+			// pgx/database/sql yields time.Time for finite timestamptz,
+			// but PostgreSQL infinity values arrive as strings. Scanning
+			// directly into sql.NullTime rejects eligible infinite bounds.
+			var validFrom, validUntil, expiresAt any
+			if err := rows.Scan(&ev.FactID, &ev.Summary, &ev.Confidence, &ev.VersionID,
+				&ev.Sensitivity, &ev.AuthorityLevel, &validFrom, &validUntil, &expiresAt); err != nil {
 				return out, err
 			}
-			if strings.TrimSpace(ev.Summary) == "" || !utf8.ValidString(ev.Summary) ||
+			if ev.ValidFrom, err = standingAnswerComposeCanonicalTime(validFrom); err != nil {
+				return out, err
+			}
+			if ev.ValidUntil, err = standingAnswerComposeCanonicalTime(validUntil); err != nil {
+				return out, err
+			}
+			if ev.ExpiresAt, err = standingAnswerComposeCanonicalTime(expiresAt); err != nil {
+				return out, err
+			}
+			if ev.AuthorityLevel < 0 || ev.AuthorityLevel > 100 || strings.TrimSpace(ev.Summary) == "" || !utf8.ValidString(ev.Summary) ||
 				strings.ContainsRune(ev.Summary, '\x00') || len(ev.Summary) > 8192 ||
 				math.IsNaN(ev.Confidence) || math.IsInf(ev.Confidence, 0) ||
 				ev.Confidence < 0 || ev.Confidence > 1 {

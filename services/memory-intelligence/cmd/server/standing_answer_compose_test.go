@@ -67,7 +67,7 @@ func TestP7ComposeEvidenceFingerprintTracksVersionAndContent(t *testing.T) {
 		Sensitivity: "internal",
 	}
 	first := standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a")
-	if first != "7ad17188a08bf84fcda5ee4a9c7b8c94e1315fe81f8cd58acc42f38778a7f167" || first != standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a") {
+	if first != "f172f513cec091f30f7e28c126344d91f4e53cd7a97cbb2fedebd92fda7d55a0" || first != standingAnswerComposeFingerprint(ev, "7cbe32c6-891c-4155-a9ec-6aa39e66704a", "4cbe32c6-891c-4155-a9ec-6aa39e66704a") {
 		t.Fatalf("fingerprint not stable SHA-256: %q", first)
 	}
 	ev.Summary = "A revised fact."
