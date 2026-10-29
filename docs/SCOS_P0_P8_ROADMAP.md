@@ -751,8 +751,10 @@ was silently ignored by the paired-run comparator, and duplicate case IDs
 were ambiguous. The comparator now indexes unique case IDs and measures the
 union: absent baseline cases count as metric coverage loss, new cases as
 coverage gain, and duplicate IDs fail closed. Three RED/GREEN regressions
-cover the failure modes. This improves offline benchmark evidence integrity
-but does not qualify representative P0 model/latency performance or close §41.
+cover the failure modes. The P4 lexical baseline was re-recorded after
+verifying that only harness/base SHA metadata changed; all seven rankings,
+quality metrics and forbidden counts remain identical. This improves offline
+benchmark evidence integrity but does not qualify representative P0 model/latency performance or close §41.
 See `docs/P0_BENCHMARK_COMPARISON_INTEGRITY.md`.
 
 **Objective:** make every retrieval/indexing/model change measurable.

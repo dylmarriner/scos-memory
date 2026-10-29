@@ -72,5 +72,8 @@ candidate cases increment `coverage_gained`. Duplicate case IDs in either
 run raise `ValueError` instead of producing ambiguous benchmark evidence.
 This records coverage drift, not a measured quality regression for absent
 cases. Three focused RED/GREEN tests cover missing, added and duplicate
-cases. This is offline P0 evidence integrity, not representative model
+cases. The frozen P4 seven-case lexical baseline was requalified because the
+shared harness digest changed; only `harness_sha256` and `git_base_sha`
+changed, with rankings, quality metrics and forbidden-hit totals identical.
+This is offline P0 evidence integrity, not representative model
 quality, production latency or P0 completion.
