@@ -121,6 +121,14 @@ class DefaultSuiteCoversAllCategoriesTests(unittest.TestCase):
         same.run(DeterministicLexicalBaseline(suite.corpus))
         self.assertEqual(same.summary(baseline_results=baseline.results)["average_scores"]["answer_regression"], 0.0)
 
+    def test_empty_retrieval_cannot_pass_conflict_detection_in_full_runner(self):
+        suite = create_default_frozen_suite()
+        contradiction = next(c for c in suite.cases if c.category == "contradiction")
+        runner = BenchmarkRunner(BenchmarkSuite(name="conflict", version="1", cases=[contradiction]))
+        result = runner.run(lambda query, context: ["unrelated"])[0]
+        self.assertEqual(result.scores["conflict_detection"], 0.0)
+        self.assertEqual(runner.summary()["average_scores"]["conflict_detection"], 0.0)
+
     def test_answer_correct_is_computed_from_the_retrieved_ids(self):
         suite = create_default_frozen_suite()
         runner = BenchmarkRunner(suite)
@@ -181,6 +189,13 @@ class MetricFunctionTests(unittest.TestCase):
     def test_conflict_detection_flags_both_sides_surfaced(self):
         self.assertEqual(conflict_detection(["a", "b"], ["a", "b"]), 0.0)
         self.assertEqual(conflict_detection(["a", "b"], ["a"]), 1.0)
+
+    def test_conflict_detection_does_not_reward_missing_evidence(self):
+        # A retriever that returns no side of a conflict has not resolved it.
+        self.assertEqual(conflict_detection(["a", "b"], []), 0.0)
+        self.assertEqual(conflict_detection(["a", "b"], ["unrelated"]), 0.0)
+        self.assertEqual(conflict_detection(["a", "b"], ["a", "a"]), 1.0)
+        self.assertIsNone(conflict_detection(["a"], ["a"]))
 
     def test_duplicate_and_stale_rates(self):
         self.assertEqual(duplicate_rate(["dup"], ["dup", "real"]), 0.5)
@@ -310,6 +325,37 @@ class SuiteFileTests(unittest.TestCase):
         self.assertEqual(report["baseline"]["summary"]["suite"], "tiny")
         self.assertEqual(report["baseline"]["summary"]["average_scores"]["recall@1"], 1.0)
         self.assertEqual(report["system_under_test"]["status"], "not_run")
+
+    def test_load_suite_rejects_duplicate_case_ids(self):
+        case = {"id": "same", "query": "alpha", "expected_ids": ["a"], "category": "known_answer"}
+        path = self._write({"name": "bad", "version": "1", "corpus": {"a": "alpha"},
+                            "cases": [case, dict(case, query="different")]})
+        with self.assertRaisesRegex(ValueError, "duplicate.*case.*id"):
+            load_suite(path)
+
+    def test_load_suite_rejects_duplicate_json_keys_at_any_depth(self):
+        for raw in (
+            '{"name":"a","name":"b","version":"1","corpus":{"a":"alpha"},"cases":[]}',
+            '{"name":"a","version":"1","corpus":{"a":"alpha","a":"other"},"cases":[]}',
+            '{"name":"a","version":"1","corpus":{"a":"alpha"},"cases":[{"id":"c","id":"other","query":"alpha","expected_ids":["a"],"category":"known_answer"}]}',
+        ):
+            with self.subTest(raw=raw):
+                handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+                handle.write(raw)
+                handle.close()
+                self.addCleanup(os.unlink, handle.name)
+                with self.assertRaisesRegex(ValueError, "duplicate.*JSON key"):
+                    load_suite(handle.name)
+
+    def test_load_suite_rejects_nonfinite_json_numbers(self):
+        for constant in ("NaN", "Infinity", "-Infinity", "1e999"):
+            with self.subTest(constant=constant):
+                handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+                handle.write('{"name":"a","version":"1","corpus":{"a":"alpha"},"cases":[{"id":"c","query":"alpha","expected_ids":["a"],"category":"known_answer","token_budget":'+constant+'}]}')
+                handle.close()
+                self.addCleanup(os.unlink, handle.name)
+                with self.assertRaisesRegex(ValueError, "non-finite.*JSON"):
+                    load_suite(handle.name)
 
     def test_load_suite_rejects_ids_outside_the_corpus(self):
         path = self._write({

@@ -101,3 +101,30 @@ for the changed harness digest: all seven case rankings, quality metrics
 and forbidden-hit counts were unchanged; only `harness_sha256` and
 `git_base_sha` metadata changed. This is offline measurement integrity,
 not representative P0 performance, production qualification or §41 completion.
+
+## Conflict detection and suite-input integrity (2026-10-29)
+
+The conflict-detection metric previously scored an empty or unrelated-only
+retrieval as `1.0` (successful conflict isolation), even though no side of
+the labelled conflict was retrieved. It now awards credit only when exactly
+one distinct conflicting source is returned; zero or multiple sides score
+`0.0`. A full `BenchmarkRunner` regression checks that the false positive
+cannot enter the aggregated score.
+
+`load_suite` previously accepted repeated case IDs, duplicate JSON keys
+(including nested corpus/case keys), and non-finite numeric constants or
+float overflow. These can silently change the evaluation corpus or ground
+truth. Suite parsing now rejects these ambiguities before scoring. This is
+not a replacement for signed benchmark provenance or deployed evaluation.
+
+Four new test methods (with nested subcases) reproduced nine failures before
+the implementation and passed after it. A fifth integration-style test
+exercised the complete runner and summary. The Python benchmark tests,
+standalone metrics tests and frozen P4 gate passed. The seven-case lexical
+baseline was re-recorded solely to bind the changed harness source hash and
+checked-out Git base SHA; ranked IDs, metrics and forbidden-hit counts are
+byte-for-byte identical to the previous measured baseline.
+
+This closes only two offline P0 measurement-integrity defects. Representative
+live BGE/retrieval performance, tenancy/temporal isolation, production
+recovery, and §41 acceptance remain unqualified.

@@ -4,6 +4,21 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P0 conflict coverage and suite JSON integrity (2026-10-29; development)
+
+The §33 conflict-detection scorer awarded a false 1.0 to empty or unrelated
+retrievals; it now requires exactly one conflicting source to be surfaced.
+The benchmark suite loader also rejects duplicate case IDs, duplicate JSON
+keys at every depth, NaN/Infinity constants and overflowed finite-looking
+numbers before measuring. Nine RED-before-fix failures became GREEN, with an
+additional full runner/summary regression. The Python benchmark suite (63
+tests), standalone metrics (5), frozen P4 tests (31) and lexical quality gate
+passed. The seven frozen rankings, metrics and forbidden-hit counts are
+unchanged; the lexical baseline was requalified for harness hash and base
+SHA only. See `docs/P0_BENCHMARK_COMPARISON_INTEGRITY.md`. This is offline
+P0 evidence integrity, not representative P0 acceptance, §41 completion or
+production deployment.
+
 ## P7 source governance drift detection (2026-10-29; development)
 
 The deterministic P7 composition source fingerprint v3 did not bind
