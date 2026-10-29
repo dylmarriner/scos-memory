@@ -279,3 +279,19 @@ suite (52 tested packages), `go vet ./...`, two race-enabled owner-transfer
 repetitions, and `git diff --check`. The §41 checker still reports FAIL because
 the governance master table is PARTIAL. PR review, merge, merged-main CI and
 production rollout are separate gates, not implied by these local results.
+
+
+**PR review hardening:** CodeRabbit identified that the existing schema can
+contain a cross-tenant `owner_principal_id` after an administrative/import
+write. The new evidence response would then disclose that foreign principal
+UUID as trusted ownership provenance. A second restricted-role PostgreSQL
+HTTP regression reproduced HTTP 200 with the foreign owner (RED). The
+composition query now joins the owner principal by both ID **and tenant**, so
+any such malformed source makes the entire draft unavailable (HTTP 404,
+GREEN, five repeated owner-transfer and foreign-owner test runs). The test
+also confirms that a freshly recomposed post-transfer digest succeeds as a
+review precondition. A global same-tenant composite FK for historical
+`memory_items` remains separate schema-integrity debt: it requires an
+existing-row inventory, safe rollout and recovery qualification before
+introducing a production constraint. This endpoint guard does not claim to
+repair historical rows or other services.

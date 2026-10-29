@@ -56,6 +56,13 @@ func TestP7ComposeReviewFingerprintInvalidatesOnSourceOwnerTransfer(t *testing.T
 	if after["draft_fingerprint"] == original {
 		t.Fatal("owner transfer did not invalidate the human-review draft fingerprint")
 	}
+	current, ok := after["draft_fingerprint"].(string)
+	if !ok || len(current) != 64 {
+		t.Fatalf("missing post-transfer fingerprint: %v", after)
+	}
+	if code, pinned := compose(current); code != http.StatusOK || pinned["draft_fingerprint"] != current {
+		t.Fatalf("fresh post-transfer pin rejected: HTTP %d %v", code, pinned)
+	}
 	if after["draft_text"] != before["draft_text"] {
 		t.Fatalf("test requires unchanged review prose: before=%v after=%v", before["draft_text"], after["draft_text"])
 	}
@@ -77,5 +84,39 @@ func TestP7ComposeReviewFingerprintInvalidatesOnSourceOwnerTransfer(t *testing.T
 	if err := f.admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM memory_standing_answers WHERE tenant_id=$1`, f.tenant).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("draft persisted without approval: count=%d err=%v", count, err)
+	}
+}
+
+// A privileged import or migration can currently attach a fact to a principal
+// from another tenant. The compose endpoint must not expose that principal ID
+// as trusted source provenance, even if the fact itself is RLS-readable.
+func TestP7ComposeRejectsForeignTenantSourceOwner(t *testing.T) {
+	f := newBehaviourFixture(t)
+	a := f.scalar(`INSERT INTO memory_items
+        (tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+         authority_level,confidence_score,sensitivity)
+        VALUES ($1,$2,$3,'semantic','active','Tenant ownership','A',80,0.8,'internal')
+        RETURNING id::text`, f.tenant, f.ns, f.owner)
+	b := f.scalar(`INSERT INTO memory_items
+        (tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+         authority_level,confidence_score,sensitivity)
+        VALUES ($1,$2,$3,'semantic','active','Tenant ownership','B',80,0.8,'internal')
+        RETURNING id::text`, f.tenant, f.ns, f.owner)
+	body := fmt.Sprintf(`{"namespace_id":%q,"fact_ids":[%q,%q]}`, f.ns, a, b)
+	status, _, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
+		"/v1/standing-answers/compose", body)
+	if status != http.StatusOK {
+		t.Fatalf("valid same-tenant ownership unexpectedly rejected: HTTP %d", status)
+	}
+	// Simulate an existing bad privileged import. This is a test-only row in
+	// an isolated database, not authorization to migrate production records.
+	if _, err := f.admin.ExecContext(context.Background(),
+		`UPDATE memory_items SET owner_principal_id=$1 WHERE id=$2`, f.other, a); err != nil {
+		t.Fatal(err)
+	}
+	status, result, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
+		"/v1/standing-answers/compose", body)
+	if status != http.StatusNotFound || result["evidence"] != nil || result["draft_text"] != nil {
+		t.Fatalf("cross-tenant source owner leaked in composition: HTTP %d %v", status, result)
 	}
 }

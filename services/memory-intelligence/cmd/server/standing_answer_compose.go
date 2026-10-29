@@ -174,10 +174,14 @@ func (s *engineServer) handleStandingAnswerCompose(w http.ResponseWriter, r *htt
 		// and free of unresolved P7 revalidation. Missing any source rejects
 		// the ENTIRE draft; there is no partial evidence fallback.
 		rows, err := tx.QueryContext(r.Context(), `
-            SELECT f.id::text, f.owner_principal_id::text, f.canonical_summary, f.confidence_score,
+            SELECT f.id::text, source_owner.id::text, f.canonical_summary, f.confidence_score,
                    COALESCE(f.current_version_id::text, ''), f.sensitivity::text,
                    f.authority_level, f.valid_from, f.valid_until, f.expires_at
             FROM public.memory_items f
+            -- Fail closed on cross-tenant owner IDs from privileged imports.
+            JOIN public.principals source_owner
+              ON source_owner.id=f.owner_principal_id
+             AND source_owner.tenant_id=f.tenant_id
             JOIN public.namespaces ns
               ON ns.id=f.namespace_id AND ns.tenant_id=f.tenant_id
             JOIN public.namespace_memberships m
