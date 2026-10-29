@@ -28,7 +28,10 @@ to a disabled principal (RED). After the migration, five focused repetitions
 and two race-enabled repetitions passed. The same regression verifies foreign-
 tenant principals with malformed cross-tenant membership, missing agent
 capability records, insufficient agent clearance, clearance upgrade and
-subsequent downgrade. The complete retrieval-orchestrator tagged PostgreSQL
+subsequent downgrade. CodeRabbit also identified a useful coverage gap:
+the test now confirms an internal-cleared agent can read internal events
+inside a confidential-ceiling namespace (event sensitivity, not ceiling,
+controls the agent cap). The complete retrieval-orchestrator tagged PostgreSQL
 suite and full memory-intelligence tagged PostgreSQL suite passed on a
 disposable PostgreSQL 17/pgvector database; 52 Go packages and Go vet passed. This is a source-only P5 authorization fix;
 production migration, rollout/recovery and historical belief reconstruction

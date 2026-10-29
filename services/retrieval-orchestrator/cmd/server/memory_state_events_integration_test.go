@@ -151,6 +151,18 @@ func TestP5MemoryEventReadbackRestrictedRoleHTTP(t *testing.T) {
 	if status != 200 || len(cleared.Events) != 2 {
 		t.Fatalf("cleared agent could not inspect eligible history: HTTP %d %+v", status, cleared)
 	}
+	// The agent cap applies to the EVENT classification, not the namespace's
+	// higher ceiling. A confidential-capable namespace can contain internal data.
+	if _, err := owner.Exec(ctx, "UPDATE namespaces SET sensitivity_ceiling='confidential' WHERE id=$1", ns); err != nil {
+		t.Fatal(err)
+	}
+	status, widerNamespace := request(tenant, agent, 10, 0)
+	if status != 200 || len(widerNamespace.Events) != 2 {
+		t.Fatalf("agent clearance incorrectly bound to namespace ceiling: HTTP %d %+v", status, widerNamespace)
+	}
+	if _, err := owner.Exec(ctx, "UPDATE namespaces SET sensitivity_ceiling='internal' WHERE id=$1", ns); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := owner.Exec(ctx, "UPDATE agents SET maximum_sensitivity='public' WHERE id=$1", agent); err != nil {
 		t.Fatal(err)
 	}
