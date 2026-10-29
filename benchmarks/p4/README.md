@@ -53,7 +53,8 @@ baseline, even when swapping irrelevant results would leave Recall/MRR/nDCG
 unchanged. Intentional ranking changes require explicit review and
 requalification. The recorded `git_base_sha` is resolved from the SCOS source checkout, not
 from the invoking process's current directory. A real CLI regression runs
-from an unrelated Git repository to guard against false commit attribution.
+from an unrelated Git repository, including a foreign `GIT_DIR` override,
+to guard against false commit attribution.
 This remains source provenance, not proof of deployment identity.
 The gate never auto-updates the baseline. Explicitly
 re-record after review with

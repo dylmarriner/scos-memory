@@ -10,9 +10,11 @@ The offline lexical benchmark previously executed `git rev-parse HEAD` in the
 caller's working directory. A caller launching the SCOS module from a different
 Git checkout via `PYTHONPATH` therefore recorded that unrelated repository's
 commit as SCOS benchmark `git_base_sha` (TDD RED). The generator now pins the
-Git lookup to the source repository containing `benchmarks/harness.py` (GREEN).
+Git lookup to the source repository containing `benchmarks/harness.py`,
+ignoring caller-supplied Git directory/worktree overrides (GREEN).
 A subprocess regression creates an independent Git repository, invokes the
-actual CLI from that checkout and requires SCOS's own HEAD to be recorded.
+actual CLI from that checkout both normally and with a foreign `GIT_DIR`
+override, requiring SCOS's own HEAD to be recorded.
 The frozen seven-case baseline was requalified only for generator SHA-256 and
 Git base provenance; rankings, per-case/aggregate quality scores and all
 forbidden-at-5/10/20 totals are unchanged. This is **offline P0 evidence

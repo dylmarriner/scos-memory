@@ -49,6 +49,18 @@ class OfflineGateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(baseline.read_text())["git_base_sha"], scos_sha)
 
+            # Git environment overrides must not impersonate another checkout
+            # even after the process working directory is pinned to SCOS.
+            env["GIT_DIR"] = str(foreign / ".git")
+            poisoned = pathlib.Path(directory) / "poisoned.json"
+            result = subprocess.run(
+                [sys.executable, "-m", "benchmarks.p4.offline_gate",
+                 "--record-baseline", str(poisoned)], cwd=foreign, env=env,
+                text=True, capture_output=True, check=False, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(poisoned.read_text())["git_base_sha"], scos_sha)
+
     def test_real_retrieval_record_then_check(self):
         with tempfile.TemporaryDirectory() as directory:
             baseline = pathlib.Path(directory) / "baseline.json"

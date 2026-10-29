@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import pathlib
 import statistics
 import subprocess
@@ -144,8 +145,15 @@ def run_retrieval(fixture: dict, fixture_sha: str) -> dict:
                 for k in FORBIDDEN_DEPTHS
             },
         }
+    # Git directory/worktree overrides from the invoking process must not
+    # impersonate another checkout even when cwd is pinned to this repository.
+    git_env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_INDEX_FILE"):
+        git_env.pop(key, None)
     git_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, env=git_env,
         text=True, capture_output=True, check=False, timeout=5,
     ).stdout.strip() or "unknown"
     return {
