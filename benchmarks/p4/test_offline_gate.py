@@ -1,6 +1,7 @@
 """Integration/regression tests for the real deterministic lexical benchmark gate."""
 import copy
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -22,6 +23,43 @@ class OfflineGateTests(unittest.TestCase):
     def test_ci_runs_when_shared_lexical_harness_changes(self):
         workflow = (ROOT / ".github/workflows/p4-hybrid-retrieval.yml").read_text()
         self.assertEqual(workflow.count('      - "benchmarks/harness.py"'), 2)
+
+    def test_git_base_provenance_comes_from_scos_not_callers_repository(self):
+        # A caller may invoke the module from another Git checkout with PYTHONPATH.
+        # Its commit must never be recorded as SCOS benchmark provenance.
+        with tempfile.TemporaryDirectory() as directory:
+            foreign = pathlib.Path(directory) / "foreign"
+            foreign.mkdir()
+            subprocess.run(["git", "init", "-q", str(foreign)], check=True, timeout=10)
+            subprocess.run(["git", "-C", str(foreign), "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid", "commit",
+                            "--allow-empty", "-qm", "foreign"], check=True, timeout=10)
+            foreign_sha = subprocess.check_output(["git", "-C", str(foreign),
+                                                   "rev-parse", "HEAD"], text=True).strip()
+            scos_sha = subprocess.check_output(["git", "-C", str(ROOT),
+                                                "rev-parse", "HEAD"], text=True).strip()
+            self.assertNotEqual(foreign_sha, scos_sha)
+            baseline = pathlib.Path(directory) / "baseline.json"
+            env = dict(os.environ, PYTHONPATH=str(ROOT))
+            result = subprocess.run(
+                [sys.executable, "-m", "benchmarks.p4.offline_gate",
+                 "--record-baseline", str(baseline)], cwd=foreign, env=env,
+                text=True, capture_output=True, check=False, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(baseline.read_text())["git_base_sha"], scos_sha)
+
+            # Git environment overrides must not impersonate another checkout
+            # even after the process working directory is pinned to SCOS.
+            env["GIT_DIR"] = str(foreign / ".git")
+            poisoned = pathlib.Path(directory) / "poisoned.json"
+            result = subprocess.run(
+                [sys.executable, "-m", "benchmarks.p4.offline_gate",
+                 "--record-baseline", str(poisoned)], cwd=foreign, env=env,
+                text=True, capture_output=True, check=False, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(poisoned.read_text())["git_base_sha"], scos_sha)
 
     def test_real_retrieval_record_then_check(self):
         with tempfile.TemporaryDirectory() as directory:
