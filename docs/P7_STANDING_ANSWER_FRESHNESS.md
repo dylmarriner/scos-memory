@@ -263,4 +263,4 @@ race-enabled focused repetitions passed. A fresh disposable PostgreSQL 17
 instance installed all 112 migration/policy files, with the helper present,
 the restrictive policy present, and `scos_app` EXECUTE granted. No live
 migration, production deployment, recovery qualification, or §41 closure
-was performed. PR-head and merged-main CI evidence must be added after merge.
+was performed. PR #166 was squash-merged using exact expected head `b29335d64cf90591c3f096d95b7e6d3016a97147` into `main` commit `6838d6be1a2bb247b2e546caf11cba276c22ab0b`. PR-head [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40862731740) and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40862731772) passed; merged-main [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40863682508) (5/5) and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40863682542) (9/9) passed. Independent merged-main PostgreSQL integration, Go suite and Go vet passed on AMD.
