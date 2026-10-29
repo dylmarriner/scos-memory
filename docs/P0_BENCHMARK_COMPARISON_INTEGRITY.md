@@ -128,3 +128,27 @@ byte-for-byte identical to the previous measured baseline.
 This closes only two offline P0 measurement-integrity defects. Representative
 live BGE/retrieval performance, tenancy/temporal isolation, production
 recovery, and §41 acceptance remain unqualified.
+
+## Summary must match the authoritative suite (2026-10-29)
+
+`BenchmarkRunner.summary()` previously checked case-set completeness only
+against an optional baseline. Without a baseline, removing a failed case or
+substituting a foreign case silently changed the average quality and task
+success denominators. Worse, a baseline with the **same forged case IDs**
+passed the old pairwise check. Programmatically constructed suites could also
+contain duplicate case IDs, despite the JSON loader rejecting duplicates.
+
+Four new regressions reproduced these defects before correction (RED):
+missing current case without baseline, foreign case without baseline,
+matching foreign case in current and baseline, and duplicate suite case IDs.
+The summary now requires the unique current case-ID set to equal the unique
+case-ID set declared by the suite, even without a baseline. Pairwise
+baseline/current checks remain, and the strict comparator's independent
+coverage-gain/loss semantics are unchanged (GREEN).
+
+The 67 Python benchmark tests and 31 frozen P4 fixture/gate tests passed.
+The seven frozen lexical rankings, quality scores and forbidden-hit counts
+remained identical. The recorded baseline changed only `harness_sha256` and
+`git_base_sha` to requalify this source-only harness change. This is offline
+measurement integrity, **not** representative P0 model/latency acceptance,
+production deployment, or governance §41 completion.

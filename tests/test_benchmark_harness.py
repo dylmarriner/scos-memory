@@ -165,6 +165,30 @@ class SummaryBaselineIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate.*case_id"):
             self.runner.summary(baseline_results=self.baseline)
 
+    def test_removed_case_without_baseline_cannot_report_healthy_summary(self):
+        self.runner.results = self.runner.results[:-1]
+        with self.assertRaisesRegex(ValueError, "suite.*case.*match"):
+            self.runner.summary()
+
+    def test_foreign_case_without_baseline_cannot_replace_suite_case(self):
+        from dataclasses import replace
+        self.runner.results[0] = replace(self.runner.results[0], case_id="foreign_case")
+        with self.assertRaisesRegex(ValueError, "suite.*case.*match"):
+            self.runner.summary()
+
+    def test_matching_forged_baseline_and_current_still_rejects_foreign_case(self):
+        from dataclasses import replace
+        self.runner.results[0] = replace(self.runner.results[0], case_id="foreign_case")
+        baseline = [replace(self.baseline[0], case_id="foreign_case"), *self.baseline[1:]]
+        with self.assertRaisesRegex(ValueError, "suite.*case.*match"):
+            self.runner.summary(baseline_results=baseline)
+
+    def test_programmatic_suite_duplicate_case_ids_cannot_be_summarized(self):
+        from dataclasses import replace
+        self.runner.suite.cases.append(replace(self.runner.suite.cases[0]))
+        with self.assertRaisesRegex(ValueError, "duplicate.*suite.*case"):
+            self.runner.summary()
+
     def test_foreign_case_fails_closed(self):
         from dataclasses import replace
         replaced = [replace(self.baseline[0], case_id="foreign_case"), *self.baseline[1:]]
