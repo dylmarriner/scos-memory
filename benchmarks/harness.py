@@ -190,7 +190,9 @@ def conflict_detection(conflicting_ids: list[str], retrieved: list[str]) -> floa
     if len(conflicting_ids) < 2:
         return None
     surfaced = len(set(conflicting_ids) & set(retrieved))
-    return 1.0 if surfaced <= 1 else 0.0
+    # Neither side surfaced is a retrieval failure, not successful conflict
+    # handling. Only exactly one side can earn conflict-isolation credit.
+    return 1.0 if surfaced == 1 else 0.0
 
 def duplicate_rate(duplicate_ids: list[str], retrieved: list[str]) -> float | None:
     """Fraction of retrieved results that are known duplicates of another
@@ -560,12 +562,35 @@ _CASE_FIELDS = {"id", "query", "expected_ids", "category", "context", "citation_
                 "conflicting_ids", "duplicate_ids", "stale_ids", "promotion_expected", "token_budget"}
 
 
+def _strict_suite_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous keys, including nested corpus and case objects."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate benchmark JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _strict_suite_json_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite benchmark JSON number: {raw}")
+    return value
+
+
+def _strict_suite_json_constant(raw: str) -> float:
+    raise ValueError(f"non-finite benchmark JSON constant: {raw}")
+
+
 def load_suite(path: str) -> BenchmarkSuite:
     """Load a suite from JSON: ``{"name", "version", "created_at", "corpus":
     {id: text}, "cases": [{"id", "query", "expected_ids", "category", ...}]}``.
     Every expected or labelled id must name a corpus document."""
     with open(path, encoding="utf-8") as handle:
-        data = json.load(handle)
+        data = json.load(handle, object_pairs_hook=_strict_suite_json_object,
+                         parse_constant=_strict_suite_json_constant,
+                         parse_float=_strict_suite_json_float)
     if not isinstance(data, dict):
         raise ValueError("a suite file must hold a JSON object")
     for key in ("name", "version", "corpus", "cases"):
@@ -575,11 +600,15 @@ def load_suite(path: str) -> BenchmarkSuite:
     if not isinstance(corpus, dict) or not corpus or not all(isinstance(v, str) for v in corpus.values()):
         raise ValueError("suite corpus must map document ids to text")
     cases = []
+    seen_case_ids: set[str] = set()
     for raw in data["cases"]:
         unknown = set(raw) - _CASE_FIELDS
         if unknown:
             raise ValueError(f"case {raw.get('id')!r} has unknown fields {sorted(unknown)}")
         case = BenchmarkCase(**raw)
+        if case.id in seen_case_ids:
+            raise ValueError(f"duplicate benchmark case id: {case.id}")
+        seen_case_ids.add(case.id)
         labelled = set(case.expected_ids) | set(case.citation_ids) | set(case.authoritative_ids) \
             | set(case.conflicting_ids) | set(case.duplicate_ids) | set(case.stale_ids)
         missing = labelled - set(corpus)
