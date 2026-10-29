@@ -65,24 +65,51 @@ def parse_evidence_json(raw: str | bytes) -> dict:
 def load_fixture(path: pathlib.Path) -> tuple[dict, str]:
     content = path.read_bytes()
     fixture = parse_evidence_json(content)
-    if not isinstance(fixture, dict) or not fixture.get("corpus") or not fixture.get("cases"):
-        raise ValueError("fixture requires nonempty corpus and cases")
-    documents = fixture["corpus"]
-    cases = fixture["cases"]
-    if not isinstance(documents, list) or not isinstance(cases, list):
-        raise ValueError("fixture corpus and cases must be arrays")
-    doc_ids = [d["id"] for d in documents]
-    case_ids = [c["id"] for c in cases]
-    if len(doc_ids) != len(set(doc_ids)) or len(case_ids) != len(set(case_ids)):
-        raise ValueError("duplicate document or case id")
+    if not isinstance(fixture, dict):
+        raise ValueError("fixture must be an object")
+    documents, cases = fixture.get("corpus"), fixture.get("cases")
+    if not isinstance(documents, list) or not documents or not isinstance(cases, list) or not cases:
+        raise ValueError("fixture requires nonempty corpus and cases arrays")
+    if not isinstance(fixture.get("name"), str) or not fixture["name"].strip():
+        raise ValueError("fixture name must be nonempty")
+
+    doc_ids = []
+    for document in documents:
+        if not isinstance(document, dict) or not isinstance(document.get("id"), str) or not document["id"].strip():
+            raise ValueError("document id must be a nonempty string")
+        for field in ("fqn", "path", "text"):
+            if field in document and not isinstance(document[field], str):
+                raise ValueError(f"{document['id']}: document {field} must be a string")
+        doc_ids.append(document["id"])
+    if len(doc_ids) != len(set(doc_ids)):
+        raise ValueError("duplicate document id")
+
+    case_ids = []
     known = set(doc_ids)
     for case in cases:
-        expected = case["expected_ids"]
+        if not isinstance(case, dict) or not isinstance(case.get("id"), str) or not case["id"].strip():
+            raise ValueError("case id must be nonempty")
+        case_id = case["id"]
+        case_ids.append(case_id)
+        if not isinstance(case.get("query"), str) or not case["query"].strip():
+            raise ValueError(f"{case_id}: nonempty query required")
+        if "requires_semantic" in case and type(case["requires_semantic"]) is not bool:
+            raise ValueError(f"{case_id}: requires_semantic must be a boolean")
+        expected = case.get("expected_ids")
         forbidden = case.get("forbidden_ids", [])
-        if not expected or set(expected) - known:
-            raise ValueError(f"{case['id']}: invalid expected ids {sorted(set(expected) - known)}")
+        for field, values in (("expected_ids", expected), ("forbidden_ids", forbidden)):
+            if (not isinstance(values, list) or
+                    (field == "expected_ids" and not values) or
+                    any(not isinstance(item, str) or not item.strip() for item in values)):
+                raise ValueError(f"{case_id}: {field} must contain valid document ids")
+            if len(values) != len(set(values)):
+                raise ValueError(f"{case_id}: duplicate {field}")
+        if set(expected) - known:
+            raise ValueError(f"{case_id}: invalid expected ids {sorted(set(expected) - known)}")
         if set(forbidden) - known or set(expected) & set(forbidden):
-            raise ValueError(f"{case['id']}: invalid forbidden ids")
+            raise ValueError(f"{case_id}: invalid forbidden ids")
+    if len(case_ids) != len(set(case_ids)):
+        raise ValueError("duplicate case id")
     return fixture, hashlib.sha256(content).hexdigest()
 
 

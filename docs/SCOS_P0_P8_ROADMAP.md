@@ -4,6 +4,20 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P0 lexical benchmark fixture-label integrity (2026-10-30; source candidate)
+
+The seven-case offline smoke harness now rejects duplicate expected/forbidden
+relevance labels, blank case IDs or queries, non-boolean `requires_semantic`
+values and non-string corpus text instead of silently normalizing malformed
+benchmark evidence. Five focused TDD regressions were RED against the
+previous loader and GREEN after validation. The real CLI additionally rejects
+recording a baseline from a blank-query fixture. Requalified
+`lexical_baseline.json` changes only `generator_sha256` and `git_base_sha`:
+all seven rankings, per-case/aggregate quality scores and forbidden-hit counts
+are byte-for-byte unchanged. This is **P0 offline evidence integrity only**;
+representative live retrieval, model-space, tenant/temporal isolation,
+performance, production recovery and §41 acceptance remain open.
+
 ## P7 owner FK validation-state acceptance guard (2026-10-30; isolated source candidate)
 
 The owner-integrity audit now offers an opt-in `--require-validated` mode,
