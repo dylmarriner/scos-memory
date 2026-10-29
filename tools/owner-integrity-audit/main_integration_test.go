@@ -10,15 +10,14 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/dylmarriner/scos-memory/packages/database"
 	"github.com/jackc/pgx/v5"
 )
 
 func auditFixtureTx(t *testing.T) (context.Context, pgx.Tx) {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
-	if err := database.RequireTLS(dsn); err != nil {
-		t.Fatal(err)
+	if dsn == "" {
+		t.Fatal("DATABASE_URL is required for PostgreSQL owner-integrity integration tests")
 	}
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, dsn)

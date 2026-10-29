@@ -65,6 +65,10 @@ violation and exited 2. Test-only remediation changed that synthetic row
 to a same-tenant owner; the audit then reported zero violations and exited 0,
 while correctly retaining `constraint_validated=false`.
 
+The P4 PostgreSQL CI workflow also runs the owner-integrity integration
+regressions against its disposable database. That workflow's test DSN is
+local-only; the production audit executable independently requires TLS.
+
 Transaction-rolled-back PostgreSQL integration fixtures exercise missing
 owner, cross-tenant owner, repaired-but-unvalidated FK, validated FK,
 misleading same-named FK, and FORCE RLS filtering. Five repeated focused

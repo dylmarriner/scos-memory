@@ -24,7 +24,9 @@ integration fixtures cover missing owners, cross-tenant owners, repaired and
 validated states, forged FK definitions and FORCE RLS filtering. Five focused
 repetitions passed; a deliberate query mutation failed the regression.
 The complete Go suite passed in 53 tested packages, Go vet and diff checks
-passed. See `docs/P7_OWNER_TENANT_INTEGRITY_AUDIT.md`.
+passed. The P4 PostgreSQL CI workflow now invokes the real audit integration
+regressions; PR-head and merged-main CI acceptance remain mandatory. See
+`docs/P7_OWNER_TENANT_INTEGRITY_AUDIT.md`.
 
 **Still open:** inventory of any actual deployment, authorized remediation,
 constraint validation, recovery/lock qualification, P7 approval/generation,
