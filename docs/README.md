@@ -5,6 +5,7 @@ This directory contains the architecture, governance, deployment and security do
 ## Start here
 
 - [ARIS Memory Fabric Technical Blueprint and Phased Roadmap](ARIS_MEMORY_TECHNICAL_BLUEPRINT_AND_ROADMAP.md)
+- [ARIS Evolution Engine evidence and context contract](ARIS_EVOLUTION_ENGINE_SCOS_CONTRACT.md) (proposed; separate from SCOS P0–P8)
 - [ARIS system map: what goes where](ARIS_SYSTEM_MAP.md) (mirror of the canonical copy in `dylmarriner/ARIS`)
 - [Architecture](architecture.md)
 - [Security configuration](security-configuration.md)

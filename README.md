@@ -163,3 +163,8 @@ design decision changes. The issue forms and PR checklist live in [`.github/`](.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for release history and
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for community expectations.
+
+
+## ARIS Evolution Engine integration (proposed)
+
+The [SCOS Evolution Engine evidence and evolving-context contract](docs/ARIS_EVOLUTION_ENGINE_SCOS_CONTRACT.md) maps existing memory governance onto the [ARIS Evolution Engine technical blueprint](https://github.com/dylmarriner/ARIS/blob/main/docs/evolution/ARIS_EVOLUTION_ENGINE_TECHNICAL_BLUEPRINT_AND_ROADMAP.md). SCOS stores verifiable trace/experiment history, independently attributed outcomes and incremental learned playbooks; it does not issue experiment or deployment authorization. This is documentation of proposed work, not production implementation or a change to the canonical SCOS P0–P8 roadmap.

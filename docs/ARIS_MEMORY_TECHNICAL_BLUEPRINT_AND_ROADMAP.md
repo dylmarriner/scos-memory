@@ -575,3 +575,8 @@ This proves memory survives model/runtime restart without becoming uncontrolled 
 ## 24. Definition of success
 
 This repository succeeds when ARIS can durably remember what happened, retrieve relevant evidence, promote verified knowledge, preserve provenance and contradiction history, survive crashes/retries/outages, support correction and transparency, and do all of that without becoming a competing cognitive runtime.
+
+
+## Evolution Engine evidence and context integration (proposed, 2026-10-29)
+
+The [ARIS Evolution Engine SCOS contract](ARIS_EVOLUTION_ENGINE_SCOS_CONTRACT.md) refines SCOS's evidence/provenance and incremental context-learning responsibilities under [ARIS-EE-BP-001](https://github.com/dylmarriner/ARIS/blob/main/docs/evolution/ARIS_EVOLUTION_ENGINE_TECHNICAL_BLUEPRINT_AND_ROADMAP.md). It builds on the existing Owner-Governed Evolution evidence contract and [SCOS ADR-0009](adr/0009-governed-learning-and-promotion.md), rather than changing accepted approval policy. SCOS retains immutable raw source references, revisioned/trace-backed playbooks, negative experiments and evaluation artifacts. **Approval evidence stored in SCOS is not a TEST or DEPLOY grant.** The trusted evaluator and authorization verifier remain independently enforced. EE-P0–EE-P9 is a separate cross-repository implementation track from SCOS P0–P8, and the proposed interfaces are not claims of completion.
