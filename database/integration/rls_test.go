@@ -336,13 +336,19 @@ func seed(ctx context.Context, db *pgxpool.Pool, f *fixture) error {
 	if err := q(`INSERT INTO principals (id,tenant_id,kind,external_id,display_name) VALUES ($1,$2,'human','principal-a','Principal A')`, f.principalA, f.tenantA); err != nil {
 		return err
 	}
+	// The other tenant's fact must have a real same-tenant owner. Earlier
+	// RLS fixtures accidentally seeded cross-tenant provenance here.
+	principalB := token()
+	if err := q(`INSERT INTO principals (id,tenant_id,kind,external_id,display_name) VALUES ($1,$2,'human','principal-b','Principal B')`, principalB, f.tenantB); err != nil {
+		return err
+	}
 	if err := q(`INSERT INTO namespaces (id,tenant_id,owner_principal_id,canonical_name,sensitivity_ceiling) VALUES ($1,$2,$3,'a-readable','internal'),($4,$2,NULL,'a-other','internal'),($5,$6,NULL,'b-readable','internal')`, f.namespaceA, f.tenantA, f.principalA, f.namespaceOther, f.namespaceB, f.tenantB); err != nil {
 		return err
 	}
 	if err := q(`INSERT INTO namespace_memberships (namespace_id,principal_id,can_read,can_write_candidates) VALUES ($1,$2,true,true)`, f.namespaceA, f.principalA); err != nil {
 		return err
 	}
-	if err := q(`INSERT INTO memory_items (id,tenant_id,namespace_id,owner_principal_id,type,title,canonical_summary,authority_level,confidence_score,sensitivity) VALUES ($1,$2,$3,$4,'semantic','allowed','allowed',50,0.9,'internal'),($5,$2,$3,$4,'semantic','restricted','restricted',50,0.9,'restricted'),($6,$7,$8,$4,'semantic','other-tenant','other',50,0.9,'public')`, f.memoryA, f.tenantA, f.namespaceA, f.principalA, token(), f.memoryB, f.tenantB, f.namespaceB); err != nil {
+	if err := q(`INSERT INTO memory_items (id,tenant_id,namespace_id,owner_principal_id,type,title,canonical_summary,authority_level,confidence_score,sensitivity) VALUES ($1,$2,$3,$4,'semantic','allowed','allowed',50,0.9,'internal'),($5,$2,$3,$4,'semantic','restricted','restricted',50,0.9,'restricted'),($6,$7,$8,$9,'semantic','other-tenant','other',50,0.9,'public')`, f.memoryA, f.tenantA, f.namespaceA, f.principalA, token(), f.memoryB, f.tenantB, f.namespaceB, principalB); err != nil {
 		return err
 	}
 	if err := q(`INSERT INTO retrieval_runs (id,tenant_id,principal_id,query_hash,namespaces,filters,ranking_config,selected_memory_ids,latency_ms) VALUES ($1,$2,$3,'hash','[]','{}','{}','[]',1)`, f.runA, f.tenantA, f.principalA); err != nil {

@@ -295,3 +295,36 @@ review precondition. A global same-tenant composite FK for historical
 existing-row inventory, safe rollout and recovery qualification before
 introducing a production constraint. This endpoint guard does not claim to
 repair historical rows or other services.
+
+## P7 cross-tenant owner database integrity (2026-10-30; PR #168 review hardening)
+
+The owner-ID read guard in the compose handler is not a substitute for a
+database invariant. A new restricted-role PostgreSQL regression first proved
+that a privileged writer could transfer a memory item to a principal from
+another tenant despite the existing UUID-only FK (RED). Append-only migration
+`000091_memory_item_owner_tenant_fk.sql` adds a unique tenant/ID key on
+`principals` and a composite `(tenant_id, owner_principal_id)` FK on
+`memory_items`, enforcing same-tenant ownership on new writes. Legitimate
+same-tenant transfers remain possible. The isolated RLS fixture now creates a
+real owner for its second tenant instead of relying on corrupt provenance.
+
+The FK is installed `NOT VALID` deliberately: existing malformed rows are
+not silently repaired or deleted, and the P7 read guard continues to reject
+them. Production rollout needs a prior cross-tenant ownership inventory,
+remediation/recovery plan, lock/latency qualification and explicit approval,
+followed by separately qualified `VALIDATE CONSTRAINT`. This source change
+does not constitute a live migration, historical data cleanup, P7 approval or
+§41 acceptance.
+
+**Local verification:** A new privileged-owner PostgreSQL regression failed before
+the FK (cross-tenant UPDATE succeeded), then passed after applying migration
+000091 to an isolated PostgreSQL 17/pgvector database. Both cross-tenant
+INSERT and UPDATE now fail with SQLSTATE 23503, and a same-tenant owner
+transfer succeeds. The source-owner review regression, old-pin rejection and
+fresh-pin acceptance also pass. Full tagged memory-intelligence and retrieval
+integration packages pass; 52 Go packages pass with package parallelism
+disabled to avoid shared-database deadlocks; Go vet, diff checks and two
+race-enabled focused repetitions pass. A separate legacy schema-isolation
+fixture remains blocked before reaching migration 000091: migration 000081
+expects a policy not yet installed in that fixture's ordering. This is an
+open integration-fixture qualification gap, not a successful §25 gate.

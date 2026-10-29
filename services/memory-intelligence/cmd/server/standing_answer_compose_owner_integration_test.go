@@ -4,9 +4,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // A reviewer must not be allowed to reuse an old draft fingerprint after
@@ -112,11 +115,62 @@ func TestP7ComposeRejectsForeignTenantSourceOwner(t *testing.T) {
 	// an isolated database, not authorization to migrate production records.
 	if _, err := f.admin.ExecContext(context.Background(),
 		`UPDATE memory_items SET owner_principal_id=$1 WHERE id=$2`, f.other, a); err != nil {
-		t.Fatal(err)
+		// New installations reject the malformed privileged import at the
+		// database boundary; the handler also guards legacy bad rows.
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+			t.Fatalf("unexpected cross-tenant owner update failure: %v", err)
+		}
+		status, result, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
+			"/v1/standing-answers/compose", body)
+		if status != http.StatusOK || result["evidence"] == nil {
+			t.Fatalf("rejected owner mutation damaged valid draft: HTTP %d %v", status, result)
+		}
+		return
 	}
 	status, result, _ := f.call(f.srv.handleStandingAnswerCompose, http.MethodPost,
 		"/v1/standing-answers/compose", body)
 	if status != http.StatusNotFound || result["evidence"] != nil || result["draft_text"] != nil {
-		t.Fatalf("cross-tenant source owner leaked in composition: HTTP %d %v", status, result)
+		t.Fatalf("legacy cross-tenant source owner leaked in composition: HTTP %d %v", status, result)
+	}
+}
+
+// The database must reject privileged cross-tenant owner assignments,
+// independently of the HTTP composition read guard. An id-only FK does not.
+func TestP7MemoryItemOwnerTenantFKRejectsPrivilegedCrossTenantWrites(t *testing.T) {
+	f := newBehaviourFixture(t)
+	fact := f.scalar(`INSERT INTO memory_items
+        (tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+         authority_level,confidence_score,sensitivity)
+        VALUES ($1,$2,$3,'semantic','active','Owner FK','Original',80,0.8,'internal')
+        RETURNING id::text`, f.tenant, f.ns, f.owner)
+	assertFK := func(label string, err error) {
+		t.Helper()
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+			t.Fatalf("%s: expected foreign-key violation 23503, got %v", label, err)
+		}
+	}
+	_, err := f.admin.ExecContext(context.Background(),
+		`UPDATE memory_items SET owner_principal_id=$1 WHERE id=$2`, f.other, fact)
+	assertFK("cross-tenant owner update", err)
+	_, err = f.admin.ExecContext(context.Background(),
+		`INSERT INTO memory_items
+        (tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+         authority_level,confidence_score,sensitivity)
+        VALUES ($1,$2,$3,'semantic','active','Owner FK','Cross tenant',80,0.8,'internal')`,
+		f.tenant, f.ns, f.other)
+	assertFK("cross-tenant owner insert", err)
+
+	replacement := f.scalar(`INSERT INTO principals(tenant_id,kind,external_id,display_name)
+        VALUES ($1,'human','owner-fk-'||gen_random_uuid(),'Same-tenant owner') RETURNING id::text`, f.tenant)
+	if _, err := f.admin.ExecContext(context.Background(),
+		`UPDATE memory_items SET owner_principal_id=$1 WHERE id=$2`, replacement, fact); err != nil {
+		t.Fatalf("same-tenant owner transfer rejected: %v", err)
+	}
+	var current string
+	if err := f.admin.QueryRowContext(context.Background(),
+		`SELECT owner_principal_id::text FROM memory_items WHERE id=$1`, fact).Scan(&current); err != nil || current != replacement {
+		t.Fatalf("same-tenant owner not retained: owner=%s err=%v", current, err)
 	}
 }
