@@ -10,6 +10,30 @@ The response includes `memory_id`, `events`, optional `next_after_id`, and `orde
 
 All SQL executes inside the existing tenant/principal-scoped transaction as the restricted runtime database role. `memory_system_events` FORCE RLS requires both current-memory visibility and event-namespace membership/sensitivity visibility. Unauthorized event rows are not returned. Database errors are sanitized; no connection string or SQL diagnostic is returned to clients. All endpoint responses carry `Cache-Control: no-store` to prevent private history being retained by HTTP caches.
 
+## Principal lifecycle and agent-clearance hardening (2026-10-29)
+
+Migration `000088_memory_event_readback_principal_clearance.sql` strengthens the
+`memory_system_events_read` FORCE-RLS policy without modifying existing event
+records. Read-time authorization now requires the authenticated principal to
+exist, belong to the event tenant and remain enabled, even if stale namespace
+membership survives. Agent principals additionally require a matching `agents`
+capability record and an `agents.maximum_sensitivity` at least as high as the
+event's historical classification. Current-memory visibility, historical
+namespace membership, namespace ceiling and transaction-local identity remain
+mandatory. Human and service principals retain their existing namespace-based
+rules.
+
+A restricted-role PostgreSQL HTTP regression first returned historical events
+to a disabled principal (RED). After the migration, five focused repetitions
+and two race-enabled repetitions passed. The same regression verifies foreign-
+tenant principals with malformed cross-tenant membership, missing agent
+capability records, insufficient agent clearance, clearance upgrade and
+subsequent downgrade. The complete retrieval-orchestrator tagged PostgreSQL
+suite and full memory-intelligence tagged PostgreSQL suite passed on a
+disposable PostgreSQL 17/pgvector database; 52 Go packages and Go vet passed. This is a source-only P5 authorization fix;
+production migration, rollout/recovery and historical belief reconstruction
+remain unapproved and unverified.
+
 ## What this does not prove
 
 Event IDs are allocation order, **not transaction commit order**. `observed_at` is the trigger's wall-clock observation, **not commit time**. Concurrent transactions may commit in a different order, and records from before migration 000082 have only migration-time baselines. Events also do not contain memory content or every historical approval/deletion/revalidation dependency. Therefore the existing `as_of_system_time` HTTP 501 guard must remain until trustworthy complete historical belief reconstruction is implemented and tested.
