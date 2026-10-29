@@ -77,6 +77,9 @@ func TestOwnerTenantAuditDetectsLegacyViolationsWithoutMutatingData(t *testing.T
 	if report.TotalRows != 3 || report.CrossTenantOwners != 0 || report.MissingOwners != 0 || report.ConstraintValidated {
 		t.Fatalf("remediated but unvalidated constraint misreported: %+v", report)
 	}
+	if got := ownerAuditExitCode(report, true); got != 2 {
+		t.Fatalf("unvalidated FK accepted as complete: exit %d", got)
+	}
 	if _, err := tx.Exec(ctx, "ALTER TABLE "+schema+".memory_items VALIDATE CONSTRAINT memory_items_owner_tenant_fk"); err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +89,9 @@ func TestOwnerTenantAuditDetectsLegacyViolationsWithoutMutatingData(t *testing.T
 	}
 	if !report.ConstraintValidated || report.CrossTenantOwners != 0 || report.MissingOwners != 0 {
 		t.Fatalf("validated constraint misreported: %+v", report)
+	}
+	if got := ownerAuditExitCode(report, true); got != 0 {
+		t.Fatalf("validated clean FK rejected: exit %d", got)
 	}
 }
 
@@ -258,4 +264,22 @@ func TestAuditExecutableExitStatuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0, 0)
+	cmd = exec.Command(binary, "--require-validated")
+	cmd.Env = append(os.Environ(), "DATABASE_URL="+dsn)
+	if output, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("unvalidated FK passed strict CLI gate: %s", output)
+	} else {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+			t.Fatalf("strict CLI returned %v: %s", err, output)
+		}
+	}
+	if _, err := conn.Exec(ctx, "ALTER TABLE public.memory_items VALIDATE CONSTRAINT memory_items_owner_tenant_fk"); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(binary, "--require-validated")
+	cmd.Env = append(os.Environ(), "DATABASE_URL="+dsn)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("validated FK failed strict CLI gate: %v: %s", err, output)
+	}
 }

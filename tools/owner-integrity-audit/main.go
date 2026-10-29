@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"reflect"
@@ -21,6 +22,16 @@ type ownerTenantAudit struct {
 	CrossTenantOwners   int64 `json:"cross_tenant_owner_principals"`
 	ConstraintPresent   bool  `json:"constraint_present"`
 	ConstraintValidated bool  `json:"constraint_validated"`
+}
+
+// ownerAuditExitCode keeps the read-only preflight and the stricter rollout
+// acceptance gate distinct. Neither mode repairs or validates any row.
+func ownerAuditExitCode(report ownerTenantAudit, requireValidated bool) int {
+	if !report.ConstraintPresent || report.MissingOwners != 0 || report.CrossTenantOwners != 0 ||
+		(requireValidated && !report.ConstraintValidated) {
+		return 2
+	}
+	return 0
 }
 
 // schema is a trusted code-selected identifier (public in production).
@@ -105,6 +116,8 @@ func run(ctx context.Context, dsn string) (ownerTenantAudit, error) {
 }
 
 func main() {
+	requireValidated := flag.Bool("require-validated", false, "require the owner/tenant foreign key to be validated for acceptance")
+	flag.Parse()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	result, err := run(ctx, os.Getenv("DATABASE_URL"))
@@ -116,7 +129,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "owner integrity audit: cannot encode report:", err)
 		os.Exit(1)
 	}
-	if !result.ConstraintPresent || result.MissingOwners != 0 || result.CrossTenantOwners != 0 {
-		os.Exit(2)
+	if code := ownerAuditExitCode(result, *requireValidated); code != 0 {
+		os.Exit(code)
 	}
 }
