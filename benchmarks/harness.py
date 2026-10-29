@@ -323,6 +323,16 @@ LOWER_IS_BETTER_METRICS = frozenset({
 })
 
 
+def index_unique_benchmark_results(items: list[BenchmarkResult]) -> dict[str, BenchmarkResult]:
+    """Reject ambiguous case identities before comparing or aggregating runs."""
+    indexed: dict[str, BenchmarkResult] = {}
+    for item in items:
+        if item.case_id in indexed:
+            raise ValueError(f"duplicate benchmark case_id: {item.case_id}")
+        indexed[item.case_id] = item
+    return indexed
+
+
 def compare_baseline(results: list[BenchmarkResult],
                      baseline_results: list[BenchmarkResult]) -> dict[str, Any]:
     """Compare metrics by case ID, including cases missing from either run.
@@ -331,16 +341,8 @@ def compare_baseline(results: list[BenchmarkResult],
     erase its previous regression. Duplicate IDs are ambiguous and rejected
     instead of allowing a later result to overwrite an earlier one.
     """
-    def index_unique(items: list[BenchmarkResult]) -> dict[str, BenchmarkResult]:
-        indexed: dict[str, BenchmarkResult] = {}
-        for item in items:
-            if item.case_id in indexed:
-                raise ValueError(f"duplicate benchmark case_id: {item.case_id}")
-            indexed[item.case_id] = item
-        return indexed
-
-    current_by_id = index_unique(results)
-    baseline_by_id = index_unique(baseline_results)
+    current_by_id = index_unique_benchmark_results(results)
+    baseline_by_id = index_unique_benchmark_results(baseline_results)
     comparisons: dict[str, dict[str, int]] = {}
     for case_id in sorted(current_by_id.keys() | baseline_by_id.keys()):
         current = current_by_id.get(case_id)
@@ -412,6 +414,12 @@ class BenchmarkRunner:
         """
         if not self.results:
             return {"error": "no results"}
+        current_by_id = index_unique_benchmark_results(self.results)
+        baseline_by_id = None
+        if baseline_results is not None:
+            baseline_by_id = index_unique_benchmark_results(baseline_results)
+            if current_by_id.keys() != baseline_by_id.keys():
+                raise ValueError("baseline and current benchmark case IDs must match for answer regression")
         collected: dict[str, list[float]] = {}
         for r in self.results:
             for metric, value in r.scores.items():
@@ -419,10 +427,9 @@ class BenchmarkRunner:
         average_scores = {metric: sum(vals) / len(vals) for metric, vals in collected.items()}
         average_scores.update(promotion_precision_recall(self.suite.cases, self.results))
         average_scores["task_success"] = sum(r.answer_correct for r in self.results) / len(self.results)
-        if baseline_results is not None:
-            baseline_by_id = {b.case_id: b for b in baseline_results}
+        if baseline_by_id is not None:
             flags = [answer_regression(baseline_by_id[r.case_id].answer_correct, r.answer_correct)
-                     for r in self.results if r.case_id in baseline_by_id]
+                     for r in self.results]
             if flags:
                 average_scores["answer_regression"] = sum(flags) / len(flags)
         categories = sorted({case.category for case in self.suite.cases})
