@@ -15,7 +15,12 @@ pgvector regression reproduced all three errors under both the owner and
 restricted `scos_app` roles (RED). The exact lane now uses case-insensitive
 `STRPOS` with the raw parameterized query, preserving ordinary substring
 search without SQL wildcard semantics (GREEN, five focused repetitions).
-All 87 ordered SQL migrations and 21 RLS policies applied to an isolated
+CodeRabbit review exposed a test coverage escape: required-mode tests could
+silently skip without an owner DSN. That guard now fails closed (reproduced
+as SKIP before the fix, FAIL afterward), and a version-content-only fixture
+covers the second exact-search SQL branch, including literal `%` and `_`.
+Five focused repetitions and two race-enabled repetitions passed after the
+review correction. All 87 ordered SQL migrations and 21 RLS policies applied to an isolated
 PostgreSQL instance; the complete tagged retrieval and memory-intelligence
 integration suites passed, along with 52 Go packages, Go vet and two focused
 race-enabled repetitions. The §41 definition-of-done checker still reports

@@ -13,6 +13,9 @@ import (
 // Exact lexical retrieval must treat a user query as text, not a SQL LIKE
 // pattern. Otherwise %, _ and backslash can retrieve unrelated evidence.
 func TestP0ExactSearchTreatsSQLWildcardsAsLiteralText(t *testing.T) {
+	if os.Getenv("SCOS_REQUIRE_APP_RLS_TESTS") == "1" && os.Getenv("SCOS_RETRIEVAL_TEST_DSN") == "" {
+		t.Fatal("owner database DSN required for restricted-role exact-search regression")
+	}
 	ctx := context.Background()
 	admin := testRetrievalPool(t)
 	var tenant, principal, namespace string
@@ -29,11 +32,15 @@ func TestP0ExactSearchTreatsSQLWildcardsAsLiteralText(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cases := []struct{ query, title string }{
-		{"%", "Only percent % marker"},
-		{"_", "Only underscore _ marker"},
-		{`\`, `Only backslash \ marker`},
-		{"ORDINARY", "ordinary mixed case text"},
+	cases := []struct {
+		query, title, content string
+		expected              []int
+	}{
+		{query: "%", title: "Only percent % marker", expected: []int{0, 4}},
+		{query: "_", title: "Only underscore _ marker", expected: []int{1, 4}},
+		{query: `\`, title: `Only backslash \ marker`, expected: []int{2}},
+		{query: "ORDINARY", title: "ordinary mixed case text", expected: []int{3}},
+		{query: "v%_", title: "version-only fact", content: "Version content includes v%_ literal", expected: []int{4}},
 	}
 	ids := make([]string, len(cases))
 	for i, tc := range cases {
@@ -41,21 +48,40 @@ func TestP0ExactSearchTreatsSQLWildcardsAsLiteralText(t *testing.T) {
             VALUES($1,$2,$3,'semantic','active',$4,$4,80,0.9,'internal') RETURNING id`, tenant, namespace, principal, tc.title).Scan(&ids[i]); err != nil {
 			t.Fatal(err)
 		}
+		if tc.content != "" {
+			var version string
+			if err := admin.QueryRow(ctx, `INSERT INTO memory_versions(memory_id,version_number,content,content_hash,change_reason,created_by)
+                VALUES($1,1,$2,$3,'test',$4) RETURNING id`, ids[i], tc.content, hashQuery(tc.content), principal).Scan(&version); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := admin.Exec(ctx, "UPDATE memory_items SET current_version_id=$1 WHERE id=$2", version, ids[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	check := func(role string, pool *pgxpool.Pool) {
 		t.Helper()
 		srv := &server{db: pool}
-		for i, tc := range cases {
+		for _, tc := range cases {
 			got, err := srv.exactSearch(ctx, RetrieveRequest{TenantID: tenant, PrincipalID: principal, Query: tc.query}, []string{t.Name()}, "internal", 20)
 			if err != nil {
 				t.Fatalf("%s query %q: %v", role, tc.query, err)
 			}
-			if len(got) != 1 || got[0].MemoryID != ids[i] {
-				actual := make([]string, 0, len(got))
-				for _, item := range got {
-					actual = append(actual, item.MemoryID)
+			expected := make(map[string]bool, len(tc.expected))
+			for _, index := range tc.expected {
+				expected[ids[index]] = true
+			}
+			if len(got) != len(expected) {
+				t.Errorf("%s literal query %q returned %d results; want %d", role, tc.query, len(got), len(expected))
+			}
+			for _, item := range got {
+				if !expected[item.MemoryID] {
+					t.Errorf("%s literal query %q returned unrelated memory %s", role, tc.query, item.MemoryID)
 				}
-				t.Errorf("%s literal query %q returned %v; want only %s", role, tc.query, actual, ids[i])
+				delete(expected, item.MemoryID)
+			}
+			for missing := range expected {
+				t.Errorf("%s literal query %q omitted memory %s", role, tc.query, missing)
 			}
 		}
 	}
