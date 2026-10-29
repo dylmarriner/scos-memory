@@ -13,7 +13,7 @@ intent, and mixed memory/code evidence.
 BGE-Code rather than lexical coincidence. `forbidden_ids` records evidence
 that must not be surfaced as current truth.
 
-CI validates structural integrity and the offline lexical regression gate below. The fixture loader also rejects blank queries/IDs, duplicate relevance or forbidden labels, non-boolean semantic flags, and non-string document text; malformed inputs cannot be re-recorded as healthy evidence.
+CI validates structural integrity and the offline lexical regression gate below. The fixture loader also rejects blank queries/IDs, duplicate relevance or forbidden labels, non-boolean semantic flags, non-string document text, and corpus documents without any searchable fqn/path/text content; malformed inputs cannot be re-recorded as healthy evidence.
 Actual deployed Recall@K, MRR, nDCG and latency still require a benchmark
 runner against a configured retrieval deployment with git SHA and model-space
 identity recorded.
