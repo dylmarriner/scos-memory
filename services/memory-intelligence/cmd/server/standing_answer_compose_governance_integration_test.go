@@ -7,17 +7,24 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestP7ComposePinnedDraftRejectsAuthorityAndValidityDrift(t *testing.T) {
 	f := newBehaviourFixture(t)
+	// Use one database clock anchor so this regression cannot expire.
+	var anchor time.Time
+	if err := f.admin.QueryRowContext(context.Background(), "SELECT statement_timestamp()").Scan(&anchor); err != nil {
+		t.Fatal(err)
+	}
 	makeFact := func(summary string) string {
 		return f.scalar(`INSERT INTO memory_items
             (tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
              authority_level,confidence_score,sensitivity,valid_from,valid_until,expires_at)
             VALUES ($1,$2,$3,'semantic','active','Governance review',$4,80,0.8,'internal',
-                    '2026-10-01T00:00:00Z','2026-12-01T00:00:00Z','2026-12-15T00:00:00Z')
-            RETURNING id::text`, f.tenant, f.ns, f.owner, summary)
+                    $5,$6,$7) RETURNING id::text`,
+			f.tenant, f.ns, f.owner, summary,
+			anchor.Add(-30*24*time.Hour), anchor.Add(60*24*time.Hour), anchor.Add(90*24*time.Hour))
 	}
 	a, b := makeFact("Authority source"), makeFact("Other source")
 	compose := func(expected string) (int, map[string]any) {
@@ -44,15 +51,22 @@ func TestP7ComposePinnedDraftRejectsAuthorityAndValidityDrift(t *testing.T) {
 		evidence["valid_until"] == nil || evidence["expires_at"] == nil {
 		t.Fatalf("reviewable evidence omits authority or validity metadata: %v", evidence)
 	}
-	updates := []struct{ name, query string }{
-		{"authority downgrade", "UPDATE memory_items SET authority_level=5 WHERE id=$1"},
-		{"valid-from change", "UPDATE memory_items SET valid_from='2026-10-02T00:00:00Z' WHERE id=$1"},
-		{"valid-until change", "UPDATE memory_items SET valid_until='2026-11-30T00:00:00Z' WHERE id=$1"},
-		{"expiry change", "UPDATE memory_items SET expires_at='2026-12-14T00:00:00Z' WHERE id=$1"},
+	updates := []struct {
+		name, query string
+		value       any
+	}{
+		{"authority downgrade", "UPDATE memory_items SET authority_level=5 WHERE id=$1", nil},
+		{"valid-from change", "UPDATE memory_items SET valid_from=$2 WHERE id=$1", anchor.Add(-29 * 24 * time.Hour)},
+		{"valid-until change", "UPDATE memory_items SET valid_until=$2 WHERE id=$1", anchor.Add(59 * 24 * time.Hour)},
+		{"expiry change", "UPDATE memory_items SET expires_at=$2 WHERE id=$1", anchor.Add(89 * 24 * time.Hour)},
 	}
 	for _, tc := range updates {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := f.admin.ExecContext(context.Background(), tc.query, a); err != nil {
+			args := []any{a}
+			if tc.value != nil {
+				args = append(args, tc.value)
+			}
+			if _, err := f.admin.ExecContext(context.Background(), tc.query, args...); err != nil {
 				t.Fatal(err)
 			}
 			status, stale := compose(expected)
