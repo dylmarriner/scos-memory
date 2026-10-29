@@ -22,6 +22,8 @@ mechanism:
 ```sh
 go build -o /tmp/scos-owner-integrity-audit ./tools/owner-integrity-audit
 /tmp/scos-owner-integrity-audit
+# Only after separately approved migration, remediation and FK validation:
+/tmp/scos-owner-integrity-audit --require-validated
 ```
 
 Use the built executable when checking exit codes; `go run` can wrap a
@@ -41,9 +43,14 @@ principal, or memory identifiers, content, or connection strings are printed.
 
 Exit codes:
 
-- `0`: query completed, expected FK exists, and both violation counts are
-  zero. If `constraint_validated=false`, validation is **still pending**.
-- `2`: missing FK or one or more owner integrity violations.
+- `0` (default preflight): query completed, expected FK exists, and both
+  violation counts are zero. If `constraint_validated=false`, validation is
+  **still pending**.
+- `0` (`--require-validated`): in addition to a clean inventory, the expected
+  FK is catalog-confirmed as validated. With this flag, an otherwise clean
+  `NOT VALID` FK returns `2`, never a false completion signal.
+- `2`: missing FK, one or more owner integrity violations, or an unvalidated
+  FK when `--require-validated` is supplied.
 - `1`: connection/TLS, authorization/RLS, query, catalog-definition,
   timeout, or JSON-output failure. Treat this as **unknown**, not clean.
 
@@ -99,3 +106,21 @@ non-TLS connections, unexpected database names, or pre-existing target tables.
 It skips without a dedicated TLS fixture; the standard CI integration suite
 continues to cover the catalog and transaction checks. No live database was
 queried, changed, repaired, or validated.
+
+## Separate validation-state gate (2026-10-30)
+
+The default command intentionally remains a preflight so operators can
+inventory legacy rows before an approved validation. The optional
+`--require-validated` switch is a stricter **read-only** acceptance check;
+it never runs `ALTER TABLE`, repairs data or grants authorization to deploy.
+
+TDD first failed to compile because the acceptance decision did not exist.
+Six exit-code unit cases then passed, covering missing FK, missing and
+cross-tenant owners, clean unvalidated preflight, rejected unvalidated
+acceptance and accepted validated state. Real PostgreSQL 17 integration
+asserted the same transition inside a rolled-back fixture. A built-binary
+subprocess test using a separate disposable TLS-enabled PostgreSQL database
+confirmed `--require-validated` exits 2 for a clean NOT VALID constraint and
+exits 0 after a **test-only** `VALIDATE CONSTRAINT`. This does not establish
+that any deployed database is clean or validated; rollout and recovery
+qualification remain explicitly outstanding.

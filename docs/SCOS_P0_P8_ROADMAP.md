@@ -4,6 +4,20 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P7 owner FK validation-state acceptance guard (2026-10-30; isolated source candidate)
+
+The owner-integrity audit now offers an opt-in `--require-validated` mode,
+separate from its default historical-violation preflight. The strict mode
+returns exit 2 for an otherwise clean but `NOT VALID` composite owner FK,
+and only returns 0 when both the historical counts are zero and the expected
+constraint is catalog-confirmed as validated. Neither mode writes data.
+TDD RED (missing acceptance decision), six GREEN unit cases, repeated real
+PostgreSQL 17 fixture assertions, and a built executable on a dedicated
+TLS-enabled disposable database verified the pre/post test-only validation
+transition. Production inventory, authorized repair, live constraint
+validation, rollout/recovery and governance §41 remain open. See
+`docs/P7_OWNER_TENANT_INTEGRITY_AUDIT.md`.
+
 ## P7 legacy owner/tenant integrity preflight (2026-10-30; source candidate)
 
 The new `tools/owner-integrity-audit` is an aggregate-only, read-only,
