@@ -799,6 +799,7 @@ func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespace
               AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
               AND other.tenant_id=mi.tenant_id
               AND other.status IN ('active')
+              AND other.superseded_by_id IS NULL
               AND other.namespace_id=ANY($2::uuid[])
               AND other.sensitivity <= $3
               AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
@@ -811,6 +812,7 @@ func (s *server) exactSearch(ctx context.Context, req RetrieveRequest, namespace
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
 		  AND mi.status = 'active'
+		  AND mi.superseded_by_id IS NULL
 		  AND mi.namespace_id = ANY($2::uuid[])
 		  AND mi.sensitivity <= $3
 		AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
@@ -843,6 +845,7 @@ func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namesp
               AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
               AND other.tenant_id=mi.tenant_id
               AND other.status IN ('active')
+              AND other.superseded_by_id IS NULL
               AND other.namespace_id=ANY($2::uuid[])
               AND other.sensitivity <= $3
               AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
@@ -855,6 +858,7 @@ func (s *server) fullTextSearch(ctx context.Context, req RetrieveRequest, namesp
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
 		  AND mi.status = 'active'
+		  AND mi.superseded_by_id IS NULL
 		  AND mi.namespace_id = ANY($2::uuid[])
 		  AND mi.sensitivity <= $3
 		AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
@@ -926,6 +930,7 @@ func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespac
 			WHERE (rel.source_memory_id = mi.id OR rel.target_memory_id = mi.id)
 			  AND (rel.relation_type = 'contradicts' OR rel.relation_type ILIKE '%conflict%')
               AND other.tenant_id=mi.tenant_id AND other.status='active'
+              AND other.superseded_by_id IS NULL
               AND other.namespace_id=ANY($2::uuid[]) AND other.sensitivity <= $3
               AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
               AND (other.valid_from IS NULL OR other.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
@@ -946,6 +951,7 @@ func (s *server) vectorSearch(ctx context.Context, req RetrieveRequest, namespac
 		) embedding ON true
 		WHERE mi.tenant_id = $1
 		  AND mi.status = 'active'
+		  AND mi.superseded_by_id IS NULL
 		  AND mi.namespace_id = ANY($2::uuid[])
 		  AND mi.sensitivity <= $3
 		  AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
@@ -988,6 +994,7 @@ func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, na
               AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
               AND other.tenant_id=mi.tenant_id
               AND other.status IN ('active', 'candidate')
+              AND other.superseded_by_id IS NULL
               AND other.namespace_id IN (SELECT n.id FROM namespaces n JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read WHERE n.tenant_id=$1 AND n.canonical_name=ANY($3::text[]))
               AND other.sensitivity <= $6
               AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
@@ -1012,6 +1019,7 @@ func (s *server) recentSessionState(ctx context.Context, req RetrieveRequest, na
 			    AND n.canonical_name = ANY($3::text[])
 		  )
 		  AND mi.status IN ('active', 'candidate')
+		  AND mi.superseded_by_id IS NULL
 		  AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
 		  AND (mi.valid_until IS NULL OR mi.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
 		  AND (mi.expires_at IS NULL OR mi.expires_at > now())
@@ -1081,6 +1089,7 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
               AND (r.relation_type='contradicts' OR r.relation_type ILIKE '%conflict%')
               AND other.tenant_id=mi.tenant_id
               AND other.status IN ('active')
+              AND other.superseded_by_id IS NULL
               AND other.namespace_id IN (SELECT n.id FROM namespaces n JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read WHERE n.tenant_id=$1 AND n.canonical_name=ANY($5::text[]))
               AND other.sensitivity <= $4
               AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
@@ -1097,6 +1106,7 @@ func (s *server) relationExpansion(ctx context.Context, req RetrieveRequest, nam
 			JOIN namespace_memberships m ON m.namespace_id=n.id AND m.principal_id=$2 AND m.can_read=true
 			JOIN principals p ON p.id=m.principal_id AND p.tenant_id=n.tenant_id AND p.disabled_at IS NULL
 			WHERE mi.tenant_id=$1 AND n.tenant_id=$1 AND rel.source_memory_id=ANY($3::uuid[]) AND mi.status='active'
+			  AND mi.superseded_by_id IS NULL
                 AND (rel.valid_from IS NULL OR rel.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
                 AND (rel.valid_until IS NULL OR rel.valid_until > COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
 			  AND mi.sensitivity <= $4 AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
@@ -1617,6 +1627,7 @@ func (s *server) recentMemories(ctx context.Context, req RetrieveRequest, namesp
               AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
               AND other.tenant_id=mi.tenant_id
               AND other.status IN ('active')
+              AND other.superseded_by_id IS NULL
               AND other.namespace_id=ANY($2::uuid[])
               AND other.sensitivity <= $3
               AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
@@ -1629,6 +1640,7 @@ func (s *server) recentMemories(ctx context.Context, req RetrieveRequest, namesp
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
 		  AND mi.status = 'active'
+		  AND mi.superseded_by_id IS NULL
 		  AND mi.namespace_id = ANY($2::uuid[])
 		  AND mi.sensitivity <= $3
 		  AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
@@ -1660,6 +1672,7 @@ func (s *server) activeTaskState(ctx context.Context, req RetrieveRequest, names
               AND (rel.relation_type='contradicts' OR rel.relation_type ILIKE '%conflict%')
               AND other.tenant_id=mi.tenant_id
               AND other.status IN ('active')
+              AND other.superseded_by_id IS NULL
               AND other.namespace_id=ANY($2::uuid[])
               AND other.sensitivity <= $3
               AND other.sensitivity <= (SELECT sensitivity_ceiling FROM namespaces WHERE id=other.namespace_id)
@@ -1672,6 +1685,7 @@ func (s *server) activeTaskState(ctx context.Context, req RetrieveRequest, names
 		LEFT JOIN memory_versions mv ON mv.id = mi.current_version_id
 		WHERE mi.tenant_id = $1
 		  AND mi.status = 'active'
+		  AND mi.superseded_by_id IS NULL
 		  AND mi.namespace_id = ANY($2::uuid[])
 		  AND mi.sensitivity <= $3
 		  AND (mi.valid_from IS NULL OR mi.valid_from <= COALESCE(NULLIF(current_setting('scos.as_of_valid_time',true), '')::timestamptz, now()))
