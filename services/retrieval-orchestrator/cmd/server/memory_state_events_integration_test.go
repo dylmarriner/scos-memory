@@ -99,6 +99,78 @@ func TestP5MemoryEventReadbackRestrictedRoleHTTP(t *testing.T) {
 	if first.Ordering != "event_id_not_commit_order" || second.Ordering != first.Ordering {
 		t.Fatalf("historical ordering misrepresented: %+v %+v", first, second)
 	}
+	// Principal lifecycle is a read-time security boundary even when an old
+	// namespace membership remains. A disabled identity cannot inspect events.
+	if _, err := owner.Exec(ctx, "UPDATE principals SET disabled_at=now() WHERE id=$1", principal); err != nil {
+		t.Fatal(err)
+	}
+	status, disabled := request(tenant, principal, 10, 0)
+	if status != 200 || len(disabled.Events) != 0 {
+		t.Fatalf("disabled principal leaked memory history: HTTP %d %+v", status, disabled)
+	}
+	if _, err := owner.Exec(ctx, "UPDATE principals SET disabled_at=NULL WHERE id=$1", principal); err != nil {
+		t.Fatal(err)
+	}
+
+	// Malformed cross-tenant membership must never turn a foreign principal
+	// into a valid tenant identity, even with a matching tenant header.
+	if _, err := owner.Exec(ctx, "INSERT INTO namespace_memberships(namespace_id,principal_id,can_read) VALUES($1,$2,true)", ns, otherPrincipal); err != nil {
+		t.Fatal(err)
+	}
+	status, foreignMember := request(tenant, otherPrincipal, 10, 0)
+	if status != 200 || len(foreignMember.Events) != 0 {
+		t.Fatalf("foreign-tenant principal leaked memory history: HTTP %d %+v", status, foreignMember)
+	}
+	if _, err := owner.Exec(ctx, "DELETE FROM namespace_memberships WHERE namespace_id=$1 AND principal_id=$2", ns, otherPrincipal); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent maximum sensitivity is independent of the namespace ceiling.
+	var agent string
+	if err := owner.QueryRow(ctx, "INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES($1,'agent',$2,$2) RETURNING id", tenant, t.Name()+"-agent").Scan(&agent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(ctx, "INSERT INTO namespace_memberships(namespace_id,principal_id,can_read) VALUES($1,$2,true)", ns, agent); err != nil {
+		t.Fatal(err)
+	}
+	status, missingCapability := request(tenant, agent, 10, 0)
+	if status != 200 || len(missingCapability.Events) != 0 {
+		t.Fatalf("agent without capability record leaked memory history: HTTP %d %+v", status, missingCapability)
+	}
+	if _, err := owner.Exec(ctx, "INSERT INTO agents(id,version,maximum_sensitivity) VALUES($1,'v1','public')", agent); err != nil {
+		t.Fatal(err)
+	}
+	status, underCleared := request(tenant, agent, 10, 0)
+	if status != 200 || len(underCleared.Events) != 0 {
+		t.Fatalf("under-cleared agent leaked internal history: HTTP %d %+v", status, underCleared)
+	}
+	if _, err := owner.Exec(ctx, "UPDATE agents SET maximum_sensitivity='internal' WHERE id=$1", agent); err != nil {
+		t.Fatal(err)
+	}
+	status, cleared := request(tenant, agent, 10, 0)
+	if status != 200 || len(cleared.Events) != 2 {
+		t.Fatalf("cleared agent could not inspect eligible history: HTTP %d %+v", status, cleared)
+	}
+	// The agent cap applies to the EVENT classification, not the namespace's
+	// higher ceiling. A confidential-capable namespace can contain internal data.
+	if _, err := owner.Exec(ctx, "UPDATE namespaces SET sensitivity_ceiling='confidential' WHERE id=$1", ns); err != nil {
+		t.Fatal(err)
+	}
+	status, widerNamespace := request(tenant, agent, 10, 0)
+	if status != 200 || len(widerNamespace.Events) != 2 {
+		t.Fatalf("agent clearance incorrectly bound to namespace ceiling: HTTP %d %+v", status, widerNamespace)
+	}
+	if _, err := owner.Exec(ctx, "UPDATE namespaces SET sensitivity_ceiling='internal' WHERE id=$1", ns); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(ctx, "UPDATE agents SET maximum_sensitivity='public' WHERE id=$1", agent); err != nil {
+		t.Fatal(err)
+	}
+	status, downgraded := request(tenant, agent, 10, 0)
+	if status != 200 || len(downgraded.Events) != 0 {
+		t.Fatalf("downgraded agent leaked memory history: HTTP %d %+v", status, downgraded)
+	}
+
 	for _, tc := range []struct{ name, tenant, principal string }{
 		{"same-tenant nonmember", tenant, outsider},
 		{"foreign tenant", otherTenant, otherPrincipal},
