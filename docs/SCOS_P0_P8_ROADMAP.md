@@ -4,6 +4,23 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P5 current-belief supersession exclusion (2026-10-29; source candidate)
+
+A real PostgreSQL 17/pgvector regression showed that a memory with
+`status='active'` and a non-null `superseded_by_id` remained retrievable
+as current evidence and appeared as a live contradiction target. Both the
+owner and restricted `scos_app` HTTP paths reproduced the leak (RED).
+Current-belief exact, full-text, vector, recent, task-state, session-state
+and relation-expansion SQL now excludes superseded sources and conflict
+targets before ranking or serialization (GREEN). The test retains the
+unsuperseded source and replacement, and requires the sole visible
+conflict to point at the replacement. Five focused PostgreSQL repetitions,
+two race-enabled repetitions, the full tagged retrieval integration suite,
+52 Go packages and Go vet passed on isolated AMD. See
+`docs/P5_SUPERSESSION_CURRENT_BELIEF.md`. This is a current-belief
+integrity fix, **not** transaction-ordered historical reconstruction,
+representative performance, §41 acceptance, or production rollout.
+
 ## P0 summary-to-suite identity integrity (2026-10-29; development)
 
 `BenchmarkRunner.summary()` could report healthy quality/task-success averages
