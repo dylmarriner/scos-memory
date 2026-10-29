@@ -4,6 +4,36 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §25 governance RLS fixture: production-schema qualification (2026-10-30; source candidate)
+
+The previously documented governance RLS fixture failure is reproduced on an
+isolated TLS-enabled PostgreSQL 17/pgvector container: applying migrations into
+a private schema fails at migration 000040 because production SECURITY DEFINER
+functions pin their search path to `public`; suppressing function validation
+merely moves the failure to migration 000085's explicit
+`public.memory_standing_answers` reference. The fixture was testing a schema
+layout that production does not use.
+
+The integration fixture now requires explicit
+`SCOS_RLS_TEST_CREATE_DATABASE=1` authorization, creates a uniquely named
+disposable **database** with production's `public` schema, installs the actual
+migrations and RLS policies, tests with a distinct `NOSUPERUSER NOBYPASSRLS`
+role, and drops its test database and owned roles on cleanup. It requires both
+a TLS-enforcing URL and an actually negotiated TLS session. The production
+`scos_app` role is created only if absent and is removed only if the fixture
+created it. New assertions check the security-invoker/security-barrier
+standing-answer view and the endpoint-aware memory-relation policy in
+`public`. Three full RLS integration repetitions passed on the disposable
+PostgreSQL 17 server; no test databases or roles remained.
+
+The P4 PostgreSQL CI job is extended to enable TLS on its disposable service
+**after** existing integration tests, then run the governance RLS suite with
+explicit disposable-database permission. CI contract tests first failed
+because this gate was absent (RED) and now pass (GREEN). PR-head and
+merged-main CI are still required. This closes a **fixture qualification
+gap only**, not live RLS deployment, production tenant validation, P7
+approval/generation, §25 complete integration acceptance, or §41.
+
 ## P0 lexical benchmark Git provenance isolation (2026-10-30; source candidate)
 
 The offline lexical benchmark previously executed `git rev-parse HEAD` in the
