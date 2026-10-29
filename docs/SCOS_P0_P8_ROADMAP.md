@@ -4,7 +4,40 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## P0 literal exact-retrieval integrity (2026-10-29; source candidate)
+## P7 standing-answer read-time agent clearance (2026-10-29; source candidate)
+
+A restricted `scos_app` PostgreSQL regression demonstrated that the
+`memory_standing_answers_current` security-invoker view could return a cached
+answer to an agent with namespace membership but **no capability record**
+(RED: 1 visible row, expected 0). Its earlier evidence-freshness checks
+relied on namespace/row policies and did not enforce the independent agent
+`maximum_sensitivity` ceiling or principal lifecycle at the view boundary.
+Migration `000089` replaces the view definition and installs a restrictive
+runtime-role SELECT policy on the underlying cache table when `scos_app`
+already exists; fresh installs apply the same policy after role creation in
+`database/policies/000021`. Both preserve `security_invoker`,
+`security_barrier`, complete evidence freshness and legacy malformed-evidence
+guards. An enabled, same-tenant principal is required; agents must have a
+capability record and every cited fact must fit its sensitivity ceiling.
+No cached answer or live data is rewritten. Real restricted-role tests cover
+direct cache-table reads, view reads, authenticated HTTP reads, multi-fact
+all-or-nothing visibility, missing capabilities,
+clearance upgrade/downgrade, disabled identities and malformed cross-tenant
+memberships. The retrieval orchestrator's opt-in cache lane is independently
+regressed for the same agent boundary. A second RED test proved that the
+original view-only fix still permitted a raw-table SELECT; the restrictive
+policy closes that bypass. A fresh disposable PostgreSQL 17/pgvector
+installation applied all 88 migrations and 22 RLS policy files, then passed
+both focused tests. The two focused suites passed five repetitions each;
+all tagged retrieval and memory-intelligence PostgreSQL
+integration tests passed, along with 52 Go packages, Go vet and two
+race-enabled focused repetitions. The first full Go invocation inherited
+`DATABASE_URL` with `sslmode=disable` and correctly failed the unrelated
+service-state TLS contract; the complete suite passed with that test-only
+DSN unset. This is a **source fix**, not a production migration, human
+approval workflow, historical belief reconstruction or P7/§41 acceptance.
+
+## P0 literal exact-retrieval integrity (2026-10-29; PR #165 merged)
 
 The P4 exact lexical lane previously interpolated the caller's query into a
 parameterized SQL `LIKE` pattern. Although SQL injection was prevented, the
@@ -26,6 +59,11 @@ integration suites passed, along with 52 Go packages, Go vet and two focused
 race-enabled repetitions. The §41 definition-of-done checker still reports
 FAIL/PARTIAL. This improves lexical evidence precision, **not** representative P0 quality,
 P5 historical reconstruction, §41 acceptance or production rollout.
+PR #165 was squash-merged at `82e1f1093f5d38abf1c4be77e3be853ea8430a52`
+from expected head `428426c275cd890f620da313e13f3c43a77a229b`;
+merged-main [CI](https://github.com/dylmarriner/scos-memory/actions/runs/40829168253)
+and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40829168438)
+both passed. No production rollout was performed.
 
 ## P5 current-belief supersession exclusion (2026-10-29; source candidate)
 
@@ -1739,6 +1777,7 @@ correction, production rollout, or P7 completion.
 - [ ] Create OKF review proposals with old/new code evidence.
 - [ ] Invalidate standing answers depending on stale/superseded evidence.
   - [x] **Database-level P7 standing-answer invalidation (2026-10-28, migration 000084, merged PR #111):** typed tenant-bound dependencies, conservative stale marking for legacy rows, atomic invalidation on fact status/version/effective-date/deletion and P7 code `needs_review` events, guarded refreshes requiring governed still-valid reviews, runtime privilege denial, and real PostgreSQL restricted-role and concurrent-refresh race tests (RED before the row lock, GREEN after), plus TEMP-table shadowing reproduction (RED before schema-qualification, GREEN after). Exact-head CI and P4 workflows passed; merge commit `6030318ac61e367844fec061688e773e096b71de` passed merged-main CI and P4 workflows. See `docs/P7_STANDING_ANSWER_FRESHNESS.md`.
+  - [x] **P7 restricted-agent stale-cache refresh remediation (2026-10-29, PR #166 review-finding follow-up; source candidate, NOT deployed):** Codex found that the agent-clearance restrictive SELECT policy in migration `000089` / policy `000021` correctly concealed stale cached rows but also broke the `ON CONFLICT DO UPDATE` refresh path for authorized agents. An isolated PostgreSQL 17 restricted-role regression reproduced HTTP 500 with the original handler (RED), then passed (GREEN) after a source-derived, least-privilege `SECURITY DEFINER` refresh entry point in migration `000090` and a fresh-install execute grant in policy `000022`. The original restrictive SELECT policy remains unchanged: stale and over-clearance raw reads are still denied. The helper rechecks tenant, enabled principal, agent capability, namespace read/write, source eligibility, code-review continuity and exact normalized title, and takes no caller-supplied answer text. Existing pending-code-review HTTP 409 semantics were preserved. Full tagged PostgreSQL memory-intelligence/retrieval integration, all 52 Go packages, Go vet, focused race repetitions and a separate clean PostgreSQL migration/policy install passed. See `docs/P7_STANDING_ANSWER_FRESHNESS.md`. **This is not merged-main, production rollout/recovery or P7 completion evidence until the PR and main CI gates are verified.**
   - [x] **Read-time freshness projection merged (2026-10-28, migration 000085, PR #112):** PostgreSQL `security_invoker`/`security_barrier` view rechecks all supporting evidence on each read, including wall-clock expiry, tenant/namespace visibility, status and P7 review restrictions. Real PostgreSQL tests first failed because the view was missing (RED), then passed after implementation (GREEN) for live-to-expired transition without cache mutation (including a long-lived transaction RED with `now()`, GREEN with statement time), cross-tenant denial, membership revocation and malformed legacy exclusion. PR #112 merged at `50f2252d242edb8cb795fe6f274322887610f89c`; exact-head and merged-main CI/P4 integration passed, with 51 Go packages, vet and the tagged PostgreSQL suite independently passing on AMD. Production rollout remains unapproved. The parent checkbox stays open because no end-to-end cache writer/serving path, stale-answer benchmark, or full P7 acceptance has been verified.
 
 - [ ] Measure false-positive/false-negative outcomes.

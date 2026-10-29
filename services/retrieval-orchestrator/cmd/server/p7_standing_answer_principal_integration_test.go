@@ -93,4 +93,37 @@ func TestP7RetrievalStandingAnswersRequireEnabledSameTenantPrincipal(t *testing.
 	if got := read(req); got != 0 {
 		t.Fatalf("cross-tenant principal read %d cached answers", got)
 	}
+
+	// The request sensitivity ceiling is not an agent capability grant.
+	// Even an internal request must fail closed when the agent has no
+	// capability row or a lower maximum_sensitivity than the source.
+	var agent string
+	if err := admin.QueryRow(ctx, "INSERT INTO principals(tenant_id,kind,external_id,display_name) VALUES($1,'agent',$2,'Cache agent') RETURNING id", tenant, uuid.NewString()).Scan(&agent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, "INSERT INTO namespace_memberships(namespace_id,principal_id,can_read) VALUES($1,$2,true)", ns, agent); err != nil {
+		t.Fatal(err)
+	}
+	req.PrincipalID = agent
+	if got := read(req); got != 0 {
+		t.Fatalf("agent without capabilities read %d cached answers", got)
+	}
+	if _, err := admin.Exec(ctx, "INSERT INTO agents(id,version,maximum_sensitivity) VALUES($1,'v1','public')", agent); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(req); got != 0 {
+		t.Fatalf("under-cleared agent read %d internal cached answers", got)
+	}
+	if _, err := admin.Exec(ctx, "UPDATE agents SET maximum_sensitivity='internal' WHERE id=$1", agent); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(req); got != 1 {
+		t.Fatalf("cleared agent could not read internal cached answer: %d", got)
+	}
+	if _, err := admin.Exec(ctx, "UPDATE agents SET maximum_sensitivity='public' WHERE id=$1", agent); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(req); got != 0 {
+		t.Fatalf("downgraded agent retained cached answer: %d", got)
+	}
 }

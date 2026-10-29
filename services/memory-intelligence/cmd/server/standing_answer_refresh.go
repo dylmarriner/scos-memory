@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -130,37 +129,11 @@ func (s *engineServer) handleStandingAnswerRefresh(w http.ResponseWriter, r *htt
 		}
 		out.Answer = summary
 		out.SourceFactID = input.FactID
-		evidence, err := json.Marshal([]string{input.FactID})
-		if err != nil {
-			return out, err
-		}
-		err = tx.QueryRowContext(r.Context(), `INSERT INTO memory_standing_answers (
-                tenant_id,namespace_id,question_key,answer,evidence_fact_ids,
-                confidence,last_refreshed_at,refresh_reason,stale_at,stale_reason)
-            VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,statement_timestamp(),
-                    'verified_fact_title_summary',NULL,NULL)
-            ON CONFLICT (tenant_id,namespace_id,question_key) DO UPDATE SET
-                answer=EXCLUDED.answer,evidence_fact_ids=EXCLUDED.evidence_fact_ids,
-                confidence=EXCLUDED.confidence,last_refreshed_at=EXCLUDED.last_refreshed_at,
-                refresh_reason=EXCLUDED.refresh_reason,stale_at=NULL,stale_reason=NULL
-            WHERE memory_standing_answers.refresh_reason='verified_fact_title_summary'
-              AND (memory_standing_answers.evidence_fact_ids=EXCLUDED.evidence_fact_ids
-                   OR memory_standing_answers.stale_at IS NOT NULL
-                   -- A clock-only expiry cannot fire a row-change invalidation
-                   -- trigger. Allow replacing only a verified single-source
-                   -- generated cache whose ORIGINAL source has objectively
-                   -- expired, not a merely unreadable/restricted cache.
-                   OR EXISTS (
-                       SELECT 1 FROM memory_items old_source
-                       WHERE old_source.tenant_id=memory_standing_answers.tenant_id
-                         AND old_source.namespace_id=memory_standing_answers.namespace_id
-                         AND memory_standing_answers.evidence_fact_ids=
-                             ('["' || old_source.id::text || '"]')
-                         AND (old_source.expires_at<=statement_timestamp()
-                              OR old_source.valid_until<=statement_timestamp())
-                   ))
-            RETURNING id::text`, identity.TenantID, out.NamespaceID, out.QuestionKey,
-			out.Answer, string(evidence), out.Confidence).Scan(&out.ID)
+		err = tx.QueryRowContext(r.Context(), `SELECT id::text FROM (
+                SELECT public.scos_refresh_verified_standing_answer(
+                    $1::uuid, $2
+                ) AS id
+            ) verified WHERE id IS NOT NULL`, input.FactID, out.QuestionKey).Scan(&out.ID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return out, errStandingAnswerConflict
 		}

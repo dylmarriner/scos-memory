@@ -70,6 +70,43 @@ restricted-role membership revocation. The service integration, answer
 generation, retrieval-orchestrator integration, and read-path benchmarking
 remain separate acceptance gates.
 
+## Read-time principal and agent clearance (migration 000089)
+
+The security-invoker view must also enforce identity lifecycle and agent
+clearance, not merely namespace membership and source freshness. Prior to
+000089, a restricted `scos_app` caller with an agent principal and an
+otherwise valid membership could read a cached answer above the agent's
+`maximum_sensitivity`, including when the agent had no capability row.
+A real PostgreSQL test reproduced the unauthorized row (RED).
+
+Migration 000089 replaces the view with a same-tenant, enabled-principal
+check and an agent capability join. It also installs a restrictive SELECT
+policy on the underlying cache table for existing `scos_app` deployments;
+`database/policies/000021` installs the same policy after role creation on
+fresh databases. This prevents direct table SELECT from bypassing the view.
+Every cited fact must be visible and below both the namespace ceiling and
+the agent's maximum sensitivity; a multi-fact answer fails closed if even
+one source is above clearance.
+Missing agent capabilities, disabled principals and cross-tenant identities
+with malformed memberships receive no cached answer. The change preserves
+`security_invoker` and `security_barrier`, the legacy malformed-evidence
+CASE guard, statement-time expiry checks and unresolved revalidation checks.
+It neither rewrites existing cache rows nor grants additional runtime
+privileges. No production migration is authorized by this source change.
+
+The initial view-only fix still leaked through direct table SELECT (second
+RED regression); the restrictive policy closes that bypass. A clean
+PostgreSQL 17/pgvector installation applied 88 migrations and 22 RLS policy
+files before passing both focused tests.
+
+Real restricted-role integration exercises direct SQL table and view reads,
+the memory-intelligence HTTP read endpoint and retrieval-orchestrator opt-in
+standing-answer selection. Five focused repetitions per suite, two
+race-enabled repetitions, full tagged PostgreSQL integration suites, the
+52-package Go suite and Go vet passed on an isolated disposable database.
+This closes a specific authorization defect; governed answer generation,
+performance acceptance, live rollout and recovery drills remain open.
+
 ## Isolation and recovery
 
 - Migration `000084` is append-only and does not modify any production data
@@ -188,3 +225,42 @@ would detect bypassing the view. The mutation was restored. These small local
 samples are **not** a performance SLA, production benchmark or P7 acceptance.
 Representative multi-tenant load, recovery and rollout qualification remain
 open and require separately approved production work.
+
+## P7 restricted agent refresh after cache invalidation (2026-10-29, PR #166 follow-up)
+
+The `000089` migration and `000021` policy enforce an agent's maximum
+sensitivity on direct standing-cache SELECT. This is essential because the
+security-invoker view alone cannot prevent a restricted runtime role from
+querying the base table. However, PostgreSQL's `INSERT ... ON CONFLICT DO
+UPDATE` requires access to the conflicting row. When a source change marks a
+previously authorized generated answer stale, the restrictive SELECT policy
+hides that row, making a legitimate agent refresh fail with HTTP 500.
+
+**TDD:** A real PostgreSQL 17 `scos_app` integration regression in
+`standing_answer_stale_agent_refresh_integration_test.go` failed RED with
+HTTP 500 on the original handler after a source-summary change. It passed
+GREEN after introducing migration `000090_standing_answer_restricted_refresh.sql`
+and fresh-install grant `policies/000022_standing_answer_restricted_refresh.sql`.
+The existing restrictive SELECT policy is not relaxed. The handler delegates
+the conflict update to `scos_refresh_verified_standing_answer(uuid,text)`, a
+schema-qualified, owner-executed, source-derived operation. Its caller supplies
+only the fact ID and normalized question key; the function derives answer,
+evidence, confidence, namespace and tenant from the authenticated, eligible
+source. It rechecks tenant/principal lifecycle, agent clearance, namespace
+read/write membership, source validity, code revalidation, and the exact
+normalized title. A source SHARE lock protects the update. The function
+returns no answer text. Direct restricted-role SQL tests deny missing agent
+capabilities, read-only memberships, forged question keys, insufficient
+clearance and disabled principals. A stale raw SELECT remains invisible even
+while authorized refresh can repair the row; a later sensitivity increase
+prevents both reading and refreshing it.
+
+The original pending-code-review HTTP 409 evidence-ineligible contract is
+preserved rather than misclassified as a cache-key conflict. The full tagged
+PostgreSQL memory-intelligence and retrieval integration suites passed; the
+uncached Go suite passed in 52 packages, `go vet ./...` passed, and two
+race-enabled focused repetitions passed. A fresh disposable PostgreSQL 17
+instance installed all 112 migration/policy files, with the helper present,
+the restrictive policy present, and `scos_app` EXECUTE granted. No live
+migration, production deployment, recovery qualification, or §41 closure
+was performed. PR-head and merged-main CI evidence must be added after merge.
