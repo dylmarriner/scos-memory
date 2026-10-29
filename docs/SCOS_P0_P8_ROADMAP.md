@@ -4,6 +4,21 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P0 lexical benchmark Git provenance isolation (2026-10-30; source candidate)
+
+The offline lexical benchmark previously executed `git rev-parse HEAD` in the
+caller's working directory. A caller launching the SCOS module from a different
+Git checkout via `PYTHONPATH` therefore recorded that unrelated repository's
+commit as SCOS benchmark `git_base_sha` (TDD RED). The generator now pins the
+Git lookup to the source repository containing `benchmarks/harness.py` (GREEN).
+A subprocess regression creates an independent Git repository, invokes the
+actual CLI from that checkout and requires SCOS's own HEAD to be recorded.
+The frozen seven-case baseline was requalified only for generator SHA-256 and
+Git base provenance; rankings, per-case/aggregate quality scores and all
+forbidden-at-5/10/20 totals are unchanged. This is **offline P0 evidence
+provenance only**; representative retrieval, production rollout/recovery and
+§41 acceptance remain open.
+
 ## P0 lexical benchmark fixture-label integrity (2026-10-30; source candidate)
 
 The seven-case offline smoke harness now rejects duplicate expected/forbidden
