@@ -33,6 +33,16 @@ constraint validation, recovery/lock qualification, P7 approval/generation,
 P5 historical belief reconstruction, §25 fixture-order qualification and
 governance §41 acceptance. No live database or production service was touched.
 
+**PR #169 review hardening, 2026-10-30:** A same-named FK with
+`ON DELETE CASCADE` previously passed the catalog audit (PostgreSQL RED).
+The audit now compares delete/update actions and match type against migration
+000091 (GREEN). An independent connection test verifies read-only,
+repeatable-read transactions, and a built-binary subprocess test against a
+separate TLS-enabled disposable database verifies exit 2 for a committed
+legacy cross-tenant violation and exit 0 after synthetic test-only cleanup.
+Production inventory, FK validation, rollout/recovery and §41 remain open.
+See `docs/P7_OWNER_TENANT_INTEGRITY_AUDIT.md`.
+
 ## P7 source-owner tenant integrity (2026-10-30; PR #168 review hardening)
 
 Review found that a UUID-only FK on `memory_items.owner_principal_id`

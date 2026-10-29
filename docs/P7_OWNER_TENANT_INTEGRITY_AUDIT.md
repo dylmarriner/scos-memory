@@ -47,8 +47,8 @@ Exit codes:
 - `1`: connection/TLS, authorization/RLS, query, catalog-definition,
   timeout, or JSON-output failure. Treat this as **unknown**, not clean.
 
-A same-named FK with incorrect source columns, referenced columns, or
-referenced table is rejected. The report is only a point-in-time inventory;
+A same-named FK with incorrect source columns, referenced columns,
+referenced table, referential DELETE/UPDATE actions, or match type is rejected. The report is only a point-in-time inventory;
 a clean report is **not** proof of successful validation or production
 acceptance. Run the preflight again before an independently approved
 `VALIDATE CONSTRAINT` and follow the separate rollback/recovery runbook.
@@ -80,3 +80,22 @@ class of false-clean result. The complete uncached Go suite passed in
 These are **local source and disposable-database tests**. No production
 inventory, remediation, constraint validation, migration, deployment, or
 recovery test was performed. P7 and governance §41 remain incomplete.
+
+## PR #169 review hardening (2026-10-30)
+
+A real PostgreSQL integration test reproduced a false-clean report when a
+same-named composite FK used `ON DELETE CASCADE` (RED). The catalog check now
+compares `confdeltype`, `confupdtype`, and `confmatchtype` with migration 000091's
+NO ACTION / NO ACTION / MATCH SIMPLE semantics (GREEN). A separate connection
+regression verifies the actual audit transaction is repeatable-read and
+read-only, including rejecting an attempted temporary-table write.
+
+A subprocess integration regression runs the built CLI over a dedicated,
+TLS-enabled disposable PostgreSQL database with committed public-schema
+fixtures: a cross-tenant legacy owner returns exit 2, and test-only deletion
+of that synthetic bad row returns exit 0. The subprocess test requires both
+`SCOS_OWNER_AUDIT_TLS_TEST_DSN` and `SCOS_OWNER_AUDIT_DISPOSABLE=1`, and refuses
+non-TLS connections, unexpected database names, or pre-existing target tables.
+It skips without a dedicated TLS fixture; the standard CI integration suite
+continues to cover the catalog and transaction checks. No live database was
+queried, changed, repaired, or validated.

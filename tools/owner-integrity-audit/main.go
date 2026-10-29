@@ -41,8 +41,9 @@ func auditOwnerTenant(ctx context.Context, tx pgx.Tx, schema string) (ownerTenan
 
 	var targetMatches bool
 	var sourceColumns, targetColumns []string
+	var deleteAction, updateAction, matchType string
 	err = tx.QueryRow(ctx, `
-        SELECT c.convalidated, c.confrelid=$2::regclass,
+        SELECT c.convalidated, c.confrelid=$2::regclass, c.confdeltype, c.confupdtype, c.confmatchtype,
                ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
                      JOIN pg_catalog.pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum ORDER BY k.ord),
                ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord)
@@ -51,20 +52,25 @@ func auditOwnerTenant(ctx context.Context, tx pgx.Tx, schema string) (ownerTenan
         WHERE c.conrelid=$1::regclass AND c.conname='memory_items_owner_tenant_fk'
           AND c.contype='f'
     `, prefix+".memory_items", prefix+".principals").Scan(
-		&result.ConstraintValidated, &targetMatches, &sourceColumns, &targetColumns)
+		&result.ConstraintValidated, &targetMatches, &deleteAction, &updateAction, &matchType, &sourceColumns, &targetColumns)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		result.ConstraintPresent = false
 	case err != nil:
 		return result, fmt.Errorf("constraint catalog query failed: %w", err)
 	default:
-		if !targetMatches || !reflect.DeepEqual(sourceColumns, []string{"tenant_id", "owner_principal_id"}) ||
+		if !targetMatches || deleteAction != "a" || updateAction != "a" || matchType != "s" || !reflect.DeepEqual(sourceColumns, []string{"tenant_id", "owner_principal_id"}) ||
 			!reflect.DeepEqual(targetColumns, []string{"tenant_id", "id"}) {
 			return result, errors.New("owner tenant constraint has unexpected definition")
 		}
 		result.ConstraintPresent = true
 	}
 	return result, nil
+}
+
+// beginAuditTx enforces a stable, read-only inventory snapshot.
+func beginAuditTx(ctx context.Context, conn *pgx.Conn) (pgx.Tx, error) {
+	return conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 }
 
 func run(ctx context.Context, dsn string) (ownerTenantAudit, error) {
@@ -76,7 +82,7 @@ func run(ctx context.Context, dsn string) (ownerTenantAudit, error) {
 		return ownerTenantAudit{}, fmt.Errorf("database connection failed: %w", err)
 	}
 	defer conn.Close(ctx)
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := beginAuditTx(ctx, conn)
 	if err != nil {
 		return ownerTenantAudit{}, err
 	}
