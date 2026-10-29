@@ -80,6 +80,8 @@ def load_fixture(path: pathlib.Path) -> tuple[dict, str]:
         for field in ("fqn", "path", "text"):
             if field in document and not isinstance(document[field], str):
                 raise ValueError(f"{document['id']}: document {field} must be a string")
+        if not any(document.get(field, "").strip() for field in ("fqn", "path", "text")):
+            raise ValueError(f"{document['id']}: document requires searchable content")
         doc_ids.append(document["id"])
     if len(doc_ids) != len(set(doc_ids)):
         raise ValueError("duplicate document id")
