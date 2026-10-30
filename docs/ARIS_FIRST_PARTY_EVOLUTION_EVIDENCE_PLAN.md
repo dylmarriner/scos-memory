@@ -69,3 +69,7 @@ These are *logical API contracts* to reconcile with real SCOS services before cr
 ## Source relevance
 
 Atropos contributed the concept of environment rollouts and scored trajectories; Axolotl contributed checkpoint/training lifecycle needs; GEPA and Darwinian search contributed failure-linked candidate histories. All are research inputs only. The implementation, governance and memory authority remain SCOS-owned. No upstream source code has been copied into this document.
+
+## Research repositories are references only (2026-10-31)
+
+[ARIS ADR 0012](https://github.com/dylmarriner/ARIS/blob/main/docs/adr/0012-first-party-evolution-and-training-ownership.md) prohibits copying, porting, translating, vendoring or importing code, tests and schemas from research frameworks into ARIS-specific SCOS integrations. Inspect GEPA, DSPy, Darwinian Evolver, Hermes Self-Evolution, Atropos and Axolotl as conceptual references, then implement our own event projections, rollout/reward evidence contracts, training provenance and tests using authoritative SCOS schemas. Existing external platform libraries and inherited code remain inventoried and governed separately. This adds no authority to memory and does not modify SCOS P0–P8 completion state.
