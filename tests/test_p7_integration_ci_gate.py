@@ -34,5 +34,14 @@ class P7IntegrationCIGateTests(unittest.TestCase):
         )))
 
 
+    def test_hermes_provider_requires_real_postgres_ci(self):
+        workflow = (ROOT / '.github/workflows/p4-hybrid-retrieval.yml').read_text()
+        job = workflow.split('  postgres-integration:', 1)[1].split('  embeddings-worker:', 1)[0]
+        self.assertIn('go test -tags=integration -count=1 ./services/hermes-provider/cmd/server', job)
+        self.assertEqual(2, len(re.findall(
+            r'(?m)^\s+- "services/hermes-provider/\*\*"\s*$', workflow
+        )))
+
+
 if __name__ == '__main__':
     unittest.main()
