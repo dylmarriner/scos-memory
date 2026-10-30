@@ -499,6 +499,27 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.seed_report()["forget_failures"])
         self.assertIn("fact-2", _Gateway.facts)
 
+    def test_partial_seeding_failure_reports_residual_memory_ids(self):
+        # Seed the first memory over HTTP, refuse its HTTP cleanup, then fail
+        # the next seed. The primary seeding error must retain cleanup evidence.
+        _Gateway.refuse_forget_ids = {"fact-2"}
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta", "c": "epsilon zeta"})
+        original_call = adapter._call
+
+        def fail_second_seed(tool, arguments):
+            if tool == "scos_remember" and arguments["content"].startswith("epsilon zeta"):
+                raise RuntimeError("second seed rejected")
+            return original_call(tool, arguments)
+
+        adapter._call = fail_second_seed
+        with self.assertRaisesRegex(RuntimeError, "second seed rejected") as caught:
+            with adapter:
+                pass
+        self.assertEqual(_Gateway.forget_requests, ["fact-2"])
+        self.assertIn("fact-2", _Gateway.facts)
+        self.assertIn("fact-2", "\n".join(getattr(caught.exception, "__notes__", [])))
+        self.assertTrue(adapter.seed_report()["forget_failures"])
+
     def test_main_does_not_emit_success_report_before_cleanup(self):
         _Gateway.fail_forget = True
         temp = tempfile.TemporaryDirectory()
