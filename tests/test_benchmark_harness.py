@@ -398,10 +398,26 @@ class _Gateway(BaseHTTPRequestHandler):
     fail_forget: bool = False
     refuse_forget_ids: set = set()
     forget_requests: list = []
+    tool_errors: set = set()
 
     def do_POST(self):  # noqa: N802
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         name, args = request["params"]["name"], request["params"]["arguments"]
+        if name in self.tool_errors:
+            # MCP tool-level failure can still be HTTP 200 and contain a
+            # well-formed JSON body that resembles a successful tool result.
+            payload = ({"forgotten": True} if name == "scos_forget" else
+                       {"recall": [{"memory_id": "fact-2"}]} if name == "scos_recall" else
+                       {"fact": {"id": "fact-2", "content": args["content"]}})
+            body = json.dumps({"jsonrpc": "2.0", "id": request["id"],
+                               "result": {"isError": True, "content": [
+                                   {"type": "text", "text": json.dumps(payload)}]}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if name == "scos_remember":
             content = args["content"]
             existing = next((fid for fid, text in self.facts.items() if text.split(" [")[0] == content.split(" [")[0]), None)
@@ -442,11 +458,36 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
         _Gateway.fail_forget = False
         _Gateway.refuse_forget_ids = set()
         _Gateway.forget_requests = []
+        _Gateway.tool_errors = set()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Gateway)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.url = f"http://127.0.0.1:{self.server.server_port}/mcp"
+
+    def test_mcp_tool_error_cannot_fake_successful_seeding(self):
+        _Gateway.tool_errors = {"scos_remember"}
+        with self.assertRaisesRegex(RuntimeError, "scos_remember.*failed"):
+            with GatewayMemoryAdapter(self.url, {"b": "gamma delta"}):
+                pass
+        self.assertNotIn("fact-2", _Gateway.facts)
+
+    def test_mcp_tool_error_cannot_fake_successful_recall(self):
+        with GatewayMemoryAdapter(self.url, {"b": "gamma delta"}) as adapter:
+            _Gateway.tool_errors = {"scos_recall"}
+            with self.assertRaisesRegex(RuntimeError, "scos_recall.*failed"):
+                adapter("gamma delta", {})
+            _Gateway.tool_errors.clear()
+        self.assertEqual(_Gateway.forgotten, ["fact-2"])
+
+    def test_mcp_tool_error_cannot_fake_confirmed_cleanup(self):
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta"})
+        with self.assertRaisesRegex(RuntimeError, "cleanup"):
+            with adapter:
+                _Gateway.tool_errors = {"scos_forget"}
+        self.assertIn("fact-2", _Gateway.facts)
+        self.assertTrue(any("fact-2" in item for item in adapter.forget_failures))
+        self.assertEqual(_Gateway.forgotten, [])
 
     def test_seeds_maps_recall_and_forgets_only_what_it_created(self):
         corpus = {"a": "alpha beta preexisting", "b": "gamma delta", "c": "epsilon zeta"}
