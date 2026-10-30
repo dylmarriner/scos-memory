@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -66,27 +67,6 @@ func TestReadyRejectsMissingDatabaseURL(t *testing.T) {
 	}
 }
 
-func TestReadyRejectsReachableTCPAddressWithoutDBHandle(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	s := server{
-		version:     "test",
-		databaseURL: "postgres://user:pass@" + listener.Addr().String() + "/db",
-		dialTimeout: time.Second,
-	}
-	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
-	res := httptest.NewRecorder()
-
-	s.routes().ServeHTTP(res, req)
-	if res.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected %d, got %d", http.StatusServiceUnavailable, res.Code)
-	}
-}
-
 // A TCP listener is not a PostgreSQL connection. Readiness must not
 // turn green merely because another process accepts packets on port 5432.
 func TestReadyRejectsTCPListenerWithoutDatabaseConnection(t *testing.T) {
@@ -106,6 +86,13 @@ func TestReadyRejectsTCPListenerWithoutDatabaseConnection(t *testing.T) {
 	s.routes().ServeHTTP(res, req)
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("TCP listener without db handle must be unready, got HTTP %d", res.Code)
+	}
+	var status statusResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode readiness response: %v", err)
+	}
+	if status.Status != "not_ready" || status.Checks["postgres"] != "not_configured" {
+		t.Fatalf("unexpected readiness response: %+v", status)
 	}
 }
 
