@@ -734,8 +734,13 @@ class GatewayMemoryAdapter:
                     self.created.append(fact_id)
                 else:
                     self.merged[corpus_id] = f"pre-existing memory {fact_id}"
-        except BaseException:
+        except BaseException as exc:
             self.cleanup()
+            if self.forget_failures:
+                # A partially seeded run can fail before __enter__ returns.
+                # Keep the original error and expose any memories left behind.
+                exc.add_note("benchmark cleanup incomplete; memories may remain: "
+                             + "; ".join(self.forget_failures))
             raise
         return self
 

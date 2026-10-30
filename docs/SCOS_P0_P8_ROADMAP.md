@@ -25,6 +25,17 @@ retrieval acceptance, a live cleanup drill, production deployment, or §41
 completion. PR-head CI, merged-main CI and P4 fixture requalification remain
 separate gates.
 
+## P0 partial-seeding cleanup diagnostics (2026-10-31; source candidate)
+
+If an HTTP-backed benchmark seeded a memory and then failed during a later
+`scos_remember` call, its `__enter__` cleanup attempted deletion but suppressed
+residual-memory IDs when the cleanup was refused. A real-HTTP regression first
+failed because the original seeding exception had no diagnostic notes. The
+adapter now preserves that exception and attaches the failed cleanup memory IDs
+using Python 3.11 exception notes, matching the evaluation-failure path.
+This is a source-only P0 integrity fix, not a production cleanup drill,
+representative retrieval acceptance or rollout approval.
+
 ## P0 external benchmark-suite schema integrity (2026-10-31; merged PR #184)
 
 An externally supplied JSON benchmark suite could previously pass an empty
