@@ -16,6 +16,10 @@ or failed with uncontrolled type errors. Seven TDD test methods (49 failing
 subcases before correction) now exercise strict fail-closed suite parsing and
 a valid labelled-suite control. Both existing harness tests and new schema
 regressions are wired into CI and local `make test` with a parity contract.
+The P4 fixture CI exposed a stale harness digest after this loader changed;
+the seven-case frozen lexical baseline was re-recorded, preserving all ranked
+results, quality metrics and forbidden@5/10/20 counts (0/0/0). Only the
+harness digest and source Git SHA changed.
 This is **offline P0 evidence-integrity hardening**, not representative
 live retrieval, actual BGE/FTS/RRF qualification, latency/cost evidence,
 production rollout, or P0–P8 completion. PR review, PR-head CI and merged-main
