@@ -66,7 +66,7 @@ func TestReadyRejectsMissingDatabaseURL(t *testing.T) {
 	}
 }
 
-func TestReadyAcceptsReachablePostgresAddress(t *testing.T) {
+func TestReadyRejectsReachableTCPAddressWithoutDBHandle(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -82,8 +82,8 @@ func TestReadyAcceptsReachablePostgresAddress(t *testing.T) {
 	res := httptest.NewRecorder()
 
 	s.routes().ServeHTTP(res, req)
-	if res.Code != http.StatusOK {
-		t.Fatalf("expected %d, got %d", http.StatusOK, res.Code)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected %d, got %d", http.StatusServiceUnavailable, res.Code)
 	}
 }
 
@@ -109,12 +109,3 @@ func TestReadyRejectsTCPListenerWithoutDatabaseConnection(t *testing.T) {
 	}
 }
 
-func TestPostgresAddressDefaultsPort(t *testing.T) {
-	got, err := postgresAddress("postgres://user:pass@db/scos")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "db:5432" {
-		t.Fatalf("expected db:5432, got %s", got)
-	}
-}
