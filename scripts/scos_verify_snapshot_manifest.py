@@ -19,7 +19,7 @@ import subprocess
 import sys
 import uuid
 
-from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, parse_export_json, tree_blobs
+from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, parse_export_json, tree_blobs, validate_trusted_export_identity
 
 
 def read_pages(
@@ -156,6 +156,8 @@ def main() -> int:
     parser.add_argument("--parent", help="Optional trusted indexed parent Git revision")
     parser.add_argument("--snapshot-id", required=True)
     parser.add_argument("--pages-file", type=Path, required=True)
+    parser.add_argument("--repository-id", help="Independently trusted SCOS repository UUID")
+    parser.add_argument("--branch", help="Independently trusted SCOS branch")
     args = parser.parse_args()
     try:
         if str(uuid.UUID(args.snapshot_id)) != args.snapshot_id:
@@ -175,7 +177,14 @@ def main() -> int:
             )
             if ancestry.returncode != 0:
                 raise WorklistError("trusted parent must be an ancestor of target")
-        manifest = read_pages(args.pages_file, args.snapshot_id, commit, parent)
+        trusted = validate_trusted_export_identity(args.repository_id, args.branch)
+        manifest, export_identity = read_pages(
+            args.pages_file, args.snapshot_id, commit, parent, return_identity=True)
+        if trusted is not None:
+            if export_identity[0] != trusted[0]:
+                raise WorklistError("export does not match trusted repository_id")
+            if export_identity[1] != trusted[1]:
+                raise WorklistError("export does not match trusted branch")
         blobs = tree_blobs(repo, commit)
         if manifest.keys() != blobs.keys():
             missing = sorted(blobs.keys() - manifest.keys())
@@ -196,6 +205,7 @@ def main() -> int:
         "snapshot_id": args.snapshot_id,
         "commit_id": commit,
         "file_count": len(manifest),
+        "trusted_identity_checked": trusted is not None,
         "limitation": "authenticated_export_not_signed_or_server_git_tree_attested",
     }))
     return 0

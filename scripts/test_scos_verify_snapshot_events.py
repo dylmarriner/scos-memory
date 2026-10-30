@@ -32,7 +32,7 @@ class SnapshotEventVerificationTests(unittest.TestCase):
         git(self.repo, "commit", "-qm", name)
         return git(self.repo, "rev-parse", "HEAD")
 
-    def invoke(self, target, events, parent=None, snapshot=SNAPSHOT, pages=None, env=None):
+    def invoke(self, target, events, parent=None, snapshot=SNAPSHOT, pages=None, env=None, extra_args=()):
         page_data = pages if pages is not None else [
             {"snapshot_id": snapshot, "events": events}]
         for page in page_data:
@@ -46,6 +46,7 @@ class SnapshotEventVerificationTests(unittest.TestCase):
                 "--commit", target, "--snapshot-id", snapshot,
                 "--pages-file", str(path)]
         args += ["--parent", parent] if parent else ["--initial"]
+        args += list(extra_args)
         return subprocess.run(args, text=True, capture_output=True, env=env)
 
     def fixture(self):
@@ -70,6 +71,35 @@ class SnapshotEventVerificationTests(unittest.TestCase):
             {"change_kind": "delete", "path": "remove.rs", "evidence_class": "snapshot_manifest"},
         ]
         return parent, target, events
+
+    def test_independent_trusted_identity_accepts_matching_event_export(self):
+        parent, target, events = self.fixture()
+        result = self.invoke(target, events, parent,
+                             extra_args=("--repository-id", REPO, "--branch", "main"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIs(json.loads(result.stdout)["trusted_identity_checked"], True)
+
+    def test_independent_trusted_identity_rejects_consistently_forged_event_export(self):
+        parent, target, events = self.fixture()
+        for override, message in (({"repository_id": "33333333-3333-4333-8333-333333333333"},
+                                   "trusted repository_id"),
+                                  ({"branch": "attacker"}, "trusted branch")):
+            with self.subTest(override=override):
+                page = {"snapshot_id": SNAPSHOT, "events": events, **override}
+                result = self.invoke(target, events, parent, pages=[page],
+                                     extra_args=("--repository-id", REPO, "--branch", "main"))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(message, result.stderr)
+
+    def test_independent_trusted_identity_requires_valid_pair(self):
+        parent, target, events = self.fixture()
+        for flags in (("--repository-id", REPO), ("--branch", "main"),
+                      ("--repository-id", "invalid", "--branch", "main"),
+                      ("--repository-id", REPO, "--branch", "  ")):
+            with self.subTest(flags=flags):
+                result = self.invoke(target, events, parent, extra_args=flags)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("trusted", result.stderr)
 
     def test_git_location_environment_cannot_redirect_verified_trees(self):
         parent, target, events = self.fixture()

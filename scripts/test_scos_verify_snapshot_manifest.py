@@ -55,12 +55,39 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
                 "commit_id": self.commit, "parent_commit_id": "",
                 "files": files, **extra}
 
+    def test_independent_trusted_identity_accepts_matching_export(self):
+        result = self.invoke(extra_args=("--repository-id", REPO, "--branch", "main"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIs(json.loads(result.stdout)["trusted_identity_checked"], True)
+
+    def test_independent_trusted_identity_rejects_consistently_forged_export(self):
+        forged = self.page(self.files, repository_id="33333333-3333-4333-8333-333333333333",
+                           branch="attacker")
+        result = self.invoke([forged],
+                             extra_args=("--repository-id", REPO, "--branch", "main"))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("trusted repository_id", result.stderr)
+        result = self.invoke([self.page(self.files, branch="attacker")],
+                             extra_args=("--repository-id", REPO, "--branch", "main"))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("trusted branch", result.stderr)
+
+    def test_independent_trusted_identity_requires_valid_pair(self):
+        for flags in (("--repository-id", REPO), ("--branch", "main"),
+                      ("--repository-id", "invalid", "--branch", "main"),
+                      ("--repository-id", REPO, "--branch", "  ")):
+            with self.subTest(flags=flags):
+                result = self.invoke(extra_args=flags)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("trusted", result.stderr)
+
     def test_valid_complete_git_manifest(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         output = json.loads(result.stdout)
         self.assertEqual(output["file_count"], 2)
         self.assertEqual(output["status"], "stored_manifest_matches_git_bytes")
+        self.assertIs(output["trusted_identity_checked"], False)
 
     def test_uppercase_sha256_hex_from_accepted_index_payload_is_supported(self):
         files = [dict(x) for x in self.files]
