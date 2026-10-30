@@ -87,6 +87,28 @@ func TestReadyAcceptsReachablePostgresAddress(t *testing.T) {
 	}
 }
 
+// A TCP listener is not a PostgreSQL connection. Readiness must not
+// turn green merely because another process accepts packets on port 5432.
+func TestReadyRejectsTCPListenerWithoutDatabaseConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	s := server{
+		version:     "test",
+		databaseURL: "postgres://user:pass@" + listener.Addr().String() + "/db",
+		dialTimeout: 20 * time.Millisecond,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	res := httptest.NewRecorder()
+	s.routes().ServeHTTP(res, req)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("TCP listener without db handle must be unready, got HTTP %d", res.Code)
+	}
+}
+
 func TestPostgresAddressDefaultsPort(t *testing.T) {
 	got, err := postgresAddress("postgres://user:pass@db/scos")
 	if err != nil {
