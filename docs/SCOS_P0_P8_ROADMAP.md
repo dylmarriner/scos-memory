@@ -4,6 +4,28 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+
+## P0 external benchmark-suite schema integrity (2026-10-31; development candidate)
+
+An externally supplied JSON benchmark suite could previously pass an empty
+`expected_ids` list to the scorer, making `task_success` vacuously true.
+Other malformed labels (strings instead of lists, duplicate ground truth),
+truthy `promotion_expected="false"`, negative/noninteger token budgets,
+blank corpus/query/identity values and nonobject case structures were accepted
+or failed with uncontrolled type errors. Seven TDD test methods (49 failing
+subcases before correction) now exercise strict fail-closed suite parsing and
+a valid labelled-suite control. Both existing harness tests and new schema
+regressions are wired into CI and local `make test` with a parity contract.
+The P4 fixture CI exposed a stale harness digest after this loader changed;
+the seven-case frozen lexical baseline was re-recorded, preserving all ranked
+results, quality metrics and forbidden@5/10/20 counts (0/0/0). Only the
+harness digest and source Git SHA changed.
+This is **offline P0 evidence-integrity hardening**, not representative
+live retrieval, actual BGE/FTS/RRF qualification, latency/cost evidence,
+production rollout, or P0–P8 completion. PR review, PR-head CI and merged-main
+verification remain mandatory.
+
+
 ## P3 offline export identity: mandatory trusted-inventory mode (2026-10-31; development)
 
 The three offline P3 snapshot verifiers previously permitted successful

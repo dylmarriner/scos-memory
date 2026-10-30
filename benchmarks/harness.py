@@ -592,40 +592,78 @@ def _strict_suite_json_constant(raw: str) -> float:
     raise ValueError(f"non-finite benchmark JSON constant: {raw}")
 
 
+def _validate_suite_ids(raw: dict[str, Any], field_name: str, *, required: bool = False) -> list[str]:
+    """Validate a labelled evidence set before it can influence benchmark scores."""
+    values = raw.get(field_name)
+    if (not isinstance(values, list) or (required and not values)
+            or any(not isinstance(item, str) or not item.strip() for item in values)
+            or len(values) != len(set(values))):
+        raise ValueError(
+            f"case {raw.get('id')!r} {field_name} must be a "
+            f"{'nonempty ' if required else ''}list of unique nonblank document ids"
+        )
+    return values
+
+
 def load_suite(path: str) -> BenchmarkSuite:
-    """Load a suite from JSON: ``{"name", "version", "created_at", "corpus":
-    {id: text}, "cases": [{"id", "query", "expected_ids", "category", ...}]}``.
-    Every expected or labelled id must name a corpus document."""
+    """Load a strictly validated, versioned JSON evidence suite.
+
+    Reject malformed ground truth before it can inflate task success or
+    silently coerce optional measurement labels.
+    """
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle, object_pairs_hook=_strict_suite_json_object,
                          parse_constant=_strict_suite_json_constant,
                          parse_float=_strict_suite_json_float)
     if not isinstance(data, dict):
         raise ValueError("a suite file must hold a JSON object")
-    for key in ("name", "version", "corpus", "cases"):
-        if key not in data:
-            raise ValueError(f"suite file is missing {key!r}")
-    corpus = data["corpus"]
-    if not isinstance(corpus, dict) or not corpus or not all(isinstance(v, str) for v in corpus.values()):
-        raise ValueError("suite corpus must map document ids to text")
-    cases = []
+    for field_name in ("name", "version"):
+        if not isinstance(data.get(field_name), str) or not data[field_name].strip():
+            raise ValueError(f"suite {field_name} must be a nonblank string")
+    if "created_at" in data and not isinstance(data["created_at"], str):
+        raise ValueError("suite created_at must be a string")
+    corpus = data.get("corpus")
+    if (not isinstance(corpus, dict) or not corpus
+            or any(not isinstance(key, str) or not key.strip()
+                   or not isinstance(value, str) or not value.strip()
+                   for key, value in corpus.items())):
+        raise ValueError("suite corpus must map nonblank document ids to nonblank text")
+    raw_cases = data.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise ValueError("suite cases must be a nonempty array of objects")
+    cases: list[BenchmarkCase] = []
     seen_case_ids: set[str] = set()
-    for raw in data["cases"]:
+    for raw in raw_cases:
+        if not isinstance(raw, dict):
+            raise ValueError("suite cases must contain only objects")
         unknown = set(raw) - _CASE_FIELDS
         if unknown:
             raise ValueError(f"case {raw.get('id')!r} has unknown fields {sorted(unknown)}")
+        for field_name in ("id", "query", "category"):
+            if not isinstance(raw.get(field_name), str) or not raw[field_name].strip():
+                raise ValueError(f"case {field_name} must be a nonblank string")
+        for field_name in ("expected_ids", "citation_ids", "authoritative_ids",
+                           "conflicting_ids", "duplicate_ids", "stale_ids"):
+            if field_name == "expected_ids" or field_name in raw:
+                _validate_suite_ids(raw, field_name, required=field_name == "expected_ids")
+        if "context" in raw and not isinstance(raw["context"], dict):
+            raise ValueError(f"case {raw['id']!r} context must be an object")
+        if "promotion_expected" in raw and not isinstance(raw["promotion_expected"], bool):
+            raise ValueError(f"case {raw['id']!r} promotion_expected must be a boolean")
+        if ("token_budget" in raw and
+                (type(raw["token_budget"]) is not int or raw["token_budget"] < 0)):
+            raise ValueError(f"case {raw['id']!r} token_budget must be a nonnegative integer")
         case = BenchmarkCase(**raw)
         if case.id in seen_case_ids:
             raise ValueError(f"duplicate benchmark case id: {case.id}")
         seen_case_ids.add(case.id)
-        labelled = set(case.expected_ids) | set(case.citation_ids) | set(case.authoritative_ids) \
-            | set(case.conflicting_ids) | set(case.duplicate_ids) | set(case.stale_ids)
+        labelled = (set(case.expected_ids) | set(case.citation_ids)
+                    | set(case.authoritative_ids) | set(case.conflicting_ids)
+                    | set(case.duplicate_ids) | set(case.stale_ids))
         missing = labelled - set(corpus)
         if missing:
             raise ValueError(f"case {case.id!r} names ids not in the corpus: {sorted(missing)}")
         cases.append(case)
-    if not cases:
-        raise ValueError("suite has no cases")
     return BenchmarkSuite(name=data["name"], version=data["version"], cases=cases,
                           created_at=data.get("created_at", ""), corpus=dict(corpus))
 

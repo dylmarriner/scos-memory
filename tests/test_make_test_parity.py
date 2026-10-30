@@ -16,6 +16,8 @@ CI = ROOT / ".github/workflows/ci.yml"
 REQUIRED_LOCAL_CHECKS = (
     "packages/benchmark-harness/python/tests",
     "test_benchmark_ranking_uniqueness.py",
+    "test_benchmark_harness.py",
+    "test_benchmark_suite_schema.py",
     "scripts/test_scos_verify_snapshot_manifest.py",
     "scripts/test_scos_verify_snapshot_events.py",
     "scripts/test_scos_verify_snapshot_bundle.py",
