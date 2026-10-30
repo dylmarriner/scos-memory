@@ -44,3 +44,7 @@ The raw history is evidence, not an automatically verified claim. Keep original 
 ## Compatibility and status
 
 This document supplements, and does **not** supersede, existing SCOS governance §4.12, §16, §20.8, ADR-0009 or the canonical SCOS P0–P8 roadmap. **EE-P0–EE-P9 numbering is a separate ARIS Evolution Engine workstream.** Until code and CI verify these contracts, all interfaces are proposed.
+
+## Research concepts without foreign runtime dependencies (2026-10-31)
+
+The [first-party SCOS memory evidence implementation plan](ARIS_FIRST_PARTY_EVOLUTION_EVIDENCE_PLAN.md) expands this interface to versioned episode/rollout/reward/dataset and checkpoint provenance, consent/source flags, incremental learned playbooks, and negative experiment retention. [ARIS first-party architecture](https://github.com/dylmarriner/ARIS/blob/main/docs/evolution/FIRST_PARTY_EVOLUTION_TRAINING_BLUEPRINT.md) explicitly forbids making external evolutionary or trainer projects required runtime components. These additions do not change SCOS authority or grant execution permissions.

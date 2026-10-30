@@ -13,6 +13,9 @@ This directory contains the architecture, governance, deployment and security do
 - [Current governance audit](governance-audit-current.md)
 - [Repository overview](../README.md)
 
+
+- [First-party ARIS Evolution Engine evidence and native training data plan](ARIS_FIRST_PARTY_EVOLUTION_EVIDENCE_PLAN.md) (proposed; memory/governance only)
+
 ## Canonical boundary
 
 SCOS Memory is the governed durable-memory authority for ARIS: journal, episodic and semantic memory, provenance, retrieval, promotion, consolidation, OKF and memory recovery. It is not the global ARIS Executive or general task/tool orchestration layer, and it does not own prompt construction: it returns ranked evidence and Harness builds model context. See the [system map](ARIS_SYSTEM_MAP.md) for where every ARIS component belongs.
