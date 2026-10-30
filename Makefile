@@ -16,16 +16,25 @@ fmt:
 
 test:
 	go test ./...
+	python3 -m compileall -q workers/consolidation workers/embeddings workers/index-maintenance workers/policy-evaluation integrations/hermes/plugins/scos
 	python3 -m unittest discover -s workers/consolidation/tests -v
+	PYTHONPATH=packages/benchmark-harness/python python3 -m unittest discover -s packages/benchmark-harness/python/tests -p 'test_*.py' -v
+	python3 -m unittest discover -s tests -p test_benchmark_ranking_uniqueness.py -v
 	python3 -m unittest discover -s workers/embeddings/tests -v
-	python3 -m unittest discover -s workers/index-maintenance -p "test_*.py" -v
-	python3 -m unittest scripts/test_scos_git_worklist.py -v
+	python3 -m unittest discover -s workers/index-maintenance -p 'test_*.py' -v
+	python3 -m unittest scripts/test_scos_git_worklist.py scripts/test_scos_verify_snapshot_manifest.py scripts/test_scos_verify_snapshot_events.py scripts/test_scos_verify_snapshot_bundle.py -v
 	python3 -m unittest discover -s tests -p test_definition_of_done_evidence.py -v
-	python3 -m unittest discover -s workers/policy-evaluation -p "test_*.py" -v
-	python3 -m unittest discover -s integrations/hermes/plugins/scos -p "test_*.py" -v
+	python3 -m unittest discover -s tests -p test_p6_rls_source_evidence.py -v
+	python3 -m unittest discover -s tests -p test_p7_integration_ci_gate.py -v
+	python3 -m unittest discover -s tests -p test_make_test_parity.py -v
+	python3 -m unittest discover -s workers/policy-evaluation -p 'test_*.py' -v
+	python3 -m unittest discover -s integrations/hermes/plugins/scos -p 'test_*.py' -v
 	python3 tests/failure-injection/test_runner.py -v
+	python3 tests/test_ci_supply_chain.py -v
 	python3 -m unittest discover -s tests -p 'test_compose_security.py' -v
 	python3 -m unittest discover -s tests -p 'test_benchmark_publish.py' -v
+	python3 scripts/validate_json.py
+	python3 scripts/audit_governance.py
 
 integration-test:
 	COMPOSE_PROJECT_NAME=scos-memory-integration docker compose -f deploy/compose/docker-compose.yml up -d postgres
