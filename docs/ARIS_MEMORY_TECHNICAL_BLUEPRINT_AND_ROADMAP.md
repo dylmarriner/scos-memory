@@ -584,3 +584,7 @@ The [ARIS Evolution Engine SCOS contract](ARIS_EVOLUTION_ENGINE_SCOS_CONTRACT.md
 ## First-party model-training and evolutionary evidence boundary (2026-10-31)
 
 The [SCOS-owned evolution and training evidence plan](ARIS_FIRST_PARTY_EVOLUTION_EVIDENCE_PLAN.md) and [ARIS technical code-ownership blueprint](https://github.com/dylmarriner/ARIS/blob/main/docs/evolution/FIRST_PARTY_EVOLUTION_TRAINING_BLUEPRINT.md) describe native evidence, rollout, reward, dataset consent and model-release provenance. SCOS retains authoritative event data and memory lifecycle and **cannot** issue TEST/DEPLOY grants, execute code mutations, grade its own experiments or train model weights. Atropos, Axolotl, GEPA, DSPy and related projects are research concepts, not SCOS runtime dependencies. Keep this repository's M0–M9 milestones and its independent P0–P8 completion roadmap unchanged until source and CI verify a real implementation.
+
+## Independent ARIS memory implementation requirement
+
+The [first-party evolution evidence plan](ARIS_FIRST_PARTY_EVOLUTION_EVIDENCE_PLAN.md) locks research repositories to reference-only use, with independently authored SCOS integration code, tests and schemas. SCOS remains the evidence authority, never an evolution runtime, trainer, independent evaluator or owner grant issuer.
