@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Remaining Hermes MemoryProvider lifecycle surface (GOVERNANCE.md §24.2).
@@ -322,6 +324,21 @@ func (s *hermesServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 		status := s.prefetchQueue.stats(identity.TenantID)
 		status["tool"] = req.Tool
 		status["provider"] = providerName
+		// Queue outcomes describe past work, not present dependency health.
+		// Keep status callable during outages, and never return raw database
+		// errors or credentials. Every call uses a bounded live PostgreSQL ping.
+		dbStatus := "unavailable"
+		if s.db != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			if err := s.db.PingContext(ctx); err != nil {
+				dbStatus = "unhealthy"
+			} else {
+				dbStatus = "ready"
+			}
+			cancel()
+		}
+		status["database_status"] = dbStatus
+		status["healthy"] = dbStatus == "ready"
 		writeJSON(w, status)
 	case "scos_recall":
 		query, _ := req.Arguments["query"].(string)

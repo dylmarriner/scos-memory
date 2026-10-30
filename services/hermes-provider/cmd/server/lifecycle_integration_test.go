@@ -205,8 +205,9 @@ func TestQueuedPrefetchIsConsumedAndServedOnlyWhileCurrent(t *testing.T) {
 	}
 
 	code, status := f.call(f.srv.handleToolCall, f.owner, "/v1/provider/tool_call", map[string]any{"tool": "scos_status"})
-	if code != http.StatusOK || status["prefetch_warmed"].(float64) != 1 {
-		t.Fatalf("scos_status = %d %v", code, status)
+	if code != http.StatusOK || status["prefetch_warmed"].(float64) != 1 ||
+		status["healthy"] != true || status["database_status"] != "ready" {
+		t.Fatalf("scos_status must verify live restricted-role database: %d %v", code, status)
 	}
 }
 

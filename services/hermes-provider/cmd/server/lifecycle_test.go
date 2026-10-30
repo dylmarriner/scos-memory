@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -408,5 +410,52 @@ func TestLifecycleHandlersRejectWrongMethod(t *testing.T) {
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s accepted GET: %d", name, w.Code)
 		}
+	}
+}
+
+// Status must not imply the memory fabric is healthy when PostgreSQL is absent.
+// A stale successful prefetch is not evidence of present database reachability.
+func TestScosStatusReportsUnavailableDatabase(t *testing.T) {
+	srv := newHermesServer()
+	w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_status"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status must remain queryable during outage: %d %s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if got["healthy"] != false || got["database_status"] != "unavailable" {
+		t.Fatalf("status must report database unavailable, got %v", got)
+	}
+}
+
+// An open sql.DB is not proof that PostgreSQL is actually reachable.
+func TestScosStatusReportsUnreachableDatabase(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("pgx", "postgres://scos:fake@"+address+"/scos_memory?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	srv := newHermesServer()
+	srv.db = db
+	w := post(t, srv.handleToolCall, "/v1/provider/tool_call", map[string]any{"tool": "scos_status"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status query should survive PostgreSQL outage: %d %s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["healthy"] != false || got["database_status"] != "unhealthy" {
+		t.Fatalf("unreachable Postgres must be reported unhealthy: %v", got)
 	}
 }

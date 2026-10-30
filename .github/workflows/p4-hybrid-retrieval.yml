@@ -10,6 +10,7 @@ on:
       - "services/code-intelligence/**"
       - "services/mcp-gateway/**"
       - "services/memory-intelligence/**"
+      - "services/hermes-provider/**"
       - "workers/embeddings/**"
       - "services/model-runtime/**"
       - "deploy/compose/docker-compose.models.yml"
@@ -32,6 +33,7 @@ on:
       - "services/code-intelligence/**"
       - "services/mcp-gateway/**"
       - "services/memory-intelligence/**"
+      - "services/hermes-provider/**"
       - "workers/embeddings/**"
       - "services/model-runtime/**"
       - "deploy/compose/docker-compose.models.yml"
@@ -169,6 +171,8 @@ jobs:
         run: go test -tags=integration -count=1 ./services/retrieval-orchestrator/cmd/server
       - name: Run P6 memory-code readback and memory-intelligence RLS integration tests
         run: go test -tags=integration -count=1 ./services/memory-intelligence/cmd/server
+      - name: Run Hermes provider lifecycle with restricted PostgreSQL role
+        run: go test -tags=integration -count=1 ./services/hermes-provider/cmd/server
       - name: Enable TLS on disposable CI PostgreSQL for governance RLS fixture
         run: |
           set -euo pipefail
