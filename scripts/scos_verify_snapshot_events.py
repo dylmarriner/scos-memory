@@ -157,6 +157,8 @@ def main() -> int:
     parser.add_argument("--snapshot-id", required=True)
     parser.add_argument("--repository-id", help="Independently trusted SCOS repository UUID")
     parser.add_argument("--branch", help="Independently trusted SCOS branch")
+    parser.add_argument("--require-trusted-identity", action="store_true",
+                        help="Fail closed unless independent repository UUID and branch are supplied")
     parser.add_argument("--pages-file", type=Path, required=True,
                         help="NDJSON export of every authenticated /v2/code/snapshots/events response page")
     args = parser.parse_args()
@@ -179,6 +181,8 @@ def main() -> int:
         old = fingerprint_manifest(repo, parent)
         new = fingerprint_manifest(repo, target)
         trusted = validate_trusted_export_identity(args.repository_id, args.branch)
+        if args.require_trusted_identity and trusted is None:
+            raise WorklistError("independently trusted repository_id and branch are required")
         events, export_identity = read_complete_pages(
             args.pages_file, args.snapshot_id, target, parent, return_identity=True)
         if trusted is not None:

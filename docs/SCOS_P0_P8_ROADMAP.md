@@ -4,6 +4,22 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P3 offline export identity: mandatory trusted-inventory mode (2026-10-31; development)
+
+The three offline P3 snapshot verifiers previously permitted successful
+unbound consistency checks if an automation accidentally omitted both
+independently trusted repository/branch flags. Although the standalone
+verifiers reported `trusted_identity_checked=false`, a caller relying only on
+exit status could silently accept self-consistent forged identity claims.
+A new opt-in `--require-trusted-identity` flag requires both independently
+sourced values or fails closed; the bundle verifier also exposes
+`trusted_identity_checked`. Three real-Git subprocess regressions were RED
+before the CLI supported this flag, then GREEN after implementation.
+This strengthens **offline acceptance policy only**. Server-side Git
+attestation, representative P3 performance, P0–P8 acceptance, production
+rollout and recovery remain unproven. PR-head and merged-main CI are separate
+gates; no live migrations, deployments or paid resources are authorized.
+
 ## §25 governance RLS fixture: production-schema qualification (2026-10-30; source candidate)
 
 The previously documented governance RLS fixture failure is reproduced on an

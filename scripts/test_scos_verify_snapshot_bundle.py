@@ -73,6 +73,15 @@ class SnapshotBundleTests(unittest.TestCase):
             argv += args
         return subprocess.run(argv, capture_output=True, text=True)
 
+    def test_require_trusted_identity_fails_closed_without_inventory(self):
+        missing = self.invoke(args=["--require-trusted-identity"])
+        self.assertNotEqual(missing.returncode, 0, missing.stdout)
+        self.assertIn("trusted", missing.stderr)
+        bound = self.invoke(args=["--require-trusted-identity", "--repository-id", REPO,
+                                  "--branch", "main"])
+        self.assertEqual(bound.returncode, 0, bound.stderr)
+        self.assertIs(json.loads(bound.stdout)["trusted_identity_checked"], True)
+
     def test_valid_bundle_with_multiple_pages(self):
         m = [self.page("files", self.manifest[:2], next_after_path="new.rs"),
              self.page("files", self.manifest[2:])]
@@ -82,6 +91,7 @@ class SnapshotBundleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["file_count"], 3)
         self.assertEqual(json.loads(result.stdout)["event_count"], 2)
+        self.assertIs(json.loads(result.stdout)["trusted_identity_checked"], False)
 
     def test_individually_valid_exports_from_different_repositories_fail_joint_binding(self):
         events = [self.page("events", self.events, repository_id=OTHER_REPO)]

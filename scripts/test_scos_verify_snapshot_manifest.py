@@ -87,6 +87,15 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("trusted", result.stderr)
 
+    def test_require_trusted_identity_fails_closed_without_inventory(self):
+        missing = self.invoke(extra_args=("--require-trusted-identity",))
+        self.assertNotEqual(missing.returncode, 0, missing.stdout)
+        self.assertIn("trusted", missing.stderr)
+        bound = self.invoke(extra_args=("--require-trusted-identity", "--repository-id", REPO,
+                                        "--branch", "main"))
+        self.assertEqual(bound.returncode, 0, bound.stderr)
+        self.assertIs(json.loads(bound.stdout)["trusted_identity_checked"], True)
+
     def test_valid_complete_git_manifest(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
