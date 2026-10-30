@@ -17,7 +17,7 @@ import subprocess
 import sys
 import uuid
 
-from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, parse_export_json, tree_blobs
+from scos_git_worklist import LANGUAGE_SUFFIXES, WorklistError, commit_oid, git_env, parse_export_json, tree_blobs, validate_trusted_export_identity
 
 
 def fingerprint_manifest(repo: Path, commit: str | None) -> dict[str, tuple[str, str]]:
@@ -58,7 +58,7 @@ def read_complete_pages(
         except (ValueError, AttributeError):
             raise WorklistError(f"page {number+1} has invalid repository_id")
         page_branch = page.get("branch")
-        if not isinstance(page_branch, str) or not page_branch.strip():
+        if not isinstance(page_branch, str) or not page_branch.strip() or "\x00" in page_branch:
             raise WorklistError(f"page {number+1} has invalid branch")
         if repository_id is not None and repo != repository_id:
             raise WorklistError(f"page {number+1} has inconsistent repository binding")
@@ -155,6 +155,8 @@ def main() -> int:
     source.add_argument("--parent", help="Indexed parent Git commit")
     source.add_argument("--initial", action="store_true", help="No parent snapshot")
     parser.add_argument("--snapshot-id", required=True)
+    parser.add_argument("--repository-id", help="Independently trusted SCOS repository UUID")
+    parser.add_argument("--branch", help="Independently trusted SCOS branch")
     parser.add_argument("--pages-file", type=Path, required=True,
                         help="NDJSON export of every authenticated /v2/code/snapshots/events response page")
     args = parser.parse_args()
@@ -176,7 +178,14 @@ def main() -> int:
             raise WorklistError("parent must be an ancestor of target")
         old = fingerprint_manifest(repo, parent)
         new = fingerprint_manifest(repo, target)
-        events = read_complete_pages(args.pages_file, args.snapshot_id, target, parent)
+        trusted = validate_trusted_export_identity(args.repository_id, args.branch)
+        events, export_identity = read_complete_pages(
+            args.pages_file, args.snapshot_id, target, parent, return_identity=True)
+        if trusted is not None:
+            if export_identity[0] != trusted[0]:
+                raise WorklistError("export does not match trusted repository_id")
+            if export_identity[1] != trusted[1]:
+                raise WorklistError("export does not match trusted branch")
         verify_events(old, new, events)
     except (WorklistError, ValueError, OSError, json.JSONDecodeError, UnicodeError) as exc:
         print(f"scos_verify_snapshot_events: {exc}", file=sys.stderr)
@@ -187,6 +196,7 @@ def main() -> int:
         "parent_commit_id": parent,
         "commit_id": target,
         "event_count": len(events),
+        "trusted_identity_checked": trusted is not None,
         "limitation": "server_commit_ids_are_caller_supplied_not_git_content_attestation",
     }))
     return 0

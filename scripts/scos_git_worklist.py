@@ -210,6 +210,28 @@ def read_blob(repo: Path, oid: str, include_source: bool, cap: int) -> tuple[str
             process.communicate()
     return digest.hexdigest(), b"".join(fragments) if include_source else b""
 
+def validate_trusted_export_identity(
+    repository_id: str | None, branch: str | None,
+) -> tuple[str, str] | None:
+    """Bind exported identity to independently obtained operator inventory.
+
+    Export self-consistency is not external identity verification. Both
+    values must be supplied together and match the export exactly.
+    """
+    if (repository_id is None) != (branch is None):
+        raise WorklistError("trusted repository_id and branch must be supplied together")
+    if repository_id is None:
+        return None
+    try:
+        if str(uuid.UUID(repository_id)) != repository_id:
+            raise ValueError("not canonical")
+    except (ValueError, AttributeError) as exc:
+        raise WorklistError("trusted repository_id must be a canonical UUID") from exc
+    if not isinstance(branch, str) or not branch.strip() or "\x00" in branch:
+        raise WorklistError("trusted branch must be nonempty")
+    return repository_id, branch
+
+
 def validate_identity(repository_id: str, branch: str) -> str:
     """Apply the same SCOS identity preconditions to payload and event exports."""
     try:

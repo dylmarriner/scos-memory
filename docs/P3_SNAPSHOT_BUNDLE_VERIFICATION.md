@@ -53,6 +53,28 @@ evidence cannot be certified by Python's permissive JSON decoder. The
 standalone manifest and event verifiers use this same strict parser, and all
 four Git verification suites are exercised in CI.
 
+**Standalone verifier identity binding (2026-10-31):** The individual
+`scripts/scos_verify_snapshot_manifest.py` and
+`scripts/scos_verify_snapshot_events.py` CLIs also accept the paired optional
+`--repository-id` and `--branch` flags. Without them, each standalone verifier
+checks the exported identity's syntax and page-to-page consistency, but a
+consistently forged repository or branch label could pass. With them, the
+export must match an **independently trusted** repository UUID and branch
+exactly; a missing partner flag, noncanonical UUID, blank branch, or mismatch
+fails closed. The JSON result reports `trusted_identity_checked` to distinguish
+the two modes. Nine real-Git test methods cover matching and consistently
+forged exports, partial flags, malformed trusted identities, unbound-mode
+reporting and NUL-containing exported branch rejection (review hardening). The two
+standalone verifiers remain offline consistency checks, **not** signed
+server-origin attestations or proof of actual indexed bytes.
+
+For example, append both of these arguments to either standalone verifier:
+
+```bash
+  --repository-id '<trusted-repository-uuid>' \
+  --branch '<trusted-branch>'
+```
+
 Verification:
 
 ```bash
