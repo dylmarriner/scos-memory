@@ -65,6 +65,7 @@ jobs:
           python3 -m unittest discover -s integrations/hermes/plugins/scos -p "test_*.py" -v
           python3 tests/failure-injection/test_runner.py -v
           python3 tests/test_ci_supply_chain.py -v
+          python3 -m unittest discover -s tests -p test_make_test_parity.py -v
       - name: JSON Schema validation
         run: python3 scripts/validate_json.py
       - name: Governance structural audit
