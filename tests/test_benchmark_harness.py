@@ -473,6 +473,17 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
 
     def test_mismatched_rpc_id_cannot_fake_successful_seeding(self):
         _Gateway.response_id_delta = {"scos_remember": 1}
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta"})
+        with self.assertRaisesRegex(RuntimeError, "scos_remember.*JSON-RPC.*id") as caught:
+            with adapter:
+                pass
+        # The gateway may have persisted the seed before returning a bad ID.
+        # Operators need the run tag to find and reconcile that residue.
+        self.assertIn(adapter.run_tag, str(caught.exception))
+
+    def test_float_rpc_id_cannot_fake_successful_seeding(self):
+        # JSON 1.0 equals Python int 1, but is not the integer request ID.
+        _Gateway.response_id_delta = {"scos_remember": 0.0}
         with self.assertRaisesRegex(RuntimeError, "scos_remember.*JSON-RPC.*id"):
             with GatewayMemoryAdapter(self.url, {"b": "gamma delta"}):
                 pass
@@ -494,9 +505,26 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
 
     def test_wrong_rpc_version_rejected_even_with_matching_id(self):
         _Gateway.response_version = {"scos_remember": "1.0"}
-        with self.assertRaisesRegex(RuntimeError, "scos_remember.*JSON-RPC.*version"):
-            with GatewayMemoryAdapter(self.url, {"b": "gamma delta"}):
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta"})
+        with self.assertRaisesRegex(RuntimeError, "scos_remember.*JSON-RPC.*version") as caught:
+            with adapter:
                 pass
+        self.assertIn(adapter.run_tag, str(caught.exception))
+
+    def test_wrong_rpc_version_rejected_for_recall(self):
+        with GatewayMemoryAdapter(self.url, {"b": "gamma delta"}) as adapter:
+            _Gateway.response_version = {"scos_recall": "1.0"}
+            with self.assertRaisesRegex(RuntimeError, "scos_recall.*JSON-RPC.*version"):
+                adapter("gamma delta", {})
+            _Gateway.response_version.clear()
+        self.assertEqual(_Gateway.forgotten, ["fact-2"])
+
+    def test_wrong_rpc_version_cannot_fake_confirmed_cleanup(self):
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta"})
+        with self.assertRaisesRegex(RuntimeError, "cleanup"):
+            with adapter:
+                _Gateway.response_version = {"scos_forget": "1.0"}
+        self.assertTrue(any("JSON-RPC" in item for item in adapter.forget_failures))
 
     def test_mcp_tool_error_cannot_fake_successful_seeding(self):
         _Gateway.tool_errors = {"scos_remember"}

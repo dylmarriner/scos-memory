@@ -10,10 +10,13 @@
 The HTTP-backed benchmark adapter previously accepted an MCP tools/call
 response without checking its JSON-RPC protocol version or matching the
 response id to the exact request. A stale or swapped HTTP 200 response could
-therefore be counted as successful seeding, retrieval or cleanup. Four
+therefore be counted as successful seeding, retrieval or cleanup. Four initial
 real-HTTP regression tests reproduced the acceptance defect before correction,
 then verified that wrong request IDs fail closed for each operation and that
-an incorrect JSON-RPC version is rejected. Local evidence: 54 benchmark
+an incorrect JSON-RPC version is rejected. Review hardening added
+run-tag diagnostics for possibly untracked seeds, a float-ID regression,
+and wrong-version coverage for recall and cleanup (seven new HTTP tests
+in total). Local evidence: 57 benchmark
 harness tests, full make test, go vet, and 42 P4 fixture/gate tests passed.
 The seven-case frozen P4 lexical baseline was explicitly requalified with
 unchanged rankings/metrics and zero forbidden evidence; only the source
