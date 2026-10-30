@@ -399,17 +399,21 @@ class _Gateway(BaseHTTPRequestHandler):
     refuse_forget_ids: set = set()
     forget_requests: list = []
     tool_errors: set = set()
+    response_id_delta: dict = {}
+    response_version: dict = {}
 
     def do_POST(self):  # noqa: N802
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         name, args = request["params"]["name"], request["params"]["arguments"]
+        response_id = request["id"] + self.response_id_delta.get(name, 0)
+        response_version = self.response_version.get(name, "2.0")
         if name in self.tool_errors:
             # MCP tool-level failure can still be HTTP 200 and contain a
             # well-formed JSON body that resembles a successful tool result.
             payload = ({"forgotten": True} if name == "scos_forget" else
                        {"recall": [{"memory_id": "fact-2"}]} if name == "scos_recall" else
                        {"fact": {"id": "fact-2", "content": args["content"]}})
-            body = json.dumps({"jsonrpc": "2.0", "id": request["id"],
+            body = json.dumps({"jsonrpc": response_version, "id": response_id,
                                "result": {"isError": True, "content": [
                                    {"type": "text", "text": json.dumps(payload)}]}}).encode()
             self.send_response(200)
@@ -439,7 +443,7 @@ class _Gateway(BaseHTTPRequestHandler):
                 payload = {"forgotten": True}
         else:
             raise AssertionError(f"unexpected MCP tool: {name}")
-        body = json.dumps({"jsonrpc": "2.0", "id": request["id"],
+        body = json.dumps({"jsonrpc": response_version, "id": response_id,
                            "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -459,11 +463,40 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
         _Gateway.refuse_forget_ids = set()
         _Gateway.forget_requests = []
         _Gateway.tool_errors = set()
+        _Gateway.response_id_delta = {}
+        _Gateway.response_version = {}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Gateway)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.url = f"http://127.0.0.1:{self.server.server_port}/mcp"
+
+    def test_mismatched_rpc_id_cannot_fake_successful_seeding(self):
+        _Gateway.response_id_delta = {"scos_remember": 1}
+        with self.assertRaisesRegex(RuntimeError, "scos_remember.*JSON-RPC.*id"):
+            with GatewayMemoryAdapter(self.url, {"b": "gamma delta"}):
+                pass
+
+    def test_mismatched_rpc_id_cannot_fake_successful_recall(self):
+        with GatewayMemoryAdapter(self.url, {"b": "gamma delta"}) as adapter:
+            _Gateway.response_id_delta = {"scos_recall": 1}
+            with self.assertRaisesRegex(RuntimeError, "scos_recall.*JSON-RPC.*id"):
+                adapter("gamma delta", {})
+            _Gateway.response_id_delta.clear()
+        self.assertEqual(_Gateway.forgotten, ["fact-2"])
+
+    def test_mismatched_rpc_id_cannot_fake_confirmed_cleanup(self):
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta"})
+        with self.assertRaisesRegex(RuntimeError, "cleanup"):
+            with adapter:
+                _Gateway.response_id_delta = {"scos_forget": 1}
+        self.assertTrue(any("JSON-RPC" in item for item in adapter.forget_failures))
+
+    def test_wrong_rpc_version_rejected_even_with_matching_id(self):
+        _Gateway.response_version = {"scos_remember": "1.0"}
+        with self.assertRaisesRegex(RuntimeError, "scos_remember.*JSON-RPC.*version"):
+            with GatewayMemoryAdapter(self.url, {"b": "gamma delta"}):
+                pass
 
     def test_mcp_tool_error_cannot_fake_successful_seeding(self):
         _Gateway.tool_errors = {"scos_remember"}

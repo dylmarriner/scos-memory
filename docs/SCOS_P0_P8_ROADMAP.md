@@ -5,6 +5,25 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 JSON-RPC response identity integrity (2026-10-31; isolated TDD candidate)
+
+The HTTP-backed benchmark adapter previously accepted an MCP tools/call
+response without checking its JSON-RPC protocol version or matching the
+response id to the exact request. A stale or swapped HTTP 200 response could
+therefore be counted as successful seeding, retrieval or cleanup. Four
+real-HTTP regression tests reproduced the acceptance defect before correction,
+then verified that wrong request IDs fail closed for each operation and that
+an incorrect JSON-RPC version is rejected. Local evidence: 54 benchmark
+harness tests, full make test, go vet, and 42 P4 fixture/gate tests passed.
+The seven-case frozen P4 lexical baseline was explicitly requalified with
+unchanged rankings/metrics and zero forbidden evidence; only the source
+harness digest and Git base SHA changed. A rejected seed response can leave
+an untracked server-side memory, so fail-closed reporting is not proof of
+remote cleanup or production recovery. This is **source-only P0 evidence
+integrity**, not representative benchmark qualification, production
+rollout/recovery evidence or P0–P8 completion. PR/merged-main CI and P4
+qualification are separate acceptance gates.
+
 ## P0 MCP tool-level failure integrity (2026-10-31; isolated TDD candidate)
 
 The live HTTP benchmark previously trusted a JSON-looking `tools/call` body
