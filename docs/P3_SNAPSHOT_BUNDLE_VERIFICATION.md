@@ -75,6 +75,15 @@ For example, append both of these arguments to either standalone verifier:
   --branch '<trusted-branch>'
 ```
 
+**Fail-closed automation mode (2026-10-31):** All three offline verifier
+CLIs accept `--require-trusted-identity`. When enabled, omission of the
+independently sourced `--repository-id` and `--branch` pair is a verification
+failure rather than a successful but unbound consistency check. This makes
+CI scripts and evidence pipelines explicitly enforce their external trust
+inventory. The joint bundle verifier now also reports
+`trusted_identity_checked`, matching the standalone verifiers. The flag
+**does not** authenticate the exporting server or establish signed provenance.
+
 Verification:
 
 ```bash

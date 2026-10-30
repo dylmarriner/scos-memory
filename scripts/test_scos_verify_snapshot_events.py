@@ -87,6 +87,18 @@ class SnapshotEventVerificationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIs(json.loads(result.stdout)["trusted_identity_checked"], False)
 
+    def test_require_trusted_identity_fails_closed_without_inventory(self):
+        parent, target, events = self.fixture()
+        missing = self.invoke(target, events, parent,
+                              extra_args=("--require-trusted-identity",))
+        self.assertNotEqual(missing.returncode, 0, missing.stdout)
+        self.assertIn("trusted", missing.stderr)
+        bound = self.invoke(target, events, parent,
+                            extra_args=("--require-trusted-identity", "--repository-id", REPO,
+                                        "--branch", "main"))
+        self.assertEqual(bound.returncode, 0, bound.stderr)
+        self.assertIs(json.loads(bound.stdout)["trusted_identity_checked"], True)
+
     def test_independent_trusted_identity_accepts_matching_event_export(self):
         parent, target, events = self.fixture()
         result = self.invoke(target, events, parent,

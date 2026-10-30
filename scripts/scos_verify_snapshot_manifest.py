@@ -158,6 +158,8 @@ def main() -> int:
     parser.add_argument("--pages-file", type=Path, required=True)
     parser.add_argument("--repository-id", help="Independently trusted SCOS repository UUID")
     parser.add_argument("--branch", help="Independently trusted SCOS branch")
+    parser.add_argument("--require-trusted-identity", action="store_true",
+                        help="Fail closed unless independent repository UUID and branch are supplied")
     args = parser.parse_args()
     try:
         if str(uuid.UUID(args.snapshot_id)) != args.snapshot_id:
@@ -178,6 +180,8 @@ def main() -> int:
             if ancestry.returncode != 0:
                 raise WorklistError("trusted parent must be an ancestor of target")
         trusted = validate_trusted_export_identity(args.repository_id, args.branch)
+        if args.require_trusted_identity and trusted is None:
+            raise WorklistError("independently trusted repository_id and branch are required")
         manifest, export_identity = read_pages(
             args.pages_file, args.snapshot_id, commit, parent, return_identity=True)
         if trusted is not None:

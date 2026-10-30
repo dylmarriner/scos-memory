@@ -76,6 +76,7 @@ def verify_bundle(
         "commit_id": target,
         "file_count": len(files),
         "event_count": len(events),
+        "trusted_identity_checked": expected_repository_id is not None,
         "limitation": "server_commit_ids_and_exports_are_not_cryptographically_attested",
     }
 
@@ -90,6 +91,8 @@ def main() -> int:
     parser.add_argument("--snapshot-id", required=True)
     parser.add_argument("--repository-id", help="Independently trusted SCOS repository UUID")
     parser.add_argument("--branch", help="Independently trusted SCOS branch name")
+    parser.add_argument("--require-trusted-identity", action="store_true",
+                        help="Fail closed unless independent repository UUID and branch are supplied")
     parser.add_argument("--manifest-pages-file", type=Path, required=True)
     parser.add_argument("--event-pages-file", type=Path, required=True)
     args = parser.parse_args()
@@ -98,6 +101,8 @@ def main() -> int:
             raise WorklistError("snapshot_id must be a canonical UUID")
         if args.parent == "":
             raise WorklistError("trusted parent cannot be empty")
+        if args.require_trusted_identity and args.repository_id is None:
+            raise WorklistError("independently trusted repository_id and branch are required")
         if (args.repository_id is None) != (args.branch is None):
             raise WorklistError("trusted repository_id and branch must be supplied together")
         if args.repository_id is not None:
