@@ -708,9 +708,19 @@ class GatewayMemoryAdapter:
                 envelope = json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise RuntimeError(f"live benchmark gateway unavailable: {self.endpoint}: {exc}") from exc
+        if not isinstance(envelope, dict):
+            raise RuntimeError(f"{tool} returned an invalid JSON-RPC envelope")
         if "error" in envelope:
             raise RuntimeError(f"{tool} failed: {envelope['error']}")
-        content = envelope.get("result", {}).get("content") or []
+        result = envelope.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"{tool} returned no valid MCP tool result")
+        # MCP tools/call may return HTTP 200 and a plausible JSON payload
+        # even when the tool explicitly marks the result as an error.
+        # Never count that as a successful seed, retrieval or deletion.
+        if "isError" in result and result["isError"] is not False:
+            raise RuntimeError(f"{tool} failed: MCP tool result isError")
+        content = result.get("content") or []
         if not content or "text" not in content[0]:
             raise RuntimeError(f"{tool} returned no content")
         try:

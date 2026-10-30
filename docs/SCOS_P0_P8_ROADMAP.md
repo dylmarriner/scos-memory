@@ -5,6 +5,20 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 MCP tool-level failure integrity (2026-10-31; isolated TDD candidate)
+
+The live HTTP benchmark previously trusted a JSON-looking `tools/call` body
+when the MCP result itself carried `isError: true` over HTTP 200. Three
+real-HTTP regressions reproduced false successful seeding, recall and cleanup
+acknowledgements (RED). The adapter now rejects tool-level failures before
+parsing tool content, rejects malformed result envelopes, and requires a
+boolean `isError: false` when that optional field is present (GREEN). A
+failed `scos_forget` is retained as a cleanup failure with the memory ID,
+so a failed deletion cannot be misreported as a successful benchmark.
+This is a source-level P0 evidence-integrity correction, not representative
+retrieval acceptance, a production cleanup drill, or a live rollout.
+PR-head CI, P4 requalification and merged-main verification remain required.
+
 ## P0 live benchmark cleanup acknowledgement (2026-10-31; source candidate)
 
 The HTTP-backed P0 benchmark previously printed successful acceptance even
