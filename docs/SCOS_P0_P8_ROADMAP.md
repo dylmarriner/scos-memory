@@ -13,8 +13,8 @@ occurred after `seed_report()` was captured, hiding deletion failures from
 the published result. Isolated real-HTTP regressions reproduced both defects
 before the fix. The adapter now requires an affirmative forget acknowledgement,
 records each affected memory ID, and fails closed on incomplete cleanup before
-emitting a successful benchmark report. It preserves the original exception if
-benchmark execution itself fails. A successful-run regression checks that only
+emitting a successful benchmark report. If evaluation itself fails, its original
+exception remains primary with a diagnostic note listing residual memory IDs. A successful-run regression checks that only
 benchmark-created memories are forgotten. No live gateway or production memory
 was touched.
 

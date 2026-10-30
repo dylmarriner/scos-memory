@@ -739,17 +739,21 @@ class GatewayMemoryAdapter:
             raise
         return self
 
-    def __exit__(self, exc_type: Any, *_exc: Any) -> None:
+    def __exit__(self, exc_type: Any, exc_value: Any, _traceback: Any) -> None:
+        """Confirm cleanup before success; annotate rather than mask an evaluation error."""
         self.cleanup()
-        # Never publish successful acceptance while benchmark-created memories
-        # may still exist. Preserve an original body exception if one occurred.
-        if exc_type is None and self.forget_failures:
-            raise RuntimeError(
-                "benchmark cleanup incomplete; memories may remain: "
-                + "; ".join(self.forget_failures)
-            )
+        if self.forget_failures:
+            message = ("benchmark cleanup incomplete; memories may remain: "
+                       + "; ".join(self.forget_failures))
+            if exc_value is not None:
+                # The evaluation error stays primary, with residual IDs visible
+                # for an operator to investigate without losing its traceback.
+                exc_value.add_note(message)
+            elif exc_type is None:
+                raise RuntimeError(message)
 
     def cleanup(self) -> None:
+        """Forget only benchmark-created memories and retain every failed ID."""
         while self.created:
             fact_id = self.created.pop()
             try:
@@ -775,6 +779,7 @@ class GatewayMemoryAdapter:
 # ── main ─────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
+    """Run offline evidence and optional live retrieval, failing on unsafe cleanup."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--suite", default="default", help="suite JSON file, or 'default' for the frozen suite")
     parser.add_argument("--endpoint", help="MCP gateway URL of a deployed SCOS, e.g. https://127.0.0.1:8098/mcp")

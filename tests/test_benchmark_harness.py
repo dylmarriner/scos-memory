@@ -474,9 +474,10 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
     def test_cleanup_refusal_does_not_mask_evaluation_failure(self):
         _Gateway.fail_forget = True
         adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta"})
-        with self.assertRaisesRegex(ValueError, "evaluation failed"):
+        with self.assertRaisesRegex(ValueError, "evaluation failed") as caught:
             with adapter:
                 raise ValueError("evaluation failed")
+        self.assertIn("fact-2", "\n".join(getattr(caught.exception, "__notes__", [])))
         self.assertTrue(adapter.seed_report()["forget_failures"])
         self.assertIn("fact-2", _Gateway.facts)
 
