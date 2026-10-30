@@ -710,6 +710,13 @@ class GatewayMemoryAdapter:
             raise RuntimeError(f"live benchmark gateway unavailable: {self.endpoint}: {exc}") from exc
         if not isinstance(envelope, dict):
             raise RuntimeError(f"{tool} returned an invalid JSON-RPC envelope")
+        # Bind each result to the exact request that produced it. A stale,
+        # swapped or otherwise malformed HTTP 200 response is not evidence
+        # that this particular seed, recall or cleanup operation succeeded.
+        if envelope.get("jsonrpc") != "2.0":
+            raise RuntimeError(f"{tool} returned an invalid JSON-RPC version; run tag {self.run_tag}")
+        if type(envelope.get("id")) is not int or envelope["id"] != self._rpc_id:
+            raise RuntimeError(f"{tool} returned a mismatched JSON-RPC response id; run tag {self.run_tag}")
         if "error" in envelope:
             raise RuntimeError(f"{tool} failed: {envelope['error']}")
         result = envelope.get("result")
