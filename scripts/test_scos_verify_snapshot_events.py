@@ -72,6 +72,21 @@ class SnapshotEventVerificationTests(unittest.TestCase):
         ]
         return parent, target, events
 
+    def test_unbound_event_export_rejects_nul_in_branch(self):
+        parent, target, events = self.fixture()
+        result = self.invoke(target, events, parent,
+                             pages=[{"snapshot_id": SNAPSHOT, "events": events,
+                                     "branch": "main\x00forged"}])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("invalid branch", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_unbound_event_export_reports_untrusted_identity(self):
+        parent, target, events = self.fixture()
+        result = self.invoke(target, events, parent)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIs(json.loads(result.stdout)["trusted_identity_checked"], False)
+
     def test_independent_trusted_identity_accepts_matching_event_export(self):
         parent, target, events = self.fixture()
         result = self.invoke(target, events, parent,

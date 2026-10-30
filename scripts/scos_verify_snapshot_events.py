@@ -58,7 +58,7 @@ def read_complete_pages(
         except (ValueError, AttributeError):
             raise WorklistError(f"page {number+1} has invalid repository_id")
         page_branch = page.get("branch")
-        if not isinstance(page_branch, str) or not page_branch.strip():
+        if not isinstance(page_branch, str) or not page_branch.strip() or "\x00" in page_branch:
             raise WorklistError(f"page {number+1} has invalid branch")
         if repository_id is not None and repo != repository_id:
             raise WorklistError(f"page {number+1} has inconsistent repository binding")

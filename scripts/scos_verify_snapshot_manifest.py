@@ -48,7 +48,7 @@ def read_pages(
                     raise ValueError("invalid repository UUID")
             except (ValueError, AttributeError):
                 raise WorklistError(f"page {number} has invalid repository_id")
-            if not isinstance(branch, str) or not branch.strip() or not isinstance(parent, str):
+            if not isinstance(branch, str) or not branch.strip() or "\x00" in branch or not isinstance(parent, str):
                 raise WorklistError(f"page {number} has invalid branch or parent_commit_id")
             if expected_parent_commit is not None and parent != expected_parent_commit:
                 raise WorklistError(f"page {number} has wrong or missing trusted parent commit binding")

@@ -55,6 +55,12 @@ class SnapshotManifestVerificationTests(unittest.TestCase):
                 "commit_id": self.commit, "parent_commit_id": "",
                 "files": files, **extra}
 
+    def test_unbound_manifest_rejects_nul_in_exported_branch(self):
+        result = self.invoke([self.page(self.files, branch="main\x00forged")])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("invalid branch", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_independent_trusted_identity_accepts_matching_export(self):
         result = self.invoke(extra_args=("--repository-id", REPO, "--branch", "main"))
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -62,8 +62,9 @@ consistently forged repository or branch label could pass. With them, the
 export must match an **independently trusted** repository UUID and branch
 exactly; a missing partner flag, noncanonical UUID, blank branch, or mismatch
 fails closed. The JSON result reports `trusted_identity_checked` to distinguish
-the two modes. Six real-Git test methods cover matching and consistently
-forged exports, partial flags and malformed trusted identities. The two
+the two modes. Nine real-Git test methods cover matching and consistently
+forged exports, partial flags, malformed trusted identities, unbound-mode
+reporting and NUL-containing exported branch rejection (review hardening). The two
 standalone verifiers remain offline consistency checks, **not** signed
 server-origin attestations or proof of actual indexed bytes.
 
