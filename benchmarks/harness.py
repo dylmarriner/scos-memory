@@ -739,14 +739,27 @@ class GatewayMemoryAdapter:
             raise
         return self
 
-    def __exit__(self, *_exc: Any) -> None:
+    def __exit__(self, exc_type: Any, exc_value: Any, _traceback: Any) -> None:
+        """Confirm cleanup before success; annotate rather than mask an evaluation error."""
         self.cleanup()
+        if self.forget_failures:
+            message = ("benchmark cleanup incomplete; memories may remain: "
+                       + "; ".join(self.forget_failures))
+            if exc_value is not None:
+                # The evaluation error stays primary, with residual IDs visible
+                # for an operator to investigate without losing its traceback.
+                exc_value.add_note(message)
+            elif exc_type is None:
+                raise RuntimeError(message)
 
     def cleanup(self) -> None:
+        """Forget only benchmark-created memories and retain every failed ID."""
         while self.created:
             fact_id = self.created.pop()
             try:
-                self._call("scos_forget", {"memory_id": fact_id})
+                response = self._call("scos_forget", {"memory_id": fact_id})
+                if not isinstance(response, dict) or response.get("forgotten") is not True:
+                    raise RuntimeError("scos_forget did not confirm forgotten=true")
             except RuntimeError as exc:
                 self.forget_failures.append(f"{fact_id}: {exc}")
 
@@ -766,6 +779,7 @@ class GatewayMemoryAdapter:
 # ── main ─────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
+    """Run offline evidence and optional live retrieval, failing on unsafe cleanup."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--suite", default="default", help="suite JSON file, or 'default' for the frozen suite")
     parser.add_argument("--endpoint", help="MCP gateway URL of a deployed SCOS, e.g. https://127.0.0.1:8098/mcp")
@@ -780,7 +794,8 @@ def main(argv: list[str] | None = None) -> int:
         with GatewayMemoryAdapter(args.endpoint, suite.corpus, ca_file=args.ca_file) as adapter:
             runner = BenchmarkRunner(suite)
             runner.run(adapter)
-            report["seeding"] = adapter.seed_report()
+        # __exit__ has completed and confirmed cleanup before reporting success.
+        report["seeding"] = adapter.seed_report()
         report["system_under_test"] = {"endpoint": args.endpoint, "summary": runner.summary(baseline_results=baseline.results),
                                        "comparison": compare_baseline(runner.results, baseline.results)}
     else:

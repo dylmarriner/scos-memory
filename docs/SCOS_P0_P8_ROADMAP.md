@@ -5,7 +5,27 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
-## P0 external benchmark-suite schema integrity (2026-10-31; development candidate)
+## P0 live benchmark cleanup acknowledgement (2026-10-31; source candidate)
+
+The HTTP-backed P0 benchmark previously printed successful acceptance even
+when `scos_forget` explicitly returned `forgotten=false`. Cleanup also
+occurred after `seed_report()` was captured, hiding deletion failures from
+the published result. Isolated real-HTTP regressions reproduced both defects
+before the fix. The adapter now requires an affirmative forget acknowledgement,
+records each affected memory ID, and fails closed on incomplete cleanup before
+emitting a successful benchmark report. If evaluation itself fails, its original
+exception remains primary with a diagnostic note listing residual memory IDs. A successful-run regression checks that only
+benchmark-created memories are forgotten. A follow-up real-HTTP regression
+exercises a two-memory cleanup where the first forget is refused and confirms
+that the second forget still succeeds while the refusal fails the run.
+No live gateway or production memory was touched.
+
+This is **P0 benchmark cleanup and evidence integrity**, not representative
+retrieval acceptance, a live cleanup drill, production deployment, or §41
+completion. PR-head CI, merged-main CI and P4 fixture requalification remain
+separate gates.
+
+## P0 external benchmark-suite schema integrity (2026-10-31; merged PR #184)
 
 An externally supplied JSON benchmark suite could previously pass an empty
 `expected_ids` list to the scorer, making `task_success` vacuously true.

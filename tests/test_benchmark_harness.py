@@ -395,6 +395,9 @@ class _Gateway(BaseHTTPRequestHandler):
     in-memory store, with one memory that predates the benchmark run."""
     facts: dict = {}
     forgotten: list = []
+    fail_forget: bool = False
+    refuse_forget_ids: set = set()
+    forget_requests: list = []
 
     def do_POST(self):  # noqa: N802
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -410,10 +413,16 @@ class _Gateway(BaseHTTPRequestHandler):
             words = set(args["query"].lower().split())
             ranked = sorted(((len(words & set(text.lower().split())), fid) for fid, text in self.facts.items()), reverse=True)
             payload = {"recall": [{"memory_id": fid} for score, fid in ranked if score][: args["max_items"]]}
+        elif name == "scos_forget":
+            self.forget_requests.append(args["memory_id"])
+            if self.fail_forget or args["memory_id"] in self.refuse_forget_ids:
+                payload = {"forgotten": False}
+            else:
+                self.forgotten.append(args["memory_id"])
+                self.facts.pop(args["memory_id"], None)
+                payload = {"forgotten": True}
         else:
-            self.forgotten.append(args["memory_id"])
-            self.facts.pop(args["memory_id"], None)
-            payload = {"forgotten": True}
+            raise AssertionError(f"unexpected MCP tool: {name}")
         body = json.dumps({"jsonrpc": "2.0", "id": request["id"],
                            "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}).encode()
         self.send_response(200)
@@ -430,6 +439,9 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
     def setUp(self):
         _Gateway.facts = {"user-1": "alpha beta preexisting"}
         _Gateway.forgotten = []
+        _Gateway.fail_forget = False
+        _Gateway.refuse_forget_ids = set()
+        _Gateway.forget_requests = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Gateway)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -453,6 +465,75 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
         self.assertIn("a", report["merged_on_save"])
         self.assertEqual(sorted(_Gateway.forgotten), ["fact-2", "fact-3"])
         self.assertIn("user-1", _Gateway.facts)
+
+    def test_cleanup_refusal_is_reported_and_fails_closed(self):
+        _Gateway.fail_forget = True
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta"})
+        with self.assertRaisesRegex(RuntimeError, "cleanup"):
+            with adapter:
+                self.assertEqual(adapter("gamma", {}), ["b"])
+        self.assertIn("fact-2", _Gateway.facts)
+        self.assertEqual(_Gateway.forgotten, [])
+        self.assertTrue(any("fact-2" in item for item in adapter.seed_report()["forget_failures"]))
+
+    def test_cleanup_continues_after_first_refusal(self):
+        # LIFO cleanup first attempts fact-3, then must still forget fact-2.
+        _Gateway.refuse_forget_ids = {"fact-3"}
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta", "c": "epsilon zeta"})
+        with self.assertRaisesRegex(RuntimeError, "cleanup"):
+            with adapter:
+                pass
+        self.assertEqual(_Gateway.forget_requests, ["fact-3", "fact-2"])
+        self.assertEqual(_Gateway.forgotten, ["fact-2"])
+        self.assertIn("fact-3", _Gateway.facts)
+        self.assertNotIn("fact-2", _Gateway.facts)
+        self.assertTrue(any("fact-3" in item for item in adapter.seed_report()["forget_failures"]))
+
+    def test_cleanup_refusal_does_not_mask_evaluation_failure(self):
+        _Gateway.fail_forget = True
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta"})
+        with self.assertRaisesRegex(ValueError, "evaluation failed") as caught:
+            with adapter:
+                raise ValueError("evaluation failed")
+        self.assertIn("fact-2", "\n".join(getattr(caught.exception, "__notes__", [])))
+        self.assertTrue(adapter.seed_report()["forget_failures"])
+        self.assertIn("fact-2", _Gateway.facts)
+
+    def test_main_does_not_emit_success_report_before_cleanup(self):
+        _Gateway.fail_forget = True
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = pathlib.Path(temp.name) / "suite.json"
+        path.write_text(json.dumps({
+            "name": "cleanup", "version": "1",
+            "corpus": {"b": "gamma delta"},
+            "cases": [{"id": "t1", "query": "gamma", "category": "known_answer",
+                       "expected_ids": ["b"]}],
+        }), encoding="utf-8")
+        output = io.StringIO()
+        with self.assertRaisesRegex(RuntimeError, "cleanup"):
+            with redirect_stdout(output):
+                main(["--suite", str(path), "--endpoint", self.url])
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("fact-2", _Gateway.facts)
+
+    def test_main_success_report_requires_completed_cleanup(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = pathlib.Path(temp.name) / "suite.json"
+        path.write_text(json.dumps({
+            "name": "cleanup", "version": "1",
+            "corpus": {"b": "gamma delta"},
+            "cases": [{"id": "t1", "query": "gamma", "category": "known_answer",
+                       "expected_ids": ["b"]}],
+        }), encoding="utf-8")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(["--suite", str(path), "--endpoint", self.url]), 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["seeding"]["forget_failures"], [])
+        self.assertEqual(_Gateway.forgotten, ["fact-2"])
+        self.assertNotIn("fact-2", _Gateway.facts)
 
     def test_unavailable_gateway_fails_closed(self):
         with self.assertRaisesRegex(RuntimeError, "unavailable"):
