@@ -95,4 +95,3 @@ func TestReadyRejectsTCPListenerWithoutDatabaseConnection(t *testing.T) {
 		t.Fatalf("unexpected readiness response: %+v", status)
 	}
 }
-
