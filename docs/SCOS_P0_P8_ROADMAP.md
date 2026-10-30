@@ -15,8 +15,10 @@ before the fix. The adapter now requires an affirmative forget acknowledgement,
 records each affected memory ID, and fails closed on incomplete cleanup before
 emitting a successful benchmark report. If evaluation itself fails, its original
 exception remains primary with a diagnostic note listing residual memory IDs. A successful-run regression checks that only
-benchmark-created memories are forgotten. No live gateway or production memory
-was touched.
+benchmark-created memories are forgotten. A follow-up real-HTTP regression
+exercises a two-memory cleanup where the first forget is refused and confirms
+that the second forget still succeeds while the refusal fails the run.
+No live gateway or production memory was touched.
 
 This is **P0 benchmark cleanup and evidence integrity**, not representative
 retrieval acceptance, a live cleanup drill, production deployment, or §41

@@ -396,6 +396,8 @@ class _Gateway(BaseHTTPRequestHandler):
     facts: dict = {}
     forgotten: list = []
     fail_forget: bool = False
+    refuse_forget_ids: set = set()
+    forget_requests: list = []
 
     def do_POST(self):  # noqa: N802
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -412,7 +414,8 @@ class _Gateway(BaseHTTPRequestHandler):
             ranked = sorted(((len(words & set(text.lower().split())), fid) for fid, text in self.facts.items()), reverse=True)
             payload = {"recall": [{"memory_id": fid} for score, fid in ranked if score][: args["max_items"]]}
         elif name == "scos_forget":
-            if self.fail_forget:
+            self.forget_requests.append(args["memory_id"])
+            if self.fail_forget or args["memory_id"] in self.refuse_forget_ids:
                 payload = {"forgotten": False}
             else:
                 self.forgotten.append(args["memory_id"])
@@ -437,6 +440,8 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
         _Gateway.facts = {"user-1": "alpha beta preexisting"}
         _Gateway.forgotten = []
         _Gateway.fail_forget = False
+        _Gateway.refuse_forget_ids = set()
+        _Gateway.forget_requests = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Gateway)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -470,6 +475,19 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
         self.assertIn("fact-2", _Gateway.facts)
         self.assertEqual(_Gateway.forgotten, [])
         self.assertTrue(any("fact-2" in item for item in adapter.seed_report()["forget_failures"]))
+
+    def test_cleanup_continues_after_first_refusal(self):
+        # LIFO cleanup first attempts fact-3, then must still forget fact-2.
+        _Gateway.refuse_forget_ids = {"fact-3"}
+        adapter = GatewayMemoryAdapter(self.url, {"b": "gamma delta", "c": "epsilon zeta"})
+        with self.assertRaisesRegex(RuntimeError, "cleanup"):
+            with adapter:
+                pass
+        self.assertEqual(_Gateway.forget_requests, ["fact-3", "fact-2"])
+        self.assertEqual(_Gateway.forgotten, ["fact-2"])
+        self.assertIn("fact-3", _Gateway.facts)
+        self.assertNotIn("fact-2", _Gateway.facts)
+        self.assertTrue(any("fact-3" in item for item in adapter.seed_report()["forget_failures"]))
 
     def test_cleanup_refusal_does_not_mask_evaluation_failure(self):
         _Gateway.fail_forget = True
