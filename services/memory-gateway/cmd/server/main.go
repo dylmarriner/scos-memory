@@ -8,9 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -314,60 +312,25 @@ func (s server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, statusResponse{Status: "ok", Version: s.version})
 }
 
+// handleReady must prove that the configured database connection can actually
+// complete a PostgreSQL ping. Merely reaching an open TCP port is not proof
+// that the journal is writable or that PostgreSQL authentication works.
 func (s server) handleReady(w http.ResponseWriter, r *http.Request) {
 	checks := map[string]string{"process": "ok"}
-	if s.db != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), s.dialTimeout)
-		defer cancel()
-		if err := s.db.PingContext(ctx); err != nil {
-			checks["postgres"] = "unhealthy"
-			writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "not_ready", Version: s.version, Checks: checks})
-			return
-		}
-		checks["postgres"] = "ready"
-		writeJSON(w, http.StatusOK, statusResponse{Status: "ready", Version: s.version, Checks: checks})
-		return
-	}
-	address, err := postgresAddress(s.databaseURL)
-	if err != nil {
-		checks["postgres"] = err.Error()
+	if s.db == nil {
+		checks["postgres"] = "not_configured"
 		writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "not_ready", Version: s.version, Checks: checks})
 		return
 	}
-
-	conn, err := net.DialTimeout("tcp", address, s.dialTimeout)
-	if err != nil {
-		checks["postgres"] = "unreachable"
+	ctx, cancel := context.WithTimeout(r.Context(), s.dialTimeout)
+	defer cancel()
+	if err := s.db.PingContext(ctx); err != nil {
+		checks["postgres"] = "unhealthy"
 		writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "not_ready", Version: s.version, Checks: checks})
 		return
 	}
-	_ = conn.Close()
-
-	checks["postgres"] = "reachable"
+	checks["postgres"] = "ready"
 	writeJSON(w, http.StatusOK, statusResponse{Status: "ready", Version: s.version, Checks: checks})
-}
-
-func postgresAddress(databaseURL string) (string, error) {
-	if databaseURL == "" {
-		return "", errors.New("DATABASE_URL is not configured")
-	}
-
-	u, err := url.Parse(databaseURL)
-	if err != nil {
-		return "", errors.New("DATABASE_URL is invalid")
-	}
-	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
-		return "", errors.New("DATABASE_URL must use postgres or postgresql")
-	}
-	if u.Hostname() == "" {
-		return "", errors.New("DATABASE_URL has no hostname")
-	}
-
-	port := u.Port()
-	if port == "" {
-		port = "5432"
-	}
-	return net.JoinHostPort(u.Hostname(), port), nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
