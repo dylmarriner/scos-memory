@@ -26,6 +26,32 @@ fixture/gate tests and `git diff --check` passed. An initial unisolated
 an environment issue, not a passing test claim. PR-head CI, P4 and
 merged-main qualification remain required.
 
+## Production PostgreSQL DNS preflight (2026-10-31; source candidate)
+
+The live SCOS/Hermes prefetch tool has repeatedly recorded Docker DNS
+resolution failures for the `postgres` hostname, but historic error
+counters cannot establish present database health. A new read-only Docker
+Compose diagnostic discovers the project's PostgreSQL and Hermes containers,
+checks running/health state, shared networks and the `postgres` alias,
+and can optionally run `getent hosts postgres` from Hermes. It returns
+explicit *pass*, *fail* or *indeterminate* network classifications and never
+reports authenticated database readiness from DNS alone. It does not run
+Docker restarts, deploy, or read raw environment variables.
+
+Test-first verification covers ten synthetic Docker/network failure and
+security scenarios, including no output of raw Docker stderr or secrets.
+An additional real existing disposable Docker container check found and
+corrected an absent-healthcheck template failure: the allowlisted Docker
+inspect format now renders without requesting `Config.Env`. The diagnostic
+test is required in local `make test` and GitHub CI; a parity regression
+first failed without those gates and passed after adding them.
+
+**Still open:** issue #181's actual production host verification,
+Docker network diagnosis there, restricted-role database and memory
+round trips, deployment/rollback and recovery drills, and governance §41.
+The diagnostic has not been run on the production host, and this does not
+qualify P0–P8 completion.
+
 ## P0 deployed benchmark redirect credential isolation (2026-10-31; TDD source candidate)
 
 The deployed code benchmark sends a bearer token and tenant/principal headers
