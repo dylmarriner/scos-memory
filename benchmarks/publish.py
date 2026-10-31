@@ -32,7 +32,7 @@ def _source_sha() -> str:
 
 def _finite_measurement(value: Any, *, label: str, nonnegative: bool = False) -> float:
     """Reject non-finite/overflowing measurements before evidence is published."""
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"benchmark {label} must be a finite number")
     try:
         number = float(value)
@@ -63,6 +63,8 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
         if case_id in seen_case_ids:
             raise ValueError(f"duplicate case_id {case_id!r}")
         seen_case_ids.add(case_id)
+        if "latency_ms" not in case:
+            raise ValueError("benchmark case latency_ms is required")
         # Validate explicit scores before the fallback: []/0/False/"" must not
         # silently become an empty measurement set.
         scores = case.get("scores")
@@ -75,7 +77,7 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
         scores = scores or {}
         item: dict[str, Any] = {
             "case_id": case_id,
-            "latency_ms": _finite_measurement(case.get("latency_ms", 0.0), label="case latency", nonnegative=True),
+            "latency_ms": _finite_measurement(case["latency_ms"], label="case latency", nonnegative=True),
         }
         numeric = {k: _finite_measurement(v, label="case score") for k, v in scores.items()
                    if isinstance(v, (int, float)) and not isinstance(v, bool)}

@@ -86,24 +86,41 @@ class PublishTests(unittest.TestCase):
         for label, fields in invalid_cases:
             with self.subTest(label=label), self.assertRaises(ValueError):
                 run_from_cases("suite", [{"case_id": "c1", "latency_ms": 1.0, **fields}])
-        for invalid in (float("nan"), float("inf"), -1.0, 10 ** 1000):
+        for invalid in (float("nan"), float("inf"), -1.0, 10 ** 1000, "12.5"):
             with self.subTest(wall_time="oversized" if isinstance(invalid, int) else repr(invalid)), self.assertRaises(ValueError):
                 run_from_cases("suite", [{"case_id": "c1", "latency_ms": 1.0}], wall_time_ms=invalid)
 
     def test_run_from_cases_rejects_nonobject_scores_and_preserves_valid_values(self):
         for invalid in ([1.0], [], 0, False, ""):
             with self.subTest(scores=repr(invalid)), self.assertRaisesRegex(ValueError, "scores must be an object"):
-                run_from_cases("suite", [{"case_id": "c1", "scores": invalid}])
+                run_from_cases("suite", [{"case_id": "c1", "latency_ms": 0, "scores": invalid}])
         with self.assertRaisesRegex(ValueError, "scores must be an object"):
-            run_from_cases("suite", [{"case_id": "c1", "metrics": []}])
-        self.assertEqual(run_from_cases("suite", [{"case_id": "c1", "scores": {"recall": 1}, "metrics": []}])["cases"][0]["scores"], {"recall": 1.0})
-        self.assertEqual(run_from_cases("suite", [{"case_id": "c1", "scores": None, "metrics": {"recall": 0.5}}])["cases"][0]["scores"], {"recall": 0.5})
+            run_from_cases("suite", [{"case_id": "c1", "latency_ms": 0, "metrics": []}])
+        self.assertEqual(run_from_cases("suite", [{"case_id": "c1", "latency_ms": 0, "scores": {"recall": 1}, "metrics": []}])["cases"][0]["scores"], {"recall": 1.0})
+        self.assertEqual(run_from_cases("suite", [{"case_id": "c1", "latency_ms": 0, "scores": None, "metrics": {"recall": 0.5}}])["cases"][0]["scores"], {"recall": 0.5})
         run = run_from_cases("suite", [{"case_id": "c1", "latency_ms": 0,
                                          "scores": {"signed_margin": -2.5, "recall": 0.75}}],
                              wall_time_ms=0)
         self.assertEqual(run["cases"][0]["scores"], {"signed_margin": -2.5, "recall": 0.75})
         self.assertEqual(run["cases"][0]["latency_ms"], 0.0)
         self.assertEqual(run["wall_time_ms"], 0.0)
+
+    def test_run_from_cases_requires_actual_latency_measurements_before_http(self):
+        # A missing latency previously became 0 ms and could be published as
+        # measured evidence. Strings were also silently coerced to numbers.
+        for label, fields in (
+            ("missing", {}),
+            ("null", {"latency_ms": None}),
+            ("numeric string", {"latency_ms": "12.5"}),
+            ("boolean", {"latency_ms": False}),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, "latency"):
+                    publish(run_from_cases("suite", [{"case_id": "c1", **fields}]),
+                            base_url=self.url, token="t0k")
+        self.assertEqual(_Collector.received, [], "unmeasured cases must never reach the publisher")
+        valid = run_from_cases("suite", [{"case_id": "c1", "latency_ms": 0}])
+        self.assertEqual(valid["cases"][0]["latency_ms"], 0.0)
 
     def test_publish_rejects_nonfinite_nested_json_before_network(self):
         for invalid in (float("nan"), float("inf"), -float("inf")):
