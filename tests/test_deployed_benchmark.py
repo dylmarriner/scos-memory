@@ -107,7 +107,7 @@ class DeployedCodeClientTests(unittest.TestCase):
         self.assertEqual(headers["X-Scos-Tenant-Id"], "tenant-1")
         self.assertEqual(headers["X-Scos-Principal-Id"], "principal-1")
 
-    def test_http_error_diagnostics_have_bounded_response_reads(self):
+    def test_http_error_diagnostics_never_read_untrusted_response_body(self):
         class TrackedBody(io.BytesIO):
             def __init__(self, body):
                 super().__init__(body)
@@ -128,7 +128,7 @@ class DeployedCodeClientTests(unittest.TestCase):
         with patch.object(client.opener, "open", side_effect=error):
             with self.assertRaisesRegex(RuntimeError, "HTTP 502"):
                 client.health()
-        self.assertEqual(body.read_sizes, [1200])
+        self.assertEqual(body.read_sizes, [], "untrusted error bodies must not be read")
         self.assertTrue(body.closed)
 
     def test_redirect_never_forwards_benchmark_credentials(self):
@@ -212,6 +212,7 @@ class _CodeService(BaseHTTPRequestHandler):
     ``leak`` set, a query on any branch also searches every other branch."""
     leak = False
     preflight_failure = False
+    case_query_error = False
     delay: dict = {}
     branches: dict = {}
     snapshots: dict = {}
@@ -237,6 +238,14 @@ class _CodeService(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
         time.sleep(self.delay.get(self.path, 0))
+        if self.case_query_error and self.path == "/v2/code/query":
+            # A compromised upstream can echo request credentials in error bodies.
+            data = b"upstream failed: secret-benchmark-token secret-control-plane-token"
+            self.send_response(503)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path == "/v2/code/repos":
             return self._send({"repository_id": "repo-1"})
         if self.path == "/v2/code/index":
@@ -275,6 +284,7 @@ class DeployedRunTests(unittest.TestCase):
     def setUp(self):
         _CodeService.leak = False
         _CodeService.preflight_failure = False
+        _CodeService.case_query_error = False
         _CodeService.delay = {}
         _CodeService.branches = {}
         _CodeService.snapshots = {}
@@ -330,6 +340,36 @@ class DeployedRunTests(unittest.TestCase):
             self.assertEqual(artifact["stage"], "preflight")
             self.assertNotIn("secret-benchmark-token", raw + output_stream.getvalue())
             self.assertNotIn("passed_cases", artifact)
+
+    def test_case_http_error_cannot_leak_credentials_to_artifact_or_publisher(self):
+        # Unlike preflight, per-case failures used to serialize upstream 503
+        # response bodies directly into durable and published evidence.
+        _CodeService.case_query_error = True
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "failed-case.json"
+            argv = ["run_deployed", "--output", str(output)]
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_CONTROL_PLANE_TOKEN": "secret-control-plane-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+            }
+            with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv), \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                publish_mock.return_value = {"run_id": "test"}
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    exit_code = run_deployed_main()
+            self.assertEqual(exit_code, 1)
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "measured")
+            self.assertLess(artifact["summary"]["passed_cases"], artifact["summary"]["total_cases"])
+            self.assertTrue(any(not c["passed"] for c in artifact["cases"]))
+            published = str(publish_mock.call_args)
+            for secret in ("secret-benchmark-token", "secret-control-plane-token"):
+                self.assertNotIn(secret, output.read_text() + stream.getvalue() + published)
+            self.assertIn("HTTP 503", output.read_text())
 
     def test_unconfigured_deployment_is_recorded_as_not_run(self):
         with tempfile.TemporaryDirectory() as directory:

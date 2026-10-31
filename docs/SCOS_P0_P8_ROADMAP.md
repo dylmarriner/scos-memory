@@ -5,6 +5,30 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 deployed per-case HTTP-error credential isolation (2026-10-31; TDD source candidate)
+
+A deployed-code benchmark could survive its preflight, receive an HTTP 503
+while measuring a code-query case, and serialize the upstream response body
+into the case's `details.error`. If a proxy echoed the bearer or control-plane
+token, those credentials were written to the benchmark JSON artifact. A real
+HTTP integration regression reproduced both credentials in the artifact
+(RED). The HTTP client now closes error responses **without reading their
+untrusted bodies** and reports only the method, fixed API path and HTTP
+status. The regression checks the output artifact, stdout and the publisher
+argument (GREEN). The previously bounded 1,200-byte error diagnostic read
+is intentionally removed; even a short error body can contain secrets.
+
+This is source-only P0 artifact integrity, not proof of a trustworthy
+remote service, a completed representative benchmark, or production
+rollout/recovery. Successful HTTP response metadata remains an independent
+trust surface. CI, P4 integration and merged-main gates remain required.
+On AMD, 15 deployed benchmark HTTP/config tests, the complete local
+`make test` suite (isolated Python 3.11 environment), `go vet ./...`,
+42 P4 fixture/gate tests and the frozen seven-case lexical P4 gate passed
+with Recall@5=1.000 and forbidden@5/10/20=0. The §41 definition-of-done
+checker still reports FAIL/PARTIAL. No live tenant, production deployment,
+migrations or paid resources used.
+
 ## P0 deployed preflight failure evidence (2026-10-31; isolated TDD candidate)
 
 A configured deployed-code benchmark could fail its health/release/version or
@@ -65,10 +89,10 @@ checks GET and POST across 301, 302, 303, 307 and 308, asserting every
 redirect fails closed and the destination receives no request (GREEN).
 HTTP error bodies are closed after diagnostics to avoid leaking response
 resources. CodeRabbit review identified an unbounded HTTP-error body read:
-a RED regression showed an attempted full 50,000-byte read, corrected to a
-maximum 1,200-byte diagnostic read (GREEN). The previously omitted
-deployed-benchmark test module is now
-required in both CI and local `make test`; the parity contract guards that
+a RED regression showed an attempted full 50,000-byte read, originally
+corrected to a maximum 1,200-byte diagnostic read. The later per-case
+credential-isolation change above removes the error-body read entirely.
+The previously omitted deployed-benchmark test module is now required in both CI and local `make test`; the parity contract guards that
 coverage against accidental removal. On AMD, the 13 deployed-benchmark
 tests, full local `make test`, `go vet ./...`, 42 P4 fixture/gate tests,
 the frozen seven-case lexical P4 baseline (Recall@5=1.000; forbidden
