@@ -8,6 +8,7 @@ principal, and never falls back to local data when the remote service fails.
 from __future__ import annotations
 
 import json
+import math
 import os
 import ssl
 import urllib.error
@@ -52,8 +53,25 @@ class BenchmarkConfig:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain userinfo")
         if parsed.query or parsed.fragment or "?" in endpoint or "#" in endpoint:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain a query or fragment")
+        # Python accepts NaN/Infinity as floats; NaN bypasses <= 0 checks and
+        # non-finite values are invalid socket timeouts and benchmark metadata.
+        if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, (int, float)):
+            raise RuntimeError("benchmark timeout must be positive and finite")
+        try:
+            finite = math.isfinite(self.timeout_seconds)
+        except OverflowError as exc:
+            raise RuntimeError("benchmark timeout must be positive and finite") from exc
+        if not finite or self.timeout_seconds <= 0:
+            raise RuntimeError("benchmark timeout must be positive and finite")
         if not all((self.token.strip(), self.tenant_id.strip(), self.principal_id.strip())):
             raise RuntimeError("benchmark token, tenant and principal are required")
+        # These values become HTTP request headers. http.client raises a raw
+        # ValueError/UnicodeEncodeError on invalid header bytes; that can escape
+        # deployed preflight and prevent its durable failure artifact. Reject
+        # control and non-ASCII bytes before constructing any network client.
+        for name in ("token", "tenant_id", "principal_id", "control_plane_token"):
+            if any(not 0x20 <= ord(char) <= 0x7E for char in getattr(self, name)):
+                raise RuntimeError(f"benchmark {name} contains invalid HTTP header characters")
         object.__setattr__(self, "endpoint", endpoint)
 
     def metadata(self) -> dict[str, Any]:
@@ -72,19 +90,19 @@ class BenchmarkConfig:
 def config_from_environment() -> BenchmarkConfig:
     required = {
         "SCOS_BENCHMARK_ENDPOINT": os.getenv("SCOS_BENCHMARK_ENDPOINT", "").strip(),
-        "SCOS_BENCHMARK_TOKEN": os.getenv("SCOS_BENCHMARK_TOKEN", "").strip(),
-        "SCOS_BENCHMARK_TENANT_ID": os.getenv("SCOS_BENCHMARK_TENANT_ID", "").strip(),
-        "SCOS_BENCHMARK_PRINCIPAL_ID": os.getenv("SCOS_BENCHMARK_PRINCIPAL_ID", "").strip(),
+        "SCOS_BENCHMARK_TOKEN": os.getenv("SCOS_BENCHMARK_TOKEN", ""),
+        "SCOS_BENCHMARK_TENANT_ID": os.getenv("SCOS_BENCHMARK_TENANT_ID", ""),
+        "SCOS_BENCHMARK_PRINCIPAL_ID": os.getenv("SCOS_BENCHMARK_PRINCIPAL_ID", ""),
     }
     for name, value in required.items():
-        if not value:
+        if not value.strip():
             raise RuntimeError(f"{name} is required for a deployed benchmark")
     try:
         timeout = float(os.getenv("SCOS_BENCHMARK_TIMEOUT_SECONDS", "10"))
     except ValueError as exc:
         raise RuntimeError("SCOS_BENCHMARK_TIMEOUT_SECONDS must be numeric") from exc
-    if timeout <= 0:
-        raise RuntimeError("SCOS_BENCHMARK_TIMEOUT_SECONDS must be positive")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeError("benchmark timeout must be positive and finite")
     return BenchmarkConfig(
         endpoint=required["SCOS_BENCHMARK_ENDPOINT"],
         token=required["SCOS_BENCHMARK_TOKEN"],
@@ -92,7 +110,7 @@ def config_from_environment() -> BenchmarkConfig:
         principal_id=required["SCOS_BENCHMARK_PRINCIPAL_ID"],
         repository_path=os.getenv("SCOS_BENCHMARK_REPOSITORY_PATH", "scos-benchmark-fixtures").strip(),
         timeout_seconds=timeout,
-        control_plane_token=os.getenv("SCOS_BENCHMARK_CONTROL_PLANE_TOKEN", "").strip(),
+        control_plane_token=os.getenv("SCOS_BENCHMARK_CONTROL_PLANE_TOKEN", ""),
         ca_file=os.getenv("SCOS_BENCHMARK_CA_FILE", os.getenv("SCOS_TLS_CA_FILE", "")).strip(),
     )
 
@@ -117,6 +135,14 @@ def _reject_duplicate_json_members(pairs: list[tuple[str, Any]]) -> dict[str, An
 def _reject_nonfinite_json_constant(_value: str) -> None:
     """JSON has no NaN or infinity values, despite Python's permissive parser."""
     raise ValueError("non-finite JSON constant")
+
+
+def _parse_finite_json_float(value: str) -> float:
+    """Reject exponent overflow, which JSON's default float parser maps to inf."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
 
 
 class DeployedCodeClient:
@@ -167,6 +193,7 @@ class DeployedCodeClient:
                 raw.decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_json_members,
                 parse_constant=_reject_nonfinite_json_constant,
+                parse_float=_parse_finite_json_float,
             )
         except (UnicodeDecodeError, ValueError) as exc:
             raise RuntimeError(f"deployed benchmark returned invalid JSON: {method} {path}") from exc
@@ -228,4 +255,17 @@ class DeployedCodeClient:
         return results
 
     def snapshot_diff(self, snapshot_id: str) -> dict[str, Any]:
-        return self._request("POST", "/v2/code/snapshots/diff", {"snapshot_id": snapshot_id})
+        value = self._request("POST", "/v2/code/snapshots/diff", {"snapshot_id": snapshot_id})
+        # A 200 response is not a valid diff unless its rename entries have
+        # the expected shape. Otherwise malformed upstream JSON can raise
+        # AttributeError/TypeError during scoring and prevent a failure
+        # artifact from being written at all.
+        renamed = value.get("Renamed")
+        if renamed is not None:
+            if not isinstance(renamed, list) or any(
+                not isinstance(entry, dict)
+                or not all(isinstance(entry.get(key), str) for key in ("Path", "PreviousPath"))
+                for entry in renamed
+            ):
+                raise RuntimeError("deployed snapshot diff returned invalid Renamed entries")
+        return value

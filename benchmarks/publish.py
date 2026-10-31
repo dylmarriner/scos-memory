@@ -10,6 +10,7 @@ a run that was meant to be recorded is never silently dropped.
 from __future__ import annotations
 
 import json
+import math
 import os
 import ssl
 import subprocess
@@ -29,6 +30,20 @@ def _source_sha() -> str:
         return ""
 
 
+def _finite_measurement(value: Any, *, label: str, nonnegative: bool = False) -> float:
+    """Reject non-finite/overflowing measurements before evidence is published."""
+    if isinstance(value, bool):
+        raise ValueError(f"benchmark {label} must be a finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"benchmark {label} must be a finite number") from exc
+    if not math.isfinite(number) or (nonnegative and number < 0):
+        raise ValueError(f"benchmark {label} must be finite and nonnegative" if nonnegative
+                         else f"benchmark {label} must be finite")
+    return number
+
+
 def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: str = "", mode: str = "",
                    wall_time_ms: float = 0.0, recorded_at: str | None = None) -> dict[str, Any]:
     """Build the observability BenchmarkRun payload from measured cases.
@@ -39,12 +54,22 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
     """
     out_cases = []
     for case in cases:
-        scores = case.get("scores") or case.get("metrics") or {}
+        # Validate explicit scores before the fallback: []/0/False/"" must not
+        # silently become an empty measurement set.
+        scores = case.get("scores")
+        if scores is not None and not isinstance(scores, dict):
+            raise ValueError("benchmark scores must be an object")
+        if not scores:
+            scores = case.get("metrics")
+            if scores is not None and not isinstance(scores, dict):
+                raise ValueError("benchmark scores must be an object")
+        scores = scores or {}
         item: dict[str, Any] = {
             "case_id": str(case["case_id"]),
-            "latency_ms": float(case.get("latency_ms", 0.0)),
+            "latency_ms": _finite_measurement(case.get("latency_ms", 0.0), label="case latency", nonnegative=True),
         }
-        numeric = {k: float(v) for k, v in scores.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        numeric = {k: _finite_measurement(v, label="case score") for k, v in scores.items()
+                   if isinstance(v, (int, float)) and not isinstance(v, bool)}
         if numeric:
             item["scores"] = numeric
         if isinstance(case.get("passed"), bool):
@@ -55,7 +80,7 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
     payload: dict[str, Any] = {
         "suite": suite,
         "recorded_at": recorded_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "wall_time_ms": float(wall_time_ms),
+        "wall_time_ms": _finite_measurement(wall_time_ms, label="wall time", nonnegative=True),
         "cases": out_cases,
     }
     if schema_version:
@@ -75,6 +100,13 @@ def _ssl_context() -> ssl.SSLContext | None:
     return None
 
 
+class _RejectRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward the observability bearer to a redirect destination."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 def publish(run: dict[str, Any], base_url: str | None = None, token: str | None = None, timeout: float = 15.0) -> dict[str, Any] | None:
     """POST a run to observability. Returns the service response, or None
     when publishing is not configured."""
@@ -86,17 +118,29 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
     token = (token or os.getenv("SCOS_INTERNAL_SERVICE_TOKEN", "")).strip()
     if not token:
         raise RuntimeError("SCOS_INTERNAL_SERVICE_TOKEN is required to publish benchmark runs")
+    try:
+        body = json.dumps(run, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("benchmark publish payload is not valid finite JSON") from exc
     request = urllib.request.Request(
         base_url + "/v1/benchmarks/runs",
-        data=json.dumps(run).encode("utf-8"),
+        data=body,
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}", "X-SCOS-Caller": "benchmark-harness"},
     )
+    opener = urllib.request.build_opener(
+        _RejectRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
+    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
+        with opener.open(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"benchmark publish failed: HTTP {exc.code}: {detail}") from exc
+        # Upstream error bodies can echo the publisher's Authorization header.
+        # Do not read or serialize them into logs, CI, or benchmark artifacts.
+        with exc:
+            status = exc.code
+        # HTTPError.reason is controlled by the remote server and may echo
+        # the bearer. Suppress the exception chain in rendered tracebacks.
+        raise RuntimeError(f"benchmark publish failed: HTTP {status}") from None
     except urllib.error.URLError as exc:
         raise RuntimeError(f"benchmark publish failed: {exc.reason}") from exc
