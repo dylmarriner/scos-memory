@@ -95,12 +95,16 @@ def _b64url(data: bytes) -> str:
 
 def build_claims_token(issuer_secret: str, tenant_id: str, principal_id: str) -> str:
     """Build a minimal HS256 claims bearer token matching packages/auth's
-    validateClaims. Some services (autonomous-control-plane, execution-proxy)
-    require real tenant_id/principal_id claims on the token itself and
+    validateClaims, including its mandatory short-lived exp claim. Some
+    services (autonomous-control-plane, execution-proxy) require real
+    tenant_id/principal_id claims on the token itself and
     refuse to fall back to X-SCOS-Tenant-ID/X-SCOS-Principal-ID headers once
     any identity has been authenticated by a plain shared-secret token, so a
     static SCOS_INTERNAL_SERVICE_TOKEN alone cannot reach those endpoints."""
-    payload = _b64url(json.dumps({"tenant_id": tenant_id, "principal_id": principal_id}, separators=(",", ":")).encode())
+    payload = _b64url(json.dumps(
+        {"tenant_id": tenant_id, "principal_id": principal_id, "exp": int(time.time()) + 900},
+        separators=(",", ":"),
+    ).encode())
     signing_input = f"{_JWT_HEADER_SEGMENT}.{payload}".encode()
     signature = _b64url(hmac.new(issuer_secret.encode(), signing_input, hashlib.sha256).digest())
     return f"{_JWT_HEADER_SEGMENT}.{payload}.{signature}"
@@ -113,16 +117,17 @@ class FailureInjector:
         self.control_plane_token = os.environ.get("SCOS_CONTROL_PLANE_TOKEN", "")
         self.issuer_secret = os.environ.get("SCOS_SECURITY_ISSUER_SECRET", "")
         self.compose = os.environ.get("SCOS_COMPOSE_FILE", str(COMPOSE))
-        self.claims_token = (
-            build_claims_token(self.issuer_secret, PROBE_TENANT_ID, PROBE_PRINCIPAL_ID) if self.issuer_secret else ""
-        )
         self.results: list[FailureTestResult] = []
         self.stack_error = self._preflight()
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "X-SCOS-Tenant-ID": PROBE_TENANT_ID, "X-SCOS-Principal-ID": PROBE_PRINCIPAL_ID}
-        if self.claims_token:
-            headers["Authorization"] = f"Bearer {self.claims_token}"
+        if self.issuer_secret:
+            # Regenerate per request: the 58-case failure suite may run longer
+            # than the 15-minute credential lifetime.
+            headers["Authorization"] = "Bearer " + build_claims_token(
+                self.issuer_secret, PROBE_TENANT_ID, PROBE_PRINCIPAL_ID
+            )
         elif self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if self.control_plane_token:
