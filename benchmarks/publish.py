@@ -15,6 +15,7 @@ import os
 import ssl
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
@@ -149,11 +150,28 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
     base_url = (base_url or os.getenv("SCOS_BENCHMARK_PUBLISH_URL", "")).strip().rstrip("/")
     if not base_url:
         return None
-    if not base_url.startswith(("https://", "http://")):
-        raise RuntimeError("SCOS_BENCHMARK_PUBLISH_URL must be an HTTP(S) URL")
+    # The destination must remain an unambiguous base URL. Otherwise a
+    # fragment or query silently swallows the appended /v1/benchmarks/runs,
+    # and an unrelated HTTP 201 can masquerade as persisted evidence.
+    if (any(ord(char) < 0x20 or ord(char) == 0x7f for char in base_url)
+            or "?" in base_url or "#" in base_url):
+        raise RuntimeError("benchmark publish URL contains invalid characters or selectors")
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        hostname, port = parsed.hostname, parsed.port
+    except ValueError:
+        raise RuntimeError("benchmark publish URL has an invalid authority") from None
+    if (parsed.scheme not in ("http", "https") or not hostname or port == 0
+            or parsed.username is not None or parsed.password is not None):
+        raise RuntimeError("benchmark publish URL requires a valid HTTP(S) authority without userinfo")
     token = (token or os.getenv("SCOS_INTERNAL_SERVICE_TOKEN", "")).strip()
     if not token:
         raise RuntimeError("SCOS_INTERNAL_SERVICE_TOKEN is required to publish benchmark runs")
+    # Reject malformed bearer bytes before constructing a network client.
+    # The raw urllib/http.client errors may otherwise escape the benchmark
+    # harness without its durable failure evidence.
+    if any(not 0x21 <= ord(char) <= 0x7e for char in token):
+        raise RuntimeError("benchmark publish token contains invalid HTTP header characters")
     try:
         body = json.dumps(run, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError, OverflowError) as exc:

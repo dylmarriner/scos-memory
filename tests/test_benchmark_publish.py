@@ -132,6 +132,33 @@ class PublishTests(unittest.TestCase):
                         base_url=self.url, token="t0k")
         self.assertEqual(_Collector.received, [], "invalid evidence must not reach observability")
 
+    def test_publish_rejects_ambiguous_base_urls_before_http(self):
+        # Query/fragment suffixes silently change the POST path while a
+        # permissive HTTP 201 responder can still claim that evidence persisted.
+        invalid = (
+            self.url + "?unexpected=1",
+            self.url + "#unexpected",
+            self.url + "?",
+            self.url + "#",
+            self.url.replace("http://", "http://user:password@"),
+            "http://127.0.0.1:invalid-port",
+        )
+        for base_url in invalid:
+            with self.subTest(base_url=base_url):
+                with self.assertRaisesRegex(RuntimeError, "publish URL"):
+                    publish({"suite": "x", "cases": []}, base_url=base_url, token="t0k")
+        self.assertEqual(_Collector.received, [], "invalid destinations must not receive evidence")
+        result = publish({"suite": "x", "cases": []}, base_url=self.url + "/prefix", token="t0k")
+        self.assertEqual(result["run_id"], "abc")
+        self.assertEqual(_Collector.received[0]["path"], "/prefix/v1/benchmarks/runs")
+
+    def test_publish_rejects_invalid_bearer_header_before_http(self):
+        for token in ("line\nfeed", "carriage\rreturn", "nonascii-\u2603"):
+            with self.subTest(token=repr(token)):
+                with self.assertRaisesRegex(RuntimeError, "publish token"):
+                    publish({"suite": "x", "cases": []}, base_url=self.url, token=token)
+        self.assertEqual(_Collector.received, [], "malformed tokens must not reach the HTTP client")
+
     def test_publish_is_noop_when_unconfigured(self):
         os.environ.pop("SCOS_BENCHMARK_PUBLISH_URL", None)
         self.assertIsNone(publish({"suite": "x", "cases": []}))
