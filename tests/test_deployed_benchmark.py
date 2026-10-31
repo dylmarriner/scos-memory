@@ -105,6 +105,53 @@ class DeployedBenchmarkConfigTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "timeout.*positive.*finite"):
                         config_from_environment()
 
+    def test_config_rejects_control_characters_in_request_headers(self):
+        fields = ("token", "tenant_id", "principal_id", "control_plane_token")
+        for field in fields:
+            for control in ("\r", "\n", "\t", "\x00", "\x7f", "\u2028", "\u00e9"):
+                with self.subTest(field=field, control=repr(control)):
+                    kwargs = dict(endpoint="https://example.test", token="secret-token",
+                                  tenant_id="tenant-1", principal_id="principal-1")
+                    kwargs[field] = "prefix" + control + "suffix"
+                    with self.assertRaisesRegex(RuntimeError, "invalid.*header"):
+                        BenchmarkConfig(**kwargs)
+
+    def test_invalid_header_credentials_write_not_run_without_network_or_secret(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "invalid-credentials.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": "http://127.0.0.1:1",
+                "SCOS_BENCHMARK_TOKEN": "secret\ninjected-token",
+                "SCOS_BENCHMARK_TENANT_ID": "tenant-1",
+                "SCOS_BENCHMARK_PRINCIPAL_ID": "principal-1",
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.DeployedCodeClient") as client_mock, \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                with redirect_stdout(io.StringIO()):
+                    exit_code = run_deployed_main()
+            self.assertEqual(exit_code, NOT_RUN_EXIT)
+            client_mock.assert_not_called()
+            publish_mock.assert_not_called()
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "not_run")
+            self.assertNotIn("secret", output.read_text())
+
+    def test_environment_does_not_silently_strip_invalid_header_controls(self):
+        for field in ("SCOS_BENCHMARK_TOKEN", "SCOS_BENCHMARK_CONTROL_PLANE_TOKEN"):
+            with self.subTest(field=field):
+                env = {
+                    "SCOS_BENCHMARK_ENDPOINT": "https://example.test",
+                    "SCOS_BENCHMARK_TOKEN": "secret-token",
+                    "SCOS_BENCHMARK_TENANT_ID": "tenant-1",
+                    "SCOS_BENCHMARK_PRINCIPAL_ID": "principal-1",
+                    field: "secret-token\n",
+                }
+                with patch.dict(os.environ, env, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, "invalid.*header"):
+                        config_from_environment()
+
     def test_config_rejects_endpoint_userinfo(self):
         with self.assertRaisesRegex(RuntimeError, "userinfo"):
             BenchmarkConfig(

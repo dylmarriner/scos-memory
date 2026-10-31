@@ -13,13 +13,29 @@ nonpositive timeouts. `NaN` bypassed the previous `<= 0` check, allowing
 invalid transport timeouts and non-standard JSON metadata. Two parameterized
 unit regressions reproduced eight failures before correction (RED). Both the
 environment parser and direct client configuration now require a positive,
-finite numeric timeout (GREEN); credential and HTTP response handling remain
-unchanged. Review follow-up: an oversized integer (`10 ** 1000`) made
+finite numeric timeout (GREEN); HTTP response handling remains unchanged.
+Review follow-up: an oversized integer (`10 ** 1000`) made
 `math.isfinite` raise an uncontrolled `OverflowError`; an isolated regression
 first reproduced it (RED), and direct configuration now maps it to the same
 controlled `RuntimeError` as other invalid timeouts (GREEN). This is benchmark-input
 integrity hardening, **not** representative
 P0 model/latency/cost evidence, production acceptance or P0–P8 completion.
+
+## P0 deployed request-header integrity (2026-11-01; PR #200 follow-up, not merged)
+
+A deployed benchmark configuration accepted control characters and non-ASCII
+characters in bearer, tenant, principal and control-plane HTTP header values.
+`http.client` can reject these only during network I/O, escaping the runner's
+preflight exception handling without a durable benchmark artifact. Environment
+loading also silently stripped trailing newline controls from credentials.
+Twenty field/control combinations failed the new configuration regression and
+the CLI did not emit its expected `not_run` artifact (RED); two environment
+trailing-newline regressions also failed (RED). The configuration now rejects
+non-printable/non-ASCII header values before network access and preserves raw
+environment credentials for validation (GREEN). Existing real-HTTP credential,
+redirect, preflight and failure-artifact regressions remain part of the focused
+suite. This is P0 input/evidence integrity hardening only: no deployed service
+was contacted, no representative BGE benchmark was run, and §41 remains open.
 
 ## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)
 
