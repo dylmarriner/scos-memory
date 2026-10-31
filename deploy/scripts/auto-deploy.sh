@@ -16,9 +16,10 @@
 # This keeps ordinary production deploys behavior-compatible until the live
 # host's model backend/profile has been explicitly provisioned.
 #
-# Safe to run frequently via a timer: exits immediately (before the lock)
-# when origin/main hasn't moved, and flock prevents overlapping runs if a
-# deploy is still in progress when the next tick fires.
+# Safe to run frequently via a timer: exits early when origin/main hasn't
+# moved AND no prior rollout is pending. The Git-private pending marker
+# prevents failed post-checkout rollouts from being silently skipped. flock
+# prevents overlapping runs if a deploy is still in progress.
 set -euo pipefail
 
 REPO_DIR="${SCOS_REPO_DIR:-/opt/scos-memory-fabric}"
@@ -42,6 +43,10 @@ cd "$REPO_DIR"
 BEFORE="$(git rev-parse HEAD)"
 git fetch --quiet origin main
 AFTER="$(git rev-parse origin/main)"
+# A checkout can advance before the post-checkout HBA gate or later rollout
+# steps fail. Persist pending work in Git's private directory, not a tracked
+# file, so a repaired retry cannot mistake HEAD == origin/main for success.
+PENDING_DEPLOY="$(git rev-parse --git-path scos-pending-deploy)"
 
 # Catch host bind-mount ACL/mode drift *even when main has not changed*.
 # A UID 1000-owned 0600 pg_hba.conf once left PostgreSQL restarting 2,391
@@ -50,7 +55,7 @@ AFTER="$(git rev-parse origin/main)"
 bash "$REPO_DIR/deploy/scripts/verify_postgres_hba_access.sh" \
   "$REPO_DIR/deploy/compose/postgres/pg_hba.conf"
 
-if [ "$BEFORE" = "$AFTER" ]; then
+if [ "$BEFORE" = "$AFTER" ] && [ ! -f "$PENDING_DEPLOY" ]; then
   exit 0
 fi
 
@@ -58,6 +63,11 @@ exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "$(date -Iseconds) deploy already in progress, skipping this tick"; exit 0; }
 
 echo "$(date -Iseconds) deploying $BEFORE -> $AFTER"
+# Record the pending target BEFORE moving HEAD. Keep it across failures in
+# checkout, preflight, build, migration, recreation or parity verification.
+PENDING_TMP="${PENDING_DEPLOY}.tmp.$$"
+printf '%s\n' "$AFTER" > "$PENDING_TMP"
+mv -f -- "$PENDING_TMP" "$PENDING_DEPLOY"
 git merge --ff-only origin/main
 
 # Fast-forward checkout may replace the HBA source inode and discard ACLs.
@@ -166,6 +176,10 @@ if [ "$MODEL_RUNTIME_ENABLED" = "true" ]; then
     sleep 5
   done
 fi
+
+# Only a fully verified rollout may clear the pending marker. A later timer
+# invocation then correctly no-ops until a genuinely new revision appears.
+rm -- "$PENDING_DEPLOY"
 
 if [ "$MODEL_RUNTIME_ENABLED" = "true" ]; then
   echo "$(date -Iseconds) deploy complete: $(git rev-parse HEAD), fabric parity verified and model-runtime healthy"

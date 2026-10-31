@@ -23,6 +23,7 @@ class HbaDeployPreflightTests(unittest.TestCase):
             'printf "%s\\n" "$*" >> "$DOCKER_CALLS"\n'
             'if [ "$MOCK_FAIL" = "image" ] && [ "$1" = "image" ]; then exit 1; fi\n'
             'if [ "$MOCK_FAIL" = "run" ] && [ "$1" = "run" ]; then exit 1; fi\n'
+            'if [ "$MOCK_FAIL" = "daemon" ] && [ "$1" = "run" ]; then exit 125; fi\n'
             "exit 0\n"
         )
         fake.chmod(0o755)
@@ -82,6 +83,110 @@ class HbaDeployPreflightTests(unittest.TestCase):
         self.assertGreater(following, script.index("git merge --ff-only"))
         self.assertLess(following, script.index('"${COMPOSE[@]}" build'))
 
+
+
+    def test_docker_runtime_failure_is_not_misdiagnosed_as_acl(self):
+        result = self.check(mode="daemon")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Docker probe failed", result.stderr)
+        self.assertNotIn("cannot read pg_hba.conf", result.stderr)
+
+    def test_pinned_probe_image_matches_compose_postgres_service(self):
+        compose = (ROOT / "deploy/compose/docker-compose.yml").read_text()
+        verifier = CHECK.read_text()
+        self.assertIn("  postgres:\n    image: pgvector/pgvector:pg17", compose)
+        self.assertIn('postgres_image="pgvector/pgvector:pg17"', verifier)
+
+    def test_image_override_cannot_diverge_from_compose(self):
+        env = os.environ.copy()
+        env.update({"PATH": str(self.directory) + os.pathsep + env["PATH"],
+                    "DOCKER_CALLS": str(self.calls), "MOCK_FAIL": "pass",
+                    "SCOS_POSTGRES_IMAGE": "untrusted/postgres:latest"})
+        result = subprocess.run(["bash", str(CHECK), str(self.config)],
+                                capture_output=True, text=True, env=env, timeout=12)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("image", result.stderr.lower())
+        self.assertFalse(self.calls.exists())
+
+    def test_post_checkout_acl_failure_retries_same_commit_after_repair(self):
+        """A failed post-FF preflight must not consume a revision forever."""
+        source = self.directory / "source"
+        remote = self.directory / "remote.git"
+        checkout = self.directory / "checkout"
+        source.mkdir()
+
+        def git(*args, cwd=None):
+            return subprocess.run(["git", *args], cwd=cwd or source,
+                                  check=True, capture_output=True, text=True).stdout.strip()
+
+        git("init", "-b", "main")
+        git("config", "user.name", "SCOS Test")
+        git("config", "user.email", "test@example.invalid")
+        (source / "deploy/scripts").mkdir(parents=True)
+        (source / "deploy/compose/postgres").mkdir(parents=True)
+        (source / "deploy/scripts/auto-deploy.sh").write_bytes(DEPLOY.read_bytes())
+        (source / "deploy/scripts/verify_postgres_hba_access.sh").write_bytes(CHECK.read_bytes())
+        (source / "deploy/compose/postgres/pg_hba.conf").write_text("allow\n")
+        (source / ".env").write_text("# disposable test\n")
+        git("add", ".")
+        git("commit", "-m", "initial")
+        git("clone", "--bare", str(source), str(remote))
+        git("clone", str(remote), str(checkout))
+        git("remote", "add", "origin", str(remote))
+
+        # The checkout initially passes the HBA preflight. The fetched revision
+        # replaces the bind source, so only the post-checkout gate rejects it.
+        (source / "deploy/compose/postgres/pg_hba.conf").write_text("deny\n")
+        git("add", ".")
+        git("commit", "-m", "replace HBA source")
+        git("push", "origin", "main")
+        new_head = git("rev-parse", "HEAD")
+
+        fake = self.directory / "docker"
+        fake.write_text("""#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_CALLS"
+if [ "$1" = image ]; then exit 0; fi
+if [ "$1" = run ]; then
+  if grep -q deny "$HBA_SOURCE"; then exit 1; fi
+  exit 0
+fi
+if [ "$1" = inspect ]; then echo sha256:fake; exit 0; fi
+if [ "$1" = compose ]; then
+  case " $* " in
+    *' images -q '*) echo sha256:fake ;;
+    *' ps -q '*) echo testcontainer ;;
+  esac
+  exit 0
+fi
+exit 1
+""")
+        fake.chmod(0o755)
+        env = os.environ.copy()
+        env.update({"PATH": str(self.directory) + os.pathsep + env["PATH"],
+                    "DOCKER_CALLS": str(self.calls),
+                    "HBA_SOURCE": str(checkout / "deploy/compose/postgres/pg_hba.conf"),
+                    "SCOS_REPO_DIR": str(checkout), "SCOS_MODEL_RUNTIME_ENABLED": "false"})
+
+        def deploy():
+            return subprocess.run(["bash", str(checkout / "deploy/scripts/auto-deploy.sh")],
+                                  env=env, capture_output=True, text=True, timeout=20)
+
+        first = deploy()
+        self.assertNotEqual(0, first.returncode, first.stdout)
+        self.assertEqual(new_head, git("rev-parse", "HEAD", cwd=checkout))
+        self.assertEqual(new_head, (checkout / ".git/scos-pending-deploy").read_text().strip())
+        self.assertNotIn(" compose ", " " + self.calls.read_text())
+        # Repair only the disposable source, not any live service.
+        (checkout / "deploy/compose/postgres/pg_hba.conf").write_text("allow\n")
+        self.calls.write_text("")
+        second = deploy()
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertIn("compose --env-file .env -f deploy/compose/docker-compose.yml build", self.calls.read_text())
+        self.assertFalse((checkout / ".git/scos-pending-deploy").exists())
+        self.calls.write_text("")
+        third = deploy()
+        self.assertEqual(0, third.returncode, third.stderr)
+        self.assertNotIn(" compose ", " " + self.calls.read_text())
 
 
 if __name__ == "__main__":

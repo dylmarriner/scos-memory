@@ -15,13 +15,21 @@ unhealthy status. This does **not** on its own establish database corruption.
 is a new commit and before any checkout/build/migration/container changes.
 A second check runs immediately after the fast-forward checkout, since a
 replacement HBA file may have lost its ACL. Both checks are before builds,
-migrations and container recreation.
+migrations and container recreation. The rollout writes a private
+`$(git rev-parse --git-path scos-pending-deploy)` marker **before** moving HEAD
+and clears it only after build, migrations, recreation and image-parity checks
+(and model health when enabled) succeed. If the second gate fails after HEAD
+advances, repairing permissions permits the same commit to retry instead of
+silently treating the checkout as deployed. Inspect the marker when diagnosing
+a skipped or repeatedly failed rollout; do not delete it to silence failures.
 The gate executes an isolated, network-disabled, nonprivileged, read-only
-container using the locally cached PostgreSQL image. It mounts **only** the
+container using the locally cached `pgvector/pgvector:pg17` image from
+Compose. A conflicting `SCOS_POSTGRES_IMAGE` override is rejected. It mounts **only** the
 HBA source file, never database data or TLS keys, and checks readability.
 Failure exits nonzero without automatically changing ownership, permissions
 or running migrations. A missing local image also fails closed; the image
-must be provisioned as part of the controlled bootstrap process.
+must be provisioned as part of the controlled bootstrap process. A Docker
+startup failure is reported separately from an HBA readability failure.
 
 Manual check on the deployment host (from the repo root):
 
