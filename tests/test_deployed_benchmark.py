@@ -106,6 +106,46 @@ class DeployedCodeClientTests(unittest.TestCase):
         self.assertEqual(headers["X-Scos-Tenant-Id"], "tenant-1")
         self.assertEqual(headers["X-Scos-Principal-Id"], "principal-1")
 
+    def test_redirect_never_forwards_benchmark_credentials(self):
+        # A benchmark endpoint must not be able to redirect the bearer and
+        # tenant/principal headers to another service.
+        capture_start = len(_Handler.requests)
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            status = 302
+
+            def do_GET(self):
+                self.send_response(self.status)
+                self.send_header(
+                    "Location", f"http://127.0.0.1:{DeployedCodeClientTests.server.server_port}/capture"
+                )
+                self.end_headers()
+
+            do_POST = do_GET
+
+            def log_message(self, *_args):
+                return
+
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        worker = threading.Thread(target=redirect.serve_forever, daemon=True)
+        worker.start()
+        try:
+            client = DeployedCodeClient(BenchmarkConfig(
+                endpoint=f"http://127.0.0.1:{redirect.server_port}",
+                token="must-not-leak", tenant_id="tenant-1", principal_id="principal-1",
+            ))
+            for status in (301, 302, 303, 307, 308):
+                RedirectHandler.status = status
+                for operation in (client.health, client.ensure_repository):
+                    with self.subTest(status=status, operation=operation.__name__):
+                        with self.assertRaisesRegex(RuntimeError, f"HTTP {status}"):
+                            operation()
+                        self.assertEqual(_Handler.requests[capture_start:], [])
+        finally:
+            redirect.shutdown()
+            worker.join()
+            redirect.server_close()
+
     def test_version_accepts_current_release_shape(self):
         client = DeployedCodeClient(BenchmarkConfig(
             endpoint=f"http://127.0.0.1:{self.server.server_port}",

@@ -18,6 +18,7 @@ REQUIRED_LOCAL_CHECKS = (
     "test_benchmark_ranking_uniqueness.py",
     "test_benchmark_harness.py",
     "test_benchmark_suite_schema.py",
+    "test_deployed_benchmark.py",
     "scripts/test_scos_verify_snapshot_manifest.py",
     "scripts/test_scos_verify_snapshot_events.py",
     "scripts/test_scos_verify_snapshot_bundle.py",

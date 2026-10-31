@@ -82,10 +82,20 @@ def config_from_environment() -> BenchmarkConfig:
     )
 
 
+class _RejectRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not forward benchmark credentials to a redirect destination."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 class DeployedCodeClient:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
         self.context = ssl.create_default_context(cafile=config.ca_file) if config.ca_file else None
+        self.opener = urllib.request.build_opener(
+            _RejectRedirect(), urllib.request.HTTPSHandler(context=self.context)
+        )
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -105,12 +115,13 @@ class DeployedCodeClient:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds, context=self.context) as response:
+            with self.opener.open(request, timeout=self.config.timeout_seconds) as response:
                 if response.status < 200 or response.status >= 300:
                     raise RuntimeError(f"deployed benchmark HTTP status {response.status}")
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace").strip()[:300]
+            with exc:
+                detail = exc.read().decode("utf-8", "replace").strip()[:300]
             raise RuntimeError(f"deployed benchmark request failed: {method} {path}: HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"deployed benchmark request failed: {method} {path}") from exc
