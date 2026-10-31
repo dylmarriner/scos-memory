@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // declarationName matches a declaration name, bare ("SignClaims") or
@@ -44,6 +46,37 @@ func declarationQuery(query string) string {
 		return ""
 	}
 	return name
+}
+
+// Code query and impact bodies are small. A bounded read deadline prevents a
+// client from sending a complete JSON value and then withholding the EOF needed
+// to prove that no second value follows. This deadline covers BOTH decodes.
+const pgJSONReadTimeout = 15 * time.Second
+
+func decodeSinglePGJSON(w http.ResponseWriter, r *http.Request, dst any, timeout time.Duration) error {
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(time.Now().Add(timeout)); err == nil {
+		// The complete body has been consumed before a successful return.
+		// Reset the connection deadline so subsequent keep-alive requests work.
+		defer controller.SetReadDeadline(time.Time{})
+	} else if !errors.Is(err, http.ErrNotSupported) {
+		return fmt.Errorf("set request read deadline: %w", err)
+	}
+	// httptest.ResponseRecorder does not support socket deadlines; real HTTP
+	// servers do, including through telemetry's Unwrap-capable recorder.
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		w.Header().Set("Connection", "close")
+		return fmt.Errorf("invalid request: %w", err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		// Do not reuse a connection after malformed or stalled request framing.
+		w.Header().Set("Connection", "close")
+		return errors.New("request must contain one JSON object")
+	}
+	return nil
 }
 
 // v2 handlers expose pgCodeStore over HTTP as /v2/code/*.
@@ -373,17 +406,8 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		SnapshotID   string `json:"snapshot_id,omitempty"`
 		MaxResults   int    `json:"max_results,omitempty"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	// Require exactly one JSON document. A second value or malformed trailing
-	// bytes must not be silently ignored by the historical query/impact API.
-	var extra any
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		http.Error(w, "request must contain one JSON object", http.StatusBadRequest)
+	if err := decodeSinglePGJSON(w, r, &req, pgJSONReadTimeout); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if req.RepositoryID == "" || req.Query == "" {
@@ -598,16 +622,8 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 		AsOfCommit   string `json:"as_of_commit,omitempty"`
 		SnapshotID   string `json:"snapshot_id,omitempty"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	// Reject a second JSON value or trailing garbage before any impact lookup.
-	var extra any
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		http.Error(w, "request must contain one JSON object", http.StatusBadRequest)
+	if err := decodeSinglePGJSON(w, r, &req, pgJSONReadTimeout); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if req.RepositoryID == "" || req.Query == "" {

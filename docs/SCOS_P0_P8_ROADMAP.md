@@ -1430,6 +1430,18 @@ request. A real-HTTP PostgreSQL 17 regression demonstrated eight RED cases
 (4 suffixes × 2 endpoints). Both routes now require exactly one JSON document
 and preserve legal trailing whitespace. The full disposable PostgreSQL 17
 code-store suite, `make test`, `go vet ./...`, and diff validation passed.
+**Follow-up review hardening (2026-10-31; PR #201, pending approval):**
+The second JSON decode could wait indefinitely when a client sent one valid
+JSON object but withheld the remaining HTTP body or chunk terminator. Both
+query and impact now share a 64 KiB bounded JSON decoder with a 15-second
+socket read deadline covering the first and trailing-value decodes. Failed
+framing closes the connection; successful complete requests reset the
+deadline for HTTP keep-alive. Real HTTP tests cover incomplete chunked
+framing, oversized declared Content-Length, stalled first-object reads,
+telemetry response-writer unwrapping, and two valid requests on one
+keep-alive connection. This is request-framing protection, not a substitute
+for a deployment-wide ingress timeout policy or live rollout evidence.
+
 The fix is source-only and does **not**
 complete P5 transaction-ordered historical memory reconstruction, P3 Git
 provenance attestation, or production rollout/recovery gates.
