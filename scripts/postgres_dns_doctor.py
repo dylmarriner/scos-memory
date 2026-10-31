@@ -57,7 +57,7 @@ def inspect_compose(
     }
     issues: list[str] = result["issues"]
     ps = _docker(
-        ["ps", "--all", "--filter", f"label=com.docker.compose.project={project}",
+        ["ps", "--all", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}",
          "--format", "{{.ID}}"],
         runner,
     )

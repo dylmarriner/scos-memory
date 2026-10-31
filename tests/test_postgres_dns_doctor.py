@@ -67,6 +67,12 @@ class PostgresDNSDoctorTests(unittest.TestCase):
         self.assertNotIn("database_ready", result)
         self.assertEqual(len(docker.commands), 3)
 
+    def test_docker_ps_requests_full_ids_to_match_inspect(self):
+        docker = FakeDocker(self.good)
+        doctor.inspect_compose("compose", runner=docker)
+        self.assertEqual(docker.commands[0][:2], ["docker", "ps"])
+        self.assertIn("--no-trunc", docker.commands[0])
+
     def test_inspect_does_not_request_environment_or_full_container_json(self):
         docker = FakeDocker(self.good)
         doctor.inspect_compose("compose", runner=docker)
