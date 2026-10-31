@@ -1291,6 +1291,11 @@ The 16 new focused regression methods were RED before implementation and GREEN
 afterward; full local `make test`, `go vet ./...`, `git diff --check`, and the
 30-case real lexical diagnostic passed. The diagnostic reported contextual
 cases unqualified and did not connect to a live tenant or model service.
+The initial PR-head P4 workflow correctly failed on the shared-harness SHA-256
+change; the frozen seven-case lexical baseline was independently re-recorded
+and compared field-for-field, preserving all ranked IDs, Recall/Precision/MRR/
+nDCG, forbidden-at-5/10/20 totals, fixture identity and engine version.
+Only the checked-out base SHA and shared-harness digest were refreshed.
 See `benchmarks/p0/README.md`. **This is synthetic corpus and harness
 qualification, not a live multi-tenant benchmark, BGE/FTS/RRF comparison,
 P0 completion, production rollout or P5 historical reconstruction.**
