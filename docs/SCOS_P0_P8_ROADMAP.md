@@ -5,6 +5,24 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 benchmark publication finite-measurement integrity (2026-11-01; PR #200 follow-up, not merged)
+
+The shared publisher accepted NaN/infinite or negative case latency and wall-time
+measurements, and NaN/infinite scores. Python's default JSON encoder then
+emitted nonstandard `NaN`/`Infinity` literals to the observability endpoint.
+Oversized integers could also raise uncontrolled `OverflowError` while building
+case evidence. A new parameterized unit regression reproduced 13 failed
+assertions and three errors before correction (RED), including three real
+localhost HTTP posts of nonfinite scores that incorrectly succeeded. Case
+measurements now require finite values (and nonnegative durations), with
+oversized integer conversion failures mapped to `ValueError`. Publication
+serializes with `allow_nan=False` before network I/O and rejects malformed
+nested JSON without sending any request (GREEN, nine publisher tests, full `make test`,
+`go vet ./...`, and `git diff --check` on isolated AMD worktree).
+This protects source-level benchmark evidence only; it does not establish
+representative P0 quality/latency/cost acceptance, merged-main qualification,
+production rollout/recovery or §41 completion.
+
 ## P0 benchmark observability publication credential isolation (2026-11-01; PR #200 follow-up, not merged)
 
 The shared benchmark publisher previously copied the first 500 bytes of an

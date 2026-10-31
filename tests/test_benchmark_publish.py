@@ -66,6 +66,41 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(run["cases"][1], {"case_id": "c2", "latency_ms": 3.0, "scores": {"recall": 0.5}, "passed": False})
         self.assertNotIn("total_cases", run)
 
+    def test_run_from_cases_rejects_nonfinite_or_negative_measurements(self):
+        invalid_cases = [
+            ("nan latency", {"latency_ms": float("nan")}),
+            ("infinite latency", {"latency_ms": float("inf")}),
+            ("negative infinite latency", {"latency_ms": -float("inf")}),
+            ("negative latency", {"latency_ms": -0.5}),
+            ("oversized integer latency", {"latency_ms": 10 ** 1000}),
+            ("nan score", {"scores": {"recall": float("nan")}}),
+            ("infinite score", {"scores": {"recall": float("inf")}}),
+            ("oversized integer score", {"scores": {"recall": 10 ** 1000}}),
+        ]
+        for label, fields in invalid_cases:
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                run_from_cases("suite", [{"case_id": "c1", "latency_ms": 1.0, **fields}])
+        for invalid in (float("nan"), float("inf"), -1.0, 10 ** 1000):
+            with self.subTest(wall_time="oversized" if isinstance(invalid, int) else repr(invalid)), self.assertRaises(ValueError):
+                run_from_cases("suite", [{"case_id": "c1", "latency_ms": 1.0}], wall_time_ms=invalid)
+
+    def test_run_from_cases_rejects_nonobject_scores_and_preserves_valid_values(self):
+        with self.assertRaisesRegex(ValueError, "scores must be an object"):
+            run_from_cases("suite", [{"case_id": "c1", "scores": [1.0]}])
+        run = run_from_cases("suite", [{"case_id": "c1", "latency_ms": 0,
+                                         "scores": {"signed_margin": -2.5, "recall": 0.75}}],
+                             wall_time_ms=0)
+        self.assertEqual(run["cases"][0]["scores"], {"signed_margin": -2.5, "recall": 0.75})
+        self.assertEqual(run["wall_time_ms"], 0.0)
+
+    def test_publish_rejects_nonfinite_nested_json_before_network(self):
+        for invalid in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(value=repr(invalid)), self.assertRaises(RuntimeError):
+                publish({"suite": "suite", "cases": [{"case_id": "c1", "latency_ms": 1,
+                                                           "scores": {"recall": invalid}}]},
+                        base_url=self.url, token="t0k")
+        self.assertEqual(_Collector.received, [], "invalid evidence must not reach observability")
+
     def test_publish_is_noop_when_unconfigured(self):
         os.environ.pop("SCOS_BENCHMARK_PUBLISH_URL", None)
         self.assertIsNone(publish({"suite": "x", "cases": []}))
