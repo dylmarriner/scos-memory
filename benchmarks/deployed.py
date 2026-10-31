@@ -139,7 +139,12 @@ class DeployedCodeClient:
         return value
 
     def health(self) -> dict[str, Any]:
-        return self._request("GET", "/health/ready")
+        value = self._request("GET", "/health/ready")
+        # HTTP 200 alone is not readiness evidence. SCOS readiness handlers
+        # return "ok" (shared handler) or "ready" (service-specific handler).
+        if value.get("status") not in ("ok", "ready"):
+            raise RuntimeError("deployed readiness response did not confirm ready")
+        return value
 
     def version(self) -> dict[str, Any]:
         value = self._request("GET", "/v1/version")

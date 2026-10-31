@@ -5,6 +5,29 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 deployed readiness-body integrity (2026-10-31; isolated TDD candidate)
+
+The deployed-code benchmark previously treated any HTTP 200 response from
+`GET /health/ready` as a successful preflight, even when the JSON explicitly
+reported `not_ready` or `unready`. Six real-HTTP variants (negative status,
+missing/null, false and numeric status) reproduced a false successful run
+(RED), and an end-to-end CLI regression proved the benchmark published a
+measured run despite the failed readiness body (RED). The client now requires
+the explicit `status` string `ok` or `ready`, matching the shared and
+service-specific SCOS readiness handlers. A valid `ready` response remains
+accepted. All 18 deployed benchmark tests pass (GREEN). A negative readiness
+body now produces a generic, credential-safe `failed` preflight artifact
+with zero measured cases, no fixture seeding and no publication.
+
+This is source-only preflight evidence integrity, not proof of a live
+service's true health, representative model performance, production
+deployment/recovery, or P0–P8 completion. Full local `make test`, `go vet
+./...`, 42 P4 fixture/gate tests, the unchanged frozen seven-case lexical
+P4 gate (Recall@5=1.000, forbidden@5/10/20=0) and `git diff --check`
+passed on AMD. CI, P4 integration and merged-main qualification remain
+required. No live tenant, production service, paid resources or migrations
+were used.
+
 ## P0 deployed per-case HTTP-error credential isolation (2026-10-31; TDD source candidate)
 
 A deployed-code benchmark could survive its preflight, receive an HTTP 503
