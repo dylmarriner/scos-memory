@@ -5,6 +5,27 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 deployed benchmark HTTP response bounds and endpoint integrity (2026-10-31; TDD source candidate)
+
+A deployed-code benchmark accepted an HTTP 200 with valid JSON followed by
+more than 16 MiB of trailing whitespace because the success path read the
+entire remote response without a byte bound. A real local HTTP regression
+reproduced successful acceptance of the oversized response (RED). The client
+now caps successful response reads at 16 MiB plus one sentinel byte and fails
+closed with a credential-safe error on overflow (GREEN). HTTP error bodies
+remain unread and redirect rejection is preserved.
+
+The configured benchmark endpoint also accepted missing hosts, query strings,
+fragments, invalid ports and malformed IPv6 authorities. A six-input RED/GREEN
+matrix now rejects those before any HTTP request while preserving legitimate
+HTTP(S) endpoint path prefixes. This prevents ambiguous request targets and
+accidental query-string credential exposure. The change is confined to the
+source benchmark client and its real-HTTP/config regression tests. It does
+not run a deployed benchmark, qualify model quality/latency/cost, validate
+production recovery, or close any P0–P8 acceptance gate. CI and merged-main
+qualification are required separately; no live services, migrations or paid
+resources are used.
+
 ## P0 deployed readiness-body integrity (2026-10-31; isolated TDD candidate)
 
 The deployed-code benchmark previously treated any HTTP 200 response from
