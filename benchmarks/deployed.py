@@ -198,8 +198,11 @@ class DeployedCodeClient:
                 parse_constant=_reject_nonfinite_json_constant,
                 parse_float=_parse_finite_json_float,
             )
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise RuntimeError(f"deployed benchmark returned invalid JSON: {method} {path}") from exc
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            # Deeply nested but syntactically valid JSON can exceed Python's
+            # parser recursion limit. Fail as a case/preflight error rather
+            # than aborting the entire run without a failure artifact.
+            raise RuntimeError(f"deployed benchmark returned invalid JSON: {method} {path}") from None
         if not isinstance(value, dict):
             raise RuntimeError(f"deployed benchmark returned a non-object: {method} {path}")
         return value

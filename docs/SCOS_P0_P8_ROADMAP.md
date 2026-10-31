@@ -5,6 +5,28 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 untrusted benchmark transport and parser-depth handling (2026-11-01; PR #200 follow-up, not merged)
+
+Two isolated TDD regressions exposed evidence and credential-handling defects:
+`publish()` interpolated the untrusted `URLError.reason` into its exception
+and chained the original exception, allowing a transport/proxy error echoing
+the Authorization token to leak into CI tracebacks (RED). A real localhost
+HTTP 200 readiness response with deeply nested, otherwise valid JSON raised
+an uncontrolled `RecursionError` in the deployed client, aborting the runner
+instead of writing its failure artifact (RED). The publisher now emits a
+fixed, credential-safe transport diagnostic with a suppressed exception chain;
+the deployed parser maps recursion-depth failures to a controlled `RuntimeError`
+without exposing the untrusted response. An end-to-end CLI regression verifies
+that deeply nested readiness produces a durable `failed` preflight artifact,
+never seeds snapshots, never publishes, and never includes the bearer (GREEN).
+AMD verification: 51 combined publisher/deployed tests, complete `make test`,
+`go vet ./...`, 42 P4 fixture/gate tests, unchanged frozen seven-case
+lexical gate and `git diff --check` passed. The §41 checker still returns
+FAIL because the governance master table is PARTIAL. These are source-only
+P0 benchmark integrity protections. They do not qualify
+representative model quality, latency/cost, merged-main acceptance, production
+rollout/recovery, or §41 completion.
+
 ## P0 benchmark publication acknowledgement integrity (2026-11-01; PR #200 follow-up, not merged)
 
 The shared publisher previously treated any successful HTTP response as proof of

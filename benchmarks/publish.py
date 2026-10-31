@@ -200,5 +200,7 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
         # HTTPError.reason is controlled by the remote server and may echo
         # the bearer. Suppress the exception chain in rendered tracebacks.
         raise RuntimeError(f"benchmark publish failed: HTTP {status}") from None
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"benchmark publish failed: {exc.reason}") from exc
+    except urllib.error.URLError:
+        # Transport and proxy exception reasons are untrusted; they can echo
+        # Authorization headers. Never serialize or chain them into CI logs.
+        raise RuntimeError("benchmark publish failed: transport error") from None

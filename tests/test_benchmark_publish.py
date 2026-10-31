@@ -9,6 +9,8 @@ import traceback
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest.mock import patch
+from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -148,6 +150,16 @@ class PublishTests(unittest.TestCase):
             publish({"suite": "x", "cases": []}, base_url=self.url, token="publisher-secret-token")
         self.assertIn("HTTP 503", str(raised.exception))
         self.assertNotIn("publisher-secret-token", "".join(traceback.format_exception(raised.exception)))
+
+    def test_transport_error_never_exposes_publisher_token_in_traceback(self):
+        # A proxy or custom transport can include request headers in its
+        # exception reason. This is untrusted data, just like an HTTP body.
+        secret = "publisher-secret-token"
+        with patch("urllib.request.OpenerDirector.open", side_effect=URLError(secret)):
+            with self.assertRaisesRegex(RuntimeError, "benchmark publish failed") as raised:
+                publish({"suite": "x", "cases": []}, base_url=self.url, token=secret)
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn(secret, "".join(traceback.format_exception(raised.exception)))
 
     def test_redirect_never_forwards_publisher_authorization(self):
         class RedirectTarget(_Collector):

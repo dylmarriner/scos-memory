@@ -378,8 +378,12 @@ class DeployedCodeClientTests(unittest.TestCase):
                 b'{"status":"ready","diagnostics":-1e999}',
                 b'{"status":"ready","metadata":{"nested":[1e999]}}',
                 b'{"status":"ready","metadata":{"nested":[-1e999]}}',
+                # Valid JSON can still exceed the parser's nesting limit.
+                # An uncontrolled RecursionError would abort the run before
+                # the benchmark failure artifact could be written.
+                b'{"status":"ready","nested":' + b'[' * 1500 + b'0' + b']' * 1500 + b'}',
             ):
-                with self.subTest(body=body):
+                with self.subTest(body=body[:64]):
                     UntrustedJSONHandler.raw_body = body
                     with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
                         client.health()
@@ -657,6 +661,34 @@ class DeployedRunTests(unittest.TestCase):
             self.assertNotIn("secret-benchmark-token", output.read_text() + stream.getvalue())
             self.assertEqual(_CodeService.snapshots, {})
             self.assertEqual(_CodeService.branches, {})
+
+    def test_deeply_nested_ready_json_writes_preflight_failure_artifact(self):
+        # A valid but parser-depth-exceeding HTTP 200 response must never
+        # abort the CLI before its fail-closed, credential-safe artifact.
+        _CodeService.raw_health = (b'{"status":"ready","nested":' +
+                                   b'[' * 1500 + b'0' + b']' * 1500 + b'}')
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "deeply-nested-ready.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    exit_code = run_deployed_main()
+                publish_mock.assert_not_called()
+            self.assertEqual(exit_code, 1)
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "failed")
+            self.assertEqual(artifact["stage"], "preflight")
+            self.assertEqual(artifact["cases"], [])
+            self.assertEqual(_CodeService.snapshots, {})
+            self.assertNotIn("secret-benchmark-token", output.read_text() + stream.getvalue())
 
     def test_http_200_ready_status_is_accepted(self):
         _CodeService.health_status = "ready"
