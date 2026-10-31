@@ -53,7 +53,16 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
     service to derive from the cases.
     """
     out_cases = []
+    seen_case_ids: set[str] = set()
     for case in cases:
+        # Never turn missing or non-string identities into apparently valid
+        # evidence IDs (e.g. None -> "None" or False -> "False").
+        case_id = case.get("case_id")
+        if not isinstance(case_id, str) or not case_id.strip():
+            raise ValueError("benchmark case_id must be a nonempty string")
+        if case_id in seen_case_ids:
+            raise ValueError(f"duplicate case_id {case_id!r}")
+        seen_case_ids.add(case_id)
         # Validate explicit scores before the fallback: []/0/False/"" must not
         # silently become an empty measurement set.
         scores = case.get("scores")
@@ -65,7 +74,7 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
                 raise ValueError("benchmark scores must be an object")
         scores = scores or {}
         item: dict[str, Any] = {
-            "case_id": str(case["case_id"]),
+            "case_id": case_id,
             "latency_ms": _finite_measurement(case.get("latency_ms", 0.0), label="case latency", nonnegative=True),
         }
         numeric = {k: _finite_measurement(v, label="case score") for k, v in scores.items()
@@ -107,6 +116,16 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("non-finite JSON constant")
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous acknowledgements, including nested duplicate keys."""
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON key")
+        obj[key] = value
+    return obj
+
+
 class _RejectRedirect(urllib.request.HTTPRedirectHandler):
     """Never forward the observability bearer to a redirect destination."""
 
@@ -146,7 +165,8 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
             if len(raw) > _MAX_PUBLISH_ACK_BYTES:
                 raise RuntimeError("invalid benchmark publish acknowledgement: response too large")
             try:
-                ack = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+                ack = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant,
+                                 object_pairs_hook=_reject_duplicate_json_keys)
             except (UnicodeError, ValueError, RecursionError):
                 raise RuntimeError("invalid benchmark publish acknowledgement: malformed JSON") from None
             if (not isinstance(ack, dict)
@@ -155,6 +175,11 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
                     or not ack["run_id"].strip()
                     or not isinstance(ack.get("created"), bool)):
                 raise RuntimeError("invalid benchmark publish acknowledgement: missing or invalid fields")
+            # The observability API returns 201 only for newly persisted runs
+            # and 200 only for an idempotent replay. An inconsistent response
+            # cannot establish whether the benchmark was actually recorded.
+            if response.status not in (200, 201) or ack["created"] != (response.status == 201):
+                raise RuntimeError("invalid benchmark publish acknowledgement: status/created mismatch")
             return ack
     except urllib.error.HTTPError as exc:
         # Upstream error bodies can echo the publisher's Authorization header.

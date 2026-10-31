@@ -2506,6 +2506,8 @@ For each phase:
 
 **2026-11-01 P0 publisher review hardening (PR #200, source-only):** RED/GREEN localhost HTTP regression confirms an upstream HTTP 503 reason phrase containing the bearer no longer appears in the formatted exception traceback (`raise ... from None`); explicit malformed `scores` and fallback `metrics` cannot be silently discarded by falsy selection. Zero case latency, valid dictionary scores, `None` fallback and unused malformed metrics are covered. Signed source commit and PR-head CI evidence must be checked; independent review and merge to `main` remain required; this does not qualify live P0 or §41 acceptance.
 
+**2026-11-01 P0 publication acknowledgement and case-identity integrity (PR #200, source-only):** TDD RED: 13 assertions failed on ambiguous real-HTTP acknowledgements and invalid case identities. GREEN: 15 publisher tests passed, including duplicate JSON keys (nested and top-level), HTTP 200/201 versus `created` mismatch, non-string/blank IDs and duplicate case IDs; legitimate new-run and idempotent responses remain accepted. The complete `make test` suite passed with the existing Python 3.11/Pydantic venv; `go vet ./...` and the P4 offline fixture checks passed independently. This is not representative P0 benchmarking, merged-main verification, production publication evidence or §41 completion. Independent approval remains required before merging.
+
 ## Immediate milestone
 
 **P4 source is merged. Complete its full P0 reproducible acceptance programme, qualify current live BGE endpoints/performance and then advance the cross-domain P5–P8 acceptance cases.**

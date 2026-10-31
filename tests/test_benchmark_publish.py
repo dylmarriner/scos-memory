@@ -185,6 +185,44 @@ class PublishTests(unittest.TestCase):
                     publish({"suite": "x", "cases": []}, base_url=self.url, token="publisher-secret-token")
         self.assertEqual(len(_Collector.received), len(invalid))
 
+    def test_publish_rejects_ambiguous_duplicate_acknowledgement_keys(self):
+        # Real HTTP: a duplicate key must never be accepted as proof of persistence.
+        invalid = [
+            b'{"run_id":"forged","run_id":"actual","created":true}',
+            b'{"run_id":"actual","created":false,"created":true}',
+            b'{"run_id":"actual","created":true,"summary":{"passed":1,"passed":0}}',
+        ]
+        for response_body in invalid:
+            with self.subTest(response_body=response_body):
+                _Collector.response_body = response_body
+                with self.assertRaisesRegex(RuntimeError, "invalid benchmark publish acknowledgement"):
+                    publish({"suite": "x", "cases": []}, base_url=self.url, token="t0k")
+
+    def test_publish_rejects_status_creation_mismatch(self):
+        # The observability API returns 201 for a new run and 200 for an existing run.
+        for status, created in ((201, False), (200, True)):
+            with self.subTest(status=status, created=created):
+                _Collector.status = status
+                _Collector.response_body = json.dumps({"run_id": "abc", "created": created}).encode()
+                with self.assertRaisesRegex(RuntimeError, "invalid benchmark publish acknowledgement"):
+                    publish({"suite": "x", "cases": []}, base_url=self.url, token="t0k")
+
+    def test_run_from_cases_rejects_ambiguous_case_identity(self):
+        for bad_id in (None, False, 123, "", "  ", [], {}):
+            with self.subTest(case_id=repr(bad_id)):
+                with self.assertRaisesRegex(ValueError, "case_id"):
+                    run_from_cases("suite", [{"case_id": bad_id, "latency_ms": 1}])
+        with self.assertRaisesRegex(ValueError, "duplicate case_id"):
+            run_from_cases("suite", [
+                {"case_id": "same", "latency_ms": 1},
+                {"case_id": "same", "latency_ms": 2},
+            ])
+        valid = run_from_cases("suite", [
+            {"case_id": "case-a", "latency_ms": 0},
+            {"case_id": "case-b", "latency_ms": 1},
+        ])
+        self.assertEqual([case["case_id"] for case in valid["cases"]], ["case-a", "case-b"])
+
     def test_publish_accepts_idempotent_existing_run_acknowledgement(self):
         _Collector.status = 200
         _Collector.response_body = b'{"run_id":"existing-run","created":false}'
