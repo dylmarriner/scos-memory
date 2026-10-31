@@ -10,6 +10,7 @@ import unittest
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -105,6 +106,30 @@ class DeployedCodeClientTests(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Bearer secret-token")
         self.assertEqual(headers["X-Scos-Tenant-Id"], "tenant-1")
         self.assertEqual(headers["X-Scos-Principal-Id"], "principal-1")
+
+    def test_http_error_diagnostics_have_bounded_response_reads(self):
+        class TrackedBody(io.BytesIO):
+            def __init__(self, body):
+                super().__init__(body)
+                self.read_sizes = []
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                return super().read(size)
+
+        body = TrackedBody(b"x" * 50000)
+        error = HTTPError(
+            "http://127.0.0.1/error", 502, "Bad Gateway", {}, body
+        )
+        client = DeployedCodeClient(BenchmarkConfig(
+            endpoint=f"http://127.0.0.1:{self.server.server_port}",
+            token="secret-token", tenant_id="tenant-1", principal_id="principal-1",
+        ))
+        with patch.object(client.opener, "open", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 502"):
+                client.health()
+        self.assertEqual(body.read_sizes, [1200])
+        self.assertTrue(body.closed)
 
     def test_redirect_never_forwards_benchmark_credentials(self):
         # A benchmark endpoint must not be able to redirect the bearer and

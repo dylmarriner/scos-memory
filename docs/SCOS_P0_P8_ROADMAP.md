@@ -17,9 +17,12 @@ configured TLS CA verification and normal proxy support. A real-HTTP matrix
 checks GET and POST across 301, 302, 303, 307 and 308, asserting every
 redirect fails closed and the destination receives no request (GREEN).
 HTTP error bodies are closed after diagnostics to avoid leaking response
-resources. The previously omitted deployed-benchmark test module is now
+resources. CodeRabbit review identified an unbounded HTTP-error body read:
+a RED regression showed an attempted full 50,000-byte read, corrected to a
+maximum 1,200-byte diagnostic read (GREEN). The previously omitted
+deployed-benchmark test module is now
 required in both CI and local `make test`; the parity contract guards that
-coverage against accidental removal. On AMD, the 12 deployed-benchmark
+coverage against accidental removal. On AMD, the 13 deployed-benchmark
 tests, full local `make test`, `go vet ./...`, 42 P4 fixture/gate tests,
 the frozen seven-case lexical P4 baseline (Recall@5=1.000; forbidden
 evidence at 5/10/20 = 0), and `git diff --check` passed. The governance

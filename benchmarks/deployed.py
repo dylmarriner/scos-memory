@@ -121,7 +121,7 @@ class DeployedCodeClient:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             with exc:
-                detail = exc.read().decode("utf-8", "replace").strip()[:300]
+                detail = exc.read(1200).decode("utf-8", "replace").strip()[:300]
             raise RuntimeError(f"deployed benchmark request failed: {method} {path}: HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"deployed benchmark request failed: {method} {path}") from exc
