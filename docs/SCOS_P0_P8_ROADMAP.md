@@ -5,6 +5,21 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 benchmark observability publication credential isolation (2026-11-01; PR #200 follow-up, not merged)
+
+The shared benchmark publisher previously copied the first 500 bytes of an
+untrusted HTTP error response into its exception. An observability endpoint
+could echo the Authorization header in that body, exposing
+SCOS_INTERNAL_SERVICE_TOKEN through CI logs. Python's default HTTP redirect
+handler also followed a POST HTTP 302 as a GET and forwarded the bearer to
+the redirect destination. Two localhost real-HTTP regressions reproduced
+both defects (RED). The publisher now rejects all redirects and never reads
+or serializes HTTP error bodies, while preserving HTTP status diagnostics
+(GREEN, all six publisher unit tests). This protects source benchmark
+publication only: no live observability service was contacted, no benchmark
+quality/latency acceptance was measured, and production rollout/recovery
+and §41 governance acceptance remain open.
+
 ## P0 deployed timeout evidence validation (2026-10-31; isolated TDD candidate)
 
 The deployed benchmark accepted non-finite timeout configuration (`NaN`,

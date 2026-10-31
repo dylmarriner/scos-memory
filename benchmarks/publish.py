@@ -75,6 +75,13 @@ def _ssl_context() -> ssl.SSLContext | None:
     return None
 
 
+class _RejectRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward the observability bearer to a redirect destination."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 def publish(run: dict[str, Any], base_url: str | None = None, token: str | None = None, timeout: float = 15.0) -> dict[str, Any] | None:
     """POST a run to observability. Returns the service response, or None
     when publishing is not configured."""
@@ -92,11 +99,17 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}", "X-SCOS-Caller": "benchmark-harness"},
     )
+    opener = urllib.request.build_opener(
+        _RejectRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
+    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
+        with opener.open(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"benchmark publish failed: HTTP {exc.code}: {detail}") from exc
+        # Upstream error bodies can echo the publisher's Authorization header.
+        # Do not read or serialize them into logs, CI, or benchmark artifacts.
+        with exc:
+            status = exc.code
+        raise RuntimeError(f"benchmark publish failed: HTTP {status}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"benchmark publish failed: {exc.reason}") from exc
