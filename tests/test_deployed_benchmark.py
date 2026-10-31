@@ -326,11 +326,17 @@ class DeployedCodeClientTests(unittest.TestCase):
                 b'{"status":"ready","diagnostics":NaN}',
                 b'{"status":"ready","diagnostics":Infinity}',
                 b'{"status":"ready","diagnostics":-Infinity}',
+                b'{"status":"ready","diagnostics":1e999}',
+                b'{"status":"ready","diagnostics":-1e999}',
+                b'{"status":"ready","metadata":{"nested":[1e999]}}',
+                b'{"status":"ready","metadata":{"nested":[-1e999]}}',
             ):
                 with self.subTest(body=body):
                     UntrustedJSONHandler.raw_body = body
                     with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
                         client.health()
+            UntrustedJSONHandler.raw_body = b'{"status":"ready","diagnostics":1.25e2}'
+            self.assertEqual(client.health()["diagnostics"], 125.0)
         finally:
             server.shutdown()
             thread.join()

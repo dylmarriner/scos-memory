@@ -37,6 +37,17 @@ redirect, preflight and failure-artifact regressions remain part of the focused
 suite. This is P0 input/evidence integrity hardening only: no deployed service
 was contacted, no representative BGE benchmark was run, and §41 remains open.
 
+## P0 deployed HTTP JSON exponent-overflow integrity (2026-11-01; PR #200 follow-up, not merged)
+
+A real HTTP 200 readiness response containing `1e999` or `-1e999` in an
+otherwise unused nested field was accepted as successful evidence: Python's
+JSON parser converted those numeric literals to infinite floats. Four
+regression subcases reproduced acceptance before the fix (RED), then passed
+(GREEN) after bounding every parsed JSON float to a finite value. A valid
+`1.25e2` response remains accepted. This is source-only deployed benchmark
+evidence hardening, **not** representative P0 acceptance, a live benchmark,
+merged-main verification, or production rollout/recovery qualification.
+
 ## P0 deployed snapshot-diff shape integrity (2026-11-01; PR #200 follow-up, not merged)
 
 A deployed HTTP 200 snapshot-diff response could supply `Renamed` as a string,

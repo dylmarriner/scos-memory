@@ -137,6 +137,14 @@ def _reject_nonfinite_json_constant(_value: str) -> None:
     raise ValueError("non-finite JSON constant")
 
 
+def _parse_finite_json_float(value: str) -> float:
+    """Reject exponent overflow, which JSON's default float parser maps to inf."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
 class DeployedCodeClient:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
@@ -185,6 +193,7 @@ class DeployedCodeClient:
                 raw.decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_json_members,
                 parse_constant=_reject_nonfinite_json_constant,
+                parse_float=_parse_finite_json_float,
             )
         except (UnicodeDecodeError, ValueError) as exc:
             raise RuntimeError(f"deployed benchmark returned invalid JSON: {method} {path}") from exc
