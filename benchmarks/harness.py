@@ -730,7 +730,8 @@ def load_suite(path: str) -> BenchmarkSuite:
                             for i in case.forbidden_ids)):
                 raise ValueError(f"case {case.id}: tenant isolation lacks foreign-tenant forbidden evidence")
             if (case.category == "namespace_isolation" and
-                    not any(document_scopes[i]["namespace_id"] != context["namespace_id"]
+                    not any(document_scopes[i]["tenant_id"] == context["tenant_id"]
+                            and document_scopes[i]["namespace_id"] != context["namespace_id"]
                             for i in case.forbidden_ids)):
                 raise ValueError(f"case {case.id}: namespace isolation lacks out-of-scope forbidden evidence")
     return BenchmarkSuite(name=data["name"], version=data["version"], cases=cases,

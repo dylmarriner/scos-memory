@@ -1287,7 +1287,7 @@ A contextual suite cannot be passed to the current single-tenant MCP gateway
 adapter: it fails **before any seeding** rather than silently ignoring tenant
 or time selectors. Focused RED/GREEN tests and metadata mutation tests are in
 `tests/test_p0_contextual_evidence.py` and `tests/test_p0_memory_corpus.py`.
-The 15 new focused regression methods were RED before implementation and GREEN
+The 16 new focused regression methods were RED before implementation and GREEN
 afterward; full local `make test`, `go vet ./...`, `git diff --check`, and the
 30-case real lexical diagnostic passed. The diagnostic reported contextual
 cases unqualified and did not connect to a live tenant or model service.

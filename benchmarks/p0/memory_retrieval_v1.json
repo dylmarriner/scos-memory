@@ -719,7 +719,8 @@
         "alpha_finance_rate"
       ],
       "forbidden_ids": [
-        "beta_finance"
+        "beta_finance",
+        "alpha_private_personnel"
       ],
       "token_budget": 512
     },

@@ -83,6 +83,13 @@ class MemoryCorpusContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'isolation'):
             self.load(data)
 
+    def test_namespace_isolation_requires_same_tenant_other_namespace(self):
+        data = copy.deepcopy(self.data)
+        case = next(c for c in data['cases'] if c['id'] == 'namespace_budget')
+        case['forbidden_ids'] = ['beta_finance']
+        with self.assertRaisesRegex(ValueError, 'namespace isolation'):
+            self.load(data)
+
     def test_lexical_baseline_is_diagnostic_not_scope_qualification(self):
         suite = load_suite(str(FIXTURE))
         runner = BenchmarkRunner(suite)
