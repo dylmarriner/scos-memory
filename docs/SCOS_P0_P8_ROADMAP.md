@@ -2483,6 +2483,8 @@ For each phase:
 - [ ] implementation is merged to `main`;
 - [ ] `main` is re-read after merge to verify expected state actually landed.
 
+**2026-11-01 P0 publisher review hardening (PR #200, source-only):** RED/GREEN localhost HTTP regression confirms an upstream HTTP 503 reason phrase containing the bearer no longer appears in the formatted exception traceback (`raise ... from None`); explicit malformed `scores` and fallback `metrics` cannot be silently discarded by falsy selection. Zero case latency, valid dictionary scores, `None` fallback and unused malformed metrics are covered. Signed source commit and PR-head CI evidence must be checked; independent review and merge to `main` remain required; this does not qualify live P0 or §41 acceptance.
+
 ## Immediate milestone
 
 **P4 source is merged. Complete its full P0 reproducible acceptance programme, qualify current live BGE endpoints/performance and then advance the cross-domain P5–P8 acceptance cases.**

@@ -54,9 +54,16 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
     """
     out_cases = []
     for case in cases:
-        scores = case.get("scores") or case.get("metrics") or {}
-        if not isinstance(scores, dict):
+        # Validate explicit scores before the fallback: []/0/False/"" must not
+        # silently become an empty measurement set.
+        scores = case.get("scores")
+        if scores is not None and not isinstance(scores, dict):
             raise ValueError("benchmark scores must be an object")
+        if not scores:
+            scores = case.get("metrics")
+            if scores is not None and not isinstance(scores, dict):
+                raise ValueError("benchmark scores must be an object")
+        scores = scores or {}
         item: dict[str, Any] = {
             "case_id": str(case["case_id"]),
             "latency_ms": _finite_measurement(case.get("latency_ms", 0.0), label="case latency", nonnegative=True),
@@ -132,6 +139,8 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
         # Do not read or serialize them into logs, CI, or benchmark artifacts.
         with exc:
             status = exc.code
-        raise RuntimeError(f"benchmark publish failed: HTTP {status}") from exc
+        # HTTPError.reason is controlled by the remote server and may echo
+        # the bearer. Suppress the exception chain in rendered tracebacks.
+        raise RuntimeError(f"benchmark publish failed: HTTP {status}") from None
     except urllib.error.URLError as exc:
         raise RuntimeError(f"benchmark publish failed: {exc.reason}") from exc

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import threading
+import traceback
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -19,12 +20,13 @@ class _Collector(BaseHTTPRequestHandler):
     status = 201
     redirect_to = None
     echo_error_body = False
+    reason_phrase = None
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length))
         type(self).received.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
-        self.send_response(type(self).status)
+        self.send_response(type(self).status, type(self).reason_phrase)
         if type(self).redirect_to:
             self.send_header("Location", type(self).redirect_to)
             self.end_headers()
@@ -47,6 +49,7 @@ class PublishTests(unittest.TestCase):
         _Collector.status = 201
         _Collector.redirect_to = None
         _Collector.echo_error_body = False
+        _Collector.reason_phrase = None
         self.server = HTTPServer(("127.0.0.1", 0), _Collector)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -85,12 +88,18 @@ class PublishTests(unittest.TestCase):
                 run_from_cases("suite", [{"case_id": "c1", "latency_ms": 1.0}], wall_time_ms=invalid)
 
     def test_run_from_cases_rejects_nonobject_scores_and_preserves_valid_values(self):
+        for invalid in ([1.0], [], 0, False, ""):
+            with self.subTest(scores=repr(invalid)), self.assertRaisesRegex(ValueError, "scores must be an object"):
+                run_from_cases("suite", [{"case_id": "c1", "scores": invalid}])
         with self.assertRaisesRegex(ValueError, "scores must be an object"):
-            run_from_cases("suite", [{"case_id": "c1", "scores": [1.0]}])
+            run_from_cases("suite", [{"case_id": "c1", "metrics": []}])
+        self.assertEqual(run_from_cases("suite", [{"case_id": "c1", "scores": {"recall": 1}, "metrics": []}])["cases"][0]["scores"], {"recall": 1.0})
+        self.assertEqual(run_from_cases("suite", [{"case_id": "c1", "scores": None, "metrics": {"recall": 0.5}}])["cases"][0]["scores"], {"recall": 0.5})
         run = run_from_cases("suite", [{"case_id": "c1", "latency_ms": 0,
                                          "scores": {"signed_margin": -2.5, "recall": 0.75}}],
                              wall_time_ms=0)
         self.assertEqual(run["cases"][0]["scores"], {"signed_margin": -2.5, "recall": 0.75})
+        self.assertEqual(run["cases"][0]["latency_ms"], 0.0)
         self.assertEqual(run["wall_time_ms"], 0.0)
 
     def test_publish_rejects_nonfinite_nested_json_before_network(self):
@@ -114,10 +123,11 @@ class PublishTests(unittest.TestCase):
     def test_http_error_cannot_echo_publisher_token_in_diagnostics(self):
         _Collector.status = 503
         _Collector.echo_error_body = True
+        _Collector.reason_phrase = "publisher-secret-token"
         with self.assertRaises(RuntimeError) as raised:
             publish({"suite": "x", "cases": []}, base_url=self.url, token="publisher-secret-token")
         self.assertIn("HTTP 503", str(raised.exception))
-        self.assertNotIn("publisher-secret-token", str(raised.exception))
+        self.assertNotIn("publisher-secret-token", "".join(traceback.format_exception(raised.exception)))
 
     def test_redirect_never_forwards_publisher_authorization(self):
         class RedirectTarget(_Collector):
