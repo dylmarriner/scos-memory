@@ -183,11 +183,14 @@ class DeployedCodeClient:
             # artifacts, so NEVER include response bytes in diagnostics.
             with exc:
                 status = exc.code
+            # The HTTP status reason is upstream-controlled and can reflect
+            # bearer/control-plane headers. Never display the chained cause.
             raise RuntimeError(
                 f"deployed benchmark request failed: {method} {path}: HTTP {status}"
-            ) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RuntimeError(f"deployed benchmark request failed: {method} {path}") from exc
+            ) from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            # Proxy, TLS and socket exception messages are also untrusted.
+            raise RuntimeError(f"deployed benchmark request failed: {method} {path}") from None
         try:
             value = json.loads(
                 raw.decode("utf-8"),

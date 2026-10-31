@@ -5,12 +5,13 @@ import pathlib
 import sys
 import tempfile
 import threading
+import traceback
 import time
 import unittest
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -53,6 +54,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         return
+
+
+class _UntrustedReason(BaseHTTPRequestHandler):
+    def do_GET(self):
+        reason = f"reflected {self.headers.get('Authorization')} {self.headers.get('X-SCOS-Control-Plane-Token')}"
+        self.send_response(503, reason)
+        self.end_headers()
+        self.wfile.write(b"untrusted response body")
+
+    def log_message(self, *_args):
+        pass
 
 
 class DeployedBenchmarkConfigTests(unittest.TestCase):
@@ -224,6 +236,42 @@ class DeployedCodeClientTests(unittest.TestCase):
                 client.health()
         self.assertEqual(body.read_sizes, [], "untrusted error bodies must not be read")
         self.assertTrue(body.closed)
+
+    def test_http_reason_cannot_expose_credentials_in_traceback(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _UntrustedReason)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            client = DeployedCodeClient(BenchmarkConfig(
+                endpoint=f"http://127.0.0.1:{server.server_port}",
+                token="example-bearer-sensitive",
+                control_plane_token="example-control-sensitive",
+                tenant_id="tenant-1", principal_id="principal-1",
+            ))
+            with self.assertRaisesRegex(RuntimeError, "HTTP 503") as raised:
+                client.health()
+            rendered = "".join(traceback.format_exception(raised.exception))
+            self.assertNotIn("example-bearer-sensitive", rendered)
+            self.assertNotIn("example-control-sensitive", rendered)
+        finally:
+            server.shutdown()
+            worker.join()
+            server.server_close()
+
+    def test_transport_error_cannot_expose_credentials_in_traceback(self):
+        client = DeployedCodeClient(BenchmarkConfig(
+            endpoint="http://127.0.0.1:1",
+            token="example-bearer-sensitive",
+            tenant_id="tenant-1", principal_id="principal-1",
+        ))
+        for error in (URLError("example-bearer-sensitive"),
+                      TimeoutError("example-bearer-sensitive")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(client.opener, "open", side_effect=error):
+                    with self.assertRaisesRegex(RuntimeError, "deployed benchmark request failed") as raised:
+                        client.health()
+                self.assertNotIn("example-bearer-sensitive",
+                                 "".join(traceback.format_exception(raised.exception)))
 
     def test_redirect_never_forwards_benchmark_credentials(self):
         # A benchmark endpoint must not be able to redirect the bearer and
