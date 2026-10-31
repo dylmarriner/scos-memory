@@ -26,6 +26,11 @@ from benchmarks.publish import publish, run_from_cases  # noqa: E402
 NOT_RUN_EXIT = 2
 
 
+class DeployedPreflightError(RuntimeError):
+    """The configured service could not be qualified before measuring cases."""
+
+
+
 def _file(path: str, content: str) -> dict[str, Any]:
     return {
         "path": path,
@@ -73,12 +78,17 @@ def _timed(case_id: str, body: Callable[[], tuple[bool, dict[str, Any]]]) -> dic
 
 def run(config=None, run_nonce: str | None = None) -> dict[str, Any]:
     config = config or config_from_environment()
-    client = DeployedCodeClient(config)
     started = time.perf_counter()
-    health = client.health()
-    release = client.release()
-    version = client.version()
-    repository_id = client.ensure_repository()
+    try:
+        client = DeployedCodeClient(config)
+        health = client.health()
+        release = client.release()
+        version = client.version()
+        repository_id = client.ensure_repository()
+    except (RuntimeError, OSError) as exc:
+        # Upstream HTTP error bodies can echo bearer credentials. Preserve
+        # the cause for a debugger, but never serialize it into artifacts.
+        raise DeployedPreflightError("deployed service preflight failed") from exc
     # The fixture identity is stable per benchmark identity; the nonce makes
     # each run's branches and commits new, so a rerun measures indexing
     # again instead of replaying the previous run's snapshots.
@@ -161,7 +171,20 @@ def main() -> int:
         args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps({"output": str(args.output), "status": "not_run", "reason": artifact["reason"]}))
         return NOT_RUN_EXIT
-    artifact = run(config)
+    try:
+        artifact = run(config)
+    except DeployedPreflightError:
+        artifact = {
+            "schema_version": "deployed-code-baseline-2",
+            "status": "failed",
+            "stage": "preflight",
+            "reason": "deployed service preflight failed; no benchmark cases were measured",
+            "metadata": config.metadata(),
+            "cases": [],
+        }
+        args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(json.dumps({"output": str(args.output), "status": "failed", "stage": "preflight"}))
+        return 1
     args.output.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     published = publish(run_from_cases(
         "deployed-code-baseline", artifact["cases"], schema_version=artifact["schema_version"],

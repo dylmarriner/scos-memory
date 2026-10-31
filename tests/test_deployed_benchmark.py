@@ -211,6 +211,7 @@ class _CodeService(BaseHTTPRequestHandler):
     fallback over content, rename diffs and idempotent re-indexing. With
     ``leak`` set, a query on any branch also searches every other branch."""
     leak = False
+    preflight_failure = False
     delay: dict = {}
     branches: dict = {}
     snapshots: dict = {}
@@ -224,6 +225,13 @@ class _CodeService(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):  # noqa: N802
+        if self.preflight_failure and self.path == "/health/ready":
+            data = b"upstream failed: secret-benchmark-token"
+            self.send_response(503)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         self._send({"status": "ok", "version": "v", "source_sha": "sha", "build_time": "now"})
 
     def do_POST(self):  # noqa: N802
@@ -266,6 +274,7 @@ class _CodeService(BaseHTTPRequestHandler):
 class DeployedRunTests(unittest.TestCase):
     def setUp(self):
         _CodeService.leak = False
+        _CodeService.preflight_failure = False
         _CodeService.delay = {}
         _CodeService.branches = {}
         _CodeService.snapshots = {}
@@ -293,6 +302,34 @@ class DeployedRunTests(unittest.TestCase):
         cases = {c["case_id"]: c for c in run(self.config, run_nonce="n2")["cases"]}
         self.assertFalse(cases["branch_isolation"]["passed"])
         self.assertEqual(cases["branch_isolation"]["details"]["branch_file_on_main"], ["branch.go"])
+
+    def test_failed_live_preflight_writes_failure_artifact_without_secrets_or_publication(self):
+        _CodeService.preflight_failure = True
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "failed.json"
+            argv = ["run_deployed", "--output", str(output)]
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+                "SCOS_BENCHMARK_PUBLISH_URL": "http://127.0.0.1:1",
+            }
+            with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv), \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                output_stream = io.StringIO()
+                with redirect_stdout(output_stream):
+                    exit_code = run_deployed_main()
+                publish_mock.assert_not_called()
+            self.assertEqual(exit_code, 1)
+            self.assertTrue(output.exists(), "configured preflight failures must leave durable evidence")
+            raw = output.read_text()
+            artifact = json.loads(raw)
+            self.assertEqual(artifact["status"], "failed")
+            self.assertEqual(artifact["cases"], [])
+            self.assertEqual(artifact["stage"], "preflight")
+            self.assertNotIn("secret-benchmark-token", raw + output_stream.getvalue())
+            self.assertNotIn("passed_cases", artifact)
 
     def test_unconfigured_deployment_is_recorded_as_not_run(self):
         with tempfile.TemporaryDirectory() as directory:

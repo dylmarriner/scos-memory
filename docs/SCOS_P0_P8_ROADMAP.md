@@ -5,6 +5,27 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 deployed preflight failure evidence (2026-10-31; isolated TDD candidate)
+
+A configured deployed-code benchmark could fail its health/release/version or
+repository preflight with an uncaught HTTP exception, leaving **no output
+artifact** and an error message containing arbitrary upstream response text.
+A real local HTTP 503 regression reproduced the uncaught exception (RED),
+including a response body echoing a benchmark bearer token. The runner now
+records a `failed` preflight artifact with zero measured cases, a safe fixed
+reason and credential-free configuration metadata; it exits nonzero without
+publishing a measured run (GREEN). The unconfigured endpoint remains a
+separate `not_run` case. The original exception is retained as an internal
+cause but is never serialized into output or printed. This is P0 evidence
+integrity only, not a successful deployed benchmark or P0 acceptance.
+Production deployment, live migrations and paid resources were not used.
+On AMD, the 14 deployed-benchmark tests, full `make test` (using the
+existing isolated Python venv for pydantic), `go vet ./...`, 42 P4
+fixture/gate tests and `git diff --check` passed. An initial unisolated
+`make test` invocation failed because system Python lacks pydantic; this was
+an environment issue, not a passing test claim. PR-head CI, P4 and
+merged-main qualification remain required.
+
 ## P0 deployed benchmark redirect credential isolation (2026-10-31; TDD source candidate)
 
 The deployed code benchmark sends a bearer token and tenant/principal headers
