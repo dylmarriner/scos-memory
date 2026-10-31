@@ -55,10 +55,13 @@ class BenchmarkConfig:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain a query or fragment")
         # Python accepts NaN/Infinity as floats; NaN bypasses <= 0 checks and
         # non-finite values are invalid socket timeouts and benchmark metadata.
-        if (isinstance(self.timeout_seconds, bool)
-                or not isinstance(self.timeout_seconds, (int, float))
-                or not math.isfinite(self.timeout_seconds)
-                or self.timeout_seconds <= 0):
+        if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, (int, float)):
+            raise RuntimeError("benchmark timeout must be positive and finite")
+        try:
+            finite = math.isfinite(self.timeout_seconds)
+        except OverflowError as exc:
+            raise RuntimeError("benchmark timeout must be positive and finite") from exc
+        if not finite or self.timeout_seconds <= 0:
             raise RuntimeError("benchmark timeout must be positive and finite")
         if not all((self.token.strip(), self.tenant_id.strip(), self.principal_id.strip())):
             raise RuntimeError("benchmark token, tenant and principal are required")

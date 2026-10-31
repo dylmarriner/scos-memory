@@ -14,7 +14,11 @@ invalid transport timeouts and non-standard JSON metadata. Two parameterized
 unit regressions reproduced eight failures before correction (RED). Both the
 environment parser and direct client configuration now require a positive,
 finite numeric timeout (GREEN); credential and HTTP response handling remain
-unchanged. This is benchmark-input integrity hardening, **not** representative
+unchanged. Review follow-up: an oversized integer (`10 ** 1000`) made
+`math.isfinite` raise an uncontrolled `OverflowError`; an isolated regression
+first reproduced it (RED), and direct configuration now maps it to the same
+controlled `RuntimeError` as other invalid timeouts (GREEN). This is benchmark-input
+integrity hardening, **not** representative
 P0 model/latency/cost evidence, production acceptance or P0–P8 completion.
 
 ## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)

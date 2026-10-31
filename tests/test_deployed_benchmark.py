@@ -82,6 +82,16 @@ class DeployedBenchmarkConfigTests(unittest.TestCase):
                         timeout_seconds=timeout,
                     )
 
+    def test_config_rejects_oversized_integer_timeout_with_controlled_error(self):
+        # math.isfinite(10 ** 1000) raises OverflowError before the normal
+        # configuration error; callers must see the same safe rejection.
+        with self.assertRaisesRegex(RuntimeError, "timeout.*positive.*finite"):
+            BenchmarkConfig(
+                endpoint="https://example.test", token="secret-token",
+                tenant_id="tenant-1", principal_id="principal-1",
+                timeout_seconds=10 ** 1000,
+            )
+
     def test_environment_rejects_nonfinite_timeouts(self):
         for timeout in ("NaN", "Infinity", "-Infinity"):
             with self.subTest(timeout=timeout):
