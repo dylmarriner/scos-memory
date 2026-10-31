@@ -5,6 +5,22 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)
+
+The deployed benchmark's HTTP 200 JSON parser accepted duplicate object keys
+and non-standard NaN/Infinity constants. A remote readiness response containing
+both `"status":"not_ready"` and `"status":"ready"` could therefore pass the
+preflight, allowing benchmark seeding despite contradictory server evidence.
+Six real-HTTP negative cases first passed the permissive parser (RED), including
+escaped duplicate keys, nested duplicate keys and positive/negative infinity.
+An end-to-end CLI regression additionally verifies that contradictory readiness
+causes a failed preflight artifact without seeding or publishing. The deployed client now
+rejects duplicate members at any nesting depth and non-finite constants before
+using remote evidence (GREEN). Response-size and credential-redaction guards
+remain unchanged. This is source-level evidence integrity, **not** a live
+deployed benchmark, representative P0 performance evidence or production
+acceptance. The §41 definition-of-done gate remains FAIL/PARTIAL.
+
 ## P0 deployed benchmark HTTP response bounds and endpoint integrity (2026-10-31; TDD source candidate)
 
 A deployed-code benchmark accepted an HTTP 200 with valid JSON followed by
