@@ -5,6 +5,25 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## Shared signed-claims expiration enforcement (2026-10-31; source candidate)
+
+The shared auth package previously accepted HMAC-signed identity tokens with
+missing, zero or negative `exp` claims indefinitely, despite the intended
+short-lived credential contract. Its signing helper also allowed no expiration
+or an already-expired timestamp. An authenticated HTTP regression demonstrated
+that the malformed tokens reached a protected handler, and signer regressions
+verified missing/past expiration was accepted (RED). Both signing and
+validation now require a future Unix-second expiration. Existing signed-token
+fixtures were updated to use real short lifetimes; valid tokens continue to
+authenticate (GREEN). A workflow parity regression ensures `packages/auth/**`
+changes trigger the restricted-role P4 integration workflow on PR and push.
+
+The corrected source was tested locally with the complete Go and Python suite,
+Go vet, and focused authentication/Hermes provider tests. These source-only
+tests do not prove production rotation of already-issued undated credentials,
+cluster-wide deployment compatibility, or completed §41 governance acceptance.
+Production credential migration and rollout remain separate approval gates.
+
 ## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)
 
 The deployed benchmark's HTTP 200 JSON parser accepted duplicate object keys

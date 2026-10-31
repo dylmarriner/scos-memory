@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func testJWT(secret, payload string) string {
@@ -61,7 +62,10 @@ func TestAuthenticatedHandlerLeavesHealthRoutesPublic(t *testing.T) {
 }
 
 func TestAuthenticatedHandlerUsesSignedCanonicalClaims(t *testing.T) {
-	token := testJWT("issuer", `{"tenant_id":"tenant-a","principal_id":"principal-a"}`)
+	token, err := SignClaims(Claims{TenantID: "tenant-a", PrincipalID: "principal-a", ExpiresAt: time.Now().Add(2 * time.Minute)}, "issuer")
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler := AuthenticatedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := CanonicalClaims(r.Context())
 		if !ok || claims.TenantID != "tenant-a" || claims.PrincipalID != "principal-a" {
@@ -187,7 +191,7 @@ func TestRequireScopeAcceptsAdminEscapeHatch(t *testing.T) {
 
 func TestValidateClaimsCarriesScopesAndJTI(t *testing.T) {
 	secret := "test-issuer-secret"
-	payload := `{"tenant_id":"t","principal_id":"p","scopes":["backups:admin"],"jti":"token-1"}`
+	payload := fmt.Sprintf(`{"tenant_id":"t","principal_id":"p","scopes":["backups:admin"],"jti":"token-1","exp":%d}`, time.Now().Add(2*time.Minute).Unix())
 	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 	body := base64.RawURLEncoding.EncodeToString([]byte(payload))
 	mac := hmac.New(sha256.New, []byte(secret))

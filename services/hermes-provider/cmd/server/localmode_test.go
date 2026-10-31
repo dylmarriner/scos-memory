@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/auth"
 )
@@ -48,7 +49,7 @@ func TestLocalModeGivesAnUnauthenticatedCallerTheLocalIdentity(t *testing.T) {
 func TestLocalModeStillVerifiesAPresentedToken(t *testing.T) {
 	handler, seen := localModeServer(t)
 	other := "22222222-2222-2222-2222-222222222222"
-	token, err := auth.SignClaims(auth.Claims{TenantID: other, PrincipalID: other, Subject: other}, testIssuerSecret)
+	token, err := auth.SignClaims(auth.Claims{TenantID: other, PrincipalID: other, Subject: other, ExpiresAt: time.Now().Add(2 * time.Minute)}, testIssuerSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestLocalModeStillVerifiesAPresentedToken(t *testing.T) {
 		t.Fatalf("status = %d, identity = %+v; want the token's identity", rec.Code, *seen)
 	}
 
-	forged, err := auth.SignClaims(auth.Claims{TenantID: other, PrincipalID: other, Subject: other}, "another-secret")
+	forged, err := auth.SignClaims(auth.Claims{TenantID: other, PrincipalID: other, Subject: other, ExpiresAt: time.Now().Add(2 * time.Minute)}, "another-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
