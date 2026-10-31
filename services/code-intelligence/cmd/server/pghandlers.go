@@ -379,6 +379,13 @@ func (s *server) handlePGQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Require exactly one JSON document. A second value or malformed trailing
+	// bytes must not be silently ignored by the historical query/impact API.
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		http.Error(w, "request must contain one JSON object", http.StatusBadRequest)
+		return
+	}
 	if req.RepositoryID == "" || req.Query == "" {
 		http.Error(w, "repository_id and query are required", http.StatusBadRequest)
 		return
@@ -595,6 +602,12 @@ func (s *server) handlePGImpact(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Reject a second JSON value or trailing garbage before any impact lookup.
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		http.Error(w, "request must contain one JSON object", http.StatusBadRequest)
 		return
 	}
 	if req.RepositoryID == "" || req.Query == "" {

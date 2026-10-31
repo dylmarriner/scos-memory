@@ -1421,6 +1421,18 @@ No superiority/performance claim for P4+ is accepted without reproducible before
 - [ ] Return explicit snapshot identity/provenance from every historical code query/impact surface.
 - [ ] Add explicit snapshot selection where callers still imply the active branch snapshot.
 - [ ] Verify retention/GC cannot remove code evidence referenced by memory-code links or audit records.
+
+**P1/P5 historical HTTP request framing (2026-10-31; isolated development branch, not merged):**
+The code-intelligence `POST /v2/code/query` and `POST /v2/code/impact`
+handlers previously accepted a valid first JSON object followed by a second
+object, scalar, null, or malformed bytes, silently ignoring the trailing
+request. A real-HTTP PostgreSQL 17 regression demonstrated eight RED cases
+(4 suffixes × 2 endpoints). Both routes now require exactly one JSON document
+and preserve legal trailing whitespace. The full disposable PostgreSQL 17
+code-store suite, `make test`, `go vet ./...`, and diff validation passed.
+The fix is source-only and does **not**
+complete P5 transaction-ordered historical memory reconstruction, P3 Git
+provenance attestation, or production rollout/recovery gates.
 - [x] Add interrupted-index/activation recovery tests around real PostgreSQL transactions (including OS-process termination during file indexing, snapshot activation and historical reactivation; see evidence below).
 
 **P1/P5/P8 historical impact selection (2026-10-26; review branch, not merged):**
