@@ -1274,6 +1274,33 @@ Git provenance attestation, P3 scaling acceptance, or production readiness.
 
 # P0 — Benchmark and Evidence Baseline
 
+## P0 contextual memory-corpus and forbidden-evidence qualification (2026-10-31; isolated source branch)
+
+A versioned synthetic P0 fixture now contains **43 memory documents and 30
+cases** spanning paraphrase, long-history noise, contradictory/superseded
+facts, temporal selectors, tenant/namespace isolation, prompt injection and
+exact identifiers. Every source carries tenant, namespace and lifecycle
+metadata. The shared harness now validates source scope against expected
+labels and computes forbidden-evidence exposure at ranks 5/10/20; a forbidden
+hit disqualifies task success even when all required evidence was returned.
+A contextual suite cannot be passed to the current single-tenant MCP gateway
+adapter: it fails **before any seeding** rather than silently ignoring tenant
+or time selectors. Focused RED/GREEN tests and metadata mutation tests are in
+`tests/test_p0_contextual_evidence.py` and `tests/test_p0_memory_corpus.py`.
+The 16 new focused regression methods were RED before implementation and GREEN
+afterward; full local `make test`, `go vet ./...`, `git diff --check`, and the
+30-case real lexical diagnostic passed. The diagnostic reported contextual
+cases unqualified and did not connect to a live tenant or model service.
+The initial PR-head P4 workflow correctly failed on the shared-harness SHA-256
+change; the frozen seven-case lexical baseline was independently re-recorded
+and compared field-for-field, preserving all ranked IDs, Recall/Precision/MRR/
+nDCG, forbidden-at-5/10/20 totals, fixture identity and engine version.
+Only the checked-out base SHA and shared-harness digest were refreshed.
+See `benchmarks/p0/README.md`. **This is synthetic corpus and harness
+qualification, not a live multi-tenant benchmark, BGE/FTS/RRF comparison,
+P0 completion, production rollout or P5 historical reconstruction.**
+
+
 **P0 duplicate-result metric integrity (2026-10-29, source candidate):** Three RED/GREEN regressions prove repeated relevant evidence previously inflated Precision@K (2/3 reported as 1) and nDCG (1.6309 for one relevant item). Precision now counts actual ranking slots, and nDCG rewards each distinct evidence ID once. The fresh P4 lexical baseline has unchanged rankings, scores and forbidden counts; only harness/base SHA metadata changed. See docs/P0_UNIQUE_RANKING_INTEGRITY.md. This is not live BGE, latency, deployment or full P0–P8 acceptance.
 
 
@@ -2394,3 +2421,18 @@ For each phase:
 **P4 source is merged. Complete its full P0 reproducible acceptance programme, qualify current live BGE endpoints/performance and then advance the cross-domain P5–P8 acceptance cases.**
 
 DeepSeek remains SCOS's reasoning/synthesis layer. BGE remains the specialist retrieval layer beneath it. They are complementary parts of the same stack.
+
+### P0 contextual review hardening (2026-10-31; PR #199 follow-up)
+
+For versioned scoped suites, forbidden evidence now includes **every** document
+whose tenant or namespace differs from the case selector, derived from corpus
+metadata rather than relying on manually enumerated distractors. Unknown
+retrieved IDs fail contextual task success even when the expected ID is also
+returned; `unknown_at_5/10/20` tracks these unclassified hits as
+lower-is-better metrics. These are synthetic evidence-integrity assertions,
+**not** evidence of deployed tenant isolation or P0 model acceptance.
+Versioned contextual ground truth is now `1.1.0`; conflicting
+forbidden/authoritative/citation labels are rejected, including scope-derived
+forbidden evidence. Review regressions reproduced the contradictory labels
+before the correction.
+The seven-case frozen P4 lexical baseline was independently re-recorded after the shared harness change. All seven ranked-ID lists, every per-case and aggregate quality metric, and forbidden@5/10/20=(0,0,0) remained identical; only the harness SHA-256 and source base SHA changed. This does not qualify contextual retrieval.
