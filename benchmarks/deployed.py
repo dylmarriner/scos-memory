@@ -246,4 +246,17 @@ class DeployedCodeClient:
         return results
 
     def snapshot_diff(self, snapshot_id: str) -> dict[str, Any]:
-        return self._request("POST", "/v2/code/snapshots/diff", {"snapshot_id": snapshot_id})
+        value = self._request("POST", "/v2/code/snapshots/diff", {"snapshot_id": snapshot_id})
+        # A 200 response is not a valid diff unless its rename entries have
+        # the expected shape. Otherwise malformed upstream JSON can raise
+        # AttributeError/TypeError during scoring and prevent a failure
+        # artifact from being written at all.
+        renamed = value.get("Renamed")
+        if renamed is not None:
+            if not isinstance(renamed, list) or any(
+                not isinstance(entry, dict)
+                or not all(isinstance(entry.get(key), str) for key in ("Path", "PreviousPath"))
+                for entry in renamed
+            ):
+                raise RuntimeError("deployed snapshot diff returned invalid Renamed entries")
+        return value

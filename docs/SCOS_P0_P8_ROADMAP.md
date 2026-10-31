@@ -37,6 +37,22 @@ redirect, preflight and failure-artifact regressions remain part of the focused
 suite. This is P0 input/evidence integrity hardening only: no deployed service
 was contacted, no representative BGE benchmark was run, and §41 remains open.
 
+## P0 deployed snapshot-diff shape integrity (2026-11-01; PR #200 follow-up, not merged)
+
+A deployed HTTP 200 snapshot-diff response could supply `Renamed` as a string,
+non-object entries or object/list-valued `Path`/`PreviousPath`. The benchmark's
+rename scoring then raised `AttributeError` or `TypeError`, terminating the
+whole run without writing the required failed-case artifact. Four real-HTTP
+shape regressions and an end-to-end CLI failure-artifact regression reproduced
+five errors before correction (RED). The deployed client now rejects malformed
+rename entries as controlled, credential-safe `RuntimeError`s, so the case
+fails without falsely passing and the CLI persists its measured failure
+artifact (GREEN, 30 focused tests). The complete `make test` target,
+`go vet ./...`, all 42 P4 fixture tests and `git diff --check` also passed
+on AMD. No deployed service was contacted. This
+closes only a P0 benchmark-evidence integrity defect; representative P0
+performance, §41 acceptance and production rollout/recovery remain open.
+
 ## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)
 
 The deployed benchmark's HTTP 200 JSON parser accepted duplicate object keys

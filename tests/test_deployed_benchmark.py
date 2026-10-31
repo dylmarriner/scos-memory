@@ -380,6 +380,7 @@ class _CodeService(BaseHTTPRequestHandler):
     health_status = "ok"
     raw_health = None
     case_query_error = False
+    malformed_diff = None
     delay: dict = {}
     branches: dict = {}
     snapshots: dict = {}
@@ -437,7 +438,7 @@ class _CodeService(BaseHTTPRequestHandler):
                        for path, f in snapshot["files"].items() if path not in previous
                        for old, g in previous.items()
                        if old not in snapshot["files"] and g["content_hash"] == f["content_hash"]]
-            return self._send({"Renamed": renamed})
+            return self._send(self.malformed_diff if self.malformed_diff is not None else {"Renamed": renamed})
         if self.path == "/v2/code/query":
             searched = list(self.branches.values()) if self.leak else [self.branches[body["branch"]]]
             files = {}
@@ -462,6 +463,7 @@ class DeployedRunTests(unittest.TestCase):
         _CodeService.health_status = "ok"
         _CodeService.raw_health = None
         _CodeService.case_query_error = False
+        _CodeService.malformed_diff = None
         _CodeService.delay = {}
         _CodeService.branches = {}
         _CodeService.snapshots = {}
@@ -483,6 +485,47 @@ class DeployedRunTests(unittest.TestCase):
         self.assertGreaterEqual(latencies["rename_lineage"], 200)
         self.assertLess(latencies["exact_symbol_lookup"], 200)
         self.assertLess(latencies["branch_isolation"], 200)
+
+    def test_malformed_http_rename_diff_is_a_recorded_case_failure(self):
+        # A 200 response can still carry invalid diff structure. It must not
+        # crash the entire benchmark before durable evidence is produced.
+        for invalid in (
+            {"Renamed": "not-a-list"},
+            {"Renamed": ["not-an-object"]},
+            {"Renamed": [{"Path": {"nested": "bad"}, "PreviousPath": "target.go"}]},
+            {"Renamed": [{"Path": "renamed.go", "PreviousPath": ["target.go"]}]},
+        ):
+            with self.subTest(invalid=invalid):
+                _CodeService.malformed_diff = invalid
+                artifact = run(self.config, run_nonce="malformed-diff")
+                cases = {case["case_id"]: case for case in artifact["cases"]}
+                self.assertFalse(cases["rename_lineage"]["passed"])
+                self.assertIn("error", cases["rename_lineage"]["details"])
+                self.assertTrue(cases["exact_symbol_lookup"]["passed"])
+                self.assertEqual(artifact["summary"]["total_cases"], 4)
+                self.assertEqual(artifact["summary"]["passed_cases"], 3)
+
+    def test_malformed_http_rename_diff_writes_failure_artifact(self):
+        _CodeService.malformed_diff = {"Renamed": [{"Path": {"nested": "bad"}, "PreviousPath": "target.go"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "malformed-diff.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.publish", return_value=None):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = run_deployed_main()
+            self.assertEqual(exit_code, 1)
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "measured")
+            self.assertEqual(artifact["summary"]["passed_cases"], 3)
+            self.assertFalse(next(c for c in artifact["cases"] if c["case_id"] == "rename_lineage")["passed"])
+            self.assertNotIn("secret-benchmark-token", output.read_text())
 
     def test_branch_isolation_fails_when_files_cross_branches(self):
         _CodeService.leak = True
