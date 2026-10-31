@@ -2421,3 +2421,13 @@ For each phase:
 **P4 source is merged. Complete its full P0 reproducible acceptance programme, qualify current live BGE endpoints/performance and then advance the cross-domain P5–P8 acceptance cases.**
 
 DeepSeek remains SCOS's reasoning/synthesis layer. BGE remains the specialist retrieval layer beneath it. They are complementary parts of the same stack.
+
+### P0 contextual review hardening (2026-10-31; PR #199 follow-up)
+
+For versioned scoped suites, forbidden evidence now includes **every** document
+whose tenant or namespace differs from the case selector, derived from corpus
+metadata rather than relying on manually enumerated distractors. Unknown
+retrieved IDs fail contextual task success even when the expected ID is also
+returned; `unknown_at_5/10/20` tracks these unclassified hits as
+lower-is-better metrics. These are synthetic evidence-integrity assertions,
+**not** evidence of deployed tenant isolation or P0 model acceptance.

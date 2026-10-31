@@ -90,6 +90,61 @@ class MemoryCorpusContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'namespace isolation'):
             self.load(data)
 
+    def test_all_known_out_of_scope_documents_are_forbidden(self):
+        suite = load_suite(str(FIXTURE))
+        by_id = {case.id: case for case in suite.cases}
+        for case_id, leaked in (('tenant_db', 'beta_release'),
+                                ('namespace_operations', 'alpha_finance_budget'),
+                                ('paraphrase_db', 'beta_incident')):
+            with self.subTest(case=case_id, leaked=leaked):
+                case = by_id[case_id]
+                self.assertIn(leaked, case.forbidden_ids)
+                result = BenchmarkRunner(type(suite)(name='test', version='1', cases=[case],
+                    corpus=suite.corpus, document_scopes=suite.document_scopes)).run(
+                    lambda query, ctx: [case.expected_ids[0], leaked])[0]
+                self.assertFalse(result.answer_correct)
+                self.assertEqual(result.scores['forbidden_at_5'], 1.0)
+
+    def test_every_case_forbids_all_foreign_tenant_and_namespace_documents(self):
+        suite = load_suite(str(FIXTURE))
+        for case in suite.cases:
+            with self.subTest(case=case.id):
+                foreign = {
+                    doc_id for doc_id, scope in suite.document_scopes.items()
+                    if (scope['tenant_id'] != case.context['tenant_id']
+                        or scope['namespace_id'] != case.context['namespace_id'])
+                }
+                self.assertTrue(foreign.issubset(set(case.forbidden_ids)))
+
+    def test_unknown_evidence_cannot_pass_contextual_task(self):
+        suite = load_suite(str(FIXTURE))
+        case = next(c for c in suite.cases if c.id == 'tenant_db')
+        runner = BenchmarkRunner(type(suite)(name='test', version='1', cases=[case],
+            corpus=suite.corpus, document_scopes=suite.document_scopes))
+        result = runner.run(lambda q, ctx: [case.expected_ids[0], 'foreign:unmapped'])[0]
+        self.assertFalse(result.answer_correct)
+        self.assertEqual(result.scores['unknown_at_5'], 1.0)
+
+    def test_unknown_evidence_beyond_top_twenty_still_invalidates_task(self):
+        suite = load_suite(str(FIXTURE))
+        case = next(c for c in suite.cases if c.id == 'tenant_db')
+        result = BenchmarkRunner(type(suite)(
+            name='test', version='1', cases=[case],
+            corpus=suite.corpus, document_scopes=suite.document_scopes
+        )).run(lambda q, ctx: [case.expected_ids[0]] * 20 + ['unmapped'])[0]
+        self.assertFalse(result.answer_correct)
+        self.assertEqual(result.scores['unknown_at_20'], 0.0)
+
+    def test_unknown_exposure_is_lower_is_better_in_comparisons(self):
+        from benchmarks.harness import compare_baseline
+        suite = load_suite(str(FIXTURE))
+        case = next(c for c in suite.cases if c.id == 'tenant_db')
+        one = type(suite)(name='test', version='1', cases=[case],
+                          corpus=suite.corpus, document_scopes=suite.document_scopes)
+        clean = BenchmarkRunner(one).run(lambda q, ctx: [case.expected_ids[0]])
+        leak = BenchmarkRunner(one).run(lambda q, ctx: [case.expected_ids[0], 'unmapped'])
+        self.assertEqual(compare_baseline(leak, clean)['unknown_at_5']['regressions'], 1)
+
     def test_lexical_baseline_is_diagnostic_not_scope_qualification(self):
         suite = load_suite(str(FIXTURE))
         runner = BenchmarkRunner(suite)

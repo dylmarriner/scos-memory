@@ -332,6 +332,7 @@ def runtime_metadata() -> dict[str, Any]:
 LOWER_IS_BETTER_METRICS = frozenset({
     "duplicate_rate", "stale_hit_rate", "answer_regression",
     "forbidden_at_5", "forbidden_at_10", "forbidden_at_20",
+    "unknown_at_5", "unknown_at_10", "unknown_at_20",
 })
 
 
@@ -398,6 +399,11 @@ class BenchmarkRunner:
         elapsed = (time.perf_counter() - start) * 1000
         if not isinstance(outcome, RetrievalOutcome):
             outcome = RetrievalOutcome(ids=list(outcome))
+        # Scoped synthetic acceptance must not count unlabelled results as
+        # clean isolation evidence. An unknown ID may be a cross-tenant leak
+        # that the labelled corpus cannot classify.
+        known_ids = set(self.suite.corpus) if self.suite.document_scopes else None
+        unknown_ids = (set(outcome.ids) - known_ids) if known_ids is not None else set()
         result = BenchmarkResult(
             case_id=case.id,
             retrieved_ids=list(outcome.ids),
@@ -406,9 +412,14 @@ class BenchmarkRunner:
             promoted=outcome.promoted,
             tokens_used=outcome.tokens_used,
             answer_correct=(task_succeeded(set(case.expected_ids), outcome.ids)
-                            and not (set(case.forbidden_ids) & set(outcome.ids))),
+                            and not (set(case.forbidden_ids) & set(outcome.ids))
+                            and not unknown_ids),
         )
         result.scores = compute_scores(set(case.expected_ids), result.retrieved_ids, case, result)
+        if known_ids is not None:
+            for k in (5, 10, 20):
+                result.scores[f"unknown_at_{k}"] = float(
+                    len(set(outcome.ids[:k]) - known_ids))
         self.results.append(result)
         return result
 
@@ -734,6 +745,15 @@ def load_suite(path: str) -> BenchmarkSuite:
                             and document_scopes[i]["namespace_id"] != context["namespace_id"]
                             for i in case.forbidden_ids)):
                 raise ValueError(f"case {case.id}: namespace isolation lacks out-of-scope forbidden evidence")
+            # Explicit labels cover stale/conflicting evidence; source metadata
+            # supplies EVERY tenant/namespace exclusion. A manually curated
+            # subset must never turn another known cross-scope leak into a pass.
+            outside_scope = {
+                doc_id for doc_id, source in document_scopes.items()
+                if source["tenant_id"] != context["tenant_id"]
+                or source["namespace_id"] != context["namespace_id"]
+            }
+            case.forbidden_ids = sorted(set(case.forbidden_ids) | outside_scope)
     return BenchmarkSuite(name=data["name"], version=data["version"], cases=cases,
                           created_at=data.get("created_at", ""), corpus=dict(corpus),
                           document_scopes=dict(document_scopes))
