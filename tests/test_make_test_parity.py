@@ -19,6 +19,7 @@ REQUIRED_LOCAL_CHECKS = (
     "test_benchmark_harness.py",
     "test_benchmark_suite_schema.py",
     "test_deployed_benchmark.py",
+    "test_postgres_dns_doctor.py",
     "scripts/test_scos_verify_snapshot_manifest.py",
     "scripts/test_scos_verify_snapshot_events.py",
     "scripts/test_scos_verify_snapshot_bundle.py",
