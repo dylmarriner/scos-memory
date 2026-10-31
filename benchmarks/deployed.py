@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# Bound successful JSON bodies as well as failed HTTP responses. A remote
+# service must not be able to exhaust benchmark memory with a 200 response.
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class BenchmarkConfig:
     endpoint: str
@@ -34,9 +39,19 @@ class BenchmarkConfig:
         endpoint = self.endpoint.rstrip("/")
         if not endpoint.startswith(("https://", "http://")):
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must be an HTTP(S) URL")
-        parsed = urllib.parse.urlsplit(endpoint)
+        if any(char in endpoint for char in "\r\n\t"):
+            raise RuntimeError("SCOS_BENCHMARK_ENDPOINT contains invalid whitespace")
+        try:
+            parsed = urllib.parse.urlsplit(endpoint)
+            hostname, port = parsed.hostname, parsed.port
+        except ValueError as exc:
+            raise RuntimeError("SCOS_BENCHMARK_ENDPOINT has an invalid authority") from exc
+        if parsed.scheme not in ("http", "https") or not hostname or port == 0:
+            raise RuntimeError("SCOS_BENCHMARK_ENDPOINT requires a valid HTTP(S) host")
         if parsed.username or parsed.password:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain userinfo")
+        if parsed.query or parsed.fragment or "?" in endpoint or "#" in endpoint:
+            raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain a query or fragment")
         if not all((self.token.strip(), self.tenant_id.strip(), self.principal_id.strip())):
             raise RuntimeError("benchmark token, tenant and principal are required")
         object.__setattr__(self, "endpoint", endpoint)
@@ -118,7 +133,9 @@ class DeployedCodeClient:
             with self.opener.open(request, timeout=self.config.timeout_seconds) as response:
                 if response.status < 200 or response.status >= 300:
                     raise RuntimeError(f"deployed benchmark HTTP status {response.status}")
-                raw = response.read()
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise RuntimeError("deployed benchmark response exceeds 16 MiB limit")
         except urllib.error.HTTPError as exc:
             # An upstream proxy or service may echo bearer/control-plane tokens
             # in its error body. Per-case errors are serialized to benchmark

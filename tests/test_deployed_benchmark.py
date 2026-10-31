@@ -80,6 +80,20 @@ class DeployedBenchmarkConfigTests(unittest.TestCase):
             )
 
 
+    def test_config_rejects_ambiguous_or_malformed_endpoint_authority(self):
+        for endpoint in (
+            "https:///no-host", "https://example.test/path?token=untrusted",
+            "https://example.test/path#fragment", "https://example.test:invalid",
+            "https://example.test:65536", "https://[::1",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaisesRegex(RuntimeError, "SCOS_BENCHMARK_ENDPOINT"):
+                    BenchmarkConfig(
+                        endpoint=endpoint, token="secret-token",
+                        tenant_id="tenant-1", principal_id="principal-1",
+                    )
+
+
 class DeployedCodeClientTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -170,6 +184,38 @@ class DeployedCodeClientTests(unittest.TestCase):
             redirect.shutdown()
             worker.join()
             redirect.server_close()
+
+    def test_success_body_is_bounded_even_when_json_is_valid(self):
+        # Real HTTP: a 200 response with valid JSON plus excessive trailing
+        # whitespace used to be accepted after an unbounded response.read().
+        class OversizedHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"status":"ok"}' + b" " * (16 * 1024 * 1024 + 1)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), OversizedHandler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            client = DeployedCodeClient(BenchmarkConfig(
+                endpoint=f"http://127.0.0.1:{server.server_port}",
+                token="secret-token", tenant_id="tenant-1", principal_id="principal-1",
+            ))
+            with self.assertRaisesRegex(RuntimeError, "response exceeds"):
+                client.health()
+        finally:
+            server.shutdown()
+            worker.join()
+            server.server_close()
 
     def test_version_accepts_current_release_shape(self):
         client = DeployedCodeClient(BenchmarkConfig(
