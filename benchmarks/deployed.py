@@ -104,6 +104,21 @@ class _RejectRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _reject_duplicate_json_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous object keys at every nesting level."""
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object member")
+        value[key] = item
+    return value
+
+
+def _reject_nonfinite_json_constant(_value: str) -> None:
+    """JSON has no NaN or infinity values, despite Python's permissive parser."""
+    raise ValueError("non-finite JSON constant")
+
+
 class DeployedCodeClient:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
@@ -148,8 +163,12 @@ class DeployedCodeClient:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"deployed benchmark request failed: {method} {path}") from exc
         try:
-            value = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            value = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_members,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
             raise RuntimeError(f"deployed benchmark returned invalid JSON: {method} {path}") from exc
         if not isinstance(value, dict):
             raise RuntimeError(f"deployed benchmark returned a non-object: {method} {path}")

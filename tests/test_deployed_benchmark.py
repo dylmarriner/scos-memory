@@ -217,6 +217,45 @@ class DeployedCodeClientTests(unittest.TestCase):
             worker.join()
             server.server_close()
 
+    def test_real_http_rejects_ambiguous_and_nonfinite_json_evidence(self):
+        class UntrustedJSONHandler(BaseHTTPRequestHandler):
+            raw_body = b""
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(self.raw_body)))
+                self.end_headers()
+                self.wfile.write(self.raw_body)
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), UntrustedJSONHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = DeployedCodeClient(BenchmarkConfig(
+                endpoint=f"http://127.0.0.1:{server.server_port}",
+                token="secret-token", tenant_id="tenant-1", principal_id="principal-1",
+            ))
+            for body in (
+                b'{"status":"not_ready","status":"ready"}',
+                b'{"status":"not_ready","\\u0073tatus":"ready"}',
+                b'{"status":"ready","metadata":{"trusted":true,"trusted":false}}',
+                b'{"status":"ready","diagnostics":NaN}',
+                b'{"status":"ready","diagnostics":Infinity}',
+                b'{"status":"ready","diagnostics":-Infinity}',
+            ):
+                with self.subTest(body=body):
+                    UntrustedJSONHandler.raw_body = body
+                    with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                        client.health()
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
     def test_version_accepts_current_release_shape(self):
         client = DeployedCodeClient(BenchmarkConfig(
             endpoint=f"http://127.0.0.1:{self.server.server_port}",
@@ -259,6 +298,7 @@ class _CodeService(BaseHTTPRequestHandler):
     leak = False
     preflight_failure = False
     health_status = "ok"
+    raw_health = None
     case_query_error = False
     delay: dict = {}
     branches: dict = {}
@@ -273,6 +313,13 @@ class _CodeService(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):  # noqa: N802
+        if self.raw_health is not None and self.path == "/health/ready":
+            data = self.raw_health
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.preflight_failure and self.path == "/health/ready":
             data = b"upstream failed: secret-benchmark-token"
             self.send_response(503)
@@ -333,6 +380,7 @@ class DeployedRunTests(unittest.TestCase):
         _CodeService.leak = False
         _CodeService.preflight_failure = False
         _CodeService.health_status = "ok"
+        _CodeService.raw_health = None
         _CodeService.case_query_error = False
         _CodeService.delay = {}
         _CodeService.branches = {}
@@ -399,6 +447,37 @@ class DeployedRunTests(unittest.TestCase):
                     run(self.config, run_nonce="not-ready")
                 self.assertEqual(_CodeService.snapshots, {})
                 self.assertEqual(_CodeService.branches, {})
+
+    def test_ambiguous_ready_json_fails_preflight_without_seeding_or_publication(self):
+        _CodeService.raw_health = b'{"status":"not_ready","status":"ready"}'
+        with self.assertRaises(DeployedPreflightError):
+            run(self.config, run_nonce="duplicate-ready")
+        self.assertEqual(_CodeService.snapshots, {})
+        self.assertEqual(_CodeService.branches, {})
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "duplicate-ready.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    exit_code = run_deployed_main()
+                publish_mock.assert_not_called()
+            self.assertEqual(exit_code, 1)
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "failed")
+            self.assertEqual(artifact["stage"], "preflight")
+            self.assertEqual(artifact["cases"], [])
+            self.assertNotIn("secret-benchmark-token", output.read_text() + stream.getvalue())
+            self.assertEqual(_CodeService.snapshots, {})
+            self.assertEqual(_CodeService.branches, {})
 
     def test_http_200_ready_status_is_accepted(self):
         _CodeService.health_status = "ready"
