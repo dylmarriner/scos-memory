@@ -202,6 +202,22 @@ class PublishTests(unittest.TestCase):
                     publish({"suite": "x", "cases": []}, base_url=self.url, token="publisher-secret-token")
         self.assertEqual(len(_Collector.received), len(invalid))
 
+    def test_publish_rejects_exponent_overflow_in_acknowledgement(self):
+        # Python json.loads silently turns 1e999 into inf, even when
+        # parse_constant rejects the literal Infinity/NaN spellings.
+        invalid = [
+            ("top-level overflow", b'{"run_id":"abc","created":true,"ratio":1e999}'),
+            ("nested negative overflow", b'{"run_id":"abc","created":true,"summary":{"latency":-1e999}}'),
+            ("array overflow", b'{"run_id":"abc","created":true,"summary":[0,1e999]}'),
+        ]
+        for label, response_body in invalid:
+            with self.subTest(label=label):
+                _Collector.response_body = response_body
+                with self.assertRaisesRegex(RuntimeError, "invalid benchmark publish acknowledgement"):
+                    publish({"suite": "x", "cases": []}, base_url=self.url, token="t0k")
+        _Collector.response_body = b'{"run_id":"abc","created":true,"summary":{"ratio":1e308}}'
+        self.assertEqual(publish({"suite": "x", "cases": []}, base_url=self.url, token="t0k")["summary"]["ratio"], 1e308)
+
     def test_publish_rejects_ambiguous_duplicate_acknowledgement_keys(self):
         # Real HTTP: a duplicate key must never be accepted as proof of persistence.
         invalid = [

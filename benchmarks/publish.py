@@ -118,6 +118,14 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("non-finite JSON constant")
 
 
+def _parse_finite_json_float(raw: str) -> float:
+    """Reject exponent overflow at parse time, including in nested fields."""
+    number = float(raw)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """Reject ambiguous acknowledgements, including nested duplicate keys."""
     obj: dict[str, Any] = {}
@@ -168,6 +176,7 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
                 raise RuntimeError("invalid benchmark publish acknowledgement: response too large")
             try:
                 ack = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant,
+                                 parse_float=_parse_finite_json_float,
                                  object_pairs_hook=_reject_duplicate_json_keys)
             except (UnicodeError, ValueError, RecursionError):
                 raise RuntimeError("invalid benchmark publish acknowledgement: malformed JSON") from None
