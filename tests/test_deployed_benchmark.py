@@ -15,7 +15,7 @@ from urllib.error import HTTPError
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from benchmarks.deployed import BenchmarkConfig, DeployedCodeClient, config_from_environment  # noqa: E402
-from benchmarks.run_deployed import NOT_RUN_EXIT, fixture_files, fixture_identity, run  # noqa: E402
+from benchmarks.run_deployed import DeployedPreflightError, NOT_RUN_EXIT, fixture_files, fixture_identity, run  # noqa: E402
 from benchmarks.run_deployed import main as run_deployed_main  # noqa: E402
 
 
@@ -212,6 +212,7 @@ class _CodeService(BaseHTTPRequestHandler):
     ``leak`` set, a query on any branch also searches every other branch."""
     leak = False
     preflight_failure = False
+    health_status = "ok"
     case_query_error = False
     delay: dict = {}
     branches: dict = {}
@@ -233,7 +234,8 @@ class _CodeService(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        self._send({"status": "ok", "version": "v", "source_sha": "sha", "build_time": "now"})
+        status = self.health_status if self.path == "/health/ready" else "ok"
+        self._send({"status": status, "version": "v", "source_sha": "sha", "build_time": "now"})
 
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
@@ -284,6 +286,7 @@ class DeployedRunTests(unittest.TestCase):
     def setUp(self):
         _CodeService.leak = False
         _CodeService.preflight_failure = False
+        _CodeService.health_status = "ok"
         _CodeService.case_query_error = False
         _CodeService.delay = {}
         _CodeService.branches = {}
@@ -340,6 +343,47 @@ class DeployedRunTests(unittest.TestCase):
             self.assertEqual(artifact["stage"], "preflight")
             self.assertNotIn("secret-benchmark-token", raw + output_stream.getvalue())
             self.assertNotIn("passed_cases", artifact)
+
+    def test_http_200_unready_status_fails_preflight_before_seeding(self):
+        # HTTP 200 is not evidence of readiness when the body says otherwise.
+        for status in ("not_ready", "unready", "error", None, False, 0):
+            with self.subTest(status=status):
+                _CodeService.health_status = status
+                with self.assertRaises(DeployedPreflightError):
+                    run(self.config, run_nonce="not-ready")
+                self.assertEqual(_CodeService.snapshots, {})
+                self.assertEqual(_CodeService.branches, {})
+
+    def test_http_200_ready_status_is_accepted(self):
+        _CodeService.health_status = "ready"
+        artifact = run(self.config, run_nonce="ready")
+        self.assertEqual(artifact["summary"]["passed_cases"], artifact["summary"]["total_cases"])
+
+    def test_http_200_unready_status_writes_failed_artifact_without_publication(self):
+        _CodeService.health_status = "not_ready"
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "unready.json"
+            argv = ["run_deployed", "--output", str(output)]
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+            }
+            with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv), \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                publish_mock.return_value = None
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    exit_code = run_deployed_main()
+                publish_mock.assert_not_called()
+            self.assertEqual(exit_code, 1)
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "failed")
+            self.assertEqual(artifact["stage"], "preflight")
+            self.assertEqual(artifact["cases"], [])
+            self.assertNotIn("secret-benchmark-token", output.read_text() + stream.getvalue())
+            self.assertEqual(_CodeService.snapshots, {})
 
     def test_case_http_error_cannot_leak_credentials_to_artifact_or_publisher(self):
         # Unlike preflight, per-case failures used to serialize upstream 503
