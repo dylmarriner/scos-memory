@@ -5,6 +5,18 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 deployed timeout evidence validation (2026-10-31; isolated TDD candidate)
+
+The deployed benchmark accepted non-finite timeout configuration (`NaN`,
+`Infinity`) from environment variables, and its direct configuration accepted
+nonpositive timeouts. `NaN` bypassed the previous `<= 0` check, allowing
+invalid transport timeouts and non-standard JSON metadata. Two parameterized
+unit regressions reproduced eight failures before correction (RED). Both the
+environment parser and direct client configuration now require a positive,
+finite numeric timeout (GREEN); credential and HTTP response handling remain
+unchanged. This is benchmark-input integrity hardening, **not** representative
+P0 model/latency/cost evidence, production acceptance or P0–P8 completion.
+
 ## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)
 
 The deployed benchmark's HTTP 200 JSON parser accepted duplicate object keys

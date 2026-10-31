@@ -72,6 +72,29 @@ class DeployedBenchmarkConfigTests(unittest.TestCase):
         self.assertNotIn(config.token, config.metadata())
         self.assertEqual(config.metadata()["endpoint"], "https://linode.example.test:8084")
 
+    def test_config_rejects_nonfinite_or_nonpositive_timeouts(self):
+        for timeout in (float("nan"), float("inf"), float("-inf"), 0.0, -1.0):
+            with self.subTest(timeout=repr(timeout)):
+                with self.assertRaisesRegex(RuntimeError, "timeout.*positive.*finite"):
+                    BenchmarkConfig(
+                        endpoint="https://example.test", token="secret-token",
+                        tenant_id="tenant-1", principal_id="principal-1",
+                        timeout_seconds=timeout,
+                    )
+
+    def test_environment_rejects_nonfinite_timeouts(self):
+        for timeout in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(timeout=timeout):
+                with patch.dict(os.environ, {
+                    "SCOS_BENCHMARK_ENDPOINT": "https://example.test",
+                    "SCOS_BENCHMARK_TOKEN": "secret-token",
+                    "SCOS_BENCHMARK_TENANT_ID": "tenant-1",
+                    "SCOS_BENCHMARK_PRINCIPAL_ID": "principal-1",
+                    "SCOS_BENCHMARK_TIMEOUT_SECONDS": timeout,
+                }, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, "timeout.*positive.*finite"):
+                        config_from_environment()
+
     def test_config_rejects_endpoint_userinfo(self):
         with self.assertRaisesRegex(RuntimeError, "userinfo"):
             BenchmarkConfig(

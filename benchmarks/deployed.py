@@ -8,6 +8,7 @@ principal, and never falls back to local data when the remote service fails.
 from __future__ import annotations
 
 import json
+import math
 import os
 import ssl
 import urllib.error
@@ -52,6 +53,13 @@ class BenchmarkConfig:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain userinfo")
         if parsed.query or parsed.fragment or "?" in endpoint or "#" in endpoint:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain a query or fragment")
+        # Python accepts NaN/Infinity as floats; NaN bypasses <= 0 checks and
+        # non-finite values are invalid socket timeouts and benchmark metadata.
+        if (isinstance(self.timeout_seconds, bool)
+                or not isinstance(self.timeout_seconds, (int, float))
+                or not math.isfinite(self.timeout_seconds)
+                or self.timeout_seconds <= 0):
+            raise RuntimeError("benchmark timeout must be positive and finite")
         if not all((self.token.strip(), self.tenant_id.strip(), self.principal_id.strip())):
             raise RuntimeError("benchmark token, tenant and principal are required")
         object.__setattr__(self, "endpoint", endpoint)
@@ -83,8 +91,8 @@ def config_from_environment() -> BenchmarkConfig:
         timeout = float(os.getenv("SCOS_BENCHMARK_TIMEOUT_SECONDS", "10"))
     except ValueError as exc:
         raise RuntimeError("SCOS_BENCHMARK_TIMEOUT_SECONDS must be numeric") from exc
-    if timeout <= 0:
-        raise RuntimeError("SCOS_BENCHMARK_TIMEOUT_SECONDS must be positive")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeError("benchmark timeout must be positive and finite")
     return BenchmarkConfig(
         endpoint=required["SCOS_BENCHMARK_ENDPOINT"],
         token=required["SCOS_BENCHMARK_TOKEN"],
