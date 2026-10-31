@@ -36,7 +36,12 @@ class P7IntegrationCIGateTests(unittest.TestCase):
 
     def test_auth_package_change_triggers_p4_postgres_integration(self):
         workflow = (ROOT / '.github/workflows/p4-hybrid-retrieval.yml').read_text()
-        self.assertEqual(2, workflow.count('packages/auth/**'))
+        on_block = workflow.split('\njobs:', 1)[0]
+        pull_request = on_block.split('\n  pull_request:', 1)[1].split('\n  push:', 1)[0]
+        push = on_block.split('\n  push:', 1)[1]
+        entry = r'(?m)^      - "packages/auth/\*\*"\s*$'
+        self.assertRegex(pull_request, entry)
+        self.assertRegex(push, entry)
 
     def test_hermes_provider_requires_real_postgres_ci(self):
         workflow = (ROOT / '.github/workflows/p4-hybrid-retrieval.yml').read_text()

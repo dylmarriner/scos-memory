@@ -56,11 +56,16 @@ func TestSignClaimsRequiresFutureExpiration(t *testing.T) {
 }
 
 func TestSignClaimsWithFutureExpirationStillWorks(t *testing.T) {
-	token, err := SignClaims(Claims{TenantID: "tenant", PrincipalID: "principal", ExpiresAt: time.Now().Add(2 * time.Minute)}, "secret")
+	expiresAt := time.Now().Add(2 * time.Minute)
+	token, err := SignClaims(Claims{TenantID: "tenant", PrincipalID: "principal", ExpiresAt: expiresAt}, "secret")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = validateClaims(token, "secret"); err != nil {
+	claims, err := validateClaims(token, "secret")
+	if err != nil {
 		t.Fatalf("valid short-lived token rejected: %v", err)
+	}
+	if claims.ExpiresAt.Unix() != expiresAt.Unix() {
+		t.Fatalf("expiration changed: got %d, want %d", claims.ExpiresAt.Unix(), expiresAt.Unix())
 	}
 }

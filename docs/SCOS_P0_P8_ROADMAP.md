@@ -24,6 +24,21 @@ tests do not prove production rotation of already-issued undated credentials,
 cluster-wide deployment compatibility, or completed §41 governance acceptance.
 Production credential migration and rollout remain separate approval gates.
 
+**PR #198 review remediation (2026-10-31; source candidate):** Codex and
+CodeRabbit independently found that the 58-case failure-injection runner still
+minted signed claims without an expiration, making authenticated probes fail
+with HTTP 401 after the stricter validator. A new HMAC/payload regression first
+failed because the expiration was missing; a second regression first failed
+because a long-running runner reused one bearer indefinitely (RED). The runner
+now signs 15-minute credentials and regenerates them for each request (GREEN).
+The P4 CI workflow contract now verifies active auth-package entries
+independently in both PR and push filters rather than counting arbitrary
+occurrences, and the signer positive control verifies the exact returned
+Unix-second expiration. These are local source tests, not executed
+failure-injection acceptance against a deployed stack. Merge remains gated
+on updated-head CI/P4, resolved substantive reviews, independent approval
+where branch protection requires it, and post-merge main verification.
+
 ## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)
 
 The deployed benchmark's HTTP 200 JSON parser accepted duplicate object keys
