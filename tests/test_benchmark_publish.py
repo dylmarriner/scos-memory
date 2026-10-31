@@ -21,6 +21,7 @@ class _Collector(BaseHTTPRequestHandler):
     redirect_to = None
     echo_error_body = False
     reason_phrase = None
+    response_body = None
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
@@ -37,7 +38,8 @@ class _Collector(BaseHTTPRequestHandler):
             return
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"run_id": "abc", "created": True}).encode())
+        self.wfile.write(type(self).response_body if type(self).response_body is not None else
+                         json.dumps({"run_id": "abc", "created": True}).encode())
 
     def log_message(self, *args):  # silence test output
         pass
@@ -50,6 +52,7 @@ class PublishTests(unittest.TestCase):
         _Collector.redirect_to = None
         _Collector.echo_error_body = False
         _Collector.reason_phrase = None
+        _Collector.response_body = None
         self.server = HTTPServer(("127.0.0.1", 0), _Collector)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -157,6 +160,42 @@ class PublishTests(unittest.TestCase):
             target.shutdown()
             target.server_close()
             thread.join()
+
+    def test_publish_rejects_malformed_success_acknowledgements(self):
+        invalid = [
+            ("empty body", b""),
+            ("non-json body", b"not-json"),
+            ("array", b'[{"run_id":"abc","created":true}]'),
+            ("missing run id", b'{"created":true}'),
+            ("null run id", b'{"run_id":null,"created":true}'),
+            ("empty run id", b'{"run_id":"","created":true}'),
+            ("numeric run id", b'{"run_id":42,"created":true}'),
+            ("whitespace run id", b'{"run_id":"   ","created":true}'),
+            ("oversized run id", b'{"run_id":"' + b"x" * 129 + b'","created":true}'),
+            ("nonfinite field", b'{"run_id":"abc","created":true,"extra":NaN}'),
+            ("missing created", b'{"run_id":"abc"}'),
+            ("nonboolean created", b'{"run_id":"abc","created":"true"}'),
+            ("numeric created", b'{"run_id":"abc","created":1}'),
+            ("oversized body", b'{"run_id":"abc","created":true,"padding":"' + b"x" * (1024 * 1024) + b'"}'),
+        ]
+        for label, response_body in invalid:
+            with self.subTest(label=label):
+                _Collector.response_body = response_body
+                with self.assertRaisesRegex(RuntimeError, "invalid benchmark publish acknowledgement"):
+                    publish({"suite": "x", "cases": []}, base_url=self.url, token="publisher-secret-token")
+        self.assertEqual(len(_Collector.received), len(invalid))
+
+    def test_publish_accepts_idempotent_existing_run_acknowledgement(self):
+        _Collector.status = 200
+        _Collector.response_body = b'{"run_id":"existing-run","created":false}'
+        result = publish({"suite": "x", "cases": []}, base_url=self.url, token="t0k")
+        self.assertEqual(result, {"run_id": "existing-run", "created": False})
+
+    def test_publish_malformed_success_body_never_leaks_credentials(self):
+        _Collector.response_body = b"publisher-secret-token\xff"
+        with self.assertRaises(RuntimeError) as raised:
+            publish({"suite": "x", "cases": []}, base_url=self.url, token="publisher-secret-token")
+        self.assertNotIn("publisher-secret-token", "".join(traceback.format_exception(raised.exception)))
 
     def test_publish_fails_closed(self):
         _Collector.status = 400

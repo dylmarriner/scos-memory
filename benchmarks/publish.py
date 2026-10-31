@@ -100,6 +100,13 @@ def _ssl_context() -> ssl.SSLContext | None:
     return None
 
 
+_MAX_PUBLISH_ACK_BYTES = 1 << 20
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON constant")
+
+
 class _RejectRedirect(urllib.request.HTTPRedirectHandler):
     """Never forward the observability bearer to a redirect destination."""
 
@@ -133,7 +140,22 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
     )
     try:
         with opener.open(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            # The acknowledgement is untrusted. Do not buffer unlimited data or
+            # let malformed response bytes escape into benchmark/CI diagnostics.
+            raw = response.read(_MAX_PUBLISH_ACK_BYTES + 1)
+            if len(raw) > _MAX_PUBLISH_ACK_BYTES:
+                raise RuntimeError("invalid benchmark publish acknowledgement: response too large")
+            try:
+                ack = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+            except (UnicodeError, ValueError, RecursionError):
+                raise RuntimeError("invalid benchmark publish acknowledgement: malformed JSON") from None
+            if (not isinstance(ack, dict)
+                    or not isinstance(ack.get("run_id"), str)
+                    or not 0 < len(ack["run_id"]) <= 128
+                    or not ack["run_id"].strip()
+                    or not isinstance(ack.get("created"), bool)):
+                raise RuntimeError("invalid benchmark publish acknowledgement: missing or invalid fields")
+            return ack
     except urllib.error.HTTPError as exc:
         # Upstream error bodies can echo the publisher's Authorization header.
         # Do not read or serialize them into logs, CI, or benchmark artifacts.

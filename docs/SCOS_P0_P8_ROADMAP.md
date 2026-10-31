@@ -5,6 +5,27 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 benchmark publication acknowledgement integrity (2026-11-01; PR #200 follow-up, not merged)
+
+The shared publisher previously treated any successful HTTP response as proof of
+recording, accepting an empty/malformed response, arrays, missing or invalid
+`run_id` and `created` fields, and arbitrarily large response bodies. This
+could report a benchmark as published even without a usable server receipt,
+raise uncontrolled JSON decoding errors, or exhaust publisher memory on an
+untrusted response. Real localhost HTTP tests reproduced eight incorrect
+acceptances and three uncontrolled errors before correction (RED). The
+publisher now caps acknowledgement reads at 1 MiB, validates the receipt's
+nonempty bounded run ID and boolean `created` field, rejects non-finite JSON
+constants, and returns fixed, credential-safe errors for malformed responses
+(GREEN). The legitimate `created: false` idempotent response remains supported.
+Verification on AMD: all 12 real-HTTP publisher test methods (including 14
+invalid acknowledgement variants), complete `make test`, `go vet ./...`, all
+42 P4 fixture/gate tests, frozen seven-case lexical gate and `git diff --check`
+passed. The independent §41 checker still correctly returns FAIL/PARTIAL.
+This is source-only benchmark evidence integrity work. Representative P0
+benchmarks, merged-main acceptance, production rollout/recovery and §41
+completion remain open.
+
 ## P0 benchmark publication finite-measurement integrity (2026-11-01; PR #200 follow-up, not merged)
 
 The shared publisher accepted NaN/infinite or negative case latency and wall-time
