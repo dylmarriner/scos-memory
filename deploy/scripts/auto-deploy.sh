@@ -43,6 +43,13 @@ BEFORE="$(git rev-parse HEAD)"
 git fetch --quiet origin main
 AFTER="$(git rev-parse origin/main)"
 
+# Catch host bind-mount ACL/mode drift *even when main has not changed*.
+# A UID 1000-owned 0600 pg_hba.conf once left PostgreSQL restarting 2,391
+# times because the official image reads it as UID 999. Never fix it by
+# changing ownership or widening permissions automatically during rollout.
+bash "$REPO_DIR/deploy/scripts/verify_postgres_hba_access.sh" \
+  "$REPO_DIR/deploy/compose/postgres/pg_hba.conf"
+
 if [ "$BEFORE" = "$AFTER" ]; then
   exit 0
 fi
@@ -52,6 +59,11 @@ flock -n 9 || { echo "$(date -Iseconds) deploy already in progress, skipping thi
 
 echo "$(date -Iseconds) deploying $BEFORE -> $AFTER"
 git merge --ff-only origin/main
+
+# Fast-forward checkout may replace the HBA source inode and discard ACLs.
+# Check the *new* file before any build, database migration or recreation.
+bash "$REPO_DIR/deploy/scripts/verify_postgres_hba_access.sh" \
+  "$REPO_DIR/deploy/compose/postgres/pg_hba.conf"
 
 "${COMPOSE[@]}" build --build-arg "SOURCE_SHA=$AFTER" --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
