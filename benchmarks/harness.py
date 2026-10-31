@@ -685,6 +685,8 @@ def load_suite(path: str) -> BenchmarkSuite:
                     | set(case.forbidden_ids))
         if set(case.expected_ids) & set(case.forbidden_ids):
             raise ValueError(f"case {case.id!r} forbidden_ids overlap expected_ids")
+        if set(case.forbidden_ids) & (set(case.authoritative_ids) | set(case.citation_ids)):
+            raise ValueError(f"case {case.id!r} forbidden_ids overlap authoritative_ids or citation_ids")
         missing = labelled - set(corpus)
         if missing:
             raise ValueError(f"case {case.id!r} names ids not in the corpus: {sorted(missing)}")
@@ -754,6 +756,8 @@ def load_suite(path: str) -> BenchmarkSuite:
                 or source["namespace_id"] != context["namespace_id"]
             }
             case.forbidden_ids = sorted(set(case.forbidden_ids) | outside_scope)
+            if set(case.forbidden_ids) & (set(case.authoritative_ids) | set(case.citation_ids)):
+                raise ValueError(f"case {case.id!r} forbidden_ids overlap authoritative_ids or citation_ids")
     return BenchmarkSuite(name=data["name"], version=data["version"], cases=cases,
                           created_at=data.get("created_at", ""), corpus=dict(corpus),
                           document_scopes=dict(document_scopes))

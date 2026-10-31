@@ -25,7 +25,7 @@ class MemoryCorpusContractTests(unittest.TestCase):
 
     def test_versioned_fixture_covers_nine_categories_and_scoped_labels(self):
         suite = load_suite(str(FIXTURE))
-        self.assertEqual(suite.version, '1.0.0')
+        self.assertEqual(suite.version, '1.1.0')
         self.assertEqual(len(suite.corpus), 43)
         self.assertEqual(len(suite.cases), 30)
         self.assertEqual(len(suite.document_scopes), 43)
@@ -104,6 +104,21 @@ class MemoryCorpusContractTests(unittest.TestCase):
                     lambda query, ctx: [case.expected_ids[0], leaked])[0]
                 self.assertFalse(result.answer_correct)
                 self.assertEqual(result.scores['forbidden_at_5'], 1.0)
+
+    def test_forbidden_evidence_cannot_be_authoritative_or_cited(self):
+        for label in ('authoritative_ids', 'citation_ids'):
+            with self.subTest(label=label):
+                data = copy.deepcopy(self.data)
+                data['cases'][0][label] = ['alpha_release_old']
+                data['cases'][0]['forbidden_ids'] = ['alpha_release_old']
+                with self.assertRaisesRegex(ValueError, 'forbidden_ids overlap'):
+                    self.load(data)
+
+    def test_derived_out_of_scope_forbidden_evidence_cannot_be_authoritative(self):
+        data = copy.deepcopy(self.data)
+        data['cases'][0]['authoritative_ids'] = ['beta_db']
+        with self.assertRaisesRegex(ValueError, 'forbidden_ids overlap'):
+            self.load(data)
 
     def test_every_case_forbids_all_foreign_tenant_and_namespace_documents(self):
         suite = load_suite(str(FIXTURE))

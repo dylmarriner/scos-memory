@@ -2431,3 +2431,8 @@ retrieved IDs fail contextual task success even when the expected ID is also
 returned; `unknown_at_5/10/20` tracks these unclassified hits as
 lower-is-better metrics. These are synthetic evidence-integrity assertions,
 **not** evidence of deployed tenant isolation or P0 model acceptance.
+Versioned contextual ground truth is now `1.1.0`; conflicting
+forbidden/authoritative/citation labels are rejected, including scope-derived
+forbidden evidence. Review regressions reproduced the contradictory labels
+before the correction.
+The seven-case frozen P4 lexical baseline was independently re-recorded after the shared harness change. All seven ranked-ID lists, every per-case and aggregate quality metric, and forbidden@5/10/20=(0,0,0) remained identical; only the harness SHA-256 and source base SHA changed. This does not qualify contextual retrieval.
