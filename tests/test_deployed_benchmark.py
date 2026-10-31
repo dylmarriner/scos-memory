@@ -494,6 +494,8 @@ class DeployedRunTests(unittest.TestCase):
             {"Renamed": ["not-an-object"]},
             {"Renamed": [{"Path": {"nested": "bad"}, "PreviousPath": "target.go"}]},
             {"Renamed": [{"Path": "renamed.go", "PreviousPath": ["target.go"]}]},
+            {"Renamed": [{"Path": "renamed.go"}]},
+            {"Renamed": [{"PreviousPath": "target.go"}]},
         ):
             with self.subTest(invalid=invalid):
                 _CodeService.malformed_diff = invalid

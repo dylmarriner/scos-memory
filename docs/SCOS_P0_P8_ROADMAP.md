@@ -44,7 +44,9 @@ non-object entries or object/list-valued `Path`/`PreviousPath`. The benchmark's
 rename scoring then raised `AttributeError` or `TypeError`, terminating the
 whole run without writing the required failed-case artifact. Four real-HTTP
 shape regressions and an end-to-end CLI failure-artifact regression reproduced
-five errors before correction (RED). The deployed client now rejects malformed
+five errors before correction (RED). Review follow-up added two real-HTTP
+regressions for omitted `Path` and `PreviousPath` fields; both reject malformed
+evidence without escaping case-level error handling. The deployed client now rejects malformed
 rename entries as controlled, credential-safe `RuntimeError`s, so the case
 fails without falsely passing and the CLI persists its measured failure
 artifact (GREEN, 30 focused tests). The complete `make test` target,
