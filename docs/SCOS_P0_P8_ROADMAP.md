@@ -5,6 +5,34 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 deployed benchmark redirect credential isolation (2026-10-31; TDD source candidate)
+
+The deployed code benchmark sends a bearer token and tenant/principal headers
+with its HTTP requests. Python's default URL opener followed HTTP redirects,
+so a redirected health probe could reach another host while retaining
+benchmark credentials. A real two-server HTTP regression first failed because
+a 302 response was followed instead of rejected (RED). The deployed client
+now installs a no-redirect handler for both HTTP and HTTPS while retaining
+configured TLS CA verification and normal proxy support. A real-HTTP matrix
+checks GET and POST across 301, 302, 303, 307 and 308, asserting every
+redirect fails closed and the destination receives no request (GREEN).
+HTTP error bodies are closed after diagnostics to avoid leaking response
+resources. CodeRabbit review identified an unbounded HTTP-error body read:
+a RED regression showed an attempted full 50,000-byte read, corrected to a
+maximum 1,200-byte diagnostic read (GREEN). The previously omitted
+deployed-benchmark test module is now
+required in both CI and local `make test`; the parity contract guards that
+coverage against accidental removal. On AMD, the 13 deployed-benchmark
+tests, full local `make test`, `go vet ./...`, 42 P4 fixture/gate tests,
+the frozen seven-case lexical P4 baseline (Recall@5=1.000; forbidden
+evidence at 5/10/20 = 0), and `git diff --check` passed. The governance
+audit passed its structural gate only.
+
+This is source-level credential and benchmark-endpoint integrity, not proof
+of representative live quality, model cost/latency, production recovery or
+P0–P8 acceptance. No live benchmark tenant or production service was used.
+PR-head CI, P4 integration and merged-main verification remain separate gates.
+
 ## P0 live benchmark canonical-merge safety (2026-10-31; TDD source candidate)
 
 The deployed `scos_remember` path may replace a pre-existing fact with a richer
