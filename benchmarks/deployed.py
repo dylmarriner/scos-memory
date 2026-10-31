@@ -120,9 +120,14 @@ class DeployedCodeClient:
                     raise RuntimeError(f"deployed benchmark HTTP status {response.status}")
                 raw = response.read()
         except urllib.error.HTTPError as exc:
+            # An upstream proxy or service may echo bearer/control-plane tokens
+            # in its error body. Per-case errors are serialized to benchmark
+            # artifacts, so NEVER include response bytes in diagnostics.
             with exc:
-                detail = exc.read(1200).decode("utf-8", "replace").strip()[:300]
-            raise RuntimeError(f"deployed benchmark request failed: {method} {path}: HTTP {exc.code}: {detail}") from exc
+                status = exc.code
+            raise RuntimeError(
+                f"deployed benchmark request failed: {method} {path}: HTTP {status}"
+            ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"deployed benchmark request failed: {method} {path}") from exc
         try:
