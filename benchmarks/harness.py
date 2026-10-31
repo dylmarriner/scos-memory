@@ -743,8 +743,27 @@ class GatewayMemoryAdapter:
                 fact_id = fact.get("id")
                 if not fact_id:
                     raise RuntimeError(f"scos_remember returned no fact id for {corpus_id}")
+                if "merged_fact_id" in saved:
+                    # The server can replace a pre-existing fact with a richer
+                    # newly inserted canonical fact. Deleting that new fact
+                    # would strand the original in a superseded state.
+                    # Never schedule this canonical fact for cleanup: stop
+                    # and require an operator to reconcile both records.
+                    raise RuntimeError(
+                        f"benchmark seed superseded existing fact {saved['merged_fact_id']}"
+                        f" with canonical fact {fact_id}; run tag {self.run_tag}; "
+                        "manual recovery required; canonical fact preserved"
+                    )
+                if "merged" in saved and type(saved["merged"]) is not bool:
+                    raise RuntimeError(f"scos_remember returned invalid merged flag; run tag {self.run_tag}")
                 if fact_id in self.fact_to_corpus:
                     self.merged[corpus_id] = self.fact_to_corpus[fact_id]
+                    continue
+                if saved.get("merged") is True:
+                    # Explicit server evidence that no new fact was created
+                    # outranks an echoed content string containing the tag.
+                    self.fact_to_corpus[fact_id] = corpus_id
+                    self.merged[corpus_id] = f"pre-existing memory {fact_id}"
                     continue
                 self.fact_to_corpus[fact_id] = corpus_id
                 if self.run_tag in str(fact.get("content", "")):

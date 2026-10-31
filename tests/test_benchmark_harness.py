@@ -401,6 +401,8 @@ class _Gateway(BaseHTTPRequestHandler):
     tool_errors: set = set()
     response_id_delta: dict = {}
     response_version: dict = {}
+    richer_merge_existing: bool = False
+    merged_response_with_tag: bool = False
 
     def do_POST(self):  # noqa: N802
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -429,6 +431,16 @@ class _Gateway(BaseHTTPRequestHandler):
                 existing = f"fact-{len(self.facts) + 1}"
                 self.facts[existing] = content
             payload = {"fact": {"id": existing, "content": self.facts[existing]}}
+            if self.richer_merge_existing and content.startswith("alpha beta"):
+                # The real /v1/facts handler can supersede an existing fact
+                # with a richer newly inserted canonical fact.
+                new_id = f"fact-{len(self.facts) + 1}"
+                self.facts[new_id] = content
+                payload = {"fact": {"id": new_id, "content": content},
+                           "merged_fact_id": "user-1"}
+            elif self.merged_response_with_tag and content.startswith("alpha beta"):
+                payload = {"fact": {"id": existing, "content": content},
+                           "merged": True, "canonical_fact_id": existing}
         elif name == "scos_recall":
             words = set(args["query"].lower().split())
             ranked = sorted(((len(words & set(text.lower().split())), fid) for fid, text in self.facts.items()), reverse=True)
@@ -465,6 +477,8 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
         _Gateway.tool_errors = set()
         _Gateway.response_id_delta = {}
         _Gateway.response_version = {}
+        _Gateway.richer_merge_existing = False
+        _Gateway.merged_response_with_tag = False
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Gateway)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -566,6 +580,29 @@ class GatewayMemoryAdapterTests(unittest.TestCase):
         self.assertEqual(recalled, ["a"])
         self.assertIn("a", report["merged_on_save"])
         self.assertEqual(sorted(_Gateway.forgotten), ["fact-2", "fact-3"])
+        self.assertIn("user-1", _Gateway.facts)
+
+    def test_richer_merge_never_deletes_new_canonical_or_hides_old_fact_mutation(self):
+        _Gateway.richer_merge_existing = True
+        adapter = GatewayMemoryAdapter(
+            self.url, {"b": "gamma delta", "a": "alpha beta preexisting"})
+        with self.assertRaisesRegex(RuntimeError, "supersed") as caught:
+            with adapter:
+                pass
+        self.assertIn(adapter.run_tag, str(caught.exception))
+        self.assertIn("user-1", str(caught.exception))
+        self.assertIn("fact-3", str(caught.exception))
+        self.assertIn("user-1", _Gateway.facts)
+        self.assertIn("fact-3", _Gateway.facts)
+        self.assertEqual(_Gateway.forgotten, ["fact-2"])
+        self.assertNotIn("fact-3", _Gateway.forget_requests)
+
+    def test_explicit_merged_response_is_never_deleted_even_if_content_has_run_tag(self):
+        _Gateway.merged_response_with_tag = True
+        with GatewayMemoryAdapter(self.url, {"a": "alpha beta preexisting"}) as adapter:
+            self.assertEqual(adapter.created, [])
+            self.assertIn("a", adapter.merged)
+        self.assertEqual(_Gateway.forgotten, [])
         self.assertIn("user-1", _Gateway.facts)
 
     def test_cleanup_refusal_is_reported_and_fails_closed(self):

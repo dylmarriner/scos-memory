@@ -5,6 +5,27 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 live benchmark canonical-merge safety (2026-10-31; TDD source candidate)
+
+The deployed `scos_remember` path may replace a pre-existing fact with a richer
+new canonical fact and return `merged_fact_id`. The benchmark previously
+scheduled that new canonical ID for deletion merely because its content carried
+the run tag, potentially leaving the original fact superseded and deleting the
+only active canonical record. A second defect trusted the echoed content tag
+even when the server explicitly reported `merged=true` (no new fact). Two
+real-HTTP regressions failed before correction and pass afterward. The adapter
+now **stops on a canonical replacement**, identifies both fact IDs and the
+run tag, and preserves the new canonical fact for manual recovery rather than
+deleting it. Explicit `merged=true` responses are never cleanup targets.
+Previously created benchmark facts still receive confirmed cleanup.
+
+**Safety limitation:** detecting `merged_fact_id` occurs *after* the server
+has changed an existing fact. Live benchmarking must use a dedicated isolated
+test tenant with no user data; a shared or production tenant is not safe.
+This source fix does not undo a server-side merge, prove remote recovery, run
+representative P0 benchmarks, or authorize deployment. CI/P4 and merged-main
+qualification remain separate gates.
+
 ## P0 JSON-RPC response identity integrity (2026-10-31; isolated TDD candidate)
 
 The HTTP-backed benchmark adapter previously accepted an MCP tools/call
