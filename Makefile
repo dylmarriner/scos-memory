@@ -24,6 +24,7 @@ test:
 	python3 -m unittest discover -s tests -p test_benchmark_suite_schema.py -v
 	python3 -m unittest discover -s tests -p test_deployed_benchmark.py -v
 	python3 -m unittest discover -s tests -p test_postgres_dns_doctor.py -v
+	python3 -m unittest discover -s tests -p test_postgres_hba_deploy_preflight.py -v
 	python3 -m unittest discover -s workers/embeddings/tests -v
 	python3 -m unittest discover -s workers/index-maintenance -p 'test_*.py' -v
 	python3 -m unittest scripts/test_scos_git_worklist.py scripts/test_scos_verify_snapshot_manifest.py scripts/test_scos_verify_snapshot_events.py scripts/test_scos_verify_snapshot_bundle.py -v

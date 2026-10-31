@@ -2287,6 +2287,9 @@ No live backup, restore, production deployment or paid resource was invoked.
 
 ## Safety and secret handling
 
+**P1/operations HBA rollout retry integrity (2026-10-31; PR #202 review correction, source-only, NOT merged/deployed):** Independent review reproduced a data-plane rollout defect: a post-fast-forward HBA ACL failure advances the local Git checkout but prevents deployment; the next timer tick sees identical HEAD and remote SHA and silently skips the pending revision. A disposable two-repository Git integration regression reproduced this skipped rollout (RED) and passed after adding an atomic Git-private pending-revision marker that survives failed preflight/build/migration/parity and is cleared only after successful verification (GREEN). Additional TDD regressions reject PostgreSQL probe image overrides that differ from the pinned Compose image and distinguish Docker runtime failures from HBA unreadability. These changes do not run the deployment script against live services, modify live ACLs, perform migrations or qualify recovery. Mandatory independent approval, verified signatures, updated-head CI, and full §41 acceptance remain open.
+
+
 **CI supply-chain gate hardening (2026-10-26; review branch, not merged):**
 A successful GitHub CI run on PR #58 still contained a `govulncheck`
 exit code 3: the CI runner used Go 1.26.9, affected by a `crypto/x509`
