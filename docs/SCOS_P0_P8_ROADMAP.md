@@ -4,6 +4,27 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.7 attributable mandatory-hook failure evidence (2026-11-02; source candidate)
+
+TDD RED reproduced an audit/telemetry attribution gap: a mandatory extension
+hook returning HTTP 500 or 302 failed closed, but the execution ledger retained
+only a generic `aborted` marker. A failing critical hook after earlier
+successful/optional deliveries likewise disappeared from per-hook evidence.
+Mandatory endpoint preflight failures (invalid destination, open circuit or
+corrupt circuit timestamp) also produced no extension-specific result. These
+failures were invisible to the per-extension §32 failure counter because the
+handler only counts returned results.
+
+The dispatcher now returns a bounded, extension-attributed failure result
+alongside its existing error for each of these cases, without leaking endpoint
+URLs, response bodies or credentials. The handler retains the failure and the
+separate abort marker under the authenticated tenant and counts the per-hook
+failure; fail-closed HTTP 503, preflight-before-side-effects, and redirect
+containment remain intact. Real loopback HTTP 500/302 and invalid-preflight
+regressions cover this behavior. Source tests and review are separate from
+merged-main CI, representative P0 measurements, complete §22/§32 coverage,
+§41 acceptance and production rollout/recovery evidence.
+
 ## §22.7 critical abort partial-execution evidence (2026-11-02; source candidate)
 
 A real HTTP regression reproduces loss of earlier tenant-scoped hook outcomes

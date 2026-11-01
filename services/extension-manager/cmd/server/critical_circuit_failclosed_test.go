@@ -58,7 +58,7 @@ func TestCriticalOpenCircuitReturnsHTTPServiceUnavailable(t *testing.T) {
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("mandatory open circuit returned %d, want 503: %s", res.Code, res.Body.String())
 	}
-	if len(srv.executions) != 1 || srv.executions[0].Status != "aborted" {
+	if len(srv.executions) != 2 || srv.executions[0].ExtensionID != "mandatory" || srv.executions[0].Status != "circuit_open" || srv.executions[1].Status != "aborted" {
 		t.Fatalf("mandatory failure must be auditable: %+v", srv.executions)
 	}
 }

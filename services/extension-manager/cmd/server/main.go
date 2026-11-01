@@ -1142,6 +1142,15 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 	s.mu.RLock()
 	targets := s.hookTargetsLocked(req.Event, req.canaryContext())
 	s.mu.RUnlock()
+	// Return a per-extension failure record even when preflight aborts
+	// before any network delivery. The handler persists this alongside the
+	// dispatch-level abort marker, so operators can identify the blocker.
+	preflightFailure := func(target hookTarget, status, reason string, err error) ([]hookDispatchResult, error) {
+		return []hookDispatchResult{{
+			ExtensionID: target.hook.ExtensionID, Status: status, Reason: reason,
+			Version: target.hook.Version, Channel: target.channel,
+		}}, err
+	}
 	// Preflight all mandatory breakers before delivering any hook. A later
 	// invalid/open critical breaker must not leave earlier hooks' external
 	// side effects behind when the dispatch ultimately fails closed.
@@ -1151,10 +1160,10 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			continue
 		}
 		if hook.Endpoint == "" {
-			return nil, fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID)
+			return preflightFailure(target, "failed", "invalid_endpoint", fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID))
 		}
 		if !validHookEndpoint(hook.Endpoint) {
-			return nil, fmt.Errorf("critical hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID)
+			return preflightFailure(target, "failed", "invalid_endpoint", fmt.Errorf("critical hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID))
 		}
 		if hook.CircuitOpenUntil == "" {
 			continue
@@ -1164,13 +1173,13 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			s.mu.Lock()
 			s.setHealthLocked(hook.ExtensionID, "failing")
 			s.mu.Unlock()
-			return nil, fmt.Errorf("critical hook %s has invalid circuit breaker state", hook.ExtensionID)
+			return preflightFailure(target, "failed", "invalid_circuit_state", fmt.Errorf("critical hook %s has invalid circuit breaker state", hook.ExtensionID))
 		}
 		if time.Now().UTC().Before(until) {
 			s.mu.Lock()
 			s.setHealthLocked(hook.ExtensionID, "circuit_open")
 			s.mu.Unlock()
-			return nil, fmt.Errorf("critical hook %s circuit breaker is open", hook.ExtensionID)
+			return preflightFailure(target, "circuit_open", "circuit_open", fmt.Errorf("critical hook %s circuit breaker is open", hook.ExtensionID))
 		}
 	}
 	results := make([]hookDispatchResult, 0, len(targets))
@@ -1293,6 +1302,9 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		fallback := hook.FallbackPolicy
 		s.mu.Unlock()
 		if fallback == "fail_closed" {
+			// Do not lose the mandatory hook's own failed attempt when
+			// dispatch aborts. Earlier successful deliveries are retained.
+			done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_fail_closed"})
 			return partialResults(), fmt.Errorf("critical hook %s failed", hook.ExtensionID)
 		}
 		done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})

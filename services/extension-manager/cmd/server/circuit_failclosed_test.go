@@ -36,7 +36,7 @@ func TestCriticalHookOpenCircuitBlocksDispatchAndFollowingHooks(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatalf("critical or subsequent hook called %d times", calls.Load())
 	}
-	if len(srv.executions) != 1 || srv.executions[0].Status != "aborted" {
+	if len(srv.executions) != 2 || srv.executions[0].ExtensionID != "critical-ext" || srv.executions[0].Status != "circuit_open" || srv.executions[1].Status != "aborted" {
 		t.Fatalf("expected durable aborted execution, got %+v", srv.executions)
 	}
 }
@@ -59,6 +59,9 @@ func TestCriticalHookInvalidCircuitStateFailsClosed(t *testing.T) {
 	}
 	if strings.Contains(res.Body.String(), "not-a-timestamp") {
 		t.Fatal("internal breaker state leaked to caller")
+	}
+	if len(srv.executions) != 2 || srv.executions[0].ExtensionID != "critical-ext" || srv.executions[0].Status != "failed" || srv.executions[0].Reason != "invalid_circuit_state" {
+		t.Fatalf("critical breaker failure not attributed: %+v", srv.executions)
 	}
 	if ext := srv.extensions["critical-ext"]; ext.Health != "failing" || ext.HealthCheckedAt == "" {
 		t.Fatalf("critical breaker corruption must invalidate previously healthy status: %+v", ext)
@@ -136,6 +139,9 @@ func TestLaterCriticalBreakerPreflightPreventsEarlierDeliveries(t *testing.T) {
 			srv.handleHookDispatch(res, req)
 			if res.Code != http.StatusServiceUnavailable || calls.Load() != 0 {
 				t.Fatalf("preflight failed: status=%d outbound_calls=%d", res.Code, calls.Load())
+			}
+			if len(srv.executions) != 2 || srv.executions[0].ExtensionID != "critical-ext" || srv.executions[0].Status != map[string]string{"failing": "failed", "circuit_open": "circuit_open"}[tc.health] || srv.executions[1].Status != "aborted" {
+				t.Fatalf("later critical preflight evidence missing: %+v", srv.executions)
 			}
 			if ext := srv.extensions["critical-ext"]; ext.Health != tc.health || ext.HealthCheckedAt == "" {
 				t.Fatalf("breaker health = %+v, want %s", ext, tc.health)

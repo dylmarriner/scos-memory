@@ -41,6 +41,9 @@ func TestHookDispatchPreflightsAllCriticalEndpointsBeforeDelivery(t *testing.T) 
 			if err == nil || !strings.Contains(err.Error(), "critical-ext") {
 				t.Fatalf("critical endpoint %q should fail closed: results=%v err=%v", tc.endpoint, results, err)
 			}
+			if len(results) != 1 || results[0].ExtensionID != "critical-ext" || results[0].Status != "failed" || results[0].Reason != "invalid_endpoint" {
+				t.Fatalf("critical preflight lacks attributable evidence: %+v", results)
+			}
 			if got := delivered.Load(); got != 0 {
 				t.Fatalf("earlier hook was delivered %d times before critical preflight failed", got)
 			}

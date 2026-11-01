@@ -47,7 +47,7 @@ func TestHookRedirectCannotForwardInternalContext(t *testing.T) {
 					t.Fatalf("unconfigured redirect target received %d calls", forwarded.Load())
 				}
 				if policy == "fail_closed" {
-					if err == nil || results != nil {
+					if err == nil || len(results) != 1 || results[0].ExtensionID != "redirecting-ext" || results[0].Status != "failed" || results[0].Reason != "fallback_fail_closed" {
 						t.Fatalf("mandatory redirected hook must abort: results=%+v err=%v", results, err)
 					}
 				} else if err != nil || len(results) != 1 || results[0].Status != "failed" {
