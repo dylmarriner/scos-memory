@@ -138,6 +138,28 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return obj
 
 
+def _ack_reflects_bearer(value: Any, token: str) -> bool:
+    """Reject untrusted acknowledgement fields echoing the publisher bearer.
+
+    Check nested values and keys: callers can print run_id or serialize the
+    whole acknowledgement. Avoid substring false positives for tiny test
+    tokens while still recognizing an explicit Bearer header reflection.
+    """
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if (current == token or f"Bearer {token}" in current
+                    or (len(token) >= 8 and token in current)):
+                return True
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+    return False
+
+
 class _RejectRedirect(urllib.request.HTTPRedirectHandler):
     """Never forward the observability bearer to a redirect destination."""
 
@@ -217,6 +239,11 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
                     or not ack["run_id"].strip()
                     or not isinstance(ack.get("created"), bool)):
                 raise RuntimeError("invalid benchmark publish acknowledgement: missing or invalid fields")
+            if _ack_reflects_bearer(ack, token):
+                # The acknowledgement is returned to callers, and run_id is
+                # printed by the deployed runner. Never propagate reflected
+                # service credentials into logs or benchmark artifacts.
+                raise RuntimeError("invalid benchmark publish acknowledgement: credential reflection")
             # The observability API returns 201 only for newly persisted runs
             # and 200 only for an idempotent replay. An inconsistent response
             # cannot establish whether the benchmark was actually recorded.
