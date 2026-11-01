@@ -5,6 +5,7 @@ import pathlib
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import traceback
 import time
 import unittest
@@ -632,6 +633,28 @@ class DeployedRunTests(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.config = BenchmarkConfig(endpoint=f"http://127.0.0.1:{self.server.server_port}", token="t",
                                       tenant_id="tenant-1", principal_id="principal-1")
+
+    def test_default_nonce_preserves_full_uuid_entropy_across_runs(self):
+        # Two UUIDs can share 32 leading bits. The old eight-character slice
+        # reuses branch/commit IDs and silently turns fresh indexing into replay.
+        values = [SimpleNamespace(hex="12345678" + "0" * 24),
+                  SimpleNamespace(hex="12345678" + "1" * 24)]
+        with patch("benchmarks.run_deployed.uuid.uuid4", side_effect=values):
+            first = run(self.config)
+            second = run(self.config)
+        self.assertEqual(first["summary"]["passed_cases"], 4)
+        self.assertEqual(second["summary"]["passed_cases"], 4)
+        self.assertNotEqual(first["fixture"]["branch"], second["fixture"]["branch"])
+        self.assertNotEqual(first["fixture"]["alternate_branch"], second["fixture"]["alternate_branch"])
+        self.assertEqual(len(_CodeService.snapshots), 6)
+
+    def test_explicit_nonce_rejects_invalid_git_ref_fragments_before_network(self):
+        for invalid in ("bad/branch", "space here", "newline\nvalue", "../escape",
+                        "x" * 65, "ümlaut"):
+            with self.subTest(nonce=invalid), self.assertRaisesRegex(ValueError, "nonce"):
+                run(self.config, run_nonce=invalid)
+        self.assertEqual(_CodeService.snapshots, {})
+        self.assertEqual(_CodeService.branches, {})
 
     def test_cases_pass_against_a_correct_service_and_are_timed_individually(self):
         _CodeService.delay = {"/v2/code/snapshots/diff": 0.2}

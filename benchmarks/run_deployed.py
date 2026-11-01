@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import sys
 import time
 import uuid
@@ -80,6 +81,13 @@ def _timed(case_id: str, body: Callable[[], tuple[bool, dict[str, Any]]]) -> dic
 
 def run(config=None, run_nonce: str | None = None) -> dict[str, Any]:
     config = config or config_from_environment()
+    # Explicit fixture identities must be safe Git branch/commit fragments.
+    # Reject invalid input before contacting or mutating the deployed service.
+    if run_nonce is not None and (
+        not isinstance(run_nonce, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_nonce) is None
+    ):
+        raise ValueError("benchmark run nonce must be 1-64 ASCII Git-ref-safe characters")
     started = time.perf_counter()
     try:
         client = DeployedCodeClient(config)
@@ -93,8 +101,10 @@ def run(config=None, run_nonce: str | None = None) -> dict[str, Any]:
         raise DeployedPreflightError("deployed service preflight failed") from exc
     # The fixture identity is stable per benchmark identity; the nonce makes
     # each run's branches and commits new, so a rerun measures indexing
-    # again instead of replaying the previous run's snapshots.
-    nonce = run_nonce or uuid.uuid4().hex[:8]
+    # again instead of replaying the previous run's snapshots. Use the full
+    # 128-bit UUID: an eight-hex-character nonce collides after surprisingly
+    # few runs, especially because benchmark branches are not cleaned up.
+    nonce = run_nonce if run_nonce is not None else uuid.uuid4().hex
     suffix = f"{fixture_identity(config)}-{nonce}"
     branch = f"benchmark-{suffix}"
     alternate_branch = f"benchmark-branch-{suffix}"
