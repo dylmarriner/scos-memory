@@ -479,6 +479,9 @@ class BenchmarkRunner:
                 raise ValueError("benchmark latency must be finite and nonnegative") from exc
             latencies.append(float(latency))
         latencies.sort()
+        total_latency_ms = sum(latencies)
+        if not math.isfinite(total_latency_ms):
+            raise ValueError("benchmark total latency must be finite")
         collected: dict[str, list[float]] = {}
         for r in self.results:
             for metric, value in r.scores.items():
@@ -499,7 +502,7 @@ class BenchmarkRunner:
             "categories": categories,
             "average_scores": average_scores,
             "metric_case_counts": {metric: len(vals) for metric, vals in collected.items()},
-            "total_latency_ms": sum(r.latency_ms for r in self.results),
+            "total_latency_ms": total_latency_ms,
             "avg_latency_ms": statistics.fmean(latencies),
             "p50_latency_ms": latency_percentile_ms(latencies, 50),
             "p95_latency_ms": latency_percentile_ms(latencies, 95),

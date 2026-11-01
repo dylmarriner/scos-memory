@@ -166,10 +166,15 @@ class P0LatencyPercentileEvidenceTests(unittest.TestCase):
         self.assertEqual(summary["p95_latency_ms"], 12.5)
 
     def test_invalid_latency_cannot_be_published_as_p0_evidence(self):
-        for value in (float("nan"), float("inf"), -1.0, True):
+        for value in (float("nan"), float("inf"), -1.0, True, 10 ** 1000):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "latency"):
                     self._runner([value]).summary()
+
+    def test_total_latency_overflow_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "latency"):
+            self._runner([1e308, 1e308]).summary()
+
 
 
 class SummaryBaselineIntegrityTests(unittest.TestCase):
