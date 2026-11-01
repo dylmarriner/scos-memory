@@ -536,6 +536,7 @@ class _CodeService(BaseHTTPRequestHandler):
     raw_health = None
     case_query_error = False
     malformed_diff = None
+    malformed_query = None
     delay: dict = {}
     branches: dict = {}
     snapshots: dict = {}
@@ -595,6 +596,8 @@ class _CodeService(BaseHTTPRequestHandler):
                        if old not in snapshot["files"] and g["content_hash"] == f["content_hash"]]
             return self._send(self.malformed_diff if self.malformed_diff is not None else {"Renamed": renamed})
         if self.path == "/v2/code/query":
+            if self.malformed_query is not None and body["query"] == "BranchOnly":
+                return self._send({"results": self.malformed_query})
             searched = list(self.branches.values()) if self.leak else [self.branches[body["branch"]]]
             files = {}
             for snapshot_id in searched:
@@ -619,6 +622,7 @@ class DeployedRunTests(unittest.TestCase):
         _CodeService.raw_health = None
         _CodeService.case_query_error = False
         _CodeService.malformed_diff = None
+        _CodeService.malformed_query = None
         _CodeService.delay = {}
         _CodeService.branches = {}
         _CodeService.snapshots = {}
@@ -640,6 +644,64 @@ class DeployedRunTests(unittest.TestCase):
         self.assertGreaterEqual(latencies["rename_lineage"], 200)
         self.assertLess(latencies["exact_symbol_lookup"], 200)
         self.assertLess(latencies["branch_isolation"], 200)
+
+    def test_malformed_http_query_hit_cannot_pass_branch_isolation(self):
+        # A syntactically valid HTTP 200 with malformed Path/MatchType
+        # used to be silently stringified or ignored by _paths, allowing
+        # branch_isolation to pass despite unclassifiable evidence.
+        invalid_hits = (
+            {"Path": {"nested": "branch.go"}, "MatchType": "lexical"},
+            {"Path": ["branch.go"], "MatchType": "lexical"},
+            {"Path": None, "MatchType": "lexical"},
+            {"MatchType": "lexical"},
+            {"Path": "", "MatchType": "lexical"},
+            {"Path": 123, "MatchType": "lexical"},
+            {"Path": "caller.go"},
+            {"Path": "caller.go", "MatchType": None},
+            {"Path": "caller.go", "MatchType": []},
+            {"Path": "caller.go", "MatchType": ""},
+        )
+        for index, invalid in enumerate(invalid_hits):
+            with self.subTest(invalid=invalid):
+                _CodeService.malformed_query = [
+                    {"Path": "caller.go", "MatchType": "lexical"}, invalid,
+                ]
+                # Exercise the full real-HTTP indexing and query sequence.
+                artifact = run(self.config, run_nonce=f"malformed-query-{index}")
+                cases = {case["case_id"]: case for case in artifact["cases"]}
+                self.assertFalse(cases["branch_isolation"]["passed"])
+                self.assertIn("invalid query result", cases["branch_isolation"]["details"]["error"])
+                self.assertTrue(cases["exact_symbol_lookup"]["passed"])
+                self.assertTrue(cases["rename_lineage"]["passed"])
+                self.assertTrue(cases["retry_idempotency"]["passed"])
+                self.assertEqual(artifact["summary"]["passed_cases"], 3)
+
+    def test_malformed_query_result_writes_failure_artifact_without_credentials(self):
+        _CodeService.malformed_query = [
+            {"Path": "caller.go", "MatchType": "lexical"},
+            {"Path": {"unexpected": "branch.go"}, "MatchType": "lexical"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "invalid-query.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_CONTROL_PLANE_TOKEN": "secret-control-plane-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.publish", return_value=None):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = run_deployed_main()
+            self.assertEqual(exit_code, 1)
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "measured")
+            self.assertEqual(artifact["summary"]["passed_cases"], 3)
+            self.assertFalse(next(c for c in artifact["cases"] if c["case_id"] == "branch_isolation")["passed"])
+            self.assertNotIn("secret-benchmark-token", output.read_text())
+            self.assertNotIn("secret-control-plane-token", output.read_text())
 
     def test_malformed_http_rename_diff_is_a_recorded_case_failure(self):
         # A 200 response can still carry invalid diff structure. It must not
