@@ -1684,6 +1684,13 @@ non-finite or boolean latency is rejected rather than reported as evidence.
 Regression tests cover unsorted samples, a single case and invalid values.
 This does **not** establish live p95 targets, model cost, representative
 hardware performance, or full P0 acceptance.
+The P4 lexical smoke baseline was explicitly requalified for the shared
+harness source digest. A recorded seven-case run was compared field-for-field
+against the previous baseline: only `harness_sha256` and `git_base_sha`
+changed. All case rankings, retrieval scores, aggregate quality metrics,
+and forbidden-at-5/10/20 counts remained identical (all forbidden counts
+zero). `offline_gate --check` and all 42 fixture/gate tests passed. This
+is provenance maintenance, **not** a new retrieval-quality claim.
 
 ## Remaining
 
