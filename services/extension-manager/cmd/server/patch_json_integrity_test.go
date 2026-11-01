@@ -17,6 +17,7 @@ func TestExtensionPatchRejectsTrailingJSONWithoutMutation(t *testing.T) {
 		{"second object", `{"config":{"mode":"unsafe"}}{"status":"disabled"}`},
 		{"second scalar", `{"config":{"mode":"unsafe"}}true`},
 		{"malformed tail", `{"config":{"mode":"unsafe"}}garbage`},
+		{"agent scope tail", `{"agent_ids":["other-agent"]}garbage`},
 		{"over limit tail", `{"config":{"mode":"unsafe"}}` + strings.Repeat(" ", 256<<10)},
 	}
 	for _, tc := range tests {
@@ -34,7 +35,7 @@ func TestExtensionPatchRejectsTrailingJSONWithoutMutation(t *testing.T) {
 				t.Fatalf("invalid trailing JSON accepted: status=%d body=%q", w.Code, w.Body.String())
 			}
 			ext := srv.extensions["ext"]
-			if ext.Status != "enabled" || ext.Config["mode"] != "safe" {
+			if ext.Status != "enabled" || ext.Config["mode"] != "safe" || len(ext.AgentScope) != 0 {
 				t.Fatalf("rejected PATCH changed extension state: %+v", ext)
 			}
 		})
