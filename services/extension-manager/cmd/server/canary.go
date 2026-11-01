@@ -61,6 +61,15 @@ func (s CanaryScope) validate() error {
 		len(s.WorkspaceIDs) > 0 || len(s.ProjectIDs) > 0) {
 		return errors.New("organisation scope cannot be combined with narrower selectors")
 	}
+	// Empty identifiers can match missing caller context, unintentionally
+	// widening an explicit cohort into an anonymous rollout.
+	for _, group := range [][]string{s.AgentIDs, s.ProfileIDs, s.WorkspaceIDs, s.ProjectIDs} {
+		for _, id := range group {
+			if strings.TrimSpace(id) == "" {
+				return errors.New("canary scope selectors must not be blank")
+			}
+		}
+	}
 	return nil
 }
 
@@ -112,15 +121,18 @@ func (d *CanaryDeployment) selects(c CanaryContext) (bool, string) {
 	switch {
 	case d.Scope.Organisation:
 		return true, "organisation_wide"
-	case contains(d.Scope.AgentIDs, c.AgentID):
+	case c.AgentID != "" && contains(d.Scope.AgentIDs, c.AgentID):
 		return true, "agent_scope"
-	case contains(d.Scope.ProfileIDs, c.ProfileID):
+	case c.ProfileID != "" && contains(d.Scope.ProfileIDs, c.ProfileID):
 		return true, "profile_scope"
-	case contains(d.Scope.WorkspaceIDs, c.WorkspaceID):
+	case c.WorkspaceID != "" && contains(d.Scope.WorkspaceIDs, c.WorkspaceID):
 		return true, "workspace_scope"
-	case contains(d.Scope.ProjectIDs, c.ProjectID):
+	case c.ProjectID != "" && contains(d.Scope.ProjectIDs, c.ProjectID):
 		return true, "project_scope"
-	case d.Scope.Percentage > 0 && canaryBucket(d.PackageID, c) < d.Scope.Percentage:
+	case d.Scope.Percentage > 0 &&
+		(strings.TrimSpace(c.AgentID) != "" || strings.TrimSpace(c.ProfileID) != "" ||
+			strings.TrimSpace(c.WorkspaceID) != "" || strings.TrimSpace(c.ProjectID) != "") &&
+		canaryBucket(d.PackageID, c) < d.Scope.Percentage:
 		return true, "percentage_rollout"
 	}
 	return false, "not_in_canary_scope"

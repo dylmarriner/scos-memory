@@ -3102,3 +3102,23 @@ of persisted canary activation scope. The latter remains an explicit security
 gap requiring a separate design and rollout compatibility review. Nor does
 this establish deployed lifecycle coverage, §25 integration, representative
 P0 benchmarks, P3–P8 qualification, production recovery or §41 completion.
+
+### 2026-11-02 §22 canary cohort selector integrity (source-only, TDD)
+
+The canary activation API accepted empty or whitespace-only agent, profile,
+workspace and project selectors. An empty selector could match an omitted
+caller identity and route that caller to the candidate rather than the stable
+extension. Percentage rollouts also hashed an entirely unidentified caller
+into a deterministic canary cohort, including at 100% rollout. Real HTTP
+regressions reproduced these failures before implementation (RED), including
+six invalid scope variants, missing caller identity, and persisted scope
+tampering. The scope validator now rejects blank selectors before persisting,
+the resolver ignores absent identity fields, and percentage selection requires
+at least one nonempty caller identifier. Invalid persisted selectors disable
+the candidate during startup normalization. Real loopback HTTP delivery tests
+confirm unidentified events stay on the stable endpoint while identified
+events continue to reach the candidate. This is **not** cryptographic
+authentication of persisted canary activation scope: a valid-looking
+replacement scope remains an outstanding signed/secret-key integrity gap.
+It does not qualify deployed §22 lifecycle coverage, §25 integration,
+representative P0 benchmarks, P3–P8 acceptance or production recovery.
