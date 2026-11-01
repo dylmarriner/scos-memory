@@ -829,6 +829,8 @@ type HookExecution struct {
 	ID          string  `json:"id"`
 	Event       string  `json:"event"`
 	ExtensionID string  `json:"extension_id,omitempty"`
+	Version     string  `json:"version,omitempty"`
+	Channel     string  `json:"channel,omitempty"`
 	TenantID    string  `json:"tenant_id"`
 	Status      string  `json:"status"`
 	Reason      string  `json:"reason,omitempty"`
@@ -966,7 +968,7 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	// separate so consumers can distinguish partial effects from success.
 	execs := make([]*HookExecution, 0, len(results)+1)
 	for _, result := range results {
-		execs = append(execs, &HookExecution{Event: req.Event, ExtensionID: result.ExtensionID, TenantID: req.TenantID, Status: result.Status, Reason: result.Reason, DurationMs: result.DurationMs, StartedAt: startedAt})
+		execs = append(execs, &HookExecution{Event: req.Event, ExtensionID: result.ExtensionID, Version: result.Version, Channel: result.Channel, TenantID: req.TenantID, Status: result.Status, Reason: result.Reason, DurationMs: result.DurationMs, StartedAt: startedAt})
 	}
 	if err != nil {
 		execs = append(execs, &HookExecution{Event: req.Event, TenantID: req.TenantID, Status: "aborted", Reason: err.Error(), DurationMs: float64(time.Since(dispatchStarted).Microseconds()) / 1000, StartedAt: startedAt})
@@ -1142,6 +1144,15 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 	s.mu.RLock()
 	targets := s.hookTargetsLocked(req.Event, req.canaryContext())
 	s.mu.RUnlock()
+	// Return a per-extension failure record even when preflight aborts
+	// before any network delivery. The handler persists this alongside the
+	// dispatch-level abort marker, so operators can identify the blocker.
+	preflightFailure := func(target hookTarget, status, reason string, err error) ([]hookDispatchResult, error) {
+		return []hookDispatchResult{{
+			ExtensionID: target.hook.ExtensionID, Status: status, Reason: reason,
+			Version: target.hook.Version, Channel: target.channel,
+		}}, err
+	}
 	// Preflight all mandatory breakers before delivering any hook. A later
 	// invalid/open critical breaker must not leave earlier hooks' external
 	// side effects behind when the dispatch ultimately fails closed.
@@ -1151,10 +1162,10 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			continue
 		}
 		if hook.Endpoint == "" {
-			return nil, fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID)
+			return preflightFailure(target, "failed", "invalid_endpoint", fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID))
 		}
 		if !validHookEndpoint(hook.Endpoint) {
-			return nil, fmt.Errorf("critical hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID)
+			return preflightFailure(target, "failed", "invalid_endpoint", fmt.Errorf("critical hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID))
 		}
 		if hook.CircuitOpenUntil == "" {
 			continue
@@ -1164,13 +1175,13 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			s.mu.Lock()
 			s.setHealthLocked(hook.ExtensionID, "failing")
 			s.mu.Unlock()
-			return nil, fmt.Errorf("critical hook %s has invalid circuit breaker state", hook.ExtensionID)
+			return preflightFailure(target, "failed", "invalid_circuit_state", fmt.Errorf("critical hook %s has invalid circuit breaker state", hook.ExtensionID))
 		}
 		if time.Now().UTC().Before(until) {
 			s.mu.Lock()
 			s.setHealthLocked(hook.ExtensionID, "circuit_open")
 			s.mu.Unlock()
-			return nil, fmt.Errorf("critical hook %s circuit breaker is open", hook.ExtensionID)
+			return preflightFailure(target, "circuit_open", "circuit_open", fmt.Errorf("critical hook %s circuit breaker is open", hook.ExtensionID))
 		}
 	}
 	results := make([]hookDispatchResult, 0, len(targets))
@@ -1293,6 +1304,9 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		fallback := hook.FallbackPolicy
 		s.mu.Unlock()
 		if fallback == "fail_closed" {
+			// Do not lose the mandatory hook's own failed attempt when
+			// dispatch aborts. Earlier successful deliveries are retained.
+			done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_fail_closed"})
 			return partialResults(), fmt.Errorf("critical hook %s failed", hook.ExtensionID)
 		}
 		done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})
