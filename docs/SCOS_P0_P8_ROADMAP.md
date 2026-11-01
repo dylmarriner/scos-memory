@@ -3084,3 +3084,21 @@ PostgreSQL-loaded state. This is source-level §22 integrity hardening, not
 proof of live deployment, complete §22 hook coverage, §25 integration,
 representative P0 benchmarks, P3–P8 acceptance or §41 completion. PR review,
 merged-main tests and main CI must be recorded separately.
+
+### 2026-11-02 §22 canary activation and resolution HTTP document integrity (source-only)
+
+Canary creation and version resolution decoded only the first JSON document from
+an HTTP request. A second JSON object/scalar, malformed suffix, or whitespace
+past the bounded body limit was silently ignored. An extra URL path segment
+also reached the resolution handler. Real loopback HTTP regression tests
+reproduced **nine failing cases** before the correction (four creation, four
+resolution, one extra path segment). The handlers now consume the entire
+bounded request before activation/resolution, reject malformed or oversized
+suffixes with HTTP 400, and reject extra canary route segments with HTTP 404.
+Valid JSON with trailing whitespace remains accepted. The tests also assert
+rejected activation cannot mutate in-memory or persisted canary state.
+This is §22 source-level request integrity, **not** cryptographic authentication
+of persisted canary activation scope. The latter remains an explicit security
+gap requiring a separate design and rollout compatibility review. Nor does
+this establish deployed lifecycle coverage, §25 integration, representative
+P0 benchmarks, P3–P8 qualification, production recovery or §41 completion.

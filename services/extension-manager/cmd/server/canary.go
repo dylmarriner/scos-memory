@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -158,7 +159,7 @@ func (s *extServer) resolveVersionLocked(packageID string, c CanaryContext) (Ver
 func (s *extServer) handleCanary(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/v1/extensions/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) < 2 || parts[0] == "" || parts[1] != "canary" {
+	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] != "canary" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -214,6 +215,13 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Consume the complete bounded body before changing deployment state.
+	// Otherwise a valid prefix can conceal another JSON document or oversized tail.
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		http.Error(w, "invalid request: expected one JSON document", http.StatusBadRequest)
 		return
 	}
 	// A canary candidate is an installation and faces the same fail-closed
@@ -284,6 +292,11 @@ func (s *extServer) canaryResolve(w http.ResponseWriter, r *http.Request, packag
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		http.Error(w, "invalid request: expected one JSON document", http.StatusBadRequest)
 		return
 	}
 	s.mu.RLock()
