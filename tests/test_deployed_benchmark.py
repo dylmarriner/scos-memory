@@ -164,6 +164,50 @@ class DeployedBenchmarkConfigTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "invalid.*header"):
                         config_from_environment()
 
+    def test_plaintext_endpoint_is_restricted_to_literal_loopback(self):
+        # Bearer and control-plane credentials must never traverse remote HTTP.
+        # DNS names and deceptive suffixes are not proof of loopback routing.
+        for endpoint in (
+            "http://example.test:8080", "http://10.0.0.5:8080",
+            "http://192.168.1.3", "http://127.0.0.1.attacker.test",
+            "http://localhost", "http://[2001:db8::1]:8080",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaisesRegex(RuntimeError, "SCOS_BENCHMARK_ENDPOINT.*HTTPS.*loopback"):
+                    BenchmarkConfig(endpoint=endpoint, token="bearer-secret", tenant_id="tenant-1",
+                                    principal_id="principal-1", control_plane_token="control-secret")
+        for endpoint in ("http://127.0.0.1:8080", "http://127.4.3.2", "http://[::1]:8080"):
+            with self.subTest(endpoint=endpoint):
+                self.assertEqual(BenchmarkConfig(endpoint=endpoint, token="bearer-secret",
+                                                 tenant_id="tenant-1", principal_id="principal-1").endpoint, endpoint)
+        self.assertEqual(BenchmarkConfig(endpoint="https://example.test", token="bearer-secret",
+                                         tenant_id="tenant-1", principal_id="principal-1").endpoint,
+                         "https://example.test")
+
+    def test_remote_plaintext_configuration_fails_before_network_and_writes_not_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "plaintext.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": "http://192.0.2.7:8080",
+                "SCOS_BENCHMARK_TOKEN": "super-secret-bearer",
+                "SCOS_BENCHMARK_CONTROL_PLANE_TOKEN": "super-secret-control",
+                "SCOS_BENCHMARK_TENANT_ID": "tenant-1",
+                "SCOS_BENCHMARK_PRINCIPAL_ID": "principal-1",
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.DeployedCodeClient") as client_mock, \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                with redirect_stdout(io.StringIO()):
+                    exit_code = run_deployed_main()
+            self.assertEqual(exit_code, NOT_RUN_EXIT)
+            client_mock.assert_not_called()
+            publish_mock.assert_not_called()
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "not_run")
+            self.assertIn("HTTPS", artifact["reason"])
+            self.assertNotIn("super-secret", output.read_text())
+
     def test_config_rejects_endpoint_userinfo(self):
         with self.assertRaisesRegex(RuntimeError, "userinfo"):
             BenchmarkConfig(
@@ -198,6 +242,47 @@ class DeployedCodeClientTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
         cls.thread.join()
+
+    def test_literal_loopback_http_ignores_environment_proxy(self):
+        # An HTTP_PROXY without NO_PROXY can otherwise receive the full
+        # Authorization and control-plane headers for a loopback URL.
+        class ProxyCapture(BaseHTTPRequestHandler):
+            requests = []
+
+            def do_GET(self):
+                self.requests.append((self.path, dict(self.headers)))
+                body = b'{"status":"ok"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyCapture)
+        worker = threading.Thread(target=proxy.serve_forever, daemon=True)
+        worker.start()
+        try:
+            origin_before = len(_Handler.requests)
+            env = {
+                "HTTP_PROXY": f"http://127.0.0.1:{proxy.server_port}",
+                "http_proxy": f"http://127.0.0.1:{proxy.server_port}",
+                "NO_PROXY": "", "no_proxy": "",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                client = DeployedCodeClient(BenchmarkConfig(
+                    endpoint=f"http://127.0.0.1:{self.server.server_port}",
+                    token="must-stay-local", tenant_id="tenant-1", principal_id="principal-1",
+                    control_plane_token="must-also-stay-local",
+                ))
+                self.assertEqual(client.health()["status"], "ok")
+            self.assertEqual(ProxyCapture.requests, [], "proxy must not see loopback credentials")
+            self.assertEqual(len(_Handler.requests), origin_before + 1)
+        finally:
+            proxy.shutdown()
+            worker.join()
+            proxy.server_close()
 
     def test_requests_carry_bearer_and_scoped_identity(self):
         client = DeployedCodeClient(BenchmarkConfig(

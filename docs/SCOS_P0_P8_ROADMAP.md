@@ -1487,6 +1487,23 @@ runs the manifest, event and joint-bundle Python suites alongside the Git
 worklist suite. This is **offline evidence integrity only**, not server-side
 Git provenance attestation, P3 scaling acceptance, or production readiness.
 
+## P0 deployed benchmark transport confidentiality (2026-11-01)
+
+The deployed benchmark client now **rejects plaintext HTTP to any non-loopback
+endpoint before constructing a network client**. Only literal IPv4/IPv6
+loopback addresses may use HTTP for disposable local integration fixtures;
+remote benchmarks require HTTPS. Hostnames such as `localhost` are not accepted
+as evidence of loopback routing because DNS resolution is not a security
+boundary. An inherited HTTP proxy is explicitly disabled for local plaintext
+fixtures, preventing bearer/control-plane headers from being forwarded to a
+proxy despite a loopback target. Three regression tests failed before their
+respective fixes and passed after: remote IPv4/IPv6, DNS and deceptive suffixes
+are refused; rejected configuration writes a credential-free `not_run` artifact
+without network access or benchmark publication; and a real local HTTP proxy
+cannot intercept loopback fixture credentials. This is a P0 confidentiality guard, **not**
+proof of a live deployed benchmark, production TLS configuration, benchmark
+quality/latency acceptance, or rollout/recovery readiness.
+
 # P0 — Benchmark and Evidence Baseline
 
 ## P0 contextual memory-corpus and forbidden-evidence qualification (2026-10-31; isolated source branch)
