@@ -694,6 +694,13 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid skill: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Do not register a skill from a valid prefix of an invalid request.
+		// Consuming to EOF also enforces MaxBytesReader on trailing whitespace.
+		var trailing any
+		if err := dec.Decode(&trailing); err != io.EOF {
+			http.Error(w, "invalid skill: expected one JSON document", http.StatusBadRequest)
+			return
+		}
 		if skill.Name == "" {
 			http.Error(w, "skill name required", http.StatusBadRequest)
 			return
@@ -1351,6 +1358,13 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid manifest: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Validate the complete bounded request before signature verification,
+	// registration, receipts, or persistence can have side effects.
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		http.Error(w, "invalid manifest: expected one JSON document", http.StatusBadRequest)
+		return
+	}
 	if manifest.PackageID == "" || manifest.Version == "" {
 		http.Error(w, "package_id and version required", http.StatusBadRequest)
 		return
@@ -1449,6 +1463,13 @@ func (s *extServer) handleInstallDryRun(w http.ResponseWriter, r *http.Request) 
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&manifest); err != nil {
 		http.Error(w, "invalid manifest: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Validate the complete bounded request before signature verification,
+	// registration, receipts, or persistence can have side effects.
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		http.Error(w, "invalid manifest: expected one JSON document", http.StatusBadRequest)
 		return
 	}
 
