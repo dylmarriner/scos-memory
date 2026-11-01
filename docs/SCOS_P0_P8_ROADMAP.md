@@ -1516,7 +1516,8 @@ The publisher now requires HTTPS for all non-loopback destinations, allows
 plaintext only for literal IPv4/IPv6 loopback fixture addresses, and disables
 inherited proxies for those local HTTP requests. The existing strict
 acknowledgement, redirect, URL and header validation remains in place.
-All 22 publisher tests pass locally after the fix. This protects P0 evidence
+All 24 publisher tests pass locally after the fix, including a real IPv6
+loopback publish when supported and a mocked remote HTTPS success path. This protects P0 evidence
 publication transport, **not** proof of live publication, representative
 retrieval quality/latency/cost, deployment TLS configuration, or P0–P8
 acceptance. No production configuration or deployment was changed.
