@@ -38,6 +38,30 @@ Unix-second expiration. These are local source tests, not executed
 failure-injection acceptance against a deployed stack. Merge remains gated
 on updated-head CI/P4, resolved substantive reviews, independent approval
 where branch protection requires it, and post-merge main verification.
+## Release drift doctor review-hardening (2026-11-01; PR #203 source candidate)
+
+Independent review of the read-only release drift doctor exposed that ordinary
+`git status` can rewrite the deployed checkout's `.git/index` on stale file
+metadata, violating the promised no-write contract. It also raised an uncaught
+`UnicodeDecodeError` on non-UTF-8 tracked filenames, returned the wrong helper
+exit code for `unknown`, and documented a relative invocation that fails from
+the stale release checkout. Four new regressions reproduced these defects
+before correction (three failures and one exception). The corrected Git
+subprocess environment sets `GIT_OPTIONAL_LOCKS=0`, decoding failures produce
+sanitized `unknown` JSON with exit 2, the helper maps `unknown` to 2, and the
+runbook explicitly separates the source checkout containing the script from
+the live `--repo` target. Further symlink-loop and inaccessible-directory regressions exercise
+sanitized path errors without exposing a traceback.
+
+All 15 focused tests pass, including real disposable Git repositories proving
+byte-for-byte `.git/index` preservation and invalid-filename handling. Full
+`make test` (isolated Python 3.11 environment), `go vet ./...`, and Git diff
+validation passed on AMD. This is a **source-only PR review correction**:
+no live release checkout, Docker container, database, production deployment,
+paid resource or irreversible migration was changed. Required independent PR
+approval, CI, merge into protected `main`, merged-main verification, runtime
+image parity, backup/recovery qualification and governance §41 remain open.
+
 
 ## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)
 
