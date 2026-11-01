@@ -4,7 +4,23 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
-## §22.7 optional hook destination failure isolation (2026-11-02; source candidate)
+## §22.7 critical abort partial-execution evidence (2026-11-02; source candidate)
+
+A real HTTP regression reproduces loss of earlier tenant-scoped hook outcomes
+when a later mandatory `fail_closed` hook returns HTTP 500. Before correction,
+the handler persisted only the generic `aborted` execution, discarding an
+earlier successful delivery and an optional `failed`/`invalid_endpoint`
+outcome even though the optional breaker counted its failure (RED).
+The dispatcher now returns accumulated results on late errors, retaining nil
+results for preflight/no-prior-delivery failures. The HTTP handler records
+those completed outcomes before its separate `aborted` marker and emits
+per-hook failure metrics even on aborted dispatches (GREEN). A real loopback
+userinfo regression also verifies no outbound request for invalid optional
+endpoints; the optional breaker test now asserts extension health transitions.
+The HTTP 503 fail-closed contract remains unchanged. This is source-level
+integrity evidence, not full §22/§41 acceptance or production recovery proof.
+
+## §22.7 optional hook destination failure isolation (2026-11-02; merged PR #221)
 
 Five real HTTP dispatch regressions reproduced a policy violation: an optional
 `continue` hook with an invalid destination (remote plaintext, unsupported
@@ -17,6 +33,12 @@ counts the failure toward the existing circuit breaker, and continues to
 later hooks including mandatory `fail_closed` hooks. The same five real-HTTP
 cases pass after the fix (GREEN), plus a four-dispatch circuit-breaker
 regression. Mandatory endpoint preflight remains fail-closed and unchanged.
+PR #221 merged at signed main SHA `737442104e8c45952fc9ead0be4873cde3562757`.
+The merged-main `make test`, `go vet ./...`, race-enabled focused tests
+(three repetitions), CI run 41307444295 and P4 run 41307444167 passed.
+CodeRabbit's subsequent review identified a related execution-evidence gap:
+when a later mandatory hook failed, earlier optional-hook results were lost.
+The follow-up below addresses that finding rather than declaring §22 closed.
 This is source-level §22 behavior hardening, not fleet-wide lifecycle coverage,
 §41 governance acceptance, or production rollout/recovery qualification.
 

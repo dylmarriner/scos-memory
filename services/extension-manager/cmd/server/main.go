@@ -961,15 +961,17 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	dispatchStarted := time.Now()
 	results, err := s.dispatchHooks(r.Context(), req)
 	startedAt := dispatchStarted.UTC().Format(time.RFC3339Nano)
-	if err != nil {
-		s.recordExecutions([]*HookExecution{{Event: req.Event, TenantID: req.TenantID, Status: "aborted", Reason: err.Error(), DurationMs: float64(time.Since(dispatchStarted).Microseconds()) / 1000, StartedAt: startedAt}})
-	} else {
-		execs := make([]*HookExecution, 0, len(results))
-		for _, result := range results {
-			execs = append(execs, &HookExecution{Event: req.Event, ExtensionID: result.ExtensionID, TenantID: req.TenantID, Status: result.Status, Reason: result.Reason, DurationMs: result.DurationMs, StartedAt: startedAt})
-		}
-		s.recordExecutions(execs)
+	// Preserve every completed hook's execution evidence even if a later
+	// mandatory hook aborts the overall dispatch. The aborted marker remains
+	// separate so consumers can distinguish partial effects from success.
+	execs := make([]*HookExecution, 0, len(results)+1)
+	for _, result := range results {
+		execs = append(execs, &HookExecution{Event: req.Event, ExtensionID: result.ExtensionID, TenantID: req.TenantID, Status: result.Status, Reason: result.Reason, DurationMs: result.DurationMs, StartedAt: startedAt})
 	}
+	if err != nil {
+		execs = append(execs, &HookExecution{Event: req.Event, TenantID: req.TenantID, Status: "aborted", Reason: err.Error(), DurationMs: float64(time.Since(dispatchStarted).Microseconds()) / 1000, StartedAt: startedAt})
+	}
+	s.recordExecutions(execs)
 	if persistErr := s.persist(r.Context()); persistErr != nil {
 		log.Printf("persist hook executions: %v", persistErr)
 	}
@@ -977,12 +979,6 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	// failures are counted per hook so one failing extension is attributable.
 	serviceMetrics.Observe(telemetry.MetricHookLatency, time.Since(dispatchStarted),
 		map[string]string{"event": req.Event}, telemetry.Correlation{})
-	if err != nil {
-		serviceMetrics.Count(telemetry.MetricHookFailure,
-			map[string]string{"event": req.Event, "reason": "dispatch_error"}, telemetry.Correlation{})
-		http.Error(w, "hook dispatch failed: "+err.Error(), http.StatusServiceUnavailable)
-		return
-	}
 	for _, result := range results {
 		if result.Status == "ok" || result.Status == "succeeded" {
 			continue
@@ -990,6 +986,12 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		serviceMetrics.Count(telemetry.MetricHookFailure, map[string]string{
 			"event": req.Event, "extension": result.ExtensionID, "reason": result.Status,
 		}, telemetry.Correlation{})
+	}
+	if err != nil {
+		serviceMetrics.Count(telemetry.MetricHookFailure,
+			map[string]string{"event": req.Event, "reason": "dispatch_error"}, telemetry.Correlation{})
+		http.Error(w, "hook dispatch failed: "+err.Error(), http.StatusServiceUnavailable)
+		return
 	}
 	writeJSON(w, map[string]any{"event": req.Event, "results": results})
 }
@@ -1172,6 +1174,12 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		}
 	}
 	results := make([]hookDispatchResult, 0, len(targets))
+	partialResults := func() []hookDispatchResult {
+		if len(results) == 0 {
+			return nil
+		}
+		return results
+	}
 	for _, target := range targets {
 		hook := target.hook
 		hookStarted := time.Now()
@@ -1183,7 +1191,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		}
 		if hook.Endpoint == "" {
 			if hook.FallbackPolicy == "fail_closed" {
-				return nil, fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID)
+				return partialResults(), fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID)
 			}
 			done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "skipped", Reason: "hook endpoint is not declared"})
 			continue
@@ -1196,7 +1204,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 				s.mu.Lock()
 				s.setHealthLocked(hook.ExtensionID, "failing")
 				s.mu.Unlock()
-				return nil, fmt.Errorf("critical hook %s has invalid circuit breaker state", hook.ExtensionID)
+				return partialResults(), fmt.Errorf("critical hook %s has invalid circuit breaker state", hook.ExtensionID)
 			}
 			if parseErr == nil && time.Now().UTC().Before(until) {
 				s.mu.Lock()
@@ -1205,7 +1213,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 				// An open circuit prevents an outbound attempt, but it must
 				// never override the extension's mandatory fail-closed policy.
 				if hook.FallbackPolicy == "fail_closed" {
-					return nil, fmt.Errorf("critical hook %s circuit breaker is open", hook.ExtensionID)
+					return partialResults(), fmt.Errorf("critical hook %s circuit breaker is open", hook.ExtensionID)
 				}
 				done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "circuit_open", Reason: "hook circuit breaker is open"})
 				continue
@@ -1229,7 +1237,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		}
 		body, err := json.Marshal(map[string]any{"event": req.Event, "tenant_id": req.TenantID, "principal_id": req.PrincipalID, "payload": req.Payload, "config": target.config})
 		if err != nil {
-			return nil, err
+			return partialResults(), err
 		}
 		timeout := time.Duration(hook.TimeoutMs) * time.Millisecond
 		if timeout <= 0 || timeout > 30*time.Second {
@@ -1247,7 +1255,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		}
 		if err != nil {
 			cancel()
-			return nil, err
+			return partialResults(), err
 		}
 		// The configured endpoint is the only authorized destination for the
 		// tenant-scoped event payload and internal bearer. The default Go
@@ -1285,12 +1293,12 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		fallback := hook.FallbackPolicy
 		s.mu.Unlock()
 		if fallback == "fail_closed" {
-			return nil, fmt.Errorf("critical hook %s failed", hook.ExtensionID)
+			return partialResults(), fmt.Errorf("critical hook %s failed", hook.ExtensionID)
 		}
 		done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})
 	}
 	if err := s.persist(parent); err != nil {
-		return nil, err
+		return partialResults(), err
 	}
 	return results, nil
 }
