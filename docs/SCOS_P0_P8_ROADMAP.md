@@ -3206,3 +3206,27 @@ and real loopback HTTP hook dispatch that stays on the stable endpoint after
 cohort tampering. This is source-level §22 integrity hardening only. §22
 deployed lifecycle, §25 integration, §32 metrics, representative P0 benchmarks,
 P3–P8 acceptance, live rollout/recovery and §41 governance remain open.
+
+### 2026-11-02 §22 in-process full-state persistence serialization (TDD source slice)
+
+Extension PATCH/enable/disable/install/canary mutations already held the
+operator mutation lock across their persistence calls, but standalone skill
+creation/deletion and hook-dispatch state persistence did not. These paths
+serialize the *entire* extension-manager snapshot. A concurrent skill or hook
+write could therefore commit a tentative operator change while its own
+persistence was still pending, defeating a subsequent compensation rollback.
+
+Three synchronized fault-injection regressions reproduced this race **RED**
+against merged main: hook dispatch, skill creation and skill deletion entered
+persistence while a PATCH write was blocked. The same tests pass **GREEN** after
+serializing standalone skill mutations through their durable write and taking
+the operator lock around the hook-dispatch persistence call. Hook HTTP delivery
+itself remains outside the operator lock. Five focused repetitions passed.
+
+This closes the identified **single-process concurrent snapshot writer**
+window only. The pending operator persistence compensation PR must separately
+reconcile ambiguous PostgreSQL commit outcomes and protect failed mutation
+rollback. Cross-instance compare-and-swap, tentative state visibility, local
+store versus PostgreSQL ordering, deployed §22 lifecycle, §25 integration,
+§32 metrics, P0 benchmarks, P3–P8 acceptance and §41 governance remain open.
+No production deployment or migration was performed.

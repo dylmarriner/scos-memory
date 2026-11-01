@@ -733,6 +733,10 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "extension skills are registered by installing the extension", http.StatusBadRequest)
 			return
 		}
+		// Serialize the mutation through its durable snapshot. Otherwise a
+		// concurrent operator rollback can be persisted by this skill write.
+		s.operatorMutationMu.Lock()
+		defer s.operatorMutationMu.Unlock()
 		s.mu.Lock()
 		s.nextID++
 		skill.ID = fmt.Sprintf("skill-%d", s.nextID)
@@ -770,6 +774,9 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, view)
 
 	case http.MethodDelete:
+		// Keep deletion and its persistence atomic with operator changes.
+		s.operatorMutationMu.Lock()
+		defer s.operatorMutationMu.Unlock()
 		s.mu.Lock()
 		skill, ok := s.skills[id]
 		if !ok {
@@ -1379,7 +1386,14 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		}
 		done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})
 	}
-	if err := s.persist(parent); err != nil {
+	// Hook health can change while an operator write is pending, but a
+	// hook's full-state persistence must not snapshot uncommitted operator
+	// changes. Take the same mutation lock only for the durable write, not
+	// during outbound hook delivery.
+	s.operatorMutationMu.Lock()
+	err := s.persist(parent)
+	s.operatorMutationMu.Unlock()
+	if err != nil {
 		return partialResults(), &hookPersistenceFailure{cause: err}
 	}
 	return results, nil
