@@ -1484,6 +1484,19 @@ quality metrics and zero forbidden exposure were not changed. This is only
 **offline P0/P4 evidence integrity**. Realistic live retrieval, model-space,
 latency, tenant isolation and production acceptance remain unverified.
 
+## P0 benchmark verdict and CI evidence hardening (2026-11-01)
+
+- Source-only hardening: `benchmarks.publish.run_from_cases` rejects explicitly
+  malformed `passed`/`task_success` values instead of silently dropping the
+  judgement or treating another field as a successful fallback. Truly absent
+  verdicts remain intentionally unjudged; measured boolean verdicts remain
+  unchanged. TDD regression reproduced 14 invalid-verdict acceptance failures
+  before the correction.
+- Add the benchmark publisher and frozen acceptance-artifact test suites to
+  required Python CI and local `make test`; the parity test guards both paths.
+  This is source/CI evidence, **not** live P0 retrieval or production rollout
+  qualification. Full §41 acceptance remains open.
+
 ## P0 frozen benchmark evidence integrity (2026-10-27)
 
 The isolated lexical smoke quality gate now rejects duplicate JSON keys at

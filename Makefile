@@ -21,6 +21,7 @@ test:
 	PYTHONPATH=packages/benchmark-harness/python python3 -m unittest discover -s packages/benchmark-harness/python/tests -p 'test_*.py' -v
 	python3 -m unittest discover -s tests -p test_benchmark_ranking_uniqueness.py -v
 	python3 -m unittest discover -s tests -p test_benchmark_harness.py -v
+	python3 -m unittest discover -s tests -p test_benchmark_acceptance.py -v
 	python3 -m unittest discover -s tests -p test_benchmark_suite_schema.py -v
 	python3 -m unittest discover -s tests -p test_p0_contextual_evidence.py -v
 	python3 -m unittest discover -s tests -p test_p0_memory_corpus.py -v

@@ -75,6 +75,28 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(run["cases"][1], {"case_id": "c2", "latency_ms": 3.0, "scores": {"recall": 0.5}, "passed": False})
         self.assertNotIn("total_cases", run)
 
+    def test_explicit_invalid_case_verdicts_cannot_be_published_as_unjudged(self):
+        # A malformed explicit verdict must not disappear from the judged
+        # denominator, or fall through to a contradictory task_success value.
+        for field in ("passed", "task_success"):
+            for invalid in (None, "true", "false", 1, 0, [], {}):
+                with self.subTest(field=field, invalid=repr(invalid)):
+                    case = {"case_id": "c1", "latency_ms": 1.0, field: invalid}
+                    if field == "passed":
+                        case["task_success"] = True
+                    with self.assertRaisesRegex(ValueError, "verdict"):
+                        run_from_cases("suite", [case])
+        self.assertEqual(_Collector.received, [])
+        self.assertEqual(run_from_cases("suite", [
+            {"case_id": "unjudged", "latency_ms": 0},
+            {"case_id": "failed", "latency_ms": 1, "passed": False},
+            {"case_id": "successful", "latency_ms": 2, "task_success": True},
+        ])["cases"], [
+            {"case_id": "unjudged", "latency_ms": 0.0},
+            {"case_id": "failed", "latency_ms": 1.0, "passed": False},
+            {"case_id": "successful", "latency_ms": 2.0, "passed": True},
+        ])
+
     def test_run_from_cases_rejects_nonfinite_or_negative_measurements(self):
         invalid_cases = [
             ("nan latency", {"latency_ms": float("nan")}),

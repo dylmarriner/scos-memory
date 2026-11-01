@@ -85,6 +85,13 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
                    if isinstance(v, (int, float)) and not isinstance(v, bool)}
         if numeric:
             item["scores"] = numeric
+        # An explicit but malformed verdict is not an unjudged case.
+        # Silently omitting it changes the observability pass-rate denominator;
+        # falling through to task_success can even turn a malformed failure
+        # into a published success. Only absent verdicts are unjudged.
+        for verdict_key in ("passed", "task_success"):
+            if verdict_key in case and not isinstance(case[verdict_key], bool):
+                raise ValueError(f"benchmark {verdict_key} verdict must be boolean")
         if isinstance(case.get("passed"), bool):
             item["passed"] = case["passed"]
         elif isinstance(case.get("task_success"), bool):
