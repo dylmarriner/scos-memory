@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -98,8 +99,32 @@ func TestOptionalInvalidEndpointOpensCircuitWithoutBlockingOtherHooks(t *testing
 		if results[0].Status != want {
 			t.Fatalf("dispatch %d invalid hook status=%q, want %q", i, results[0].Status, want)
 		}
+		if i == 0 && srv.extensions["invalid"].Health != "failing" {
+			t.Fatalf("first invalid destination should mark extension failing: %q", srv.extensions["invalid"].Health)
+		}
+		if i == 2 && srv.extensions["invalid"].Health != "circuit_open" {
+			t.Fatalf("third invalid destination should open extension circuit: %q", srv.extensions["invalid"].Health)
+		}
 	}
 	if invalid.ConsecutiveFailures != 3 || invalid.CircuitOpenUntil == "" || later.Load() != 4 {
 		t.Fatalf("invalid endpoint breaker/continuation incorrect: failures=%d breaker=%q later=%d", invalid.ConsecutiveFailures, invalid.CircuitOpenUntil, later.Load())
+	}
+}
+
+// A userinfo URL that otherwise targets a real loopback listener is rejected
+// before any network request, not merely converted to a failed result later.
+func TestOptionalUserinfoEndpointMakesNoOutboundRequest(t *testing.T) {
+	var calls atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer endpoint.Close()
+	srv := newExtServer()
+	enableForTest(srv, "invalid")
+	srv.hooks["on_checkpoint"] = []*Hook{{Event: "on_checkpoint", ExtensionID: "invalid", Endpoint: strings.Replace(endpoint.URL, "http://", "http://user:pass@", 1), FallbackPolicy: "continue"}}
+	results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{Event: "on_checkpoint", TenantID: "tenant-a", PrincipalID: "principal-a"})
+	if err != nil || len(results) != 1 || results[0].Status != "failed" || results[0].Reason != "invalid_endpoint" || calls.Load() != 0 {
+		t.Fatalf("userinfo endpoint was not rejected before outbound I/O: results=%+v err=%v calls=%d", results, err, calls.Load())
 	}
 }
