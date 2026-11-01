@@ -2989,3 +2989,21 @@ The seven-case frozen P4 lexical baseline was independently re-recorded after th
 **2026-11-01 P0 short-bearer reflection follow-up (isolated source candidate):** A separate real HTTP 201 regression reproduced a remaining leak when the configured service token was shorter than eight characters and embedded in the returned run ID. The first publisher guard had exempted short substring matches to avoid fixture false positives, but no minimum credential length is enforced. The follow-up now rejects direct token substrings regardless of length; valid acknowledgements remain accepted. This is source-only confidentiality hardening and does not close live P0 performance or production qualification gates.
 
 **2026-11-01 P0 publisher reflection review correction:** CodeRabbit identified a valid false positive: a configured short token such as 'run' matched the fixed protocol key 'run_id' in every otherwise valid acknowledgement. Two real-HTTP regression assertions failed RED; the detector now exempts only the fixed top-level 'run_id' and 'created' key names, still checks their values and every untrusted/nested key, and retains short-token substring protection. This is review-driven source hardening, not deployed acceptance evidence.
+
+### 2026-11-02 §22 extension installation and skill-registration request integrity (source-only)
+
+The extension manager's signed-manifest installation, dry-run verdict and direct
+skill-registration handlers previously accepted the first valid JSON document
+without consuming the rest of the bounded HTTP body. A second document,
+malformed suffix or oversized whitespace could be ignored while installation
+state/receipts/skills were changed or a misleading dry-run acceptance verdict
+was returned. Real loopback HTTP TDD reproduced **10 failing assertions**
+across these three routes before correction (RED). Each route now requires
+exactly one complete JSON document and enforces its existing body-size limit
+through EOF before producing a verdict or mutating state. All **13 regression
+subcases** pass after correction (GREEN), including valid trailing-whitespace
+controls; rejected requests leave extension/receipt/skill state untouched.
+Focused race-enabled regressions pass twice. This is §22 source integrity
+evidence only. It is **not** proof of deployed extension-hook integration,
+representative P0 model benchmarks, production rollout/recovery or §41
+completion. PR review, merged-main tests and CI remain separately gated.
