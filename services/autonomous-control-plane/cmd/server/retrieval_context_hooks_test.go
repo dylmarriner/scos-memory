@@ -84,7 +84,7 @@ func TestRetrievalAndContextLifecycleHooksOrder(t *testing.T) {
 	if status != runCompleted {
 		t.Fatalf("status %s; events %v", status, got)
 	}
-	want := []string{"pre_turn", "on_turn_start", "on_before_retrieval", "/v1/retrieve", "on_after_retrieval", "on_before_context_compile", "/v1/context/compile", "on_after_context_compile", "on_before_model", "on_after_model", "on_checkpoint", "post_turn"}
+	want := []string{"on_turn_received", "pre_turn", "on_turn_start", "on_before_retrieval", "/v1/retrieve", "on_after_retrieval", "on_before_context_compile", "/v1/context/compile", "on_after_context_compile", "on_before_model", "on_after_model", "on_checkpoint", "post_turn"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %v; want %v", got, want)
 	}
