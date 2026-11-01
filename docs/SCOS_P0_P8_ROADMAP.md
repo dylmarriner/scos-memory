@@ -4,6 +4,20 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.6 single-document hook-dispatch input integrity (2026-11-02; source candidate)
+
+Real loopback HTTP TDD reproduced that a valid hook-dispatch JSON object followed
+by a second JSON object, a scalar or malformed trailing bytes returned HTTP 200
+and delivered the tenant-scoped event to an extension (three RED cases).
+The dispatch handler now requires EOF after the first JSON object, accepting
+trailing whitespace but rejecting extra documents/bytes with HTTP 400 before
+identity resolution, outbound delivery, execution-ledger writes or metrics.
+The existing 1 MiB request-body limit remains in force across both decodes.
+Four real-HTTP regression cases pass GREEN, including a valid whitespace-only
+control. This is source-only §22 input-integrity hardening; broader hook coverage,
+§32 metrics qualification, §25 integration, representative P0 evidence, §41
+acceptance and production rollout/recovery remain open.
+
 ## §22.7 attributable mandatory-hook failure evidence (2026-11-02; source candidate)
 
 TDD RED reproduced an audit/telemetry attribution gap: a mandatory extension

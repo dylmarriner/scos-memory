@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -939,6 +940,13 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid hook dispatch: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Reject trailing JSON documents or malformed bytes before any hook can
+	// receive tenant data. A single Decode otherwise ignores the remainder.
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		http.Error(w, "invalid hook dispatch: expected one JSON document", http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(req.Event) == "" {
