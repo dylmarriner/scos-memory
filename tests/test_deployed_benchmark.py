@@ -15,7 +15,8 @@ from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from benchmarks.deployed import BenchmarkConfig, DeployedCodeClient, config_from_environment  # noqa: E402
+from benchmarks.deployed import (BenchmarkConfig, DeployedCodeClient, MAX_JSON_DEPTH,
+                                 _exceeds_json_depth, config_from_environment)  # noqa: E402
 from benchmarks.run_deployed import DeployedPreflightError, NOT_RUN_EXIT, fixture_files, fixture_identity, run  # noqa: E402
 from benchmarks.run_deployed import main as run_deployed_main  # noqa: E402
 
@@ -430,6 +431,14 @@ class DeployedCodeClientTests(unittest.TestCase):
             worker.join()
             server.server_close()
 
+    def test_json_nesting_limit_is_stable_across_python_versions(self):
+        allowed: object = 0
+        for _ in range(MAX_JSON_DEPTH):
+            allowed = [allowed]
+        self.assertFalse(_exceeds_json_depth(allowed))
+        self.assertTrue(_exceeds_json_depth([allowed]))
+        self.assertFalse(_exceeds_json_depth({"nested": [1, 2, {"safe": True}]}))
+
     def test_real_http_rejects_ambiguous_and_nonfinite_json_evidence(self):
         class UntrustedJSONHandler(BaseHTTPRequestHandler):
             raw_body = b""
@@ -463,6 +472,9 @@ class DeployedCodeClientTests(unittest.TestCase):
                 b'{"status":"ready","diagnostics":-1e999}',
                 b'{"status":"ready","metadata":{"nested":[1e999]}}',
                 b'{"status":"ready","metadata":{"nested":[-1e999]}}',
+                # A syntactically valid, deeply nested object must be
+                # rejected at a fixed depth independent of Python version.
+                b'{"status":"ready","metadata":' + b'[' * 200 + b'0' + b']' * 200 + b'}',
                 # Valid JSON can still exceed the parser's nesting limit.
                 # An uncontrolled RecursionError would abort the run before
                 # the benchmark failure artifact could be written.

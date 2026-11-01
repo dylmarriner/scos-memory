@@ -156,6 +156,23 @@ def _parse_finite_json_float(value: str) -> float:
     return number
 
 
+# Explicitly bound successful JSON nesting independent of the Python
+# interpreter's evolving json decoder recursion limit.
+MAX_JSON_DEPTH = 128
+
+
+def _exceeds_json_depth(value: Any) -> bool:
+    pending = [(value, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if isinstance(current, (dict, list)):
+            if depth >= MAX_JSON_DEPTH:
+                return True
+            children = current.values() if isinstance(current, dict) else current
+            pending.extend((child, depth + 1) for child in children)
+    return False
+
+
 def _contains_credential_echo(value: Any, credentials: tuple[str, ...]) -> bool:
     """Detect credential reflection even inside otherwise valid nested JSON.
 
@@ -235,6 +252,8 @@ class DeployedCodeClient:
                 parse_constant=_reject_nonfinite_json_constant,
                 parse_float=_parse_finite_json_float,
             )
+            if _exceeds_json_depth(value):
+                raise ValueError("JSON nesting exceeds the benchmark evidence limit")
         except (UnicodeDecodeError, ValueError, RecursionError):
             # Deeply nested but syntactically valid JSON can exceed Python's
             # parser recursion limit. Fail as a case/preflight error rather
