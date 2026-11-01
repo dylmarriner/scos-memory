@@ -829,6 +829,8 @@ type HookExecution struct {
 	ID          string  `json:"id"`
 	Event       string  `json:"event"`
 	ExtensionID string  `json:"extension_id,omitempty"`
+	Version     string  `json:"version,omitempty"`
+	Channel     string  `json:"channel,omitempty"`
 	TenantID    string  `json:"tenant_id"`
 	Status      string  `json:"status"`
 	Reason      string  `json:"reason,omitempty"`
@@ -966,7 +968,7 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	// separate so consumers can distinguish partial effects from success.
 	execs := make([]*HookExecution, 0, len(results)+1)
 	for _, result := range results {
-		execs = append(execs, &HookExecution{Event: req.Event, ExtensionID: result.ExtensionID, TenantID: req.TenantID, Status: result.Status, Reason: result.Reason, DurationMs: result.DurationMs, StartedAt: startedAt})
+		execs = append(execs, &HookExecution{Event: req.Event, ExtensionID: result.ExtensionID, Version: result.Version, Channel: result.Channel, TenantID: req.TenantID, Status: result.Status, Reason: result.Reason, DurationMs: result.DurationMs, StartedAt: startedAt})
 	}
 	if err != nil {
 		execs = append(execs, &HookExecution{Event: req.Event, TenantID: req.TenantID, Status: "aborted", Reason: err.Error(), DurationMs: float64(time.Since(dispatchStarted).Microseconds()) / 1000, StartedAt: startedAt})

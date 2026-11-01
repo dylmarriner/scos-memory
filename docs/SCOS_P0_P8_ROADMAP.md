@@ -20,8 +20,11 @@ alongside its existing error for each of these cases, without leaking endpoint
 URLs, response bodies or credentials. The handler retains the failure and the
 separate abort marker under the authenticated tenant and counts the per-hook
 failure; fail-closed HTTP 503, preflight-before-side-effects, and redirect
-containment remain intact. Real loopback HTTP 500/302 and invalid-preflight
-regressions cover this behavior. Source tests and review are separate from
+containment remain intact. Review found that the recorded result's version and
+stable/canary channel were not persisted in the audit ledger. Additional RED/GREEN
+real-HTTP regressions verify the selected canary failure and stable success
+retain distinct version/channel evidence through tenant-scoped readback. Real
+loopback HTTP 500/302 and invalid-preflight regressions cover this behavior. Source tests and review are separate from
 merged-main CI, representative P0 measurements, complete §22/§32 coverage,
 §41 acceptance and production rollout/recovery evidence.
 
