@@ -5,6 +5,143 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 untrusted benchmark transport and parser-depth handling (2026-11-01; PR #200 follow-up, not merged)
+
+Two isolated TDD regressions exposed evidence and credential-handling defects:
+`publish()` interpolated the untrusted `URLError.reason` into its exception
+and chained the original exception, allowing a transport/proxy error echoing
+the Authorization token to leak into CI tracebacks (RED). A real localhost
+HTTP 200 readiness response with deeply nested, otherwise valid JSON raised
+an uncontrolled `RecursionError` in the deployed client, aborting the runner
+instead of writing its failure artifact (RED). The publisher now emits a
+fixed, credential-safe transport diagnostic with a suppressed exception chain;
+the deployed parser maps recursion-depth failures to a controlled `RuntimeError`
+without exposing the untrusted response. An end-to-end CLI regression verifies
+that deeply nested readiness produces a durable `failed` preflight artifact,
+never seeds snapshots, never publishes, and never includes the bearer (GREEN).
+AMD verification: 51 combined publisher/deployed tests, complete `make test`,
+`go vet ./...`, 42 P4 fixture/gate tests, unchanged frozen seven-case
+lexical gate and `git diff --check` passed. The §41 checker still returns
+FAIL because the governance master table is PARTIAL. These are source-only
+P0 benchmark integrity protections. They do not qualify
+representative model quality, latency/cost, merged-main acceptance, production
+rollout/recovery, or §41 completion.
+
+## P0 benchmark publication acknowledgement integrity (2026-11-01; PR #200 follow-up, not merged)
+
+The shared publisher previously treated any successful HTTP response as proof of
+recording, accepting an empty/malformed response, arrays, missing or invalid
+`run_id` and `created` fields, and arbitrarily large response bodies. This
+could report a benchmark as published even without a usable server receipt,
+raise uncontrolled JSON decoding errors, or exhaust publisher memory on an
+untrusted response. Real localhost HTTP tests reproduced eight incorrect
+acceptances and three uncontrolled errors before correction (RED). The
+publisher now caps acknowledgement reads at 1 MiB, validates the receipt's
+nonempty bounded run ID and boolean `created` field, rejects non-finite JSON
+constants, and returns fixed, credential-safe errors for malformed responses
+(GREEN). The legitimate `created: false` idempotent response remains supported.
+Verification on AMD: all 12 real-HTTP publisher test methods (including 14
+invalid acknowledgement variants), complete `make test`, `go vet ./...`, all
+42 P4 fixture/gate tests, frozen seven-case lexical gate and `git diff --check`
+passed. The independent §41 checker still correctly returns FAIL/PARTIAL.
+This is source-only benchmark evidence integrity work. Representative P0
+benchmarks, merged-main acceptance, production rollout/recovery and §41
+completion remain open.
+
+## P0 benchmark publication finite-measurement integrity (2026-11-01; PR #200 follow-up, not merged)
+
+The shared publisher accepted NaN/infinite or negative case latency and wall-time
+measurements, and NaN/infinite scores. Python's default JSON encoder then
+emitted nonstandard `NaN`/`Infinity` literals to the observability endpoint.
+Oversized integers could also raise uncontrolled `OverflowError` while building
+case evidence. A new parameterized unit regression reproduced 13 failed
+assertions and three errors before correction (RED), including three real
+localhost HTTP posts of nonfinite scores that incorrectly succeeded. Case
+measurements now require finite values (and nonnegative durations), with
+oversized integer conversion failures mapped to `ValueError`. Publication
+serializes with `allow_nan=False` before network I/O and rejects malformed
+nested JSON without sending any request (GREEN, nine publisher tests, full `make test`,
+`go vet ./...`, and `git diff --check` on isolated AMD worktree).
+This protects source-level benchmark evidence only; it does not establish
+representative P0 quality/latency/cost acceptance, merged-main qualification,
+production rollout/recovery or §41 completion.
+
+## P0 benchmark observability publication credential isolation (2026-11-01; PR #200 follow-up, not merged)
+
+The shared benchmark publisher previously copied the first 500 bytes of an
+untrusted HTTP error response into its exception. An observability endpoint
+could echo the Authorization header in that body, exposing
+SCOS_INTERNAL_SERVICE_TOKEN through CI logs. Python's default HTTP redirect
+handler also followed a POST HTTP 302 as a GET and forwarded the bearer to
+the redirect destination. Two localhost real-HTTP regressions reproduced
+both defects (RED). The publisher now rejects all redirects and never reads
+or serializes HTTP error bodies, while preserving HTTP status diagnostics
+(GREEN, all six publisher unit tests). This protects source benchmark
+publication only: no live observability service was contacted, no benchmark
+quality/latency acceptance was measured, and production rollout/recovery
+and §41 governance acceptance remain open.
+
+## P0 deployed timeout evidence validation (2026-10-31; isolated TDD candidate)
+
+The deployed benchmark accepted non-finite timeout configuration (`NaN`,
+`Infinity`) from environment variables, and its direct configuration accepted
+nonpositive timeouts. `NaN` bypassed the previous `<= 0` check, allowing
+invalid transport timeouts and non-standard JSON metadata. Two parameterized
+unit regressions reproduced eight failures before correction (RED). Both the
+environment parser and direct client configuration now require a positive,
+finite numeric timeout (GREEN); HTTP response handling remains unchanged.
+Review follow-up: an oversized integer (`10 ** 1000`) made
+`math.isfinite` raise an uncontrolled `OverflowError`; an isolated regression
+first reproduced it (RED), and direct configuration now maps it to the same
+controlled `RuntimeError` as other invalid timeouts (GREEN). This is benchmark-input
+integrity hardening, **not** representative
+P0 model/latency/cost evidence, production acceptance or P0–P8 completion.
+
+## P0 deployed request-header integrity (2026-11-01; PR #200 follow-up, not merged)
+
+A deployed benchmark configuration accepted control characters and non-ASCII
+characters in bearer, tenant, principal and control-plane HTTP header values.
+`http.client` can reject these only during network I/O, escaping the runner's
+preflight exception handling without a durable benchmark artifact. Environment
+loading also silently stripped trailing newline controls from credentials.
+Twenty field/control combinations failed the new configuration regression and
+the CLI did not emit its expected `not_run` artifact (RED); two environment
+trailing-newline regressions also failed (RED). The configuration now rejects
+non-printable/non-ASCII header values before network access and preserves raw
+environment credentials for validation (GREEN). Existing real-HTTP credential,
+redirect, preflight and failure-artifact regressions remain part of the focused
+suite. This is P0 input/evidence integrity hardening only: no deployed service
+was contacted, no representative BGE benchmark was run, and §41 remains open.
+
+## P0 deployed HTTP JSON exponent-overflow integrity (2026-11-01; PR #200 follow-up, not merged)
+
+A real HTTP 200 readiness response containing `1e999` or `-1e999` in an
+otherwise unused nested field was accepted as successful evidence: Python's
+JSON parser converted those numeric literals to infinite floats. Four
+regression subcases reproduced acceptance before the fix (RED), then passed
+(GREEN) after bounding every parsed JSON float to a finite value. A valid
+`1.25e2` response remains accepted. This is source-only deployed benchmark
+evidence hardening, **not** representative P0 acceptance, a live benchmark,
+merged-main verification, or production rollout/recovery qualification.
+
+## P0 deployed snapshot-diff shape integrity (2026-11-01; PR #200 follow-up, not merged)
+
+A deployed HTTP 200 snapshot-diff response could supply `Renamed` as a string,
+non-object entries or object/list-valued `Path`/`PreviousPath`. The benchmark's
+rename scoring then raised `AttributeError` or `TypeError`, terminating the
+whole run without writing the required failed-case artifact. Four real-HTTP
+shape regressions and an end-to-end CLI failure-artifact regression reproduced
+five errors before correction (RED). Review follow-up added two real-HTTP
+regressions for omitted `Path` and `PreviousPath` fields; both reject malformed
+evidence without escaping case-level error handling. The deployed client now rejects malformed
+rename entries as controlled, credential-safe `RuntimeError`s, so the case
+fails without falsely passing and the CLI persists its measured failure
+artifact (GREEN, 30 focused tests). The complete `make test` target,
+`go vet ./...`, all 42 P4 fixture tests and `git diff --check` also passed
+on AMD. No deployed service was contacted. This
+closes only a P0 benchmark-evidence integrity defect; representative P0
+performance, §41 acceptance and production rollout/recovery remain open.
+
 ## Shared signed-claims expiration enforcement (2026-10-31; source candidate)
 
 The shared auth package previously accepted HMAC-signed identity tokens with
@@ -2500,6 +2637,18 @@ For each phase:
 - [ ] source proof, CI proof and live-deployment proof are labelled separately;
 - [ ] implementation is merged to `main`;
 - [ ] `main` is re-read after merge to verify expected state actually landed.
+
+**2026-11-01 P0 publisher review hardening (PR #200, source-only):** RED/GREEN localhost HTTP regression confirms an upstream HTTP 503 reason phrase containing the bearer no longer appears in the formatted exception traceback (`raise ... from None`); explicit malformed `scores` and fallback `metrics` cannot be silently discarded by falsy selection. Zero case latency, valid dictionary scores, `None` fallback and unused malformed metrics are covered. Signed source commit and PR-head CI evidence must be checked; independent review and merge to `main` remain required; this does not qualify live P0 or §41 acceptance.
+
+**2026-11-01 P0 publication acknowledgement and case-identity integrity (PR #200, source-only):** TDD RED: 13 assertions failed on ambiguous real-HTTP acknowledgements and invalid case identities. GREEN: 15 publisher tests passed, including duplicate JSON keys (nested and top-level), HTTP 200/201 versus `created` mismatch, non-string/blank IDs and duplicate case IDs; legitimate new-run and idempotent responses remain accepted. The complete `make test` suite passed with the existing Python 3.11/Pydantic venv; `go vet ./...` and the P4 offline fixture checks passed independently. This is not representative P0 benchmarking, merged-main verification, production publication evidence or §41 completion. Independent approval remains required before merging.
+
+**2026-11-01 P0 required-latency evidence integrity (PR #200, source-only; NOT deployed):** TDD RED: a real localhost HTTP collector accepted two invalid benchmark runs because missing `latency_ms` silently became `0.0` and a numeric string was coerced into a measurement. The publisher now requires every case to carry an explicit numeric (non-boolean), finite, nonnegative latency, retaining valid measured zero. The HTTP regression passes GREEN and verifies invalid cases never reach the collector. Existing score tests now supply explicit zero latency so they continue to test their intended score contract. All 16 publisher tests, 18 benchmark acceptance fixture tests, full `make test` (53 Go package results plus Python/schema/governance structural checks), `go vet ./...`, and `git diff --check` passed on AMD using the existing Python 3.11 venv. The §41 checker still fails on the PARTIAL governance master table. This fixes the Python publishing path only; independent approval, merged-main verification, representative live P0 measurement, direct API input-hardening review and production rollout/recovery evidence remain separate gates.
+
+**2026-11-01 P0 publish-acknowledgement exponent-overflow integrity (PR #200, source-only; NOT deployed):** Three real localhost HTTP regressions reproduced Python JSON decoding `1e999` and `-1e999` to non-finite float values in top-level, nested-object and array acknowledgement fields despite the existing `parse_constant` guard (RED, three failures). The publisher now rejects non-finite JSON floats at parse time using a finite-number parser callback, while retaining valid `1e308` and the strict run ID, creation-status, duplicate-key, response-size and credential-safety contracts (GREEN, 17 focused publisher tests). The complete `make test` suite, `go vet ./...`, all 42 P4 fixture/gate tests, the unchanged seven-case offline lexical baseline and `git diff --check` passed on AMD in an isolated worktree. The §41 checker still reports FAIL/PARTIAL. This is response-evidence hardening, **not** representative P0 benchmarking, a live publication proof, independent PR approval, merged-main verification or §41 acceptance.
+
+**2026-11-01 P0 deployed-client HTTP exception-chain credential redaction (PR #200, source-only; NOT deployed):** A real localhost HTTP 503 regression reproduced the deployed benchmark client displaying both the bearer and control-plane credentials when an upstream status reason reflected request headers. Two transport-error regressions also reproduced credential exposure in formatted URLError and TimeoutError exception chains (3 RED assertions). The deployed client now reports bounded method/path/status diagnostics while suppressing untrusted HTTP/proxy/socket exception causes in rendered tracebacks. Both new regressions and the complete 32-test deployed benchmark suite pass GREEN. This is a source-level confidentiality fix; it does not establish representative P0 model performance, deployed publication evidence, merged-main qualification, production rollout/recovery or §41 acceptance. Independent review and branch-protection gates remain mandatory.
+
+**2026-11-01 P0 publication destination/header integrity (PR #200, source-only; NOT deployed):** A real localhost HTTP 201 collector accepted POSTs to `/` and query-modified paths when `SCOS_BENCHMARK_PUBLISH_URL` contained a fragment or query, and the publisher falsely treated those acknowledgements as persisted benchmark evidence (TDD RED: four ambiguous URL variants, plus unvalidated userinfo and malformed-port cases). Malformed bearer header bytes also escaped as uncontrolled HTTP-client errors (TDD RED). The publisher now validates the base URL's HTTP(S) authority before any request, rejects userinfo, query, fragment, control bytes and invalid ports, and validates printable ASCII bearer bytes before constructing headers. A legitimate ingress path prefix remains supported. Two focused localhost regressions and the complete 20-test publisher suite pass GREEN. This prevents false publication acknowledgements and uncontrolled malformed-header errors; representative live P0 measurement, independent approval, merged-main verification, production rollout/recovery and §41 qualification remain separate gates.
 
 ## Immediate milestone
 

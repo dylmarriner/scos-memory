@@ -10,10 +10,12 @@ a run that was meant to be recorded is never silently dropped.
 from __future__ import annotations
 
 import json
+import math
 import os
 import ssl
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any
@@ -29,6 +31,20 @@ def _source_sha() -> str:
         return ""
 
 
+def _finite_measurement(value: Any, *, label: str, nonnegative: bool = False) -> float:
+    """Reject non-finite/overflowing measurements before evidence is published."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"benchmark {label} must be a finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"benchmark {label} must be a finite number") from exc
+    if not math.isfinite(number) or (nonnegative and number < 0):
+        raise ValueError(f"benchmark {label} must be finite and nonnegative" if nonnegative
+                         else f"benchmark {label} must be finite")
+    return number
+
+
 def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: str = "", mode: str = "",
                    wall_time_ms: float = 0.0, recorded_at: str | None = None) -> dict[str, Any]:
     """Build the observability BenchmarkRun payload from measured cases.
@@ -38,13 +54,34 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
     service to derive from the cases.
     """
     out_cases = []
+    seen_case_ids: set[str] = set()
     for case in cases:
-        scores = case.get("scores") or case.get("metrics") or {}
+        # Never turn missing or non-string identities into apparently valid
+        # evidence IDs (e.g. None -> "None" or False -> "False").
+        case_id = case.get("case_id")
+        if not isinstance(case_id, str) or not case_id.strip():
+            raise ValueError("benchmark case_id must be a nonempty string")
+        if case_id in seen_case_ids:
+            raise ValueError(f"duplicate case_id {case_id!r}")
+        seen_case_ids.add(case_id)
+        if "latency_ms" not in case:
+            raise ValueError("benchmark case latency_ms is required")
+        # Validate explicit scores before the fallback: []/0/False/"" must not
+        # silently become an empty measurement set.
+        scores = case.get("scores")
+        if scores is not None and not isinstance(scores, dict):
+            raise ValueError("benchmark scores must be an object")
+        if not scores:
+            scores = case.get("metrics")
+            if scores is not None and not isinstance(scores, dict):
+                raise ValueError("benchmark scores must be an object")
+        scores = scores or {}
         item: dict[str, Any] = {
-            "case_id": str(case["case_id"]),
-            "latency_ms": float(case.get("latency_ms", 0.0)),
+            "case_id": case_id,
+            "latency_ms": _finite_measurement(case["latency_ms"], label="case latency", nonnegative=True),
         }
-        numeric = {k: float(v) for k, v in scores.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        numeric = {k: _finite_measurement(v, label="case score") for k, v in scores.items()
+                   if isinstance(v, (int, float)) and not isinstance(v, bool)}
         if numeric:
             item["scores"] = numeric
         if isinstance(case.get("passed"), bool):
@@ -55,7 +92,7 @@ def run_from_cases(suite: str, cases: list[dict[str, Any]], *, schema_version: s
     payload: dict[str, Any] = {
         "suite": suite,
         "recorded_at": recorded_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "wall_time_ms": float(wall_time_ms),
+        "wall_time_ms": _finite_measurement(wall_time_ms, label="wall time", nonnegative=True),
         "cases": out_cases,
     }
     if schema_version:
@@ -75,28 +112,113 @@ def _ssl_context() -> ssl.SSLContext | None:
     return None
 
 
+_MAX_PUBLISH_ACK_BYTES = 1 << 20
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON constant")
+
+
+def _parse_finite_json_float(raw: str) -> float:
+    """Reject exponent overflow at parse time, including in nested fields."""
+    number = float(raw)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous acknowledgements, including nested duplicate keys."""
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON key")
+        obj[key] = value
+    return obj
+
+
+class _RejectRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward the observability bearer to a redirect destination."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 def publish(run: dict[str, Any], base_url: str | None = None, token: str | None = None, timeout: float = 15.0) -> dict[str, Any] | None:
     """POST a run to observability. Returns the service response, or None
     when publishing is not configured."""
     base_url = (base_url or os.getenv("SCOS_BENCHMARK_PUBLISH_URL", "")).strip().rstrip("/")
     if not base_url:
         return None
-    if not base_url.startswith(("https://", "http://")):
-        raise RuntimeError("SCOS_BENCHMARK_PUBLISH_URL must be an HTTP(S) URL")
+    # The destination must remain an unambiguous base URL. Otherwise a
+    # fragment or query silently swallows the appended /v1/benchmarks/runs,
+    # and an unrelated HTTP 201 can masquerade as persisted evidence.
+    if (any(ord(char) < 0x20 or ord(char) == 0x7f for char in base_url)
+            or "?" in base_url or "#" in base_url):
+        raise RuntimeError("benchmark publish URL contains invalid characters or selectors")
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        hostname, port = parsed.hostname, parsed.port
+    except ValueError:
+        raise RuntimeError("benchmark publish URL has an invalid authority") from None
+    if (parsed.scheme not in ("http", "https") or not hostname or port == 0
+            or parsed.username is not None or parsed.password is not None):
+        raise RuntimeError("benchmark publish URL requires a valid HTTP(S) authority without userinfo")
     token = (token or os.getenv("SCOS_INTERNAL_SERVICE_TOKEN", "")).strip()
     if not token:
         raise RuntimeError("SCOS_INTERNAL_SERVICE_TOKEN is required to publish benchmark runs")
+    # Reject malformed bearer bytes before constructing a network client.
+    # The raw urllib/http.client errors may otherwise escape the benchmark
+    # harness without its durable failure evidence.
+    if any(not 0x21 <= ord(char) <= 0x7e for char in token):
+        raise RuntimeError("benchmark publish token contains invalid HTTP header characters")
+    try:
+        body = json.dumps(run, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("benchmark publish payload is not valid finite JSON") from exc
     request = urllib.request.Request(
         base_url + "/v1/benchmarks/runs",
-        data=json.dumps(run).encode("utf-8"),
+        data=body,
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}", "X-SCOS-Caller": "benchmark-harness"},
     )
+    opener = urllib.request.build_opener(
+        _RejectRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
+    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
-            return json.loads(response.read().decode("utf-8"))
+        with opener.open(request, timeout=timeout) as response:
+            # The acknowledgement is untrusted. Do not buffer unlimited data or
+            # let malformed response bytes escape into benchmark/CI diagnostics.
+            raw = response.read(_MAX_PUBLISH_ACK_BYTES + 1)
+            if len(raw) > _MAX_PUBLISH_ACK_BYTES:
+                raise RuntimeError("invalid benchmark publish acknowledgement: response too large")
+            try:
+                ack = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant,
+                                 parse_float=_parse_finite_json_float,
+                                 object_pairs_hook=_reject_duplicate_json_keys)
+            except (UnicodeError, ValueError, RecursionError):
+                raise RuntimeError("invalid benchmark publish acknowledgement: malformed JSON") from None
+            if (not isinstance(ack, dict)
+                    or not isinstance(ack.get("run_id"), str)
+                    or not 0 < len(ack["run_id"]) <= 128
+                    or not ack["run_id"].strip()
+                    or not isinstance(ack.get("created"), bool)):
+                raise RuntimeError("invalid benchmark publish acknowledgement: missing or invalid fields")
+            # The observability API returns 201 only for newly persisted runs
+            # and 200 only for an idempotent replay. An inconsistent response
+            # cannot establish whether the benchmark was actually recorded.
+            if response.status not in (200, 201) or ack["created"] != (response.status == 201):
+                raise RuntimeError("invalid benchmark publish acknowledgement: status/created mismatch")
+            return ack
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"benchmark publish failed: HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"benchmark publish failed: {exc.reason}") from exc
+        # Upstream error bodies can echo the publisher's Authorization header.
+        # Do not read or serialize them into logs, CI, or benchmark artifacts.
+        with exc:
+            status = exc.code
+        # HTTPError.reason is controlled by the remote server and may echo
+        # the bearer. Suppress the exception chain in rendered tracebacks.
+        raise RuntimeError(f"benchmark publish failed: HTTP {status}") from None
+    except urllib.error.URLError:
+        # Transport and proxy exception reasons are untrusted; they can echo
+        # Authorization headers. Never serialize or chain them into CI logs.
+        raise RuntimeError("benchmark publish failed: transport error") from None

@@ -5,12 +5,13 @@ import pathlib
 import sys
 import tempfile
 import threading
+import traceback
 import time
 import unittest
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -55,6 +56,17 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
 
+class _UntrustedReason(BaseHTTPRequestHandler):
+    def do_GET(self):
+        reason = f"reflected {self.headers.get('Authorization')} {self.headers.get('X-SCOS-Control-Plane-Token')}"
+        self.send_response(503, reason)
+        self.end_headers()
+        self.wfile.write(b"untrusted response body")
+
+    def log_message(self, *_args):
+        pass
+
+
 class DeployedBenchmarkConfigTests(unittest.TestCase):
     def test_config_requires_all_remote_identity_fields(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -71,6 +83,86 @@ class DeployedBenchmarkConfigTests(unittest.TestCase):
         )
         self.assertNotIn(config.token, config.metadata())
         self.assertEqual(config.metadata()["endpoint"], "https://linode.example.test:8084")
+
+    def test_config_rejects_nonfinite_or_nonpositive_timeouts(self):
+        for timeout in (float("nan"), float("inf"), float("-inf"), 0.0, -1.0):
+            with self.subTest(timeout=repr(timeout)):
+                with self.assertRaisesRegex(RuntimeError, "timeout.*positive.*finite"):
+                    BenchmarkConfig(
+                        endpoint="https://example.test", token="secret-token",
+                        tenant_id="tenant-1", principal_id="principal-1",
+                        timeout_seconds=timeout,
+                    )
+
+    def test_config_rejects_oversized_integer_timeout_with_controlled_error(self):
+        # math.isfinite(10 ** 1000) raises OverflowError before the normal
+        # configuration error; callers must see the same safe rejection.
+        with self.assertRaisesRegex(RuntimeError, "timeout.*positive.*finite"):
+            BenchmarkConfig(
+                endpoint="https://example.test", token="secret-token",
+                tenant_id="tenant-1", principal_id="principal-1",
+                timeout_seconds=10 ** 1000,
+            )
+
+    def test_environment_rejects_nonfinite_timeouts(self):
+        for timeout in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(timeout=timeout):
+                with patch.dict(os.environ, {
+                    "SCOS_BENCHMARK_ENDPOINT": "https://example.test",
+                    "SCOS_BENCHMARK_TOKEN": "secret-token",
+                    "SCOS_BENCHMARK_TENANT_ID": "tenant-1",
+                    "SCOS_BENCHMARK_PRINCIPAL_ID": "principal-1",
+                    "SCOS_BENCHMARK_TIMEOUT_SECONDS": timeout,
+                }, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, "timeout.*positive.*finite"):
+                        config_from_environment()
+
+    def test_config_rejects_control_characters_in_request_headers(self):
+        fields = ("token", "tenant_id", "principal_id", "control_plane_token")
+        for field in fields:
+            for control in ("\r", "\n", "\t", "\x00", "\x7f", "\u2028", "\u00e9"):
+                with self.subTest(field=field, control=repr(control)):
+                    kwargs = dict(endpoint="https://example.test", token="secret-token",
+                                  tenant_id="tenant-1", principal_id="principal-1")
+                    kwargs[field] = "prefix" + control + "suffix"
+                    with self.assertRaisesRegex(RuntimeError, "invalid.*header"):
+                        BenchmarkConfig(**kwargs)
+
+    def test_invalid_header_credentials_write_not_run_without_network_or_secret(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "invalid-credentials.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": "http://127.0.0.1:1",
+                "SCOS_BENCHMARK_TOKEN": "secret\ninjected-token",
+                "SCOS_BENCHMARK_TENANT_ID": "tenant-1",
+                "SCOS_BENCHMARK_PRINCIPAL_ID": "principal-1",
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.DeployedCodeClient") as client_mock, \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                with redirect_stdout(io.StringIO()):
+                    exit_code = run_deployed_main()
+            self.assertEqual(exit_code, NOT_RUN_EXIT)
+            client_mock.assert_not_called()
+            publish_mock.assert_not_called()
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "not_run")
+            self.assertNotIn("secret", output.read_text())
+
+    def test_environment_does_not_silently_strip_invalid_header_controls(self):
+        for field in ("SCOS_BENCHMARK_TOKEN", "SCOS_BENCHMARK_CONTROL_PLANE_TOKEN"):
+            with self.subTest(field=field):
+                env = {
+                    "SCOS_BENCHMARK_ENDPOINT": "https://example.test",
+                    "SCOS_BENCHMARK_TOKEN": "secret-token",
+                    "SCOS_BENCHMARK_TENANT_ID": "tenant-1",
+                    "SCOS_BENCHMARK_PRINCIPAL_ID": "principal-1",
+                    field: "secret-token\n",
+                }
+                with patch.dict(os.environ, env, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, "invalid.*header"):
+                        config_from_environment()
 
     def test_config_rejects_endpoint_userinfo(self):
         with self.assertRaisesRegex(RuntimeError, "userinfo"):
@@ -144,6 +236,42 @@ class DeployedCodeClientTests(unittest.TestCase):
                 client.health()
         self.assertEqual(body.read_sizes, [], "untrusted error bodies must not be read")
         self.assertTrue(body.closed)
+
+    def test_http_reason_cannot_expose_credentials_in_traceback(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _UntrustedReason)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            client = DeployedCodeClient(BenchmarkConfig(
+                endpoint=f"http://127.0.0.1:{server.server_port}",
+                token="example-bearer-sensitive",
+                control_plane_token="example-control-sensitive",
+                tenant_id="tenant-1", principal_id="principal-1",
+            ))
+            with self.assertRaisesRegex(RuntimeError, "HTTP 503") as raised:
+                client.health()
+            rendered = "".join(traceback.format_exception(raised.exception))
+            self.assertNotIn("example-bearer-sensitive", rendered)
+            self.assertNotIn("example-control-sensitive", rendered)
+        finally:
+            server.shutdown()
+            worker.join()
+            server.server_close()
+
+    def test_transport_error_cannot_expose_credentials_in_traceback(self):
+        client = DeployedCodeClient(BenchmarkConfig(
+            endpoint="http://127.0.0.1:1",
+            token="example-bearer-sensitive",
+            tenant_id="tenant-1", principal_id="principal-1",
+        ))
+        for error in (URLError("example-bearer-sensitive"),
+                      TimeoutError("example-bearer-sensitive")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(client.opener, "open", side_effect=error):
+                    with self.assertRaisesRegex(RuntimeError, "deployed benchmark request failed") as raised:
+                        client.health()
+                self.assertNotIn("example-bearer-sensitive",
+                                 "".join(traceback.format_exception(raised.exception)))
 
     def test_redirect_never_forwards_benchmark_credentials(self):
         # A benchmark endpoint must not be able to redirect the bearer and
@@ -246,11 +374,21 @@ class DeployedCodeClientTests(unittest.TestCase):
                 b'{"status":"ready","diagnostics":NaN}',
                 b'{"status":"ready","diagnostics":Infinity}',
                 b'{"status":"ready","diagnostics":-Infinity}',
+                b'{"status":"ready","diagnostics":1e999}',
+                b'{"status":"ready","diagnostics":-1e999}',
+                b'{"status":"ready","metadata":{"nested":[1e999]}}',
+                b'{"status":"ready","metadata":{"nested":[-1e999]}}',
+                # Valid JSON can still exceed the parser's nesting limit.
+                # An uncontrolled RecursionError would abort the run before
+                # the benchmark failure artifact could be written.
+                b'{"status":"ready","nested":' + b'[' * 1500 + b'0' + b']' * 1500 + b'}',
             ):
-                with self.subTest(body=body):
+                with self.subTest(body=body[:64]):
                     UntrustedJSONHandler.raw_body = body
                     with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
                         client.health()
+            UntrustedJSONHandler.raw_body = b'{"status":"ready","diagnostics":1.25e2}'
+            self.assertEqual(client.health()["diagnostics"], 125.0)
         finally:
             server.shutdown()
             thread.join()
@@ -300,6 +438,7 @@ class _CodeService(BaseHTTPRequestHandler):
     health_status = "ok"
     raw_health = None
     case_query_error = False
+    malformed_diff = None
     delay: dict = {}
     branches: dict = {}
     snapshots: dict = {}
@@ -357,7 +496,7 @@ class _CodeService(BaseHTTPRequestHandler):
                        for path, f in snapshot["files"].items() if path not in previous
                        for old, g in previous.items()
                        if old not in snapshot["files"] and g["content_hash"] == f["content_hash"]]
-            return self._send({"Renamed": renamed})
+            return self._send(self.malformed_diff if self.malformed_diff is not None else {"Renamed": renamed})
         if self.path == "/v2/code/query":
             searched = list(self.branches.values()) if self.leak else [self.branches[body["branch"]]]
             files = {}
@@ -382,6 +521,7 @@ class DeployedRunTests(unittest.TestCase):
         _CodeService.health_status = "ok"
         _CodeService.raw_health = None
         _CodeService.case_query_error = False
+        _CodeService.malformed_diff = None
         _CodeService.delay = {}
         _CodeService.branches = {}
         _CodeService.snapshots = {}
@@ -403,6 +543,49 @@ class DeployedRunTests(unittest.TestCase):
         self.assertGreaterEqual(latencies["rename_lineage"], 200)
         self.assertLess(latencies["exact_symbol_lookup"], 200)
         self.assertLess(latencies["branch_isolation"], 200)
+
+    def test_malformed_http_rename_diff_is_a_recorded_case_failure(self):
+        # A 200 response can still carry invalid diff structure. It must not
+        # crash the entire benchmark before durable evidence is produced.
+        for invalid in (
+            {"Renamed": "not-a-list"},
+            {"Renamed": ["not-an-object"]},
+            {"Renamed": [{"Path": {"nested": "bad"}, "PreviousPath": "target.go"}]},
+            {"Renamed": [{"Path": "renamed.go", "PreviousPath": ["target.go"]}]},
+            {"Renamed": [{"Path": "renamed.go"}]},
+            {"Renamed": [{"PreviousPath": "target.go"}]},
+        ):
+            with self.subTest(invalid=invalid):
+                _CodeService.malformed_diff = invalid
+                artifact = run(self.config, run_nonce="malformed-diff")
+                cases = {case["case_id"]: case for case in artifact["cases"]}
+                self.assertFalse(cases["rename_lineage"]["passed"])
+                self.assertIn("error", cases["rename_lineage"]["details"])
+                self.assertTrue(cases["exact_symbol_lookup"]["passed"])
+                self.assertEqual(artifact["summary"]["total_cases"], 4)
+                self.assertEqual(artifact["summary"]["passed_cases"], 3)
+
+    def test_malformed_http_rename_diff_writes_failure_artifact(self):
+        _CodeService.malformed_diff = {"Renamed": [{"Path": {"nested": "bad"}, "PreviousPath": "target.go"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "malformed-diff.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.publish", return_value=None):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = run_deployed_main()
+            self.assertEqual(exit_code, 1)
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "measured")
+            self.assertEqual(artifact["summary"]["passed_cases"], 3)
+            self.assertFalse(next(c for c in artifact["cases"] if c["case_id"] == "rename_lineage")["passed"])
+            self.assertNotIn("secret-benchmark-token", output.read_text())
 
     def test_branch_isolation_fails_when_files_cross_branches(self):
         _CodeService.leak = True
@@ -478,6 +661,34 @@ class DeployedRunTests(unittest.TestCase):
             self.assertNotIn("secret-benchmark-token", output.read_text() + stream.getvalue())
             self.assertEqual(_CodeService.snapshots, {})
             self.assertEqual(_CodeService.branches, {})
+
+    def test_deeply_nested_ready_json_writes_preflight_failure_artifact(self):
+        # A valid but parser-depth-exceeding HTTP 200 response must never
+        # abort the CLI before its fail-closed, credential-safe artifact.
+        _CodeService.raw_health = (b'{"status":"ready","nested":' +
+                                   b'[' * 1500 + b'0' + b']' * 1500 + b'}')
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "deeply-nested-ready.json"
+            env = {
+                "SCOS_BENCHMARK_ENDPOINT": self.config.endpoint,
+                "SCOS_BENCHMARK_TOKEN": "secret-benchmark-token",
+                "SCOS_BENCHMARK_TENANT_ID": self.config.tenant_id,
+                "SCOS_BENCHMARK_PRINCIPAL_ID": self.config.principal_id,
+            }
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(sys, "argv", ["run_deployed", "--output", str(output)]), \
+                    patch("benchmarks.run_deployed.publish") as publish_mock:
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    exit_code = run_deployed_main()
+                publish_mock.assert_not_called()
+            self.assertEqual(exit_code, 1)
+            artifact = json.loads(output.read_text())
+            self.assertEqual(artifact["status"], "failed")
+            self.assertEqual(artifact["stage"], "preflight")
+            self.assertEqual(artifact["cases"], [])
+            self.assertEqual(_CodeService.snapshots, {})
+            self.assertNotIn("secret-benchmark-token", output.read_text() + stream.getvalue())
 
     def test_http_200_ready_status_is_accepted(self):
         _CodeService.health_status = "ready"
