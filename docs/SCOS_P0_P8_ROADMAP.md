@@ -1497,6 +1497,23 @@ latency, tenant isolation and production acceptance remain unverified.
   This is source/CI evidence, **not** live P0 retrieval or production rollout
   qualification. Full §41 acceptance remains open.
 
+## §22.7 critical extension-hook circuit state hardening (2026-11-01)
+
+The extension-manager hook dispatcher now **fails closed** when a mandatory
+(`fail_closed`) hook has a malformed persisted `circuit_open_until` timestamp.
+Previously an invalid timestamp was ignored and the endpoint invoked, silently
+bypassing the circuit breaker. The invalid state now also marks extension
+health as `failing` instead of retaining a stale `healthy` status.
+A preflight across **all** mandatory breaker states (invalid or still open)
+now prevents earlier hooks from producing external side effects before a later
+critical breaker rejects the dispatch; both cases were RED before correction. A regression reproduced the unsafe 200 response
+and outbound call before the fix; the corrected dispatcher returns 503 without
+calling the hook. Additional regressions verify that a genuinely open critical
+circuit blocks subsequent hooks, an expired breaker recovers normally, and an
+optional `continue` hook remains callable with malformed breaker state.
+This is **source-level §22 hardening only**, not proof of full lifecycle-hook
+coverage, production activation, P0–P8 acceptance, or §41 completion.
+
 ## P0 frozen benchmark evidence integrity (2026-10-27)
 
 The isolated lexical smoke quality gate now rejects duplicate JSON keys at

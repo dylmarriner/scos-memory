@@ -1128,6 +1128,28 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 	s.mu.RLock()
 	targets := s.hookTargetsLocked(req.Event, req.canaryContext())
 	s.mu.RUnlock()
+	// Preflight all mandatory breakers before delivering any hook. A later
+	// invalid/open critical breaker must not leave earlier hooks' external
+	// side effects behind when the dispatch ultimately fails closed.
+	for _, target := range targets {
+		hook := target.hook
+		if hook.FallbackPolicy != "fail_closed" || hook.CircuitOpenUntil == "" {
+			continue
+		}
+		until, err := time.Parse(time.RFC3339, hook.CircuitOpenUntil)
+		if err != nil {
+			s.mu.Lock()
+			s.setHealthLocked(hook.ExtensionID, "failing")
+			s.mu.Unlock()
+			return nil, fmt.Errorf("critical hook %s has invalid circuit breaker state", hook.ExtensionID)
+		}
+		if time.Now().UTC().Before(until) {
+			s.mu.Lock()
+			s.setHealthLocked(hook.ExtensionID, "circuit_open")
+			s.mu.Unlock()
+			return nil, fmt.Errorf("critical hook %s circuit breaker is open", hook.ExtensionID)
+		}
+	}
 	results := make([]hookDispatchResult, 0, len(targets))
 	for _, target := range targets {
 		hook := target.hook
@@ -1146,7 +1168,16 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			continue
 		}
 		if hook.CircuitOpenUntil != "" {
-			if until, err := time.Parse(time.RFC3339, hook.CircuitOpenUntil); err == nil && time.Now().UTC().Before(until) {
+			until, parseErr := time.Parse(time.RFC3339, hook.CircuitOpenUntil)
+			// Corrupt persisted breaker state must not silently enable a
+			// mandatory hook. Optional hooks retain their continue policy.
+			if parseErr != nil && hook.FallbackPolicy == "fail_closed" {
+				s.mu.Lock()
+				s.setHealthLocked(hook.ExtensionID, "failing")
+				s.mu.Unlock()
+				return nil, fmt.Errorf("critical hook %s has invalid circuit breaker state", hook.ExtensionID)
+			}
+			if parseErr == nil && time.Now().UTC().Before(until) {
 				s.mu.Lock()
 				s.setHealthLocked(hook.ExtensionID, "circuit_open")
 				s.mu.Unlock()
