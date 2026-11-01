@@ -17,6 +17,8 @@ REQUIRED_LOCAL_CHECKS = (
     "packages/benchmark-harness/python/tests",
     "test_benchmark_ranking_uniqueness.py",
     "test_benchmark_harness.py",
+    "test_benchmark_publish.py",
+    "test_benchmark_acceptance.py",
     "test_benchmark_suite_schema.py",
     "test_deployed_*.py",
     "test_postgres_dns_doctor.py",
