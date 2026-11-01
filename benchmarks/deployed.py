@@ -318,6 +318,15 @@ class DeployedCodeClient:
         results = value.get("results")
         if not isinstance(results, list) or not all(isinstance(item, dict) for item in results):
             raise RuntimeError("deployed query response missing results")
+        # A 200 response can contain unclassifiable hits. Silently coercing
+        # Path to str or treating a missing MatchType as non-exact makes
+        # branch-isolation checks pass on invalid evidence. Fail the case.
+        if any(
+            not isinstance(item.get("Path"), str) or not item["Path"].strip()
+            or not isinstance(item.get("MatchType"), str) or not item["MatchType"].strip()
+            for item in results
+        ):
+            raise RuntimeError("deployed query returned invalid query result fields")
         return results
 
     def snapshot_diff(self, snapshot_id: str) -> dict[str, Any]:

@@ -57,8 +57,10 @@ def fixture_identity(config) -> str:
 
 
 def _paths(results: list[dict[str, Any]], exact_only: bool = False) -> list[str]:
-    return sorted({str(item.get("Path", "")) for item in results
-                   if not exact_only or item.get("MatchType") == "exact"})
+    # DeployedCodeClient.query has validated these fields. Preserve actual
+    # service path strings rather than coercing invalid values into evidence.
+    return sorted({item["Path"] for item in results
+                   if not exact_only or item["MatchType"] == "exact"})
 
 
 # A query that names no indexed path falls back to ranked lexical matches,
