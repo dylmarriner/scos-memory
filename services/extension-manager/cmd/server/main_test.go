@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -528,6 +529,9 @@ func sealManifest(t *testing.T, manifest ExtensionManifest, privateKey ed25519.P
 // withSigningKey installs a fresh signing key for the test and returns its
 // private half.
 func withSigningKey(t *testing.T) ed25519.PrivateKey {
+	if _, configured := os.LookupEnv("SCOS_CANARY_SCOPE_HMAC_KEY"); !configured {
+		canaryScopeTestKey(t)
+	}
 	t.Helper()
 	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
 	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))

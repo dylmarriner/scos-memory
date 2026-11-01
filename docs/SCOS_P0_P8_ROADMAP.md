@@ -3165,3 +3165,44 @@ commit across all event-dispatch persistence or multi-instance writers.
 Persisted canary scope is still unauthenticated; §22 deployed lifecycle,
 §25 cross-service integration, §32 metrics, representative P0 benchmarks,
 P3–P8 acceptance, production recovery and §41 governance remain open.
+
+### 2026-11-02 §22 authenticated canary activation scope (TDD source slice)
+
+A persisted candidate had a signed extension manifest but its operator-selected
+activation cohort was unauthenticated. An attacker with write access to stored
+state could replace a narrow agent selector with a valid organisation-wide or
+100% percentage scope, and the restarted manager would deliver events to the
+candidate. A previously rolled-back deployment could also be reactivated by
+changing its persisted status to `active`. Three focused regression cases
+reproduced these failures **RED**, including an actual canary-selection bypass.
+
+The manager now requires an independent operator-held
+`SCOS_CANARY_SCOPE_HMAC_KEY` (base64, at least 32 random bytes) before starting
+a canary. An HMAC-SHA256 binds the approved scope, package, stable/candidate
+versions, signed manifest content hash, activation status and creation time.
+A successful promotion or rollback re-authenticates its final status. Startup
+verifies active deployments before allowing resolution or hook dispatch and
+rolls unverifiable deployments back in memory. No key, malformed key, rotated
+key, legacy unsigned active deployment or altered cohort fails closed. The
+secret is **not** stored in the database, state file or source repository.
+The Compose service accepts secret-manager-provided key material; local/native
+service deployment must inject the same key through its environment.
+
+**Compatibility and recovery:** Existing active canaries lacking a MAC will
+be disabled on restart after upgrading; plan explicit reactivation with the
+operator-approved scope and a stable, backed-up secret. Every instance reading
+the same state must use the same key. Rotating or losing the key disables
+active canaries for that process load. If the persisted record is not rewritten
+and the original key returns, the old active deployment can resume on a later
+restart; operators must explicitly inspect and resolve such deployments. This protects
+against edits to the persisted decision, **not** replay of an entire previously
+authenticated state snapshot, a compromised operator key, cross-instance
+write races, or a compromised database writer with access to the key. No live
+key rollout or state migration is authorised by this source change.
+
+Regression coverage includes narrow-scope restart, organisation and
+percentage widening, missing/invalid/rotated key, rollback status forgery,
+and real loopback HTTP hook dispatch that stays on the stable endpoint after
+cohort tampering. This is source-level §22 integrity hardening only. §22
+deployed lifecycle, §25 integration, §32 metrics, representative P0 benchmarks,
+P3–P8 acceptance, live rollout/recovery and §41 governance remain open.
