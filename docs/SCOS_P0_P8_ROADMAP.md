@@ -1643,6 +1643,30 @@ No superiority/performance claim for P4+ is accepted without reproducible before
 - [ ] Return explicit snapshot identity/provenance from every historical code query/impact surface.
 - [ ] Add explicit snapshot selection where callers still imply the active branch snapshot.
 - [ ] Verify retention/GC cannot remove code evidence referenced by memory-code links or audit records.
+
+**P1/P5 historical HTTP request framing (2026-10-31; isolated development branch, not merged):**
+The code-intelligence `POST /v2/code/query` and `POST /v2/code/impact`
+handlers previously accepted a valid first JSON object followed by a second
+object, scalar, null, or malformed bytes, silently ignoring the trailing
+request. A real-HTTP PostgreSQL 17 regression demonstrated eight RED cases
+(4 suffixes × 2 endpoints). Both routes now require exactly one JSON document
+and preserve legal trailing whitespace. The full disposable PostgreSQL 17
+code-store suite, `make test`, `go vet ./...`, and diff validation passed.
+**Follow-up review hardening (2026-10-31; PR #201, pending approval):**
+The second JSON decode could wait indefinitely when a client sent one valid
+JSON object but withheld the remaining HTTP body or chunk terminator. Both
+query and impact now share a 64 KiB bounded JSON decoder with a 15-second
+socket read deadline covering the first and trailing-value decodes. Failed
+framing closes the connection; successful complete requests reset the
+deadline for HTTP keep-alive. Real HTTP tests cover incomplete chunked
+framing, oversized declared Content-Length, stalled first-object reads,
+telemetry response-writer unwrapping, and two valid requests on one
+keep-alive connection. This is request-framing protection, not a substitute
+for a deployment-wide ingress timeout policy or live rollout evidence.
+
+The fix is source-only and does **not**
+complete P5 transaction-ordered historical memory reconstruction, P3 Git
+provenance attestation, or production rollout/recovery gates.
 - [x] Add interrupted-index/activation recovery tests around real PostgreSQL transactions (including OS-process termination during file indexing, snapshot activation and historical reactivation; see evidence below).
 
 **P1/P5/P8 historical impact selection (2026-10-26; review branch, not merged):**
@@ -2508,6 +2532,9 @@ qualification, complete §32 service coverage, or governance §41 completion.
 No live backup, restore, production deployment or paid resource was invoked.
 
 ## Safety and secret handling
+
+**P1/operations HBA rollout retry integrity (2026-10-31; PR #202 review correction, source-only, NOT merged/deployed):** Independent review reproduced a data-plane rollout defect: a post-fast-forward HBA ACL failure advances the local Git checkout but prevents deployment; the next timer tick sees identical HEAD and remote SHA and silently skips the pending revision. A disposable two-repository Git integration regression reproduced this skipped rollout (RED) and passed after adding an atomic Git-private pending-revision marker that survives failed preflight/build/migration/parity and is cleared only after successful verification (GREEN). Additional TDD regressions reject PostgreSQL probe image overrides that differ from the pinned Compose image and distinguish Docker runtime failures from HBA unreadability. These changes do not run the deployment script against live services, modify live ACLs, perform migrations or qualify recovery. Mandatory independent approval, verified signatures, updated-head CI, and full §41 acceptance remain open.
+
 
 **CI supply-chain gate hardening (2026-10-26; review branch, not merged):**
 A successful GitHub CI run on PR #58 still contained a `govulncheck`
