@@ -4,6 +4,18 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.7 extension configuration PATCH single-document integrity (2026-11-02; review candidate)
+
+Four HTTP handler regression cases reproduced a governance integrity defect: an
+operator PATCH to `/v1/extensions/{id}` accepted a valid JSON prefix followed
+by another object, a scalar, malformed trailing bytes or a body exceeding the
+256 KiB limit. The prefix mutated extension configuration despite invalid
+input (RED). The handler now requires EOF from the same bounded decoder
+before changing extension state (GREEN); a valid PATCH with trailing JSON
+whitespace still succeeds. Run the focused `TestExtensionPatch` Go tests for verification. This is a
+source-level §22 integrity improvement, **not** proof of full lifecycle hook
+coverage, §41 governance acceptance, deployed correctness or recovery.
+
 ## §22.6 single-document hook-dispatch input integrity (2026-11-02; source candidate)
 
 Real loopback HTTP TDD reproduced that a valid hook-dispatch JSON object followed
