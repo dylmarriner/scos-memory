@@ -20,7 +20,8 @@ exactly or with a Bearer prefix to avoid false positives in ordinary text.
 A real localhost HTTP integration regression proves reflected preflight JSON
 produces a failed, credential-free artifact without seeding any repository.
 Focused Python 3.11 tests and full `make test` passed on an isolated AMD
-worktree. This is source evidence only, not live benchmark performance,
+worktree. Both the Makefile and GitHub CI unit-test gates now discover all
+`test_deployed_*.py` modules so the new regression cannot silently be skipped. This is source evidence only, not live benchmark performance,
 production rollout/recovery or P0–P8 acceptance.
 
 

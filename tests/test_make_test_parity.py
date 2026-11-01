@@ -18,7 +18,7 @@ REQUIRED_LOCAL_CHECKS = (
     "test_benchmark_ranking_uniqueness.py",
     "test_benchmark_harness.py",
     "test_benchmark_suite_schema.py",
-    "test_deployed_benchmark.py",
+    "test_deployed_*.py",
     "test_postgres_dns_doctor.py",
     "scripts/test_scos_verify_snapshot_manifest.py",
     "scripts/test_scos_verify_snapshot_events.py",
@@ -32,6 +32,13 @@ REQUIRED_LOCAL_CHECKS = (
 
 
 class MakeTestParityTests(unittest.TestCase):
+    def test_deployed_discovery_includes_credential_reflection_regressions(self):
+        import fnmatch
+        for filename in ("test_deployed_benchmark.py", "test_deployed_credential_reflection.py"):
+            with self.subTest(filename=filename):
+                self.assertTrue(fnmatch.fnmatchcase(filename, "test_deployed_*.py"))
+                self.assertTrue((ROOT / "tests" / filename).is_file())
+
     def test_local_test_target_keeps_ci_python_integrity_gates(self):
         workflow = CI.read_text(encoding="utf-8")
         proc = subprocess.run(

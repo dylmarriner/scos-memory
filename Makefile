@@ -24,7 +24,7 @@ test:
 	python3 -m unittest discover -s tests -p test_benchmark_suite_schema.py -v
 	python3 -m unittest discover -s tests -p test_p0_contextual_evidence.py -v
 	python3 -m unittest discover -s tests -p test_p0_memory_corpus.py -v
-	python3 -m unittest discover -s tests -p test_deployed_benchmark.py -v
+	python3 -m unittest discover -s tests -p "test_deployed_*.py" -v
 	python3 -m unittest discover -s tests -p test_postgres_dns_doctor.py -v
 	python3 -m unittest discover -s tests -p test_deploy_drift_doctor.py -v
 	python3 -m unittest discover -s tests -p test_postgres_hba_deploy_preflight.py -v
