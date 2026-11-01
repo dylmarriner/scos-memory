@@ -406,6 +406,26 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(publish({"suite": "x", "cases": []},
                                  base_url=self.url, token=secret)["run_id"], "safe-run")
 
+    def test_publish_rejects_short_bearer_substring_in_acknowledgement(self):
+        # No minimum token length is enforced. A short configured token must
+        # not be echoed inside a run ID that the deployed runner prints.
+        _Collector.response_body = b'{"run_id":"run-t0k","created":true}'
+        with self.assertRaisesRegex(RuntimeError, "invalid benchmark publish acknowledgement") as raised:
+            publish({"suite": "x", "cases": []}, base_url=self.url, token="t0k")
+        self.assertNotIn("t0k", "".join(traceback.format_exception(raised.exception)))
+
+    def test_short_token_matching_does_not_reject_fixed_acknowledgement_keys(self):
+        # Protocol-defined keys are not remote-controlled credential echoes.
+        _Collector.response_body = b'{"run_id":"safe-id","created":true}'
+        for token in ("run", "created"):
+            with self.subTest(token=token):
+                self.assertEqual(publish({"suite": "x", "cases": []},
+                                         base_url=self.url, token=token)["run_id"], "safe-id")
+        # Unknown keys remain untrusted, including nested keys.
+        _Collector.response_body = b'{"run_id":"safe-id","created":true,"debug":{"run_trace":"x"}}'
+        with self.assertRaisesRegex(RuntimeError, "credential reflection"):
+            publish({"suite": "x", "cases": []}, base_url=self.url, token="run")
+
     def test_publish_malformed_success_body_never_leaks_credentials(self):
         _Collector.response_body = b"publisher-secret-token\xff"
         with self.assertRaises(RuntimeError) as raised:

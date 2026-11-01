@@ -142,21 +142,24 @@ def _ack_reflects_bearer(value: Any, token: str) -> bool:
     """Reject untrusted acknowledgement fields echoing the publisher bearer.
 
     Check nested values and keys: callers can print run_id or serialize the
-    whole acknowledgement. Avoid substring false positives for tiny test
-    tokens while still recognizing an explicit Bearer header reflection.
+    whole acknowledgement. No minimum token length is enforced, so even a
+    short bearer must be detected as a substring of an echoed run ID.
     """
-    pending = [value]
+    pending = [(value, True)]
     while pending:
-        current = pending.pop()
+        current, root = pending.pop()
         if isinstance(current, str):
-            if (current == token or f"Bearer {token}" in current
-                    or (len(token) >= 8 and token in current)):
+            if token in current:
                 return True
         elif isinstance(current, dict):
-            pending.extend(current.keys())
-            pending.extend(current.values())
+            # These two top-level names are fixed by the acknowledgement
+            # protocol. A token such as "run" must not reject every valid
+            # response merely because the field is named "run_id".
+            pending.extend((key, False) for key in current
+                           if not root or key not in ("run_id", "created"))
+            pending.extend((item, False) for item in current.values())
         elif isinstance(current, list):
-            pending.extend(current)
+            pending.extend((item, False) for item in current)
     return False
 
 
