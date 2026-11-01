@@ -145,6 +145,29 @@ def _parse_finite_json_float(value: str) -> float:
     return number
 
 
+def _contains_credential_echo(value: Any, credentials: tuple[str, ...]) -> bool:
+    """Detect credential reflection even inside otherwise valid nested JSON.
+
+    Very short fixture credentials are matched exactly or with the Bearer
+    prefix to avoid treating ordinary words containing a one-letter token as
+    leaked secrets. Real bearer credentials are checked as substrings.
+    """
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if any(secret and (current == secret or f"Bearer {secret}" in current
+                               or (len(secret) >= 8 and secret in current))
+                   for secret in credentials):
+                return True
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+    return False
+
+
 class DeployedCodeClient:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
@@ -205,6 +228,10 @@ class DeployedCodeClient:
             raise RuntimeError(f"deployed benchmark returned invalid JSON: {method} {path}") from None
         if not isinstance(value, dict):
             raise RuntimeError(f"deployed benchmark returned a non-object: {method} {path}")
+        if _contains_credential_echo(value, (self.config.token, self.config.control_plane_token)):
+            # Successful upstream JSON is untrusted too. Otherwise an echoed
+            # bearer could enter a durable benchmark artifact or publisher.
+            raise RuntimeError(f"deployed benchmark response reflected a credential: {method} {path}")
         return value
 
     def health(self) -> dict[str, Any]:
