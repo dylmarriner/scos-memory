@@ -195,7 +195,12 @@ func (c *controlPlane) executeRoute(ctx context.Context, req RouteRequest, decis
 	lifecycle.Status = runRunning
 
 	outcome := runCompleted
-	if err := c.dispatchHook(ctx, "pre_turn", map[string]any{"interaction_id": req.InteractionID, "input": req.Input}, req); err != nil {
+	// §22.6: a received turn is a distinct lifecycle boundary from an
+	// executing turn. Do not share the raw prompt with reception hooks.
+	// Failure stops later hooks and plan stages just like other pre-turn gates.
+	if err := c.dispatchHook(ctx, "on_turn_received", map[string]any{"interaction_id": req.InteractionID}, req); err != nil {
+		outcome, lifecycle.Detail = runDegraded, "on_turn_received hook: "+err.Error()
+	} else if err := c.dispatchHook(ctx, "pre_turn", map[string]any{"interaction_id": req.InteractionID, "input": req.Input}, req); err != nil {
 		outcome, lifecycle.Detail = runDegraded, "pre_turn hook: "+err.Error()
 	} else if err := c.dispatchHook(ctx, "on_turn_start", map[string]any{"interaction_id": req.InteractionID}, req); err != nil {
 		outcome, lifecycle.Detail = runDegraded, "on_turn_start hook: "+err.Error()

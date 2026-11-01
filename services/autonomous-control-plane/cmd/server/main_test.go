@@ -513,7 +513,7 @@ func TestAgentLifecycleDispatchesGovernedHookStages(t *testing.T) {
 	if status != "completed" {
 		t.Fatalf("lifecycle status = %s, events = %v", status, events)
 	}
-	want := []string{"pre_turn", "on_turn_start", "on_before_model", "on_after_model", "on_checkpoint", "post_turn"}
+	want := []string{"on_turn_received", "pre_turn", "on_turn_start", "on_before_model", "on_after_model", "on_checkpoint", "post_turn"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("hook events = %v, want %v", events, want)
 	}

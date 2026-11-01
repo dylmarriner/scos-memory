@@ -1095,6 +1095,25 @@ passed 94 tests but had six fixture setup errors; GitHub's Python CI
 passed. None of this qualifies the live migration, general P7 answer
 generation, retrieval integration, or production recovery.
 
+## §22.6 canonical turn-reception hook (2026-11-01; source candidate)
+
+The actual autonomous-control-plane execution path already dispatched legacy
+`pre_turn` and canonical `on_turn_start`, but did **not** emit the required
+`on_turn_received` event. A real HTTP lifecycle-order regression first
+failed because the event was absent. A second regression reproduced that
+a failing reception endpoint still allowed the model and authoritative turn
+commit to run (RED). The execution path now delivers `on_turn_received`
+before `pre_turn` and `on_turn_start`; the reception payload contains the
+interaction identifier but no raw prompt. Failure degrades the run and skips
+the plan, model and commit (GREEN). The existing context/retrieval hook-order
+tests and all autonomous-control-plane tests pass, as do complete `make test`
+and `go vet ./...` on an isolated Kubuntux worktree. This only covers
+**executing, confirmed** turns: awaiting-confirmation requests are still
+excluded by the earlier explicit owner-confirmation gate. Agent/session,
+memory mutation and remaining lifecycle event coverage, installed extension
+end-to-end integration, P0–P8 acceptance and production deployment remain
+unverified. This is not a claim that §22 or §41 is complete.
+
 ## §22 retrieval/context lifecycle hook coverage (2026-10-28; merged PR #117)
 
 The autonomous control plane already dispatched turn, model, tool and
