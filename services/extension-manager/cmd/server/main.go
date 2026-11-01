@@ -165,6 +165,8 @@ type extServer struct {
 	nextID    int
 	db        *pgxpool.Pool
 	storePath string
+	// Optional audit-persistence fault injection for deterministic HTTP tests.
+	persistHookExecutions func(context.Context) error
 }
 
 func (s *extServer) readinessCheck() error {
@@ -1002,8 +1004,18 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		execs = append(execs, &HookExecution{Event: req.Event, TenantID: req.TenantID, Status: "aborted", Reason: err.Error(), DurationMs: float64(time.Since(dispatchStarted).Microseconds()) / 1000, StartedAt: startedAt})
 	}
 	s.recordExecutions(execs)
-	if persistErr := s.persist(r.Context()); persistErr != nil {
+	// The dispatcher's earlier state write is not sufficient: the audit
+	// execution records must also be durable before acknowledging success.
+	// A second-write failure must fail closed without leaking storage details.
+	persistExecutions := s.persist
+	if s.persistHookExecutions != nil {
+		persistExecutions = s.persistHookExecutions
+	}
+	if persistErr := persistExecutions(r.Context()); persistErr != nil {
 		log.Printf("persist hook executions: %v", persistErr)
+		if err == nil {
+			err = &hookPersistenceFailure{cause: persistErr}
+		}
 	}
 	// §32 hook latency and failure. Latency covers the whole bounded dispatch;
 	// failures are counted per hook so one failing extension is attributable.
