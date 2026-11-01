@@ -1514,6 +1514,24 @@ optional `continue` hook remains callable with malformed breaker state.
 This is **source-level §22 hardening only**, not proof of full lifecycle-hook
 coverage, production activation, P0–P8 acceptance, or §41 completion.
 
+## §22.7 extension hook redirect containment (2026-11-01; source candidate)
+
+The extension manager's hook dispatcher used Go's default HTTP client,
+which automatically follows 3xx redirects. A permitted hook endpoint could
+therefore forward tenant/principal headers, the event payload and an internal
+service bearer to an **unconfigured redirect destination**. Real HTTP
+regressions using two independent loopback servers reproduced the unwanted
+second delivery for HTTP 302 and 307, under both mandatory fail_closed
+and optional continue policies (four RED cases).
+
+Hook delivery now disables automatic redirects. A 3xx response counts as a
+failed delivery: mandatory hooks abort; optional hooks record a failed
+delivery and continue. All four cases pass GREEN with zero outbound calls to
+the unconfigured destination. This is source-level confidentiality and
+lifecycle enforcement only. The required CI, merged-main qualification,
+installed extension integration, fleet-wide §22 coverage, §32 metrics,
+production rollout/recovery and canonical §41 completion are separate gates.
+
 ## P0 frozen benchmark evidence integrity (2026-10-27)
 
 The isolated lexical smoke quality gate now rejects duplicate JSON keys at
