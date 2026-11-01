@@ -2737,6 +2737,24 @@ For each phase:
 
 **2026-11-01 P0 deployed-query evidence-shape integrity (source-level; not production):** The real HTTP fixture returned a successful branch-isolation query with a valid hit plus an unclassifiable hit. Previously, `_paths` coerced malformed `Path` values to strings and silently ignored missing or invalid `MatchType`, so the branch-isolation case could incorrectly pass. Ten malformed-hit variants reproduced the false pass before correction (RED). The deployed client now requires every query hit to contain a nonblank string `Path` and `MatchType` before scoring; the runner uses those validated fields without string coercion. Real-HTTP RED/GREEN regressions cover all ten variants (39 focused tests passing) and a CLI run that persists a failed-case artifact without bearer/control-plane credentials. This qualifies only offline benchmark evidence integrity; it does **not** establish deployed tenant isolation, representative retrieval quality/latency, P3 scale, production rollout/recovery or §41 completion. Merge/main-CI status is tracked separately.
 
+### P0 deployed benchmark run-identity collision guard (2026-11-01)
+
+The deployed code-index baseline previously truncated the automatically
+generated UUID to eight hexadecimal characters (32 bits). Two different
+UUIDs sharing those first eight characters reused the same benchmark
+branch/commit identities; because fixture branches persist between runs,
+that can measure replay/idempotency instead of fresh indexing without
+disclosing the collision. A real local code-service regression reproduced
+identical branch identities from distinct UUIDs (RED). The runner now uses
+the full 128-bit UUID for automatic runs and rejects invalid explicit
+run-nonce fragments before making any network request or mutating a
+benchmark repository. The tests also verify that distinct default runs
+create six distinct snapshots and that invalid Git-ref fragments do not
+seed the service. This improves P0 evidence integrity only: it is not
+representative deployed latency/quality, P3 scale acceptance, or production
+rollout/recovery evidence. PR, merged-main and CI qualification are tracked
+separately.
+
 ## Immediate milestone
 
 **P4 source is merged. Complete its full P0 reproducible acceptance programme, qualify current live BGE endpoints/performance and then advance the cross-domain P5–P8 acceptance cases.**
