@@ -81,7 +81,10 @@ type CanaryDeployment struct {
 	CanaryVersion  string            `json:"canary_version"`
 	CanaryManifest ExtensionManifest `json:"canary_manifest"`
 	Scope          CanaryScope       `json:"scope"`
-	Isolation      string            `json:"isolation"`
+	// ScopeMAC binds the operator-approved cohort, versions and activation status
+	// to an independent key kept outside persisted extension state.
+	ScopeMAC  string `json:"scope_mac,omitempty"`
+	Isolation string `json:"isolation"`
 	// Hooks are the candidate version's subscriptions, delivered to callers
 	// in the cohort in place of the stable version's.
 	Hooks        map[string]*Hook `json:"hooks,omitempty"`
@@ -247,6 +250,10 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 		http.Error(w, "invalid canary scope: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if s.canaryScopeKeyErr != nil {
+		http.Error(w, "canary scope authentication is not configured", http.StatusServiceUnavailable)
+		return
+	}
 	if req.Manifest.PackageID != packageID {
 		http.Error(w, "manifest package_id does not match the target package", http.StatusBadRequest)
 		return
@@ -284,6 +291,11 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 		Status:         "active",
 		CreatedAt:      now,
 		UpdatedAt:      now,
+	}
+	if err := s.sealCanaryScope(deployment); err != nil {
+		s.mu.Unlock()
+		http.Error(w, "canary scope authentication failed", http.StatusServiceUnavailable)
+		return
 	}
 	previousDeployment, hadPrevious := s.canaries[packageID]
 	s.canaries[packageID] = deployment
@@ -335,6 +347,10 @@ func (s *extServer) canaryResolve(w http.ResponseWriter, r *http.Request, packag
 // canaryFinish promotes the candidate to installed, or discards it. Either way
 // the package is left with exactly one active version and no partial state.
 func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, packageID string, promote bool) {
+	if s.canaryScopeKeyErr != nil {
+		http.Error(w, "canary scope authentication is not configured", http.StatusServiceUnavailable)
+		return
+	}
 	s.operatorMutationMu.Lock()
 	defer s.operatorMutationMu.Unlock()
 	s.mu.Lock()
@@ -381,6 +397,17 @@ func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, package
 		deployment.Status = "rolled_back"
 	}
 	deployment.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.sealCanaryScope(deployment); err != nil {
+		*ext = previous
+		s.history[packageID] = previousHistory
+		*deployment = previousDeployment
+		if promote {
+			s.restoreCanaryRegistrationsLocked(packageID, previousRegistrations)
+		}
+		s.mu.Unlock()
+		http.Error(w, "canary scope authentication failed", http.StatusServiceUnavailable)
+		return
+	}
 	result := map[string]any{"package_id": packageID, "canary": *deployment, "installed_version": ext.Manifest.Version}
 	s.mu.Unlock()
 

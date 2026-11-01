@@ -259,6 +259,8 @@ func (s *extServer) normalizeLocked() {
 			invalid = fmt.Errorf("canary identity or version mismatch")
 		case d.Scope.validate() != nil:
 			invalid = fmt.Errorf("invalid canary scope")
+		case s.verifyCanaryScope(d) != nil:
+			invalid = fmt.Errorf("canary scope integrity verification failed")
 		default:
 			invalid = s.verifyLoadedManifest(d.CanaryManifest)
 		}

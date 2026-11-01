@@ -164,10 +164,13 @@ type extServer struct {
 	executions         []*HookExecution
 	history            map[string][]ExtensionManifest
 	// canaries holds side-by-side candidate versions, one per package (§22.3).
-	canaries  map[string]*CanaryDeployment
-	nextID    int
-	db        *pgxpool.Pool
-	storePath string
+	canaries map[string]*CanaryDeployment
+	// Independent operator-held key authenticates persisted canary activation.
+	canaryScopeKey    []byte
+	canaryScopeKeyErr error
+	nextID            int
+	db                *pgxpool.Pool
+	storePath         string
 	// Optional audit-persistence fault injection for deterministic HTTP tests.
 	persistHookExecutions func(context.Context) error
 	// Test-only persistence fault/barrier injection for concurrent operator requests.
@@ -202,13 +205,16 @@ func newExtServer() *extServer {
 }
 
 func newExtServerAt(storePath string) *extServer {
+	canaryKey, canaryKeyErr := loadCanaryScopeKey()
 	s := &extServer{
-		extensions: make(map[string]*Extension),
-		skills:     make(map[string]*Skill),
-		hooks:      make(map[string][]*Hook),
-		history:    make(map[string][]ExtensionManifest),
-		canaries:   make(map[string]*CanaryDeployment),
-		storePath:  storePath,
+		extensions:        make(map[string]*Extension),
+		skills:            make(map[string]*Skill),
+		hooks:             make(map[string][]*Hook),
+		history:           make(map[string][]ExtensionManifest),
+		canaries:          make(map[string]*CanaryDeployment),
+		canaryScopeKey:    canaryKey,
+		canaryScopeKeyErr: canaryKeyErr,
+		storePath:         storePath,
 	}
 	s.loadLocalState()
 	return s

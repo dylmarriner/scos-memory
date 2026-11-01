@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -17,6 +18,9 @@ func canaryFixture(t *testing.T) (*extServer, ed25519.PrivateKey) {
 	t.Helper()
 	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
 	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))
+	if _, configured := os.LookupEnv("SCOS_CANARY_SCOPE_HMAC_KEY"); !configured {
+		canaryScopeTestKey(t)
+	}
 
 	srv := newExtServerAt(filepath.Join(t.TempDir(), "extension-state.json"))
 	stable := canaryManifest(t, privateKey, "1.0.0")
@@ -237,6 +241,7 @@ func TestCanaryStatusReportsNoDeployment(t *testing.T) {
 }
 
 func TestCanarySurvivesRestart(t *testing.T) {
+	canaryScopeTestKey(t)
 	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
 	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))
 	path := filepath.Join(t.TempDir(), "extension-state.json")
