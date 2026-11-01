@@ -994,6 +994,11 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		execs = append(execs, &HookExecution{Event: req.Event, ExtensionID: result.ExtensionID, Version: result.Version, Channel: result.Channel, TenantID: req.TenantID, Status: result.Status, Reason: result.Reason, DurationMs: result.DurationMs, StartedAt: startedAt})
 	}
 	if err != nil {
+		if storageErr, ok := err.(*hookPersistenceFailure); ok {
+			// Keep the underlying filesystem/SQL failure in operator logs,
+			// never in the tenant-scoped audit ledger or HTTP response.
+			log.Printf("hook state persistence failed: %v", storageErr.cause)
+		}
 		execs = append(execs, &HookExecution{Event: req.Event, TenantID: req.TenantID, Status: "aborted", Reason: err.Error(), DurationMs: float64(time.Since(dispatchStarted).Microseconds()) / 1000, StartedAt: startedAt})
 	}
 	s.recordExecutions(execs)
@@ -1162,6 +1167,12 @@ func validHookEndpoint(endpoint string) bool {
 	return parsed.Scheme == "https" || (parsed.Scheme == "http" &&
 		(parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost"))
 }
+
+// hookPersistenceFailure keeps storage internals out of HTTP responses and
+// tenant-visible hook execution records. Its cause is for operator logs only.
+type hookPersistenceFailure struct{ cause error }
+
+func (e *hookPersistenceFailure) Error() string { return "hook state persistence failed" }
 
 func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchRequest) ([]hookDispatchResult, error) {
 	s.mu.RLock()
@@ -1335,7 +1346,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 		done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "fallback_continue"})
 	}
 	if err := s.persist(parent); err != nil {
-		return partialResults(), err
+		return partialResults(), &hookPersistenceFailure{cause: err}
 	}
 	return results, nil
 }
