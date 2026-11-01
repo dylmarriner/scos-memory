@@ -308,6 +308,17 @@ def deterministic_interval(values: list[float], seed: int = 1729,
     }
 
 
+def latency_percentile_ms(sorted_latencies: list[float], percentile: int) -> float:
+    """Nearest-rank percentile over observed case latencies.
+
+    Values must already be sorted and validated; nearest rank avoids
+    inventing interpolated request durations on small deterministic suites.
+    """
+    if not sorted_latencies or not 0 < percentile <= 100:
+        raise ValueError("latency percentile requires samples and 1..100 percentile")
+    return sorted_latencies[math.ceil(len(sorted_latencies) * percentile / 100) - 1]
+
+
 def runtime_metadata() -> dict[str, Any]:
     try:
         commit = subprocess.run(
@@ -453,6 +464,24 @@ class BenchmarkRunner:
             raise ValueError("duplicate suite case IDs")
         if current_by_id.keys() != set(suite_ids):
             raise ValueError("suite and current benchmark case IDs must match")
+        # A malformed programmatic result must not produce apparently valid
+        # percentile evidence or contaminate the published summary with NaN.
+        latencies: list[float] = []
+        for result in self.results:
+            latency = result.latency_ms
+            if (isinstance(latency, bool) or not isinstance(latency, (int, float))
+                    or latency < 0):
+                raise ValueError("benchmark latency must be finite and nonnegative")
+            try:
+                if not math.isfinite(latency):
+                    raise ValueError("benchmark latency must be finite and nonnegative")
+            except OverflowError as exc:
+                raise ValueError("benchmark latency must be finite and nonnegative") from exc
+            latencies.append(float(latency))
+        latencies.sort()
+        total_latency_ms = sum(latencies)
+        if not math.isfinite(total_latency_ms):
+            raise ValueError("benchmark total latency must be finite")
         collected: dict[str, list[float]] = {}
         for r in self.results:
             for metric, value in r.scores.items():
@@ -473,8 +502,10 @@ class BenchmarkRunner:
             "categories": categories,
             "average_scores": average_scores,
             "metric_case_counts": {metric: len(vals) for metric, vals in collected.items()},
-            "total_latency_ms": sum(r.latency_ms for r in self.results),
-            "avg_latency_ms": sum(r.latency_ms for r in self.results) / len(self.results),
+            "total_latency_ms": total_latency_ms,
+            "avg_latency_ms": statistics.fmean(latencies),
+            "p50_latency_ms": latency_percentile_ms(latencies, 50),
+            "p95_latency_ms": latency_percentile_ms(latencies, 95),
         }
 
 

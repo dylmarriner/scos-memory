@@ -1674,6 +1674,24 @@ gates remain outstanding. No merge or deployment authorized.
 **Merged-main evidence for P0 parity:** [PR #157](https://github.com/dylmarriner/scos-memory/pull/157) merged at `5c028d1dce7f2e7473299a6c6961adc754496541`; [main CI](https://github.com/dylmarriner/scos-memory/actions/runs/40798568766) and [P4 integration](https://github.com/dylmarriner/scos-memory/actions/runs/40798568781) both passed. This is source/CI evidence only, not production qualification.
 
 
+## P0 per-case latency percentile evidence (2026-11-01; source-only)
+
+The frozen benchmark summary now records deterministic measured
+`p50_latency_ms` and `p95_latency_ms` using nearest-rank percentiles
+over every case's observed wall-clock retrieval latency, alongside existing
+mean and total latency. Programmatic result injection with negative,
+non-finite or boolean latency is rejected rather than reported as evidence.
+Regression tests cover unsorted samples, a single case and invalid values.
+This does **not** establish live p95 targets, model cost, representative
+hardware performance, or full P0 acceptance.
+The P4 lexical smoke baseline was explicitly requalified for the shared
+harness source digest. A recorded seven-case run was compared field-for-field
+against the previous baseline: only `harness_sha256` and `git_base_sha`
+changed. All case rankings, retrieval scores, aggregate quality metrics,
+and forbidden-at-5/10/20 counts remained identical (all forbidden counts
+zero). `offline_gate --check` and all 42 fixture/gate tests passed. This
+is provenance maintenance, **not** a new retrieval-quality claim.
+
 ## Remaining
 
 - [ ] Expand the versioned memory-retrieval corpus for paraphrase, long-history noise, conflicts, supersession, temporal queries and scope isolation.
