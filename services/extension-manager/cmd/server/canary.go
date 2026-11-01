@@ -185,8 +185,16 @@ func (s *extServer) handleCanary(w http.ResponseWriter, r *http.Request) {
 		action = parts[2]
 	}
 
+	// Even read-only canary resolution is misleading until an uncertain
+	// durable state has been reconciled by the operator.
+	if s.rejectUncertainMutation(w) {
+		return
+	}
 	// resolve only answers which version a caller would get.
 	if r.Method != http.MethodGet && action != "resolve" && !operatorOnly(w, r) {
+		return
+	}
+	if r.Method == http.MethodPost && action != "resolve" && s.rejectUncertainMutation(w) {
 		return
 	}
 	switch {
@@ -261,6 +269,9 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 
 	s.operatorMutationMu.Lock()
 	defer s.operatorMutationMu.Unlock()
+	if s.rejectUncertainMutation(w) {
+		return
+	}
 	s.mu.Lock()
 	ext, ok := s.extensions[packageID]
 	if !ok {
@@ -303,15 +314,18 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 	s.mu.Unlock()
 
 	if err := s.persist(r.Context()); err != nil {
-		s.mu.Lock()
-		if s.canaries[packageID] == deployment {
-			if hadPrevious {
-				s.canaries[packageID] = previousDeployment
-			} else {
-				delete(s.canaries, packageID)
+		if !errors.Is(err, errPersistenceOutcomeUnknown) {
+			s.mu.Lock()
+			if s.canaries[packageID] == deployment {
+				if hadPrevious {
+					s.canaries[packageID] = previousDeployment
+				} else {
+					delete(s.canaries, packageID)
+				}
 			}
+			s.mu.Unlock()
+			s.repairLocalAfterCompensation()
 		}
-		s.mu.Unlock()
 		log.Printf("canary deployment persistence failed: %v", err)
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "canary deployment persistence failed",
@@ -353,6 +367,9 @@ func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, package
 	}
 	s.operatorMutationMu.Lock()
 	defer s.operatorMutationMu.Unlock()
+	if s.rejectUncertainMutation(w) {
+		return
+	}
 	s.mu.Lock()
 	deployment, ok := s.canaries[packageID]
 	if !ok || deployment.Status != "active" {
@@ -412,16 +429,18 @@ func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, package
 	s.mu.Unlock()
 
 	if err := s.persist(r.Context()); err != nil {
-		// Restore the pre-change state so a failed persist cannot leave the
-		// package half-promoted.
-		s.mu.Lock()
-		*ext = previous
-		s.history[packageID] = previousHistory
-		*deployment = previousDeployment
-		if promote {
-			s.restoreCanaryRegistrationsLocked(packageID, previousRegistrations)
+		// Never compensate a canary promotion with unknown DB commit outcome.
+		if !errors.Is(err, errPersistenceOutcomeUnknown) {
+			s.mu.Lock()
+			*ext = previous
+			s.history[packageID] = previousHistory
+			*deployment = previousDeployment
+			if promote {
+				s.restoreCanaryRegistrationsLocked(packageID, previousRegistrations)
+			}
+			s.mu.Unlock()
+			s.repairLocalAfterCompensation()
 		}
-		s.mu.Unlock()
 		log.Printf("canary decision persistence failed: %v", err)
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "canary decision persistence failed",

@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,10 +21,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
@@ -156,13 +159,15 @@ type extServer struct {
 	// Serialize operator package mutations through durable writes and compensation.
 	// s.mu alone protects only the in-memory portion, not the persistence gap.
 	operatorMutationMu sync.Mutex
-	mu                 sync.RWMutex
-	extensions         map[string]*Extension
-	skills             map[string]*Skill
-	hooks              map[string][]*Hook // event -> hooks
-	receipts           []*InstallationReceipt
-	executions         []*HookExecution
-	history            map[string][]ExtensionManifest
+	// Unverified commit: fence further mutations and hook side effects.
+	persistenceUncertain atomic.Bool
+	mu                   sync.RWMutex
+	extensions           map[string]*Extension
+	skills               map[string]*Skill
+	hooks                map[string][]*Hook // event -> hooks
+	receipts             []*InstallationReceipt
+	executions           []*HookExecution
+	history              map[string][]ExtensionManifest
 	// canaries holds side-by-side candidate versions, one per package (§22.3).
 	canaries map[string]*CanaryDeployment
 	// Independent operator-held key authenticates persisted canary activation.
@@ -175,9 +180,14 @@ type extServer struct {
 	persistHookExecutions func(context.Context) error
 	// Test-only persistence fault/barrier injection for concurrent operator requests.
 	persistBeforeWrite func(context.Context) error
+	// Test-only simulation of an acknowledgement lost after a DB commit.
+	persistAfterDBWrite func(context.Context) error
 }
 
 func (s *extServer) readinessCheck() error {
+	if s.persistenceUncertain.Load() {
+		return errPersistenceOutcomeUnknown
+	}
 	if os.Getenv("DATABASE_URL") == "" {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
@@ -357,65 +367,154 @@ func (s *extServer) loadState(ctx context.Context) error {
 	return nil
 }
 
+// errPersistenceOutcomeUnknown means a database write may have committed, but
+// its outcome could not be established. Compensation must not blindly restore
+// old live state in this case, since that can contradict the committed row.
+var errPersistenceOutcomeUnknown = errors.New("database persistence outcome unknown")
+
+func (s *extServer) durableState(ctx context.Context) ([]byte, error) {
+	var raw []byte
+	err := s.db.QueryRow(ctx, `SELECT state FROM extension_manager_state WHERE id=true`).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return raw, err
+}
+
+func samePersistedJSON(a, b []byte) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
+}
+
+func (s *extServer) snapshotState() ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return json.Marshal(persistedExtensionState{
+		Extensions: s.extensions, Skills: s.skills, Hooks: s.hooks,
+		Receipts: s.receipts, Executions: s.executions, History: s.history,
+		Canaries: s.canaries, NextID: s.nextID,
+	})
+}
+
+func (s *extServer) writeLocalState(raw []byte) error {
+	if s.storePath == "" {
+		return nil
+	}
+	dir := filepath.Dir(s.storePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".extension-manager-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	err = tmp.Chmod(0600)
+	if err == nil {
+		_, err = tmp.Write(raw)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmpName, s.storePath)
+	}
+	return err
+}
+
+// Repair the local mirror after a definitely failed database mutation. The
+// caller holds operatorMutationMu across its compensation and this repair.
+func (s *extServer) repairLocalAfterCompensation() {
+	if s.storePath == "" {
+		return
+	}
+	raw, err := s.snapshotState()
+	if err == nil {
+		err = s.writeLocalState(raw)
+	}
+	if err != nil {
+		// A local rename failure leaves the previous atomic file untouched.
+		// A DB+local mirror failure needs operator recovery to avoid split state.
+		if s.db != nil {
+			s.persistenceUncertain.Store(true)
+		}
+		log.Printf("extension local state compensation failed: %v", err)
+	}
+}
+
 func (s *extServer) persist(ctx context.Context) error {
 	if s.persistBeforeWrite != nil {
 		if err := s.persistBeforeWrite(ctx); err != nil {
 			return err
 		}
 	}
-	if s.db == nil {
-		if s.storePath == "" {
-			return nil
-		}
+	if s.db == nil && s.storePath == "" {
+		return nil
 	}
-	s.mu.RLock()
-	state := persistedExtensionState{
-		Extensions: s.extensions,
-		Skills:     s.skills,
-		Hooks:      s.hooks,
-		Receipts:   s.receipts,
-		Executions: s.executions,
-		History:    s.history,
-		Canaries:   s.canaries,
-		NextID:     s.nextID,
-	}
-	raw, err := json.Marshal(state)
-	s.mu.RUnlock()
+	raw, err := s.snapshotState()
 	if err != nil {
 		return err
 	}
-	if s.storePath != "" {
-		dir := filepath.Dir(s.storePath)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
-		tmp, err := os.CreateTemp(dir, ".extension-manager-*.tmp")
-		if err != nil {
-			return err
-		}
-		tmpName := tmp.Name()
-		defer os.Remove(tmpName)
-		err = tmp.Chmod(0600)
-		if err == nil {
-			_, err = tmp.Write(raw)
-		}
-		if err == nil {
-			err = tmp.Sync()
-		}
-		if closeErr := tmp.Close(); err == nil {
-			err = closeErr
-		}
-		if err == nil {
-			err = os.Rename(tmpName, s.storePath)
-		}
-		if err != nil {
-			return err
-		}
-	}
+
+	// Read the prior durable value before writing. If the acknowledgement is
+	// lost, readback distinguishes an unchanged row from the attempted row.
+	// This is NOT cross-instance CAS and cannot detect every ABA race.
+	var before []byte
 	if s.db != nil {
-		_, err = s.db.Exec(ctx, `INSERT INTO extension_manager_state (id,state,updated_at) VALUES (true,$1,now()) ON CONFLICT (id) DO UPDATE SET state=EXCLUDED.state, updated_at=EXCLUDED.updated_at`, raw)
+		before, err = s.durableState(ctx)
+		if err != nil {
+			return err
+		}
 	}
-	return err
+	if err := s.writeLocalState(raw); err != nil {
+		return err
+	}
+	if s.db == nil {
+		return nil
+	}
+	_, err = s.db.Exec(ctx, `INSERT INTO extension_manager_state (id,state,updated_at) VALUES (true,$1,now()) ON CONFLICT (id) DO UPDATE SET state=EXCLUDED.state, updated_at=EXCLUDED.updated_at`, raw)
+	if err == nil && s.persistAfterDBWrite != nil {
+		err = s.persistAfterDBWrite(ctx)
+	}
+	if err == nil {
+		return nil
+	}
+
+	// A canceled request context cannot establish the outcome of its own
+	// canceled write. Use a fresh bounded readback on the primary database.
+	verifyCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	after, readErr := s.durableState(verifyCtx)
+	if readErr == nil {
+		if samePersistedJSON(after, raw) {
+			return nil
+		} // write committed
+		if samePersistedJSON(after, before) {
+			return err
+		} // unchanged row
+	}
+	s.persistenceUncertain.Store(true)
+	return fmt.Errorf("%w: write: %v; readback: %v", errPersistenceOutcomeUnknown, err, readErr)
+}
+
+// After an unverified write, refuse new mutations and outbound deliveries.
+// Operator recovery requires reconciling durable state and restarting.
+func (s *extServer) rejectUncertainMutation(w http.ResponseWriter) bool {
+	if !s.persistenceUncertain.Load() {
+		return false
+	}
+	http.Error(w, "extension persistence requires recovery", http.StatusServiceUnavailable)
+	return true
 }
 
 func healthOK(w http.ResponseWriter, _ *http.Request) {
@@ -457,9 +556,15 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 	if r.Method != http.MethodGet && !operatorOnly(w, r) {
 		return
 	}
+	if r.Method != http.MethodGet && s.rejectUncertainMutation(w) {
+		return
+	}
 	if r.Method == http.MethodPatch || r.Method == http.MethodDelete {
 		s.operatorMutationMu.Lock()
 		defer s.operatorMutationMu.Unlock()
+		if s.rejectUncertainMutation(w) {
+			return
+		}
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -503,6 +608,10 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		// Preserve the complete prior operator state until the durable write
+		// succeeds. A failed write must not expose uncommitted status, scope
+		// or configuration to hook dispatch or subsequent reads.
+		previous := *ext
 		if update.Status != "" {
 			if err := s.setEnabledLocked(ext, update.Status == "enabled"); err != nil {
 				s.mu.Unlock()
@@ -520,7 +629,14 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 		snapshot := *ext
 		s.mu.Unlock()
 		if err := s.persist(r.Context()); err != nil {
-			http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
+			if !errors.Is(err, errPersistenceOutcomeUnknown) {
+				s.mu.Lock()
+				restoreExtensionOperatorStateLocked(ext, previous)
+				s.mu.Unlock()
+				s.repairLocalAfterCompensation()
+			}
+			log.Printf("extension patch persistence failed: %v", err)
+			http.Error(w, "extension persistence failed", http.StatusServiceUnavailable)
 			return
 		}
 		writeJSON(w, snapshot)
@@ -565,14 +681,29 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 	if !operatorOnly(w, r) {
 		return
 	}
+	if s.rejectUncertainMutation(w) {
+		return
+	}
 	s.operatorMutationMu.Lock()
 	defer s.operatorMutationMu.Unlock()
+	if s.rejectUncertainMutation(w) {
+		return
+	}
 	s.mu.Lock()
 	ext, ok := s.extensions[id]
 	if !ok {
 		s.mu.Unlock()
 		http.Error(w, "not found", http.StatusNotFound)
 		return
+	}
+	previous := *ext
+	// A manifest rollback changes registration maps and the undo stack,
+	// not just extension metadata. Preserve both for failed persistence.
+	var previousHistory []ExtensionManifest
+	var previousRegistrations canaryRegistrationSnapshot
+	if action == "rollback" {
+		previousHistory = append([]ExtensionManifest(nil), s.history[id]...)
+		previousRegistrations = s.snapshotCanaryRegistrationsLocked(id)
 	}
 	switch action {
 	case "enable", "disable":
@@ -609,7 +740,18 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 	result := *ext
 	s.mu.Unlock()
 	if err := s.persist(r.Context()); err != nil {
-		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "persist extension state: " + err.Error()})
+		if !errors.Is(err, errPersistenceOutcomeUnknown) {
+			s.mu.Lock()
+			restoreExtensionOperatorStateLocked(ext, previous)
+			if action == "rollback" {
+				s.history[id] = previousHistory
+				s.restoreCanaryRegistrationsLocked(id, previousRegistrations)
+			}
+			s.mu.Unlock()
+			s.repairLocalAfterCompensation()
+		}
+		log.Printf("extension action persistence failed: %v", err)
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "extension persistence failed"})
 		return
 	}
 	status := action + "d"
@@ -617,6 +759,19 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 		status = "rolled_back"
 	}
 	writeJSON(w, map[string]any{"status": status, "extension": result})
+}
+
+// restoreExtensionOperatorStateLocked compensates only the fields an operator
+// mutation can change. Hook dispatch independently updates Health and
+// HealthCheckedAt under s.mu while persistence is pending; copying the entire
+// extension would erase that newer runtime evidence.
+func restoreExtensionOperatorStateLocked(ext *Extension, previous Extension) {
+	ext.Manifest = previous.Manifest
+	ext.Status = previous.Status
+	ext.StatusReason = previous.StatusReason
+	ext.AgentScope = previous.AgentScope
+	ext.Config = previous.Config
+	ext.UpdatedAt = previous.UpdatedAt
 }
 
 // setEnabledLocked enables or disables an extension. Enabling re-verifies
@@ -711,6 +866,9 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, sk)
 
 	case http.MethodPost:
+		if s.rejectUncertainMutation(w) {
+			return
+		}
 		var skill Skill
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512<<10))
 		dec.DisallowUnknownFields()
@@ -737,6 +895,9 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 		// concurrent operator rollback can be persisted by this skill write.
 		s.operatorMutationMu.Lock()
 		defer s.operatorMutationMu.Unlock()
+		if s.rejectUncertainMutation(w) {
+			return
+		}
 		s.mu.Lock()
 		s.nextID++
 		skill.ID = fmt.Sprintf("skill-%d", s.nextID)
@@ -774,9 +935,15 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, view)
 
 	case http.MethodDelete:
+		if s.rejectUncertainMutation(w) {
+			return
+		}
 		// Keep deletion and its persistence atomic with operator changes.
 		s.operatorMutationMu.Lock()
 		defer s.operatorMutationMu.Unlock()
+		if s.rejectUncertainMutation(w) {
+			return
+		}
 		s.mu.Lock()
 		skill, ok := s.skills[id]
 		if !ok {
@@ -979,6 +1146,9 @@ func resolveIdentity(r *http.Request, bodyTenant, bodyPrincipal string) (request
 func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.rejectUncertainMutation(w) {
 		return
 	}
 	var req hookDispatchRequest
@@ -1216,6 +1386,9 @@ type hookPersistenceFailure struct{ cause error }
 func (e *hookPersistenceFailure) Error() string { return "hook state persistence failed" }
 
 func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchRequest) ([]hookDispatchResult, error) {
+	if s.persistenceUncertain.Load() {
+		return nil, errPersistenceOutcomeUnknown
+	}
 	s.mu.RLock()
 	targets := s.hookTargetsLocked(req.Event, req.canaryContext())
 	s.mu.RUnlock()
@@ -1410,6 +1583,9 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.rejectUncertainMutation(w) {
+		return
+	}
 	var manifest ExtensionManifest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
 	dec.DisallowUnknownFields()
@@ -1434,6 +1610,9 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	s.operatorMutationMu.Lock()
 	defer s.operatorMutationMu.Unlock()
+	if s.rejectUncertainMutation(w) {
+		return
+	}
 	warnings := []string{}
 
 	s.mu.Lock()

@@ -3207,6 +3207,39 @@ cohort tampering. This is source-level §22 integrity hardening only. §22
 deployed lifecycle, §25 integration, §32 metrics, representative P0 benchmarks,
 P3–P8 acceptance, live rollout/recovery and §41 governance remain open.
 
+### 2026-11-02 §22 extension operator mutation persistence compensation (TDD source slice)
+
+The operator PATCH and enable/disable/manifest-rollback HTTP handlers previously
+modified live extension status, agent scope, configuration, or installed
+registrations before persistence, then returned HTTP 503 without restoring
+the original state when the write failed. Their error responses also exposed
+raw persistence diagnostics, including internal filesystem paths. Three
+real-handler fault-injection regressions reproduced the disclosure (RED);
+the failure-path assertions additionally require unchanged in-memory and
+restarted local-state values.
+
+The handlers now restore the previous extension state on persistence failure.
+Manifest rollback additionally restores the prior undo history and exact
+registration snapshot, including owned hooks and skills. Client responses
+are generic, while operator logs retain the underlying failure diagnostics.
+Codex review exposed a concurrent hook-health overwrite: a whole-extension
+compensation erased a hook's newer Health/HealthCheckedAt values. Two
+synchronized persistence-barrier regressions reproduced that defect RED.
+Compensation now restores only operator-mutated fields, preserving independent
+hook telemetry; both regressions pass GREEN under repeated race-enabled tests.
+Five repeated focused test runs cover failed PATCH scope/config and status,
+failed disable, failed manifest rollback, and successful persisted PATCH and
+disable controls (GREEN). These changes use the existing operator mutation
+serialization and do not modify the deployment configuration.
+
+**Limitations:** This compensation is source-level, not a distributed
+transaction. The current persistence path writes a local snapshot before
+its optional database write, and concurrent readers may observe tentative
+state while a write is in progress. Installation/uninstallation persistence
+failure paths, cross-instance CAS/locking, authenticated state replay
+protection, full §22 lifecycle and §25/§32 acceptance, representative P0
+benchmarks, P3–P8 qualification, production recovery and §41 DoD remain
+separate gates. No production rollout or migration was performed.
 ### 2026-11-02 §22 in-process full-state persistence serialization (TDD source slice)
 
 Extension PATCH/enable/disable/install/canary mutations already held the
@@ -3230,3 +3263,35 @@ rollback. Cross-instance compare-and-swap, tentative state visibility, local
 store versus PostgreSQL ordering, deployed §22 lifecycle, §25 integration,
 §32 metrics, P0 benchmarks, P3–P8 acceptance and §41 governance remain open.
 No production deployment or migration was performed.
+
+### 2026-11-02 §22 ambiguous PostgreSQL commit outcome reconciliation (TDD source slice)
+
+CodeRabbit identified that a lost PostgreSQL write acknowledgement can occur
+*after* a committed operator PATCH/enable/disable/rollback. Blindly restoring
+prior in-memory state on every persistence error can therefore contradict the
+committed durable row. Two isolated real-PostgreSQL HTTP regressions reproduced
+this mismatch **RED**: an acknowledged commit with a simulated lost response
+was incorrectly rolled back, and an unreadable commit outcome also overwrote
+live state with the old value. Both pass **GREEN** after reconciliation.
+
+Persistence now snapshots the prior durable row, writes, then performs a fresh
+bounded readback if the write reports an error. If the attempted JSON state is
+durable, the operation is acknowledged; if the previous state remains, normal
+compensation restores the operator fields and repairs the local mirror. If
+readback fails or the durable state matches neither, the outcome is explicitly
+unknown: the server keeps the tentative live state rather than asserting a
+false rollback, fails the request with a sanitized 503, marks readiness failed,
+and fences subsequent operator mutations and outbound hook dispatch pending
+operator recovery. Canary activation and promotion/rollback use the same conservative
+compensation rule. A real PostgreSQL CHECK-constraint regression verifies
+confirmed non-commit and local mirror repair; a committed canary activation
+regression verifies correct acknowledgement. All use an isolated loopback
+PostgreSQL test database and no live services or paid resources.
+
+**Limitations:** This does not establish cross-instance CAS/transactional
+serialization or durable replay protection. In-flight dispatches and readers
+may still observe tentative state before persistence finishes. An unknown
+outcome requires operator reconciliation and controlled restart; this source
+change is not production rollout/recovery evidence. §22 deployed lifecycle,
+§25 integration, §32 metrics, representative P0 benchmarks, P3–P8 acceptance,
+production recovery and §41 governance remain open.
