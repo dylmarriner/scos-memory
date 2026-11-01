@@ -22,6 +22,8 @@ test:
 	python3 -m unittest discover -s tests -p test_benchmark_ranking_uniqueness.py -v
 	python3 -m unittest discover -s tests -p test_benchmark_harness.py -v
 	python3 -m unittest discover -s tests -p test_benchmark_suite_schema.py -v
+	python3 -m unittest discover -s tests -p test_p0_contextual_evidence.py -v
+	python3 -m unittest discover -s tests -p test_p0_memory_corpus.py -v
 	python3 -m unittest discover -s tests -p test_deployed_benchmark.py -v
 	python3 -m unittest discover -s tests -p test_postgres_dns_doctor.py -v
 	python3 -m unittest discover -s workers/embeddings/tests -v
