@@ -462,6 +462,14 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "invalid update: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Consume the entire bounded body before changing operator-managed
+		// extension state. A valid JSON prefix must not hide extra documents,
+		// malformed trailing bytes or an oversized whitespace suffix.
+		var trailing any
+		if err := dec.Decode(&trailing); err != io.EOF {
+			http.Error(w, "invalid update: expected one JSON document", http.StatusBadRequest)
+			return
+		}
 		if update.Status != "" && update.Status != "enabled" && update.Status != "disabled" {
 			http.Error(w, `status must be "enabled" or "disabled"`, http.StatusBadRequest)
 			return
