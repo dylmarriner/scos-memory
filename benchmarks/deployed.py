@@ -7,6 +7,7 @@ principal, and never falls back to local data when the remote service fails.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import os
@@ -51,6 +52,16 @@ class BenchmarkConfig:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT requires a valid HTTP(S) host")
         if parsed.username or parsed.password:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain userinfo")
+        if parsed.scheme == "http":
+            # HTTP is useful for a local disposable test server, but remote
+            # plaintext would disclose bearer and control-plane credentials.
+            # Do not trust DNS names (including localhost) as loopback proof.
+            try:
+                loopback = ipaddress.ip_address(hostname).is_loopback
+            except ValueError:
+                loopback = False
+            if not loopback:
+                raise RuntimeError("SCOS_BENCHMARK_ENDPOINT requires HTTPS except for literal loopback HTTP")
         if parsed.query or parsed.fragment or "?" in endpoint or "#" in endpoint:
             raise RuntimeError("SCOS_BENCHMARK_ENDPOINT must not contain a query or fragment")
         # Python accepts NaN/Infinity as floats; NaN bypasses <= 0 checks and
@@ -172,9 +183,12 @@ class DeployedCodeClient:
     def __init__(self, config: BenchmarkConfig):
         self.config = config
         self.context = ssl.create_default_context(cafile=config.ca_file) if config.ca_file else None
-        self.opener = urllib.request.build_opener(
-            _RejectRedirect(), urllib.request.HTTPSHandler(context=self.context)
-        )
+        handlers = [_RejectRedirect(), urllib.request.HTTPSHandler(context=self.context)]
+        if urllib.parse.urlsplit(config.endpoint).scheme == "http":
+            # An inherited HTTP_PROXY may otherwise receive Authorization and
+            # X-SCOS-Control-Plane-Token for an otherwise safe loopback URL.
+            handlers.append(urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(*handlers)
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload, sort_keys=True).encode("utf-8")
