@@ -153,13 +153,16 @@ type Hook struct {
 // ── server state ─────────────────────────────────────────────────────────
 
 type extServer struct {
-	mu         sync.RWMutex
-	extensions map[string]*Extension
-	skills     map[string]*Skill
-	hooks      map[string][]*Hook // event -> hooks
-	receipts   []*InstallationReceipt
-	executions []*HookExecution
-	history    map[string][]ExtensionManifest
+	// Serialize operator package mutations through durable writes and compensation.
+	// s.mu alone protects only the in-memory portion, not the persistence gap.
+	operatorMutationMu sync.Mutex
+	mu                 sync.RWMutex
+	extensions         map[string]*Extension
+	skills             map[string]*Skill
+	hooks              map[string][]*Hook // event -> hooks
+	receipts           []*InstallationReceipt
+	executions         []*HookExecution
+	history            map[string][]ExtensionManifest
 	// canaries holds side-by-side candidate versions, one per package (§22.3).
 	canaries  map[string]*CanaryDeployment
 	nextID    int
@@ -167,6 +170,8 @@ type extServer struct {
 	storePath string
 	// Optional audit-persistence fault injection for deterministic HTTP tests.
 	persistHookExecutions func(context.Context) error
+	// Test-only persistence fault/barrier injection for concurrent operator requests.
+	persistBeforeWrite func(context.Context) error
 }
 
 func (s *extServer) readinessCheck() error {
@@ -347,6 +352,11 @@ func (s *extServer) loadState(ctx context.Context) error {
 }
 
 func (s *extServer) persist(ctx context.Context) error {
+	if s.persistBeforeWrite != nil {
+		if err := s.persistBeforeWrite(ctx); err != nil {
+			return err
+		}
+	}
 	if s.db == nil {
 		if s.storePath == "" {
 			return nil
@@ -440,6 +450,10 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 	}
 	if r.Method != http.MethodGet && !operatorOnly(w, r) {
 		return
+	}
+	if r.Method == http.MethodPatch || r.Method == http.MethodDelete {
+		s.operatorMutationMu.Lock()
+		defer s.operatorMutationMu.Unlock()
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -545,6 +559,8 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 	if !operatorOnly(w, r) {
 		return
 	}
+	s.operatorMutationMu.Lock()
+	defer s.operatorMutationMu.Unlock()
 	s.mu.Lock()
 	ext, ok := s.extensions[id]
 	if !ok {
@@ -1396,6 +1412,8 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "manifest rejected: "+err.Error(), http.StatusForbidden)
 		return
 	}
+	s.operatorMutationMu.Lock()
+	defer s.operatorMutationMu.Unlock()
 	warnings := []string{}
 
 	s.mu.Lock()

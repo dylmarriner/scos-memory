@@ -4,6 +4,29 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.3 canary persistence-failure atomicity (2026-11-02; TDD source candidate)
+
+Canary promotion changed the installed hook/skill registration maps before
+writing durable state. A failed atomic state-file rename restored the stable
+manifest and history but left candidate hooks and skills registered as if
+promotion had succeeded, allowing stable callers to receive candidate effects.
+A failed replacement activation also deleted the prior rolled-back canary
+decision; failed promote/rollback changed its update timestamp. Deterministic
+filesystem-failure tests reproduced these issues RED. The correction restores
+the original package registration pointers, event order, circuit health,
+skills, canary metadata and previous decision after a failed write, while
+preserving unrelated registrations. Real loopback HTTP tests verify stable
+and canary callers still reach their correct endpoints. Storage diagnostics
+are restricted to operator logs; HTTP 503 responses do not expose filesystem
+paths. Focused race tests, full make test, vet, review, merged-main verification
+and CI are tracked separately.
+
+This is source-level §22.3 integrity work. Persisted canary activation scope
+still lacks cryptographic authentication, and deployed lifecycle qualification,
+§25 integration, §32 metrics breadth, representative P0 benchmarks, P3–P8
+acceptance and production rollout/recovery evidence remain open. Canonical
+§41 completion is not claimed.
+
 ## §22.3 persisted canary manifest and hook-cache integrity (2026-11-02; source candidate)
 
 The persisted canary hook cache was trusted after restart even when its
@@ -3122,3 +3145,23 @@ authentication of persisted canary activation scope: a valid-looking
 replacement scope remains an outstanding signed/secret-key integrity gap.
 It does not qualify deployed §22 lifecycle coverage, §25 integration,
 representative P0 benchmarks, P3–P8 acceptance or production recovery.
+
+### 2026-11-02 §22 canary promotion/installation concurrency integrity (source-only, TDD)
+
+PR #233 review identified a substantive race: a promotion can replace package
+hooks and skills, pause during durable persistence, and then fail after a
+concurrent installation has registered a newer package version. Its rollback
+would remove the newer version's registrations and restore obsolete hooks,
+leaving the advertised manifest inconsistent with dispatch. A deterministic
+concurrent HTTP regression reproduced lost version-3 registrations (RED).
+Operator-controlled installation, canary activation/decisions, extension
+status changes, rollback and uninstall now share a mutation lock held through
+persistence and compensation (GREEN), preventing those competing operations
+from interleaving inside the vulnerable window. The test uses a controlled
+persistence barrier and real request handlers, verifying the failed promotion
+returns 503 while the newer installation and its hooks/skills remain intact.
+This is source-level concurrency hardening, **not** a durable transactional
+commit across all event-dispatch persistence or multi-instance writers.
+Persisted canary scope is still unauthenticated; §22 deployed lifecycle,
+§25 cross-service integration, §32 metrics, representative P0 benchmarks,
+P3–P8 acceptance, production recovery and §41 governance remain open.
