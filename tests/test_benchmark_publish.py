@@ -385,6 +385,27 @@ class PublishTests(unittest.TestCase):
         result = publish({"suite": "x", "cases": []}, base_url=self.url, token="t0k")
         self.assertEqual(result, {"run_id": "existing-run", "created": False})
 
+    def test_publish_rejects_reflected_bearer_in_success_acknowledgement(self):
+        # A successful acknowledgement is still untrusted. run_deployed.main()
+        # prints the returned run_id, so an echoed bearer becomes a log leak.
+        secret = "publisher-secret-token"
+        responses = [
+            {"run_id": f"run-{secret}", "created": True},
+            {"run_id": "safe-run", "created": True,
+             "debug": {"authorization": f"Bearer {secret}"}},
+            {"run_id": "safe-run", "created": True,
+             f"debug-{secret}": "unexpected"},
+        ]
+        for response in responses:
+            with self.subTest(response=response):
+                _Collector.response_body = json.dumps(response).encode()
+                with self.assertRaisesRegex(RuntimeError, "invalid benchmark publish acknowledgement") as raised:
+                    publish({"suite": "x", "cases": []}, base_url=self.url, token=secret)
+                self.assertNotIn(secret, "".join(traceback.format_exception(raised.exception)))
+        _Collector.response_body = b'{"run_id":"safe-run","created":true,"summary":{"count":2}}'
+        self.assertEqual(publish({"suite": "x", "cases": []},
+                                 base_url=self.url, token=secret)["run_id"], "safe-run")
+
     def test_publish_malformed_success_body_never_leaks_credentials(self):
         _Collector.response_body = b"publisher-secret-token\xff"
         with self.assertRaises(RuntimeError) as raised:
