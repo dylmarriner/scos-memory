@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -89,6 +90,19 @@ func (s *extServer) verifyManifestIntegrity(m ExtensionManifest) error {
 	return verifyStoredManifest(m)
 }
 
+// verifyLoadedManifest retains the useful hash/isolation diagnostics for
+// legacy corrupt records, then checks the publisher signature as well. A
+// recomputed hash alone must not turn a modified manifest into authority.
+func (s *extServer) verifyLoadedManifest(m ExtensionManifest) error {
+	if err := verifyStoredManifest(m); err != nil {
+		return err
+	}
+	if !s.verifySignature(m) {
+		return fmt.Errorf("invalid signature")
+	}
+	return nil
+}
+
 // hookTimeoutMs is the timeout every hook delivery is given.
 const hookTimeoutMs = 30000
 
@@ -130,9 +144,17 @@ func ownedSkillID(packageID, skill string) string {
 // in line with what the dispatcher actually does: hooks report their real
 // semantics, extension-exported skills record their owner, skills left
 // behind by an extension that is no longer installed are removed, and an
-// enabled extension whose stored manifest fails its integrity or isolation
-// check is disabled with the reason recorded. Callers hold s.mu.
+// enabled extension whose stored manifest fails signature, hash or isolation
+// verification is disabled with the reason recorded. Callers hold s.mu.
 func (s *extServer) normalizeLocked() {
+	// Hook records are mutable runtime state, not signed configuration. The
+	// separately stored hook map must never override a verified manifest's
+	// subscribed events, destination or fail-closed policy after a restart.
+	trusted := make(map[string]bool, len(s.extensions))
+	for id, ext := range s.extensions {
+		trusted[id] = s.verifyLoadedManifest(ext.Manifest) == nil
+	}
+	seen := make(map[string]bool)
 	for event, hooks := range s.hooks {
 		kept := hooks[:0]
 		for _, h := range hooks {
@@ -140,11 +162,27 @@ func (s *extServer) normalizeLocked() {
 			if !ok {
 				continue
 			}
-			h.Type = hookType(h.FallbackPolicy)
-			h.Retryable = false
-			h.TimeoutMs = hookTimeoutMs
-			if h.Version == "" {
-				h.Version = ext.Manifest.Version
+			if trusted[h.ExtensionID] {
+				if !contains(ext.Manifest.HooksSubscribed, event) {
+					continue // injected event absent from the verified manifest
+				}
+				key := event + "\x00" + h.ExtensionID
+				if seen[key] {
+					continue // duplicate registration cannot multiply side effects
+				}
+				seen[key] = true
+				canonical := newHook(ext.Manifest, event)
+				// Preserve only delivery health, not mutable routing/authority.
+				canonical.ConsecutiveFailures = h.ConsecutiveFailures
+				canonical.CircuitOpenUntil = h.CircuitOpenUntil
+				*h = *canonical
+			} else {
+				h.Type = hookType(h.FallbackPolicy)
+				h.Retryable = false
+				h.TimeoutMs = hookTimeoutMs
+				if h.Version == "" {
+					h.Version = ext.Manifest.Version
+				}
 			}
 			kept = append(kept, h)
 		}
@@ -152,6 +190,25 @@ func (s *extServer) normalizeLocked() {
 			delete(s.hooks, event)
 		} else {
 			s.hooks[event] = kept
+		}
+	}
+	// Reconstruct missing signed subscriptions too: deleting a mandatory
+	// record from stored state must not silently bypass its hook.
+	ids := make([]string, 0, len(s.extensions))
+	for id := range s.extensions {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if !trusted[id] {
+			continue
+		}
+		for _, event := range s.extensions[id].Manifest.HooksSubscribed {
+			key := event + "\x00" + id
+			if !seen[key] {
+				s.hooks[event] = append(s.hooks[event], newHook(s.extensions[id].Manifest, event))
+				seen[key] = true
+			}
 		}
 	}
 	for id, skill := range s.skills {
@@ -179,7 +236,7 @@ func (s *extServer) normalizeLocked() {
 		ext.Isolation = isolationRemoteEndpoint
 		ext.IsolationEnforcement = isolationEnforcement
 		if ext.Status == "enabled" {
-			if err := verifyStoredManifest(ext.Manifest); err != nil {
+			if err := s.verifyLoadedManifest(ext.Manifest); err != nil {
 				ext.Status = "disabled"
 				ext.StatusReason = "disabled at load: " + err.Error()
 			}
