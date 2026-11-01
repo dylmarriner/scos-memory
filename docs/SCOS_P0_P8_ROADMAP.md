@@ -3007,3 +3007,21 @@ Focused race-enabled regressions pass twice. This is §22 source integrity
 evidence only. It is **not** proof of deployed extension-hook integration,
 representative P0 model benchmarks, production rollout/recovery or §41
 completion. PR review, merged-main tests and CI remain separately gated.
+
+### 2026-11-02 §22 hook-dispatch storage-failure confidentiality (source-only)
+
+A real loopback HTTP hook and deliberately failing local audit-store rename
+reproduced a storage failure after successful external delivery. Dispatch
+already returned HTTP 503, but its response and tenant-readable abort record
+included the raw filesystem rename error and absolute server path. This
+exposed internal storage diagnostics to a tenant through both the synchronous
+response and `GET /v1/hooks/executions`. The RED regression covers those
+surfaces, preserves evidence of the already-attempted external delivery, and
+includes a successful durable-store control. The dispatch layer now returns a
+bounded generic persistence error to HTTP/audit consumers while retaining the
+underlying cause in operator logs. The GREEN regression exercises actual
+filesystem failure and real loopback HTTP delivery; focused race tests, full
+`make test`, and `go vet ./...` are required before merge. This is source
+confidentiality/evidence integrity, **not** proof of production persistence,
+end-to-end hook coverage, §25 integration, representative P0 benchmarks,
+P3–P8 qualification, live rollout/recovery or §41 completion.
