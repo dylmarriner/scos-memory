@@ -252,6 +252,8 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 		return
 	}
 
+	s.operatorMutationMu.Lock()
+	defer s.operatorMutationMu.Unlock()
 	s.mu.Lock()
 	ext, ok := s.extensions[packageID]
 	if !ok {
@@ -333,6 +335,8 @@ func (s *extServer) canaryResolve(w http.ResponseWriter, r *http.Request, packag
 // canaryFinish promotes the candidate to installed, or discards it. Either way
 // the package is left with exactly one active version and no partial state.
 func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, packageID string, promote bool) {
+	s.operatorMutationMu.Lock()
+	defer s.operatorMutationMu.Unlock()
 	s.mu.Lock()
 	deployment, ok := s.canaries[packageID]
 	if !ok || deployment.Status != "active" {

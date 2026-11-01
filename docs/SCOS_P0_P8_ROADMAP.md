@@ -3145,3 +3145,23 @@ authentication of persisted canary activation scope: a valid-looking
 replacement scope remains an outstanding signed/secret-key integrity gap.
 It does not qualify deployed §22 lifecycle coverage, §25 integration,
 representative P0 benchmarks, P3–P8 acceptance or production recovery.
+
+### 2026-11-02 §22 canary promotion/installation concurrency integrity (source-only, TDD)
+
+PR #233 review identified a substantive race: a promotion can replace package
+hooks and skills, pause during durable persistence, and then fail after a
+concurrent installation has registered a newer package version. Its rollback
+would remove the newer version's registrations and restore obsolete hooks,
+leaving the advertised manifest inconsistent with dispatch. A deterministic
+concurrent HTTP regression reproduced lost version-3 registrations (RED).
+Operator-controlled installation, canary activation/decisions, extension
+status changes, rollback and uninstall now share a mutation lock held through
+persistence and compensation (GREEN), preventing those competing operations
+from interleaving inside the vulnerable window. The test uses a controlled
+persistence barrier and real request handlers, verifying the failed promotion
+returns 503 while the newer installation and its hooks/skills remain intact.
+This is source-level concurrency hardening, **not** a durable transactional
+commit across all event-dispatch persistence or multi-instance writers.
+Persisted canary scope is still unauthenticated; §22 deployed lifecycle,
+§25 cross-service integration, §32 metrics, representative P0 benchmarks,
+P3–P8 acceptance, production recovery and §41 governance remain open.
