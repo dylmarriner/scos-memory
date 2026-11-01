@@ -5,6 +5,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -282,16 +283,24 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
+	previousDeployment, hadPrevious := s.canaries[packageID]
 	s.canaries[packageID] = deployment
 	snapshot := *deployment
 	s.mu.Unlock()
 
 	if err := s.persist(r.Context()); err != nil {
 		s.mu.Lock()
-		delete(s.canaries, packageID)
+		if s.canaries[packageID] == deployment {
+			if hadPrevious {
+				s.canaries[packageID] = previousDeployment
+			} else {
+				delete(s.canaries, packageID)
+			}
+		}
 		s.mu.Unlock()
+		log.Printf("canary deployment persistence failed: %v", err)
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "persist canary deployment: " + err.Error(),
+			"error": "canary deployment persistence failed",
 		})
 		return
 	}
@@ -338,7 +347,14 @@ func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, package
 		return
 	}
 	previous := *ext
+	previousDeployment := *deployment
 	previousHistory := append([]ExtensionManifest(nil), s.history[packageID]...)
+	// Promotion replaces registered hooks and skills before persistence. Keep
+	// their original pointers, order and circuit health for an exact rollback.
+	var previousRegistrations canaryRegistrationSnapshot
+	if promote {
+		previousRegistrations = s.snapshotCanaryRegistrationsLocked(packageID)
+	}
 
 	if promote {
 		if err := s.verifyManifestIntegrity(deployment.CanaryManifest); err != nil {
@@ -370,12 +386,77 @@ func (s *extServer) canaryFinish(w http.ResponseWriter, r *http.Request, package
 		s.mu.Lock()
 		*ext = previous
 		s.history[packageID] = previousHistory
-		deployment.Status = "active"
+		*deployment = previousDeployment
+		if promote {
+			s.restoreCanaryRegistrationsLocked(packageID, previousRegistrations)
+		}
 		s.mu.Unlock()
+		log.Printf("canary decision persistence failed: %v", err)
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "persist canary decision: " + err.Error(),
+			"error": "canary decision persistence failed",
 		})
 		return
 	}
 	writeJSON(w, result)
+}
+
+// canaryRegistrationSnapshot captures the installed package's registrations
+// before promotion. A failed persistence write must not expose candidate
+// hooks or skills to stable callers, nor erase stable circuit-breaker state.
+type canaryRegistrationSnapshot struct {
+	hooks  map[string][]*Hook
+	skills map[string]*Skill
+}
+
+func (s *extServer) snapshotCanaryRegistrationsLocked(packageID string) canaryRegistrationSnapshot {
+	snapshot := canaryRegistrationSnapshot{
+		hooks:  make(map[string][]*Hook),
+		skills: make(map[string]*Skill),
+	}
+	for event, hooks := range s.hooks {
+		for _, hook := range hooks {
+			if hook.ExtensionID == packageID {
+				snapshot.hooks[event] = append([]*Hook(nil), hooks...)
+				break
+			}
+		}
+	}
+	for id, skill := range s.skills {
+		if skill.ExtensionID == packageID {
+			snapshot.skills[id] = skill
+		}
+	}
+	return snapshot
+}
+
+func (s *extServer) restoreCanaryRegistrationsLocked(packageID string, before canaryRegistrationSnapshot) {
+	// Remove candidate-only registrations while retaining any unrelated
+	// registrations made while the persistence attempt was in flight.
+	s.removeExtensionRegistrationsLocked(packageID)
+	for event, original := range before.hooks {
+		current := s.hooks[event]
+		remaining := make(map[*Hook]bool, len(current))
+		for _, hook := range current {
+			remaining[hook] = true
+		}
+		restored := make([]*Hook, 0, len(original)+len(current))
+		for _, hook := range original {
+			if hook.ExtensionID == packageID {
+				restored = append(restored, hook)
+			} else if remaining[hook] {
+				restored = append(restored, hook)
+				delete(remaining, hook)
+			}
+		}
+		for _, hook := range current {
+			if remaining[hook] {
+				restored = append(restored, hook)
+				delete(remaining, hook)
+			}
+		}
+		s.hooks[event] = restored
+	}
+	for id, skill := range before.skills {
+		s.skills[id] = skill
+	}
 }

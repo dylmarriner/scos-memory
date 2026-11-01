@@ -4,6 +4,29 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.3 canary persistence-failure atomicity (2026-11-02; TDD source candidate)
+
+Canary promotion changed the installed hook/skill registration maps before
+writing durable state. A failed atomic state-file rename restored the stable
+manifest and history but left candidate hooks and skills registered as if
+promotion had succeeded, allowing stable callers to receive candidate effects.
+A failed replacement activation also deleted the prior rolled-back canary
+decision; failed promote/rollback changed its update timestamp. Deterministic
+filesystem-failure tests reproduced these issues RED. The correction restores
+the original package registration pointers, event order, circuit health,
+skills, canary metadata and previous decision after a failed write, while
+preserving unrelated registrations. Real loopback HTTP tests verify stable
+and canary callers still reach their correct endpoints. Storage diagnostics
+are restricted to operator logs; HTTP 503 responses do not expose filesystem
+paths. Focused race tests, full make test, vet, review, merged-main verification
+and CI are tracked separately.
+
+This is source-level §22.3 integrity work. Persisted canary activation scope
+still lacks cryptographic authentication, and deployed lifecycle qualification,
+§25 integration, §32 metrics breadth, representative P0 benchmarks, P3–P8
+acceptance and production rollout/recovery evidence remain open. Canonical
+§41 completion is not claimed.
+
 ## §22.3 persisted canary manifest and hook-cache integrity (2026-11-02; source candidate)
 
 The persisted canary hook cache was trusted after restart even when its
