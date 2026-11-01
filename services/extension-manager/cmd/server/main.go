@@ -1124,6 +1124,18 @@ func (s *extServer) setHealthLocked(extensionID, health string) {
 	}
 }
 
+// validHookEndpoint enforces the same outbound destination contract at
+// preflight and delivery. Reject userinfo so the service bearer is not mixed
+// with URL-embedded credentials, and reject missing authorities.
+func validHookEndpoint(endpoint string) bool {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
+		return false
+	}
+	return parsed.Scheme == "https" || (parsed.Scheme == "http" &&
+		(parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost"))
+}
+
 func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchRequest) ([]hookDispatchResult, error) {
 	s.mu.RLock()
 	targets := s.hookTargetsLocked(req.Event, req.canaryContext())
@@ -1133,7 +1145,16 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 	// side effects behind when the dispatch ultimately fails closed.
 	for _, target := range targets {
 		hook := target.hook
-		if hook.FallbackPolicy != "fail_closed" || hook.CircuitOpenUntil == "" {
+		if hook.FallbackPolicy != "fail_closed" {
+			continue
+		}
+		if hook.Endpoint == "" {
+			return nil, fmt.Errorf("critical hook %s has no declared endpoint", hook.ExtensionID)
+		}
+		if !validHookEndpoint(hook.Endpoint) {
+			return nil, fmt.Errorf("critical hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID)
+		}
+		if hook.CircuitOpenUntil == "" {
 			continue
 		}
 		until, err := time.Parse(time.RFC3339, hook.CircuitOpenUntil)
@@ -1190,8 +1211,7 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 				continue
 			}
 		}
-		parsed, err := url.Parse(hook.Endpoint)
-		if err != nil || (parsed.Scheme != "https" && !(parsed.Scheme == "http" && (parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "localhost"))) {
+		if !validHookEndpoint(hook.Endpoint) {
 			return nil, fmt.Errorf("hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID)
 		}
 		body, err := json.Marshal(map[string]any{"event": req.Event, "tenant_id": req.TenantID, "principal_id": req.PrincipalID, "payload": req.Payload, "config": target.config})

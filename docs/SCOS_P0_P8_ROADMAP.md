@@ -4,6 +4,21 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## P22 critical hook endpoint preflight (2026-11-02; source candidate)
+
+A later mandatory `fail_closed` extension hook with an absent, malformed,
+non-loopback plaintext, or unsupported endpoint could abort dispatch only
+**after** earlier hooks had already received tenant-scoped events and performed
+external side effects. Six real-HTTP TDD regressions now exercise invalid
+critical destinations and require zero prior deliveries (four failed before
+the fix); a valid critical hook still succeeds. The extension dispatcher
+preflights all mandatory hook endpoint destinations before sending any event,
+and shares the destination validator with actual delivery. The validator also
+rejects absent authorities and URL-embedded userinfo. This closes a local
+§22 fail-closed sequencing gap only. Independent PR review, CI, merged-main
+verification, wider lifecycle-hook coverage, §41 governance acceptance and
+production rollout/recovery remain separate gates.
+
 
 ## P0 deployed HTTP 200 credential-reflection guard (2026-11-01; isolated TDD source candidate)
 
