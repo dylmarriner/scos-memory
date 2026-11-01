@@ -27,6 +27,7 @@ import json
 import math
 import platform
 import random
+import re
 import ssl
 import statistics
 import subprocess
@@ -36,6 +37,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable
 
 # ── benchmark types ──────────────────────────────────────────────────────
@@ -58,6 +60,8 @@ class BenchmarkCase:
     conflicting_ids: list[str] = field(default_factory=list)
     duplicate_ids: list[str] = field(default_factory=list)
     stale_ids: list[str] = field(default_factory=list)
+    # Evidence forbidden by the case scope or current-belief policy.
+    forbidden_ids: list[str] = field(default_factory=list)
     promotion_expected: bool = False
     token_budget: int = 0
 
@@ -94,6 +98,7 @@ class BenchmarkSuite:
     cases: list[BenchmarkCase]
     created_at: str = ""
     corpus: dict[str, str] = field(default_factory=dict)
+    document_scopes: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 FROZEN_CORPUS: dict[str, str] = {
@@ -253,6 +258,10 @@ def compute_scores(expected: set[str], retrieved: list[str],
         "stale_hit_rate": stale_hit_rate(case.stale_ids, retrieved),
         "token_efficiency": token_efficiency(case.token_budget, result.tokens_used),
     }
+    if case.forbidden_ids:
+        forbidden = set(case.forbidden_ids)
+        for k in (5, 10, 20):
+            scores[f"forbidden_at_{k}"] = float(len(forbidden & set(retrieved[:k])))
     for name, value in optional.items():
         if value is not None:
             scores[name] = value
@@ -322,6 +331,8 @@ def runtime_metadata() -> dict[str, Any]:
 # must not interpret increasing stale/duplicate exposure as an improvement.
 LOWER_IS_BETTER_METRICS = frozenset({
     "duplicate_rate", "stale_hit_rate", "answer_regression",
+    "forbidden_at_5", "forbidden_at_10", "forbidden_at_20",
+    "unknown_at_5", "unknown_at_10", "unknown_at_20",
 })
 
 
@@ -388,6 +399,11 @@ class BenchmarkRunner:
         elapsed = (time.perf_counter() - start) * 1000
         if not isinstance(outcome, RetrievalOutcome):
             outcome = RetrievalOutcome(ids=list(outcome))
+        # Scoped synthetic acceptance must not count unlabelled results as
+        # clean isolation evidence. An unknown ID may be a cross-tenant leak
+        # that the labelled corpus cannot classify.
+        known_ids = set(self.suite.corpus) if self.suite.document_scopes else None
+        unknown_ids = (set(outcome.ids) - known_ids) if known_ids is not None else set()
         result = BenchmarkResult(
             case_id=case.id,
             retrieved_ids=list(outcome.ids),
@@ -395,9 +411,15 @@ class BenchmarkRunner:
             cited_ids=outcome.cited_ids,
             promoted=outcome.promoted,
             tokens_used=outcome.tokens_used,
-            answer_correct=task_succeeded(set(case.expected_ids), outcome.ids),
+            answer_correct=(task_succeeded(set(case.expected_ids), outcome.ids)
+                            and not (set(case.forbidden_ids) & set(outcome.ids))
+                            and not unknown_ids),
         )
         result.scores = compute_scores(set(case.expected_ids), result.retrieved_ids, case, result)
+        if known_ids is not None:
+            for k in (5, 10, 20):
+                result.scores[f"unknown_at_{k}"] = float(
+                    len(set(outcome.ids[:k]) - known_ids))
         self.results.append(result)
         return result
 
@@ -568,7 +590,7 @@ def create_default_frozen_suite() -> BenchmarkSuite:
 
 
 _CASE_FIELDS = {"id", "query", "expected_ids", "category", "context", "citation_ids", "authoritative_ids",
-                "conflicting_ids", "duplicate_ids", "stale_ids", "promotion_expected", "token_budget"}
+                "conflicting_ids", "duplicate_ids", "stale_ids", "forbidden_ids", "promotion_expected", "token_budget"}
 
 
 def _strict_suite_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -643,7 +665,7 @@ def load_suite(path: str) -> BenchmarkSuite:
             if not isinstance(raw.get(field_name), str) or not raw[field_name].strip():
                 raise ValueError(f"case {field_name} must be a nonblank string")
         for field_name in ("expected_ids", "citation_ids", "authoritative_ids",
-                           "conflicting_ids", "duplicate_ids", "stale_ids"):
+                           "conflicting_ids", "duplicate_ids", "stale_ids", "forbidden_ids"):
             if field_name == "expected_ids" or field_name in raw:
                 _validate_suite_ids(raw, field_name, required=field_name == "expected_ids")
         if "context" in raw and not isinstance(raw["context"], dict):
@@ -659,13 +681,86 @@ def load_suite(path: str) -> BenchmarkSuite:
         seen_case_ids.add(case.id)
         labelled = (set(case.expected_ids) | set(case.citation_ids)
                     | set(case.authoritative_ids) | set(case.conflicting_ids)
-                    | set(case.duplicate_ids) | set(case.stale_ids))
+                    | set(case.duplicate_ids) | set(case.stale_ids)
+                    | set(case.forbidden_ids))
+        if set(case.expected_ids) & set(case.forbidden_ids):
+            raise ValueError(f"case {case.id!r} forbidden_ids overlap expected_ids")
+        if set(case.forbidden_ids) & (set(case.authoritative_ids) | set(case.citation_ids)):
+            raise ValueError(f"case {case.id!r} forbidden_ids overlap authoritative_ids or citation_ids")
         missing = labelled - set(corpus)
         if missing:
             raise ValueError(f"case {case.id!r} names ids not in the corpus: {sorted(missing)}")
         cases.append(case)
+    # Contextual fixtures carry explicit source scope, not just natural-language
+    # hints. Validate every expected label against its actual tenant/namespace;
+    # otherwise an isolation case could score a cross-tenant leak as correct.
+    document_scopes = data.get("document_scopes", {})
+    if "document_scopes" in data:
+        if not isinstance(document_scopes, dict) or set(document_scopes) != set(corpus):
+            raise ValueError("document_scopes must cover the exact corpus")
+        def canonical_uuid(value: Any) -> bool:
+            if not isinstance(value, str):
+                return False
+            try:
+                parsed = uuid.UUID(value)
+            except (ValueError, AttributeError):
+                return False
+            return parsed.int != 0 and str(parsed) == value
+        for doc_id, scope in document_scopes.items():
+            if (not isinstance(scope, dict) or set(scope) != {"tenant_id", "namespace_id", "state"}
+                    or not canonical_uuid(scope.get("tenant_id"))
+                    or not canonical_uuid(scope.get("namespace_id"))
+                    or not isinstance(scope.get("state"), str)
+                    or scope["state"] not in {"active", "historical", "superseded", "revoked", "duplicate"}):
+                raise ValueError(f"document_scopes invalid for {doc_id}")
+        for case in cases:
+            context = case.context
+            if (not canonical_uuid(context.get("tenant_id"))
+                    or not canonical_uuid(context.get("namespace_id"))):
+                raise ValueError(f"case {case.id}: contextual scope requires canonical tenant/namespace UUIDs")
+            if set(context) - {"tenant_id", "namespace_id", "as_of_valid_time"}:
+                raise ValueError(f"case {case.id}: unsupported contextual selector")
+            if "as_of_valid_time" in context:
+                raw_time = context["as_of_valid_time"]
+                if (not isinstance(raw_time, str) or
+                        not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)", raw_time)):
+                    raise ValueError(f"case {case.id}: valid time must be RFC3339 with timezone")
+                try:
+                    datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise ValueError(f"case {case.id}: invalid valid time") from exc
+            for doc_id in case.expected_ids:
+                source = document_scopes[doc_id]
+                if (source["tenant_id"] != context["tenant_id"]
+                        or source["namespace_id"] != context["namespace_id"]):
+                    raise ValueError(f"case {case.id}: expected evidence outside requested scope")
+                if source["state"] == "historical" and not context.get("as_of_valid_time"):
+                    raise ValueError(f"case {case.id}: historical evidence needs explicit valid time")
+                if source["state"] not in {"active", "historical"}:
+                    raise ValueError(f"case {case.id}: expected evidence is not active or historical")
+            if (case.category == "scope_isolation" and
+                    not any(document_scopes[i]["tenant_id"] != context["tenant_id"]
+                            for i in case.forbidden_ids)):
+                raise ValueError(f"case {case.id}: tenant isolation lacks foreign-tenant forbidden evidence")
+            if (case.category == "namespace_isolation" and
+                    not any(document_scopes[i]["tenant_id"] == context["tenant_id"]
+                            and document_scopes[i]["namespace_id"] != context["namespace_id"]
+                            for i in case.forbidden_ids)):
+                raise ValueError(f"case {case.id}: namespace isolation lacks out-of-scope forbidden evidence")
+            # Explicit labels cover stale/conflicting evidence; source metadata
+            # supplies EVERY tenant/namespace exclusion. A manually curated
+            # subset must never turn another known cross-scope leak into a pass.
+            outside_scope = {
+                doc_id for doc_id, source in document_scopes.items()
+                if source["tenant_id"] != context["tenant_id"]
+                or source["namespace_id"] != context["namespace_id"]
+            }
+            case.forbidden_ids = sorted(set(case.forbidden_ids) | outside_scope)
+            if set(case.forbidden_ids) & (set(case.authoritative_ids) | set(case.citation_ids)):
+                raise ValueError(f"case {case.id!r} forbidden_ids overlap authoritative_ids or citation_ids")
     return BenchmarkSuite(name=data["name"], version=data["version"], cases=cases,
-                          created_at=data.get("created_at", ""), corpus=dict(corpus))
+                          created_at=data.get("created_at", ""), corpus=dict(corpus),
+                          document_scopes=dict(document_scopes))
 
 
 class GatewayMemoryAdapter:
@@ -809,6 +904,10 @@ class GatewayMemoryAdapter:
                 "forget_failures": self.forget_failures}
 
     def __call__(self, query: str, context: dict[str, Any]) -> list[str]:
+        # This adapter seeds one namespace and cannot enforce per-case tenant,
+        # namespace, temporal or project selectors. Never score ignored scope.
+        if context:
+            raise ValueError("benchmark case context unsupported by the MCP gateway adapter")
         recalled = self._call("scos_recall", {"query": query, "max_items": self.max_items})
         ids = []
         for item in recalled.get("recall") or []:
@@ -830,8 +929,14 @@ def main(argv: list[str] | None = None) -> int:
     suite = create_default_frozen_suite() if args.suite == "default" else load_suite(args.suite)
     baseline = BenchmarkRunner(suite)
     baseline.run(DeterministicLexicalBaseline(suite.corpus))
-    report: dict[str, Any] = {"baseline": {"name": DeterministicLexicalBaseline.name, "summary": baseline.summary()}}
+    report: dict[str, Any] = {"baseline": {"name": DeterministicLexicalBaseline.name,
+                                      "context_aware": False,
+                                      "contextual_cases_unqualified": sum(bool(c.context) for c in suite.cases),
+                                      "summary": baseline.summary()}}
     if args.endpoint:
+        # Fail BEFORE seeding anything: cleanup cannot undo a canonical merge.
+        if any(case.context for case in suite.cases):
+            raise ValueError("benchmark case context unsupported by the MCP gateway adapter; no seeding performed")
         with GatewayMemoryAdapter(args.endpoint, suite.corpus, ca_file=args.ca_file) as adapter:
             runner = BenchmarkRunner(suite)
             runner.run(adapter)

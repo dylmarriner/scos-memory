@@ -142,6 +142,40 @@ on AMD. No deployed service was contacted. This
 closes only a P0 benchmark-evidence integrity defect; representative P0
 performance, §41 acceptance and production rollout/recovery remain open.
 
+## Shared signed-claims expiration enforcement (2026-10-31; source candidate)
+
+The shared auth package previously accepted HMAC-signed identity tokens with
+missing, zero or negative `exp` claims indefinitely, despite the intended
+short-lived credential contract. Its signing helper also allowed no expiration
+or an already-expired timestamp. An authenticated HTTP regression demonstrated
+that the malformed tokens reached a protected handler, and signer regressions
+verified missing/past expiration was accepted (RED). Both signing and
+validation now require a future Unix-second expiration. Existing signed-token
+fixtures were updated to use real short lifetimes; valid tokens continue to
+authenticate (GREEN). A workflow parity regression ensures `packages/auth/**`
+changes trigger the restricted-role P4 integration workflow on PR and push.
+
+The corrected source was tested locally with the complete Go and Python suite,
+Go vet, and focused authentication/Hermes provider tests. These source-only
+tests do not prove production rotation of already-issued undated credentials,
+cluster-wide deployment compatibility, or completed §41 governance acceptance.
+Production credential migration and rollout remain separate approval gates.
+
+**PR #198 review remediation (2026-10-31; source candidate):** Codex and
+CodeRabbit independently found that the 58-case failure-injection runner still
+minted signed claims without an expiration, making authenticated probes fail
+with HTTP 401 after the stricter validator. A new HMAC/payload regression first
+failed because the expiration was missing; a second regression first failed
+because a long-running runner reused one bearer indefinitely (RED). The runner
+now signs 15-minute credentials and regenerates them for each request (GREEN).
+The P4 CI workflow contract now verifies active auth-package entries
+independently in both PR and push filters rather than counting arbitrary
+occurrences, and the signer positive control verifies the exact returned
+Unix-second expiration. These are local source tests, not executed
+failure-injection acceptance against a deployed stack. Merge remains gated
+on updated-head CI/P4, resolved substantive reviews, independent approval
+where branch protection requires it, and post-merge main verification.
+
 ## P0 deployed benchmark strict JSON evidence (2026-10-31; TDD source candidate)
 
 The deployed benchmark's HTTP 200 JSON parser accepted duplicate object keys
@@ -1411,6 +1445,33 @@ Git provenance attestation, P3 scaling acceptance, or production readiness.
 
 # P0 — Benchmark and Evidence Baseline
 
+## P0 contextual memory-corpus and forbidden-evidence qualification (2026-10-31; isolated source branch)
+
+A versioned synthetic P0 fixture now contains **43 memory documents and 30
+cases** spanning paraphrase, long-history noise, contradictory/superseded
+facts, temporal selectors, tenant/namespace isolation, prompt injection and
+exact identifiers. Every source carries tenant, namespace and lifecycle
+metadata. The shared harness now validates source scope against expected
+labels and computes forbidden-evidence exposure at ranks 5/10/20; a forbidden
+hit disqualifies task success even when all required evidence was returned.
+A contextual suite cannot be passed to the current single-tenant MCP gateway
+adapter: it fails **before any seeding** rather than silently ignoring tenant
+or time selectors. Focused RED/GREEN tests and metadata mutation tests are in
+`tests/test_p0_contextual_evidence.py` and `tests/test_p0_memory_corpus.py`.
+The 16 new focused regression methods were RED before implementation and GREEN
+afterward; full local `make test`, `go vet ./...`, `git diff --check`, and the
+30-case real lexical diagnostic passed. The diagnostic reported contextual
+cases unqualified and did not connect to a live tenant or model service.
+The initial PR-head P4 workflow correctly failed on the shared-harness SHA-256
+change; the frozen seven-case lexical baseline was independently re-recorded
+and compared field-for-field, preserving all ranked IDs, Recall/Precision/MRR/
+nDCG, forbidden-at-5/10/20 totals, fixture identity and engine version.
+Only the checked-out base SHA and shared-harness digest were refreshed.
+See `benchmarks/p0/README.md`. **This is synthetic corpus and harness
+qualification, not a live multi-tenant benchmark, BGE/FTS/RRF comparison,
+P0 completion, production rollout or P5 historical reconstruction.**
+
+
 **P0 duplicate-result metric integrity (2026-10-29, source candidate):** Three RED/GREEN regressions prove repeated relevant evidence previously inflated Precision@K (2/3 reported as 1) and nDCG (1.6309 for one relevant item). Precision now counts actual ranking slots, and nDCG rewards each distinct evidence ID once. The fresh P4 lexical baseline has unchanged rankings, scores and forbidden counts; only harness/base SHA metadata changed. See docs/P0_UNIQUE_RANKING_INTEGRITY.md. This is not live BGE, latency, deployment or full P0–P8 acceptance.
 
 
@@ -2543,3 +2604,18 @@ For each phase:
 **P4 source is merged. Complete its full P0 reproducible acceptance programme, qualify current live BGE endpoints/performance and then advance the cross-domain P5–P8 acceptance cases.**
 
 DeepSeek remains SCOS's reasoning/synthesis layer. BGE remains the specialist retrieval layer beneath it. They are complementary parts of the same stack.
+
+### P0 contextual review hardening (2026-10-31; PR #199 follow-up)
+
+For versioned scoped suites, forbidden evidence now includes **every** document
+whose tenant or namespace differs from the case selector, derived from corpus
+metadata rather than relying on manually enumerated distractors. Unknown
+retrieved IDs fail contextual task success even when the expected ID is also
+returned; `unknown_at_5/10/20` tracks these unclassified hits as
+lower-is-better metrics. These are synthetic evidence-integrity assertions,
+**not** evidence of deployed tenant isolation or P0 model acceptance.
+Versioned contextual ground truth is now `1.1.0`; conflicting
+forbidden/authoritative/citation labels are rejected, including scope-derived
+forbidden evidence. Review regressions reproduced the contradictory labels
+before the correction.
+The seven-case frozen P4 lexical baseline was independently re-recorded after the shared harness change. All seven ranked-ID lists, every per-case and aggregate quality metric, and forbidden@5/10/20=(0,0,0) remained identical; only the harness SHA-256 and source base SHA changed. This does not qualify contextual retrieval.

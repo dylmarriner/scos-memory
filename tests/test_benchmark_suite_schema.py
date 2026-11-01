@@ -45,7 +45,7 @@ class SuiteSchemaIntegrityTests(unittest.TestCase):
 
     def test_semantic_labels_must_be_unique_string_lists(self):
         for field in ("citation_ids", "authoritative_ids", "conflicting_ids",
-                      "duplicate_ids", "stale_ids"):
+                      "duplicate_ids", "stale_ids", "forbidden_ids"):
             for invalid in ("doc", ["doc", "doc"], [1], [None], [""]):
                 with self.subTest(field=field, value=invalid):
                     payload = self.base()
