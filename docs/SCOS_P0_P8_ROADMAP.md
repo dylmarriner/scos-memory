@@ -5,6 +5,25 @@
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
 
+## P0 deployed HTTP 200 credential-reflection guard (2026-11-01; isolated TDD source candidate)
+
+A successful JSON response from the deployed code service could include the
+benchmark bearer or control-plane credential in arbitrary nested fields. The
+runner persisted complete preflight responses and per-case result details, so
+an upstream debug echo could leak those credentials into a durable benchmark
+artifact despite the existing HTTP error-body and redirect protections.
+Two targeted regressions first failed RED: a reflected bearer in a readiness
+`debug` field and a control-plane token inside a nested query result. The
+client now rejects credential reflection across parsed JSON object keys,
+values and arrays with a fixed diagnostic; short test credentials are matched
+exactly or with a Bearer prefix to avoid false positives in ordinary text.
+A real localhost HTTP integration regression proves reflected preflight JSON
+produces a failed, credential-free artifact without seeding any repository.
+Focused Python 3.11 tests and full `make test` passed on an isolated AMD
+worktree. This is source evidence only, not live benchmark performance,
+production rollout/recovery or P0–P8 acceptance.
+
+
 ## P0 untrusted benchmark transport and parser-depth handling (2026-11-01; PR #200 follow-up, not merged)
 
 Two isolated TDD regressions exposed evidence and credential-handling defects:
