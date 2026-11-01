@@ -67,6 +67,7 @@ type prefetchQueue struct {
 type prefetchOutcomes struct {
 	warmed    int64
 	failed    int64
+	skipped   int64
 	lastError string
 }
 
@@ -151,6 +152,12 @@ func (q *prefetchQueue) record(tenantID string, err error) {
 		o = &prefetchOutcomes{}
 		q.outcomes[tenantID] = o
 	}
+	if errors.Is(err, errPrefetchSessionUnknown) {
+		// A newly started session may not have any stored turns yet.
+		// This is neither a warmed cache entry nor an operational failure.
+		o.skipped++
+		return
+	}
 	if err != nil {
 		o.failed++
 		o.lastError = err.Error()
@@ -173,7 +180,7 @@ func (q *prefetchQueue) stats(tenantID string) map[string]any {
 	if o == nil {
 		o = &prefetchOutcomes{}
 	}
-	out := map[string]any{"queue_depth": depth, "prefetch_warmed": o.warmed, "prefetch_failed": o.failed}
+	out := map[string]any{"queue_depth": depth, "prefetch_warmed": o.warmed, "prefetch_failed": o.failed, "prefetch_skipped": o.skipped}
 	if o.lastError != "" {
 		out["prefetch_last_error"] = o.lastError
 	}
