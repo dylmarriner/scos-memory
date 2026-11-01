@@ -4,6 +4,28 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.3 persisted canary manifest and hook-cache integrity (2026-11-02; source candidate)
+
+The persisted canary hook cache was trusted after restart even when its
+endpoint, fallback policy, or event subscriptions disagreed with the signed
+candidate manifest. A tampered candidate manifest with a recomputed content
+hash but invalid Ed25519 signature also remained active. Real loopback HTTP
+and persisted-file TDD regressions reproduced the unsafe routing and selection
+before correction (RED). On restore, active canaries now require a verified
+candidate signature/hash/isolation, matching installed package and stable/
+candidate version bindings, an enabled stable extension and valid scope.
+Invalid candidates fall back to the stable version with an explicit reason;
+valid candidates reconstruct their hooks exclusively from the signed manifest,
+retaining only circuit health from cached hook state. Missing mandatory hooks
+are restored, while injected events and redirected endpoints are discarded.
+
+This is source-level §22.3 integrity hardening only. The canary activation
+scope itself is operational state, not cryptographically authenticated by the
+candidate manifest; a separately governed durable scope attestation and live
+rollout/recovery qualification remain outstanding. This does not close §22
+fleet-wide lifecycle coverage, §25 integration, §32 metrics, representative
+P0 benchmarking, P3–P8 acceptance or canonical §41 completion.
+
 ## §22.7 hook execution acknowledgement durability (2026-11-02; source candidate)
 
 A real outbound HTTP hook could succeed and the dispatcher could persist hook

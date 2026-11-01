@@ -73,10 +73,11 @@ type CanaryDeployment struct {
 	Isolation      string            `json:"isolation"`
 	// Hooks are the candidate version's subscriptions, delivered to callers
 	// in the cohort in place of the stable version's.
-	Hooks     map[string]*Hook `json:"hooks,omitempty"`
-	Status    string           `json:"status"` // active, promoted, rolled_back
-	CreatedAt string           `json:"created_at"`
-	UpdatedAt string           `json:"updated_at"`
+	Hooks        map[string]*Hook `json:"hooks,omitempty"`
+	Status       string           `json:"status"` // active, promoted, rolled_back
+	StatusReason string           `json:"status_reason,omitempty"`
+	CreatedAt    string           `json:"created_at"`
+	UpdatedAt    string           `json:"updated_at"`
 }
 
 // CanaryContext identifies the caller a version must be resolved for.

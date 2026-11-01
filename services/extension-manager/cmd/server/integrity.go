@@ -242,10 +242,44 @@ func (s *extServer) normalizeLocked() {
 			}
 		}
 	}
-	for _, d := range s.canaries {
-		if d.Status == "active" && d.Hooks == nil {
-			d.Hooks = canaryHooks(d.CanaryManifest)
+	for id, d := range s.canaries {
+		if d.Status != "active" {
+			continue
 		}
+		// The persisted canary hook cache is not signed. Validate the
+		// candidate manifest before restoring any candidate deliveries.
+		ext, exists := s.extensions[id]
+		var invalid error
+		switch {
+		case !exists || ext.Status != "enabled":
+			invalid = fmt.Errorf("stable extension unavailable")
+		case d.PackageID != id || d.CanaryManifest.PackageID != id ||
+			d.StableVersion != ext.Manifest.Version || d.CanaryVersion != d.CanaryManifest.Version ||
+			d.CanaryVersion == ext.Manifest.Version:
+			invalid = fmt.Errorf("canary identity or version mismatch")
+		case d.Scope.validate() != nil:
+			invalid = fmt.Errorf("invalid canary scope")
+		default:
+			invalid = s.verifyLoadedManifest(d.CanaryManifest)
+		}
+		if invalid != nil {
+			// Do not allow a corrupted candidate to reach a hook endpoint
+			// or be selected by the version resolver after restart.
+			d.Status = "rolled_back"
+			d.StatusReason = "disabled at load: " + invalid.Error()
+			d.Hooks = nil
+			continue
+		}
+		verifiedHooks := canaryHooks(d.CanaryManifest)
+		for event, verified := range verifiedHooks {
+			if cached := d.Hooks[event]; cached != nil {
+				// Circuit health is operational state; endpoint and fallback
+				// policy must always come from the signed manifest.
+				verified.ConsecutiveFailures = cached.ConsecutiveFailures
+				verified.CircuitOpenUntil = cached.CircuitOpenUntil
+			}
+		}
+		d.Hooks = verifiedHooks
 	}
 }
 
