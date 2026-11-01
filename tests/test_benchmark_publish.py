@@ -159,6 +159,52 @@ class PublishTests(unittest.TestCase):
                     publish({"suite": "x", "cases": []}, base_url=self.url, token=token)
         self.assertEqual(_Collector.received, [], "malformed tokens must not reach the HTTP client")
 
+    def test_publish_rejects_remote_plaintext_before_sending_service_token(self):
+        # A configured remote HTTP collector would otherwise receive the
+        # internal service token in cleartext. DNS names are not loopback proof.
+        invalid = (
+            "http://192.0.2.17:8080", "http://10.1.2.3:8080",
+            "http://localhost:8080", "http://127.0.0.1.attacker.test:8080",
+            "http://[2001:db8::1]:8080",
+        )
+        with patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("network attempted")) as network:
+            for url in invalid:
+                with self.subTest(url=url), self.assertRaisesRegex(RuntimeError, "HTTPS.*loopback"):
+                    publish({"suite": "x", "cases": []}, base_url=url, token="service-secret")
+            network.assert_not_called()
+        self.assertEqual(_Collector.received, [])
+
+    def test_loopback_publisher_never_forwards_service_token_to_inherited_proxy(self):
+        # HTTP_PROXY and an empty NO_PROXY must not divert local fixture
+        # publication, even when the proxy returns a plausible HTTP 201.
+        class ProxyCollector(_Collector):
+            received = []
+            status = 201
+            redirect_to = None
+            echo_error_body = False
+            reason_phrase = None
+            response_body = None
+
+        proxy = HTTPServer(("127.0.0.1", 0), ProxyCollector)
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        try:
+            env = {
+                "HTTP_PROXY": f"http://127.0.0.1:{proxy.server_port}",
+                "http_proxy": f"http://127.0.0.1:{proxy.server_port}",
+                "NO_PROXY": "", "no_proxy": "",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                result = publish({"suite": "x", "cases": []}, base_url=self.url, token="service-secret")
+            self.assertEqual(result["run_id"], "abc")
+            self.assertEqual(len(_Collector.received), 1, "loopback collector must receive the run")
+            self.assertEqual(_Collector.received[0]["auth"], "Bearer service-secret")
+            self.assertEqual(ProxyCollector.received, [], "proxy must not see the token or benchmark")
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join()
+
     def test_publish_is_noop_when_unconfigured(self):
         os.environ.pop("SCOS_BENCHMARK_PUBLISH_URL", None)
         self.assertIsNone(publish({"suite": "x", "cases": []}))

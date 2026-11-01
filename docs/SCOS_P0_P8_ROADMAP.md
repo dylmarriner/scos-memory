@@ -1504,6 +1504,23 @@ cannot intercept loopback fixture credentials. This is a P0 confidentiality guar
 proof of a live deployed benchmark, production TLS configuration, benchmark
 quality/latency acceptance, or rollout/recovery readiness.
 
+## P0 benchmark publisher transport confidentiality (2026-11-01)
+
+The observability benchmark publisher previously accepted non-loopback HTTP
+collectors and sent the internal service bearer over plaintext. It also used
+inherited HTTP proxy settings for literal-loopback fixture publication, so a
+configured proxy could intercept the bearer and return a plausible HTTP 201.
+Two new regression tests were RED before the fix: a five-address remote/DNS
+plaintext rejection matrix and a real two-server local collector/proxy test.
+The publisher now requires HTTPS for all non-loopback destinations, allows
+plaintext only for literal IPv4/IPv6 loopback fixture addresses, and disables
+inherited proxies for those local HTTP requests. The existing strict
+acknowledgement, redirect, URL and header validation remains in place.
+All 22 publisher tests pass locally after the fix. This protects P0 evidence
+publication transport, **not** proof of live publication, representative
+retrieval quality/latency/cost, deployment TLS configuration, or P0–P8
+acceptance. No production configuration or deployment was changed.
+
 ## P0 deployed evidence JSON nesting limit (2026-11-01)
 
 Deployed benchmark HTTP JSON now enforces a fixed maximum nesting depth of
