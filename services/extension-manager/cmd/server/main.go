@@ -1216,7 +1216,18 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			cancel()
 			return nil, err
 		}
-		response, callErr := (&http.Client{Timeout: timeout}).Do(hookReq)
+		// The configured endpoint is the only authorized destination for the
+		// tenant-scoped event payload and internal bearer. The default Go
+		// client follows 3xx redirects, potentially forwarding both to an
+		// unconfigured host or an insecure HTTP URL. Treat every redirect as
+		// a failed delivery instead, preserving fail-closed hook semantics.
+		client := &http.Client{
+			Timeout: timeout,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		response, callErr := client.Do(hookReq)
 		if response != nil {
 			response.Body.Close()
 		}
