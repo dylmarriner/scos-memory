@@ -3222,6 +3222,11 @@ The handlers now restore the previous extension state on persistence failure.
 Manifest rollback additionally restores the prior undo history and exact
 registration snapshot, including owned hooks and skills. Client responses
 are generic, while operator logs retain the underlying failure diagnostics.
+Codex review exposed a concurrent hook-health overwrite: a whole-extension
+compensation erased a hook's newer Health/HealthCheckedAt values. Two
+synchronized persistence-barrier regressions reproduced that defect RED.
+Compensation now restores only operator-mutated fields, preserving independent
+hook telemetry; both regressions pass GREEN under repeated race-enabled tests.
 Five repeated focused test runs cover failed PATCH scope/config and status,
 failed disable, failed manifest rollback, and successful persisted PATCH and
 disable controls (GREEN). These changes use the existing operator mutation

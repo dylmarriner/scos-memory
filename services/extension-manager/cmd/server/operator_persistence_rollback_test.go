@@ -135,3 +135,45 @@ func TestExtensionOperatorMutationsPersistOnSuccess(t *testing.T) {
 		t.Fatalf("successful changes not durable: %+v", got)
 	}
 }
+
+func TestExtensionFailedMutationPreservesConcurrentHookHealth(t *testing.T) {
+	for _, tc := range []struct{ name, method, path, body string }{
+		{"patch", http.MethodPatch, "/v1/extensions/canary.ext", `{"config":{"mode":"new"}}`},
+		{"disable", http.MethodPost, "/v1/extensions/canary.ext/disable", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := canaryFixture(t)
+			srv.extensions["canary.ext"].Health = "healthy"
+			srv.extensions["canary.ext"].HealthCheckedAt = "2020-01-01T00:00:00Z"
+			started := make(chan struct{})
+			resume := make(chan struct{})
+			srv.persistBeforeWrite = func(context.Context) error {
+				close(started)
+				<-resume
+				return errors.New("injected storage failure")
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				res := httptest.NewRecorder()
+				srv.handleExtensionByID(res, operatorRequest(tc.method, tc.path, bytes.NewBufferString(tc.body)))
+				done <- res
+			}()
+			<-started
+			// Hook completion updates runtime health under s.mu, independently
+			// of the operator-mutation lock while the durable write is pending.
+			srv.mu.Lock()
+			srv.extensions["canary.ext"].Health = "failing"
+			srv.extensions["canary.ext"].HealthCheckedAt = "2026-11-02T00:00:00Z"
+			srv.mu.Unlock()
+			close(resume)
+			res := <-done
+			if res.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d", res.Code)
+			}
+			got := srv.extensions["canary.ext"]
+			if got.Health != "failing" || got.HealthCheckedAt != "2026-11-02T00:00:00Z" {
+				t.Fatalf("failed %s overwrote newer hook health: %+v", tc.name, got)
+			}
+		})
+	}
+}

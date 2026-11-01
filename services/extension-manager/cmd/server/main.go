@@ -525,7 +525,7 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 		s.mu.Unlock()
 		if err := s.persist(r.Context()); err != nil {
 			s.mu.Lock()
-			*ext = previous
+			restoreExtensionOperatorStateLocked(ext, previous)
 			s.mu.Unlock()
 			log.Printf("extension patch persistence failed: %v", err)
 			http.Error(w, "extension persistence failed", http.StatusServiceUnavailable)
@@ -627,7 +627,7 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 	s.mu.Unlock()
 	if err := s.persist(r.Context()); err != nil {
 		s.mu.Lock()
-		*ext = previous
+		restoreExtensionOperatorStateLocked(ext, previous)
 		if action == "rollback" {
 			s.history[id] = previousHistory
 			s.restoreCanaryRegistrationsLocked(id, previousRegistrations)
@@ -642,6 +642,19 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 		status = "rolled_back"
 	}
 	writeJSON(w, map[string]any{"status": status, "extension": result})
+}
+
+// restoreExtensionOperatorStateLocked compensates only the fields an operator
+// mutation can change. Hook dispatch independently updates Health and
+// HealthCheckedAt under s.mu while persistence is pending; copying the entire
+// extension would erase that newer runtime evidence.
+func restoreExtensionOperatorStateLocked(ext *Extension, previous Extension) {
+	ext.Manifest = previous.Manifest
+	ext.Status = previous.Status
+	ext.StatusReason = previous.StatusReason
+	ext.AgentScope = previous.AgentScope
+	ext.Config = previous.Config
+	ext.UpdatedAt = previous.UpdatedAt
 }
 
 // setEnabledLocked enables or disables an extension. Enabling re-verifies
