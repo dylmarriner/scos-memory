@@ -3240,3 +3240,58 @@ failure paths, cross-instance CAS/locking, authenticated state replay
 protection, full §22 lifecycle and §25/§32 acceptance, representative P0
 benchmarks, P3–P8 qualification, production recovery and §41 DoD remain
 separate gates. No production rollout or migration was performed.
+### 2026-11-02 §22 in-process full-state persistence serialization (TDD source slice)
+
+Extension PATCH/enable/disable/install/canary mutations already held the
+operator mutation lock across their persistence calls, but standalone skill
+creation/deletion and hook-dispatch state persistence did not. These paths
+serialize the *entire* extension-manager snapshot. A concurrent skill or hook
+write could therefore commit a tentative operator change while its own
+persistence was still pending, defeating a subsequent compensation rollback.
+
+Three synchronized fault-injection regressions reproduced this race **RED**
+against merged main: hook dispatch, skill creation and skill deletion entered
+persistence while a PATCH write was blocked. The same tests pass **GREEN** after
+serializing standalone skill mutations through their durable write and taking
+the operator lock around the hook-dispatch persistence call. Hook HTTP delivery
+itself remains outside the operator lock. Five focused repetitions passed.
+
+This closes the identified **single-process concurrent snapshot writer**
+window only. The pending operator persistence compensation PR must separately
+reconcile ambiguous PostgreSQL commit outcomes and protect failed mutation
+rollback. Cross-instance compare-and-swap, tentative state visibility, local
+store versus PostgreSQL ordering, deployed §22 lifecycle, §25 integration,
+§32 metrics, P0 benchmarks, P3–P8 acceptance and §41 governance remain open.
+No production deployment or migration was performed.
+
+### 2026-11-02 §22 ambiguous PostgreSQL commit outcome reconciliation (TDD source slice)
+
+CodeRabbit identified that a lost PostgreSQL write acknowledgement can occur
+*after* a committed operator PATCH/enable/disable/rollback. Blindly restoring
+prior in-memory state on every persistence error can therefore contradict the
+committed durable row. Two isolated real-PostgreSQL HTTP regressions reproduced
+this mismatch **RED**: an acknowledged commit with a simulated lost response
+was incorrectly rolled back, and an unreadable commit outcome also overwrote
+live state with the old value. Both pass **GREEN** after reconciliation.
+
+Persistence now snapshots the prior durable row, writes, then performs a fresh
+bounded readback if the write reports an error. If the attempted JSON state is
+durable, the operation is acknowledged; if the previous state remains, normal
+compensation restores the operator fields and repairs the local mirror. If
+readback fails or the durable state matches neither, the outcome is explicitly
+unknown: the server keeps the tentative live state rather than asserting a
+false rollback, fails the request with a sanitized 503, marks readiness failed,
+and fences subsequent operator mutations and outbound hook dispatch pending
+operator recovery. Canary activation and promotion/rollback use the same conservative
+compensation rule. A real PostgreSQL CHECK-constraint regression verifies
+confirmed non-commit and local mirror repair; a committed canary activation
+regression verifies correct acknowledgement. All use an isolated loopback
+PostgreSQL test database and no live services or paid resources.
+
+**Limitations:** This does not establish cross-instance CAS/transactional
+serialization or durable replay protection. In-flight dispatches and readers
+may still observe tentative state before persistence finishes. An unknown
+outcome requires operator reconciliation and controlled restart; this source
+change is not production rollout/recovery evidence. §22 deployed lifecycle,
+§25 integration, §32 metrics, representative P0 benchmarks, P3–P8 acceptance,
+production recovery and §41 governance remain open.
