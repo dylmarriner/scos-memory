@@ -1114,6 +1114,25 @@ memory mutation and remaining lifecycle event coverage, installed extension
 end-to-end integration, P0–P8 acceptance and production deployment remain
 unverified. This is not a claim that §22 or §41 is complete.
 
+## §22.6 code-retrieval lifecycle boundary (2026-11-01; source candidate)
+
+The `code-intelligence` execution stage previously called `/v2/code/repos` and
+`/v2/code/query` without emitting either canonical retrieval lifecycle hook,
+even though the memory-gateway stage already dispatched both. Five real HTTP
+stage regressions first failed (RED) on missing hook events and unsafe
+continued code retrieval after a rejected pre-hook. The code stage now emits
+`on_before_retrieval` before repository resolution and
+`on_after_retrieval` after success or upstream/repository failure. It passes
+only interaction identity, a fixed source discriminator and stage status,
+never the repository path, raw query, code results or upstream error body.
+A rejected pre-hook prevents both upstream requests; a rejected post-hook
+prevents successful code evidence from entering downstream model context.
+All five focused real HTTP cases pass (GREEN), including failure-status
+telemetry on both upstream endpoints. This covers only a source-level code
+retrieval stage, not installed extension conformance, fleet-wide hook coverage,
+representative P0 retrieval acceptance, live deployment or §41 completion.
+Merge, main CI and production verification are separate gates.
+
 ## §22 retrieval/context lifecycle hook coverage (2026-10-28; merged PR #117)
 
 The autonomous control plane already dispatched turn, model, tool and

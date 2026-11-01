@@ -328,24 +328,42 @@ func (c *controlPlane) runStage(ctx context.Context, req RouteRequest, decision 
 		if strings.TrimSpace(req.RepositoryPath) == "" {
 			return skippedStage("no repository_path on the request")
 		}
+		// §22.6: code retrieval must pass the same canonical hook boundary
+		// as memory retrieval. Only safe identifiers/status reach extensions;
+		// the query, repository path, results and upstream error body do not.
+		hookPayload := map[string]any{"interaction_id": req.InteractionID, "source": "code-intelligence"}
+		if err := c.dispatchHook(ctx, "on_before_retrieval", hookPayload, req); err != nil {
+			return degradedStage("on_before_retrieval hook: " + err.Error())
+		}
+		finish := func(result stageResult, code []byte) stageResult {
+			hookErr := c.dispatchHook(ctx, "on_after_retrieval", map[string]any{
+				"interaction_id": req.InteractionID, "source": "code-intelligence", "status": result.status,
+			}, req)
+			if hookErr != nil && result.status == stageCompleted {
+				return degradedStage("on_after_retrieval hook: " + hookErr.Error())
+			}
+			if result.status == stageCompleted {
+				state.code = code
+			}
+			return result
+		}
 		registered, err := c.callService(ctx, step.System, "/v2/code/repos", map[string]any{"canonical_path": req.RepositoryPath}, req)
 		if err != nil {
-			return degradedStage("resolve repository: " + err.Error())
+			return finish(degradedStage("resolve repository: "+err.Error()), nil)
 		}
 		var repo struct {
 			RepositoryID string `json:"repository_id"`
 		}
 		if err := json.Unmarshal(registered, &repo); err != nil || repo.RepositoryID == "" {
-			return degradedStage("resolve repository: code-intelligence returned no repository_id")
+			return finish(degradedStage("resolve repository: code-intelligence returned no repository_id"), nil)
 		}
 		code, err := c.callService(ctx, step.System, "/v2/code/query", map[string]any{
 			"repository_id": repo.RepositoryID, "query": req.Input, "max_results": 10,
 		}, req)
 		if err != nil {
-			return degradedStage(err.Error())
+			return finish(degradedStage(err.Error()), nil)
 		}
-		state.code = code
-		return completedStage("")
+		return finish(completedStage(""), code)
 	case "context-optimisation":
 		if err := c.dispatchHook(ctx, "on_before_context_compile", map[string]any{"interaction_id": req.InteractionID}, req); err != nil {
 			return degradedStage("on_before_context_compile hook: " + err.Error())
