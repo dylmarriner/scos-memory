@@ -138,6 +138,40 @@ class DefaultSuiteCoversAllCategoriesTests(unittest.TestCase):
         self.assertFalse(result.answer_correct)
 
 
+class P0LatencyPercentileEvidenceTests(unittest.TestCase):
+    """P0 requires measured per-case p50/p95, not average-only latency."""
+
+    def _runner(self, values):
+        cases = [BenchmarkCase(id=f"case-{i}", query="q", expected_ids=["a"],
+                               category="known_answer") for i in range(len(values))]
+        runner = BenchmarkRunner(BenchmarkSuite(name="latency", version="1", cases=cases))
+        runner.results = [
+            BenchmarkResult(case_id=case.id, retrieved_ids=["a"],
+                            latency_ms=value, answer_correct=True,
+                            scores={"recall@1": 1.0})
+            for case, value in zip(cases, values)
+        ]
+        return runner
+
+    def test_latency_percentiles_are_deterministic_nearest_rank(self):
+        summary = self._runner([40.0, 10.0, 30.0, 20.0]).summary()
+        self.assertEqual(summary["avg_latency_ms"], 25.0)
+        self.assertEqual(summary["p50_latency_ms"], 20.0)
+        self.assertEqual(summary["p95_latency_ms"], 40.0)
+        self.assertEqual(summary["total_latency_ms"], 100.0)
+
+    def test_single_case_percentiles_are_measured_not_fabricated(self):
+        summary = self._runner([12.5]).summary()
+        self.assertEqual(summary["p50_latency_ms"], 12.5)
+        self.assertEqual(summary["p95_latency_ms"], 12.5)
+
+    def test_invalid_latency_cannot_be_published_as_p0_evidence(self):
+        for value in (float("nan"), float("inf"), -1.0, True):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "latency"):
+                    self._runner([value]).summary()
+
+
 class SummaryBaselineIntegrityTests(unittest.TestCase):
     """A missing/duplicated case cannot improve reported answer regression."""
 
