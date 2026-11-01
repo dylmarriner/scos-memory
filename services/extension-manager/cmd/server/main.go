@@ -1150,6 +1150,11 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 				s.mu.Lock()
 				s.setHealthLocked(hook.ExtensionID, "circuit_open")
 				s.mu.Unlock()
+				// An open circuit prevents an outbound attempt, but it must
+				// never override the extension's mandatory fail-closed policy.
+				if hook.FallbackPolicy == "fail_closed" {
+					return nil, fmt.Errorf("critical hook %s circuit breaker is open", hook.ExtensionID)
+				}
 				done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "circuit_open", Reason: "hook circuit breaker is open"})
 				continue
 			}

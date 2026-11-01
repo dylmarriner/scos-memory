@@ -1095,6 +1095,25 @@ passed 94 tests but had six fixture setup errors; GitHub's Python CI
 passed. None of this qualifies the live migration, general P7 answer
 generation, retrieval integration, or production recovery.
 
+## §22.7 Critical hook open-circuit fail-closed safety (2026-11-01; source candidate)
+
+The extension manager previously bypassed a **critical** hook when its
+circuit breaker was open, then returned a successful HTTP dispatch response.
+That violated the hook's explicit `fail_closed` fallback policy and allowed
+later extension callbacks and governed execution to continue without the
+critical hook. RED tests reproduced both the incorrect successful direct
+dispatch and HTTP 200, while a separate baseline test verified that optional
+`continue` hooks intentionally remain skippable when their circuit is open.
+
+The circuit-open branch now preserves each hook's declared fallback: a
+`fail_closed` hook returns an abort error before later extensions run; the
+HTTP endpoint returns 503 and records the aborted dispatch. Optional hooks
+still produce a visible `circuit_open` skip and continue, with no outbound
+attempt. All three focused RED/GREEN regressions and the full
+extension-manager test package passed. This is a source-only fix; installed
+extension end-to-end testing, remaining §22 lifecycle events, production
+rollout, recovery evidence and canonical §41 closure remain outstanding.
+
 ## §22.6 canonical turn-reception hook (2026-11-01; source candidate)
 
 The actual autonomous-control-plane execution path already dispatched legacy
