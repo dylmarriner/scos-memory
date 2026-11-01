@@ -1504,6 +1504,18 @@ cannot intercept loopback fixture credentials. This is a P0 confidentiality guar
 proof of a live deployed benchmark, production TLS configuration, benchmark
 quality/latency acceptance, or rollout/recovery readiness.
 
+## P0 deployed evidence JSON nesting limit (2026-11-01)
+
+Deployed benchmark HTTP JSON now enforces a fixed maximum nesting depth of
+128 object/array levels using an iterative walk after strict parsing. This
+prevents Python interpreter version differences in decoder recursion limits
+from admitting deeply nested, upstream-controlled readiness or query evidence
+that may later fail artifact serialization. A real local HTTP response with
+200 nested arrays was accepted before the fix and rejected after; boundary
+regressions verify 128 levels accepted and 129 rejected. This is an offline
+P0 evidence-hardening gate, **not** representative deployed P0/P4 performance,
+production credential/tenant qualification, or rollout/recovery evidence.
+
 # P0 — Benchmark and Evidence Baseline
 
 ## P0 contextual memory-corpus and forbidden-evidence qualification (2026-10-31; isolated source branch)
