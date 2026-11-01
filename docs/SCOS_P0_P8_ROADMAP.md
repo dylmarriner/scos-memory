@@ -4,6 +4,22 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.7 optional hook destination failure isolation (2026-11-02; source candidate)
+
+Five real HTTP dispatch regressions reproduced a policy violation: an optional
+`continue` hook with an invalid destination (remote plaintext, unsupported
+scheme, missing authority, embedded credentials, or malformed URL) returned
+HTTP 503 and discarded the per-hook result, even when valid neighboring hooks
+were available. All five cases failed before the fix (RED). The dispatcher
+now rejects invalid optional destinations without outbound I/O, records a
+`failed`/`invalid_endpoint` result and tenant-scoped execution evidence,
+counts the failure toward the existing circuit breaker, and continues to
+later hooks including mandatory `fail_closed` hooks. The same five real-HTTP
+cases pass after the fix (GREEN), plus a four-dispatch circuit-breaker
+regression. Mandatory endpoint preflight remains fail-closed and unchanged.
+This is source-level §22 behavior hardening, not fleet-wide lifecycle coverage,
+§41 governance acceptance, or production rollout/recovery qualification.
+
 ## P22 critical hook endpoint preflight (2026-11-02; source candidate)
 
 A later mandatory `fail_closed` extension hook with an absent, malformed,

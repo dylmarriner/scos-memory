@@ -1212,7 +1212,20 @@ func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchReques
 			}
 		}
 		if !validHookEndpoint(hook.Endpoint) {
-			return nil, fmt.Errorf("hook %s endpoint must use HTTPS or loopback HTTP", hook.ExtensionID)
+			// A malformed optional destination must not abort unrelated hook
+			// deliveries. Treat it as a failed attempt without network I/O,
+			// retaining circuit-breaker accounting and per-hook telemetry.
+			s.mu.Lock()
+			hook.ConsecutiveFailures++
+			if hook.ConsecutiveFailures >= 3 {
+				hook.CircuitOpenUntil = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+				s.setHealthLocked(hook.ExtensionID, "circuit_open")
+			} else {
+				s.setHealthLocked(hook.ExtensionID, "failing")
+			}
+			s.mu.Unlock()
+			done(hookDispatchResult{ExtensionID: hook.ExtensionID, Status: "failed", Reason: "invalid_endpoint"})
+			continue
 		}
 		body, err := json.Marshal(map[string]any{"event": req.Event, "tenant_id": req.TenantID, "principal_id": req.PrincipalID, "payload": req.Payload, "config": target.config})
 		if err != nil {
