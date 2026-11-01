@@ -503,6 +503,10 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		// Preserve the complete prior operator state until the durable write
+		// succeeds. A failed write must not expose uncommitted status, scope
+		// or configuration to hook dispatch or subsequent reads.
+		previous := *ext
 		if update.Status != "" {
 			if err := s.setEnabledLocked(ext, update.Status == "enabled"); err != nil {
 				s.mu.Unlock()
@@ -520,7 +524,11 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 		snapshot := *ext
 		s.mu.Unlock()
 		if err := s.persist(r.Context()); err != nil {
-			http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
+			s.mu.Lock()
+			*ext = previous
+			s.mu.Unlock()
+			log.Printf("extension patch persistence failed: %v", err)
+			http.Error(w, "extension persistence failed", http.StatusServiceUnavailable)
 			return
 		}
 		writeJSON(w, snapshot)
@@ -574,6 +582,15 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	previous := *ext
+	// A manifest rollback changes registration maps and the undo stack,
+	// not just extension metadata. Preserve both for failed persistence.
+	var previousHistory []ExtensionManifest
+	var previousRegistrations canaryRegistrationSnapshot
+	if action == "rollback" {
+		previousHistory = append([]ExtensionManifest(nil), s.history[id]...)
+		previousRegistrations = s.snapshotCanaryRegistrationsLocked(id)
+	}
 	switch action {
 	case "enable", "disable":
 		if err := s.setEnabledLocked(ext, action == "enable"); err != nil {
@@ -609,7 +626,15 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 	result := *ext
 	s.mu.Unlock()
 	if err := s.persist(r.Context()); err != nil {
-		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "persist extension state: " + err.Error()})
+		s.mu.Lock()
+		*ext = previous
+		if action == "rollback" {
+			s.history[id] = previousHistory
+			s.restoreCanaryRegistrationsLocked(id, previousRegistrations)
+		}
+		s.mu.Unlock()
+		log.Printf("extension action persistence failed: %v", err)
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "extension persistence failed"})
 		return
 	}
 	status := action + "d"

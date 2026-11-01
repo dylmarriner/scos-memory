@@ -3206,3 +3206,32 @@ and real loopback HTTP hook dispatch that stays on the stable endpoint after
 cohort tampering. This is source-level §22 integrity hardening only. §22
 deployed lifecycle, §25 integration, §32 metrics, representative P0 benchmarks,
 P3–P8 acceptance, live rollout/recovery and §41 governance remain open.
+
+### 2026-11-02 §22 extension operator mutation persistence compensation (TDD source slice)
+
+The operator PATCH and enable/disable/manifest-rollback HTTP handlers previously
+modified live extension status, agent scope, configuration, or installed
+registrations before persistence, then returned HTTP 503 without restoring
+the original state when the write failed. Their error responses also exposed
+raw persistence diagnostics, including internal filesystem paths. Three
+real-handler fault-injection regressions reproduced the disclosure (RED);
+the failure-path assertions additionally require unchanged in-memory and
+restarted local-state values.
+
+The handlers now restore the previous extension state on persistence failure.
+Manifest rollback additionally restores the prior undo history and exact
+registration snapshot, including owned hooks and skills. Client responses
+are generic, while operator logs retain the underlying failure diagnostics.
+Five repeated focused test runs cover failed PATCH scope/config and status,
+failed disable, failed manifest rollback, and successful persisted PATCH and
+disable controls (GREEN). These changes use the existing operator mutation
+serialization and do not modify the deployment configuration.
+
+**Limitations:** This compensation is source-level, not a distributed
+transaction. The current persistence path writes a local snapshot before
+its optional database write, and concurrent readers may observe tentative
+state while a write is in progress. Installation/uninstallation persistence
+failure paths, cross-instance CAS/locking, authenticated state replay
+protection, full §22 lifecycle and §25/§32 acceptance, representative P0
+benchmarks, P3–P8 qualification, production recovery and §41 DoD remain
+separate gates. No production rollout or migration was performed.
