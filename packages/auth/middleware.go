@@ -100,6 +100,9 @@ func SignClaims(claims Claims, secret string) (string, error) {
 	if strings.TrimSpace(secret) == "" || strings.TrimSpace(claims.TenantID) == "" || strings.TrimSpace(claims.PrincipalID) == "" {
 		return "", errors.New("signing secret, tenant_id and principal_id are required")
 	}
+	if claims.ExpiresAt.IsZero() || claims.ExpiresAt.Unix() <= time.Now().UTC().Unix() {
+		return "", errors.New("signed bearer claims require a future expiration")
+	}
 	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 	payload, err := json.Marshal(map[string]any{
 		"tenant_id": claims.TenantID, "principal_id": claims.PrincipalID,
@@ -260,17 +263,19 @@ func validateClaims(token, secret string) (Claims, error) {
 	if strings.TrimSpace(raw.TenantID) == "" || strings.TrimSpace(raw.PrincipalID) == "" {
 		return Claims{}, fmt.Errorf("tenant_id and principal_id claims are required")
 	}
-	if raw.Exp > 0 && !time.Now().UTC().Before(time.Unix(raw.Exp, 0)) {
+	// Every issued bearer must expire. An absent, zero, or negative exp would
+	// otherwise create a replayable, effectively permanent credential.
+	if raw.Exp <= 0 {
+		return Claims{}, errors.New("bearer claims expiration is required")
+	}
+	if !time.Now().UTC().Before(time.Unix(raw.Exp, 0)) {
 		return Claims{}, fmt.Errorf("expired bearer claims")
 	}
 	if raw.TraceID == "" {
 		digest := sha256.Sum256(payload)
 		raw.TraceID = hex.EncodeToString(digest[:])
 	}
-	expiresAt := time.Now().UTC().Add(5 * time.Minute)
-	if raw.Exp > 0 {
-		expiresAt = time.Unix(raw.Exp, 0).UTC()
-	}
+	expiresAt := time.Unix(raw.Exp, 0).UTC()
 	return Claims{TenantID: raw.TenantID, PrincipalID: raw.PrincipalID, AgentID: raw.AgentID, Subject: raw.Subject,
 		DelegatedAuthority: raw.DelegatedAuthority, ExpiresAt: expiresAt, TraceID: raw.TraceID,
 		Scopes: raw.Scopes, JTI: raw.JTI}, nil
