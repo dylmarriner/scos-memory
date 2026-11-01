@@ -4,6 +4,21 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.7 hook execution acknowledgement durability (2026-11-02; source candidate)
+
+A real outbound HTTP hook could succeed and the dispatcher could persist hook
+health, but a **separate, later execution-evidence write** could fail while the
+handler logged the failure and still returned HTTP 200. A deterministic
+second-write fault-injection regression reproduced this false acknowledgement
+(RED). The handler now returns a sanitized HTTP 503 when execution-evidence
+persistence fails, even after external delivery, and counts the dispatch as a
+failure. Storage diagnostics remain in operator logs only; the in-memory
+execution record still reflects the external side effect. The existing
+filesystem-failure and successful durable-write tests cover the first write
+and normal control. This is source-level §22.7 audit-integrity hardening,
+**not** a claim of exactly-once external effects, successful live persistence,
+§32 fleet-wide metrics, §41 completion, or production recovery qualification.
+
 ## §22.7 extension configuration PATCH single-document integrity (2026-11-02; review candidate)
 
 Four HTTP handler regression cases reproduced a governance integrity defect: an
