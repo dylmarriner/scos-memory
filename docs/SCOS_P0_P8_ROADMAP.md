@@ -3040,3 +3040,25 @@ filesystem failure and real loopback HTTP delivery; focused race tests, full
 confidentiality/evidence integrity, **not** proof of production persistence,
 end-to-end hook coverage, §25 integration, representative P0 benchmarks,
 P3–P8 qualification, live rollout/recovery or §41 completion.
+
+### 2026-11-02 §22 persisted extension-hook manifest authority (TDD source slice)
+
+The extension manager persisted its signed extension manifest separately from
+mutable hook registrations. On restart, an altered hook entry could replace a
+mandatory hook's endpoint, downgrade `fail_closed` to `continue`, duplicate a
+subscription or inject an event absent from the manifest. Deleting the hook
+entry also silently removed a mandatory subscription. Worse, a modified
+manifest with a recomputed unkeyed content hash, but an invalid Ed25519
+signature, was still enabled at load. Three regression tests reproduced these
+failures **RED** using real local persistence and loopback HTTP delivery.
+
+Loaded manifests now require a valid content hash, isolation mode **and
+publisher signature**. For verified manifests, startup rebuilds hook routing,
+policy and subscriptions from manifest authority, removes injected/duplicate
+entries, and restores missing mandatory registrations. Only runtime circuit
+breaker health survives reconstruction. Invalid signed manifests are disabled
+instead of being treated as authority. The same normalization applies to
+PostgreSQL-loaded state. This is source-level §22 integrity hardening, not
+proof of live deployment, complete §22 hook coverage, §25 integration,
+representative P0 benchmarks, P3–P8 acceptance or §41 completion. PR review,
+merged-main tests and main CI must be recorded separately.
