@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import threading
 import traceback
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -158,6 +159,89 @@ class PublishTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "publish token"):
                     publish({"suite": "x", "cases": []}, base_url=self.url, token=token)
         self.assertEqual(_Collector.received, [], "malformed tokens must not reach the HTTP client")
+
+    def test_publish_rejects_remote_plaintext_before_sending_service_token(self):
+        # A configured remote HTTP collector would otherwise receive the
+        # internal service token in cleartext. DNS names are not loopback proof.
+        invalid = (
+            "http://192.0.2.17:8080", "http://10.1.2.3:8080",
+            "http://localhost:8080", "http://127.0.0.1.attacker.test:8080",
+            "http://[2001:db8::1]:8080",
+        )
+        with patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("network attempted")) as network:
+            for url in invalid:
+                with self.subTest(url=url), self.assertRaisesRegex(RuntimeError, "HTTPS.*loopback"):
+                    publish({"suite": "x", "cases": []}, base_url=url, token="service-secret")
+            network.assert_not_called()
+        self.assertEqual(_Collector.received, [])
+
+    def test_remote_https_publisher_keeps_expected_path_and_bearer(self):
+        # HTTPS must remain usable for production collectors; no real remote
+        # endpoint or paid service is contacted by this transport mock.
+        response = MagicMock()
+        response.status = 201
+        response.read.return_value = b'{"run_id":"secure-run","created":true}'
+        response.__enter__.return_value = response
+        with patch("urllib.request.OpenerDirector.open", return_value=response) as opened:
+            result = publish({"suite": "x", "cases": []},
+                             base_url="https://collector.example.test/api", token="service-secret")
+        request = opened.call_args.args[0]
+        self.assertEqual(result["run_id"], "secure-run")
+        self.assertEqual(request.full_url, "https://collector.example.test/api/v1/benchmarks/runs")
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Authorization"), "Bearer service-secret")
+
+    def test_literal_ipv6_loopback_publisher_works_when_available(self):
+        class IPv6HTTPServer(HTTPServer):
+            address_family = socket.AF_INET6
+
+        try:
+            server = IPv6HTTPServer(("::1", 0), _Collector)
+        except OSError as exc:
+            self.skipTest(f"IPv6 loopback unavailable: {exc}")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = publish({"suite": "x", "cases": []},
+                             base_url=f"http://[::1]:{server.server_port}", token="service-secret")
+            self.assertEqual(result["run_id"], "abc")
+            self.assertEqual(len(_Collector.received), 1)
+            self.assertEqual(_Collector.received[0]["auth"], "Bearer service-secret")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_loopback_publisher_never_forwards_service_token_to_inherited_proxy(self):
+        # HTTP_PROXY and an empty NO_PROXY must not divert local fixture
+        # publication, even when the proxy returns a plausible HTTP 201.
+        class ProxyCollector(_Collector):
+            received = []
+            status = 201
+            redirect_to = None
+            echo_error_body = False
+            reason_phrase = None
+            response_body = None
+
+        proxy = HTTPServer(("127.0.0.1", 0), ProxyCollector)
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        try:
+            env = {
+                "HTTP_PROXY": f"http://127.0.0.1:{proxy.server_port}",
+                "http_proxy": f"http://127.0.0.1:{proxy.server_port}",
+                "NO_PROXY": "", "no_proxy": "",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                result = publish({"suite": "x", "cases": []}, base_url=self.url, token="service-secret")
+            self.assertEqual(result["run_id"], "abc")
+            self.assertEqual(len(_Collector.received), 1, "loopback collector must receive the run")
+            self.assertEqual(_Collector.received[0]["auth"], "Bearer service-secret")
+            self.assertEqual(ProxyCollector.received, [], "proxy must not see the token or benchmark")
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join()
 
     def test_publish_is_noop_when_unconfigured(self):
         os.environ.pop("SCOS_BENCHMARK_PUBLISH_URL", None)

@@ -9,6 +9,7 @@ a run that was meant to be recorded is never silently dropped.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import os
@@ -164,6 +165,15 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
     if (parsed.scheme not in ("http", "https") or not hostname or port == 0
             or parsed.username is not None or parsed.password is not None):
         raise RuntimeError("benchmark publish URL requires a valid HTTP(S) authority without userinfo")
+    if parsed.scheme == "http":
+        # The internal service token must never traverse remote plaintext.
+        # A hostname (including "localhost") is not proof of loopback.
+        try:
+            loopback = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise RuntimeError("benchmark publish URL requires HTTPS except for literal loopback HTTP")
     token = (token or os.getenv("SCOS_INTERNAL_SERVICE_TOKEN", "")).strip()
     if not token:
         raise RuntimeError("SCOS_INTERNAL_SERVICE_TOKEN is required to publish benchmark runs")
@@ -182,9 +192,12 @@ def publish(run: dict[str, Any], base_url: str | None = None, token: str | None 
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}", "X-SCOS-Caller": "benchmark-harness"},
     )
-    opener = urllib.request.build_opener(
-        _RejectRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())
-    )
+    handlers = [_RejectRedirect(), urllib.request.HTTPSHandler(context=_ssl_context())]
+    if parsed.scheme == "http":
+        # Inherited HTTP_PROXY/NO_PROXY settings must not reroute a local
+        # benchmark fixture's bearer token to an arbitrary proxy.
+        handlers.append(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(*handlers)
     try:
         with opener.open(request, timeout=timeout) as response:
             # The acknowledgement is untrusted. Do not buffer unlimited data or
