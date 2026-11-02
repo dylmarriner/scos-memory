@@ -159,6 +159,10 @@ type extServer struct {
 	// Serialize operator package mutations through durable writes and compensation.
 	// s.mu alone protects only the in-memory portion, not the persistence gap.
 	operatorMutationMu sync.Mutex
+	// Serialize durable snapshots and track the last acknowledged PostgreSQL
+	// value. A different instance must not overwrite a newer decision.
+	persistMu      sync.Mutex
+	persistedState []byte
 	// Unverified commit: fence further mutations and hook side effects.
 	persistenceUncertain atomic.Bool
 	mu                   sync.RWMutex
@@ -180,6 +184,8 @@ type extServer struct {
 	persistHookExecutions func(context.Context) error
 	// Test-only persistence fault/barrier injection for concurrent operator requests.
 	persistBeforeWrite func(context.Context) error
+	// Test-only barrier after reading the expected row but before atomic CAS.
+	persistAfterRead func(context.Context) error
 	// Test-only simulation of an acknowledgement lost after a DB commit.
 	persistAfterDBWrite func(context.Context) error
 }
@@ -364,6 +370,9 @@ func (s *extServer) loadState(ctx context.Context) error {
 		return fmt.Errorf("decode persisted extension state: %w", err)
 	}
 	s.applyState(state)
+	// loadState is called before serving requests; this is the revision the
+	// first write must compare against, not the latest row at write time.
+	s.persistedState = append([]byte(nil), raw...)
 	return nil
 }
 
@@ -453,6 +462,11 @@ func (s *extServer) repairLocalAfterCompensation() {
 }
 
 func (s *extServer) persist(ctx context.Context) error {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	if s.persistenceUncertain.Load() {
+		return errPersistenceOutcomeUnknown
+	}
 	if s.persistBeforeWrite != nil {
 		if err := s.persistBeforeWrite(ctx); err != nil {
 			return err
@@ -466,13 +480,22 @@ func (s *extServer) persist(ctx context.Context) error {
 		return err
 	}
 
-	// Read the prior durable value before writing. If the acknowledgement is
-	// lost, readback distinguishes an unchanged row from the attempted row.
-	// This is NOT cross-instance CAS and cannot detect every ABA race.
+	// Compare with the state this instance last acknowledged (or loaded),
+	// not merely the value observed immediately before this write. The latter
+	// would silently adopt and overwrite another instance's committed update.
 	var before []byte
 	if s.db != nil {
 		before, err = s.durableState(ctx)
 		if err != nil {
+			return err
+		}
+		if !samePersistedJSON(before, s.persistedState) {
+			s.persistenceUncertain.Store(true)
+			return fmt.Errorf("%w: persisted extension state changed on another instance", errPersistenceOutcomeUnknown)
+		}
+	}
+	if s.persistAfterRead != nil {
+		if err := s.persistAfterRead(ctx); err != nil {
 			return err
 		}
 	}
@@ -482,11 +505,26 @@ func (s *extServer) persist(ctx context.Context) error {
 	if s.db == nil {
 		return nil
 	}
-	_, err = s.db.Exec(ctx, `INSERT INTO extension_manager_state (id,state,updated_at) VALUES (true,$1,now()) ON CONFLICT (id) DO UPDATE SET state=EXCLUDED.state, updated_at=EXCLUDED.updated_at`, raw)
+	// PostgreSQL atomically compares the expected JSONB state at the write
+	// boundary. A concurrent writer between readback and UPDATE cannot win
+	// silently. This content CAS does not detect ABA; production multi-writer
+	// rollout still needs a monotonic revision and recovery qualification.
+	tag, err := s.db.Exec(ctx, `
+		INSERT INTO extension_manager_state (id,state,updated_at)
+		VALUES (true,$1::jsonb,now())
+		ON CONFLICT (id) DO UPDATE SET
+			state=EXCLUDED.state, updated_at=EXCLUDED.updated_at
+		WHERE $2::jsonb IS NOT NULL AND extension_manager_state.state=$2::jsonb
+	`, raw, s.persistedState)
+	if err == nil && tag.RowsAffected() == 0 {
+		s.persistenceUncertain.Store(true)
+		return fmt.Errorf("%w: concurrent extension state update rejected", errPersistenceOutcomeUnknown)
+	}
 	if err == nil && s.persistAfterDBWrite != nil {
 		err = s.persistAfterDBWrite(ctx)
 	}
 	if err == nil {
+		s.persistedState = append([]byte(nil), raw...)
 		return nil
 	}
 
@@ -497,6 +535,7 @@ func (s *extServer) persist(ctx context.Context) error {
 	after, readErr := s.durableState(verifyCtx)
 	if readErr == nil {
 		if samePersistedJSON(after, raw) {
+			s.persistedState = append([]byte(nil), raw...)
 			return nil
 		} // write committed
 		if samePersistedJSON(after, before) {
