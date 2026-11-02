@@ -17,8 +17,10 @@ preceding the actual master table, a PASS inside a fenced example without
 a real master table, duplicate conflicting §41 rows, and a PASS inside a
 Markdown HTML comment. The checker now recognizes the actual
 § / Topic / Status / Basis table and separator, ignores fenced examples,
-HTML comments and stray rows, and fails closed if the master table or §41
-row is absent, duplicated, or malformed. It still accepts a single
+HTML comments, indented code examples and stray rows. Review-found
+regressions also enforce exactly four §41 row cells, rejecting extra columns.
+The gate fails closed if the master table or §41 row is absent, duplicated,
+or malformed. It still accepts a single
 unqualified PASS in the real table, verified by positive regression tests.
 
 This is evidence-integrity hardening, not proof that §41 acceptance gates are

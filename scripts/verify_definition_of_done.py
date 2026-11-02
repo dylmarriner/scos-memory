@@ -272,6 +272,10 @@ def _master_audit_tables(text: str) -> list[list[list[str]]]:
     i = 0
 
     def cells(line: str) -> list[str] | None:
+        # Four spaces or a tab denotes Markdown indented code, not a table.
+        prefix = line[: len(line) - len(line.lstrip(" \t"))]
+        if len(prefix) >= 4 or "\t" in prefix:
+            return None
         stripped = line.strip()
         if not (stripped.startswith("|") and stripped.endswith("|")):
             return None
@@ -338,7 +342,7 @@ def audit_doc_gate() -> list[str]:
             f"governance master table (found {len(tables)}); §41 cannot be verified"
         ]
     rows = [row for row in tables[0] if row and row[0] == "41"]
-    if len(rows) != 1 or len(rows[0]) < 4 or rows[0][1] != "Definition of done":
+    if len(rows) != 1 or len(rows[0]) != 4 or rows[0][1] != "Definition of done":
         return [
             "docs/governance-audit-current.md must contain exactly one valid "
             "§41 Definition of done row in the master table"

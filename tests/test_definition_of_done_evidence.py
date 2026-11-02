@@ -188,5 +188,32 @@ class DefinitionOfDoneEvidenceTests(unittest.TestCase):
                 self.assertTrue(dod.audit_doc_gate())
 
 
+    def test_indented_code_example_cannot_forge_master_table_pass(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "    | § | Topic | Status | Basis |\n"
+                "    |---|---|---|---|\n"
+                "    | 41 | Definition of done | PASS | indented example |\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertTrue(dod.audit_doc_gate())
+
+    def test_extra_columns_in_section_41_row_fail_closed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 41 | Definition of done | PASS | verified | conflicting basis |\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertTrue(dod.audit_doc_gate())
+
+
 if __name__ == "__main__":
     unittest.main()
