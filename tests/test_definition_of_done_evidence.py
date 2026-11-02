@@ -299,5 +299,46 @@ class DefinitionOfDoneEvidenceTests(unittest.TestCase):
                 self.assertTrue(dod.function_exists(path, item.pattern))
 
 
+    def test_literal_false_python_branches_are_not_evidence(self):
+        item = next(i for i in dod.ITEMS if i.bullet == "Corrections preserve versions.")
+        name = "test_build_memory_version_contains_version_1"
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_promoter.py"
+            for literal in ("0", "None", "''", "False"):
+                with self.subTest(literal=literal):
+                    path.write_text(f"if {literal}:\n    def {name}(self): pass\n")
+                    self.assertFalse(dod.function_exists(path, item.pattern))
+            for literal in ("1", "'active'", "True"):
+                with self.subTest(literal=literal):
+                    path.write_text(f"if {literal}:\n    def {name}(self): pass\n")
+                    self.assertTrue(dod.function_exists(path, item.pattern))
+            path.write_text(f"if 0:\n    pass\nelse:\n    def {name}(self): pass\n")
+            self.assertTrue(dod.function_exists(path, item.pattern))
+
+    def test_constant_skip_decorators_follow_unittest_truthiness(self):
+        item = next(i for i in dod.ITEMS if i.bullet == "Corrections preserve versions.")
+        cases = {
+            "@unittest.skipIf(0, 'enabled')": True,
+            "@unittest.skipIf('', 'enabled')": True,
+            "@unittest.skipUnless(1, 'enabled')": True,
+            "@unittest.skipUnless('enabled', 'enabled')": True,
+            "@unittest.skipIf(1, 'disabled')": False,
+            "@unittest.skipUnless(0, 'disabled')": False,
+            "@pytest.mark.skipif(0, reason='enabled')": True,
+            "@pytest.mark.skipif(1, reason='disabled')": False,
+            "@pytest.mark.skipif('False', reason='dynamic')": False,
+        }
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_promoter.py"
+            for decorator, expected in cases.items():
+                with self.subTest(decorator=decorator):
+                    path.write_text(
+                        "import unittest\nimport pytest\nclass TestPromoter:\n"
+                        f"    {decorator}\n"
+                        "    def test_build_memory_version_contains_version_1(self): pass\n"
+                    )
+                    self.assertEqual(dod.function_exists(path, item.pattern), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -116,7 +116,13 @@ def _python_skipped(decorators: list[ast.expr], aliases: dict[str, str]) -> bool
                 None,
             )
             enabled = dotted == "unittest.skipUnless"
-            if not isinstance(condition, ast.Constant) or condition.value is not enabled:
+            if not isinstance(condition, ast.Constant):
+                return True
+            # pytest treats string skipif conditions as expressions, not
+            # truthy strings. Do not execute expressions during evidence checks.
+            if dotted == "pytest.mark.skipif" and isinstance(condition.value, str):
+                return True
+            if bool(condition.value) is not enabled:
                 return True
     return False
 
@@ -150,8 +156,8 @@ def _python_live_evidence(tree: ast.AST, lines: list[str], pattern: str) -> bool
         visit_AsyncFunctionDef = visit_FunctionDef
 
         def visit_If(self, node: ast.If) -> None:
-            if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
-                selected = node.body if node.test.value else node.orelse
+            if isinstance(node.test, ast.Constant):
+                selected = node.body if bool(node.test.value) else node.orelse
                 for statement in selected:
                     self.visit(statement)
             else:

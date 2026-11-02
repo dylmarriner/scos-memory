@@ -20,9 +20,14 @@ recognition of active tests and explicitly enabled conditional decorators.
 Codex review identified that enabled `skipIf(condition=False)` and
 `skipUnless(condition=True)` keyword forms were initially rejected; a
 RED-before-fix regression now covers both, and the parser recognizes them.
-The check is conservative for dynamic skip conditions. These are source
-qualification tests, **not** proof that the cited tests executed in CI or
-that production acceptance is complete.
+The check is conservative for dynamic skip conditions. CodeRabbit review
+also identified literal-false non-boolean branches (if 0, if None) and
+truthiness-based skip decorators as integrity gaps. New RED-before-fix
+regressions cover these cases; the parser now evaluates literal branch
+truthiness and unittest constant skip conditions, while rejecting pytest
+string expressions as dynamic rather than evaluating arbitrary expressions.
+These are source qualification tests, **not** proof that the cited tests
+executed in CI or that production acceptance is complete.
 
 §41 remains FAIL / PARTIAL (Carried, synthesized) pending deployed §22
 lifecycle and mixed-version qualification, §25 integration, §32 telemetry,
