@@ -1704,6 +1704,17 @@ func (s *extServer) setHealthLocked(extensionID, health string) {
 	if ext, ok := s.extensions[extensionID]; ok {
 		ext.Health = health
 		ext.HealthCheckedAt = time.Now().UTC().Format(time.RFC3339)
+		// Only actual hook-delivery outcomes are health evidence. Installation
+		// begins at "unknown" and must never manufacture a healthy signal.
+		if health == "healthy" || health == "failing" || health == "circuit_open" {
+			value := 0.0
+			if health == "healthy" {
+				value = 1
+			}
+			serviceMetrics.Gauge(telemetry.MetricPluginHealth, value, "1",
+				map[string]string{"extension": extensionID, "health": health},
+				telemetry.Correlation{})
+		}
 	}
 }
 
@@ -2025,6 +2036,14 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Signature verification occurred before registration, but the metric is
+	// emitted only after the install is durably committed. A failed write
+	// must not produce false evidence of an installed signed extension.
+	if s.db != nil || s.storePath != "" {
+		serviceMetrics.Gauge(telemetry.MetricSignatureState, 1, "1",
+			map[string]string{"extension": manifest.PackageID, "version": manifest.Version, "state": "verified"},
+			telemetry.Correlation{})
+	}
 	writeJSON(w, map[string]any{
 		"status":                "installed",
 		"package_id":            manifest.PackageID,
