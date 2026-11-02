@@ -234,7 +234,7 @@ func TestCanaryRejectsInvalidRequests(t *testing.T) {
 func TestCanaryStatusReportsNoDeployment(t *testing.T) {
 	srv, _ := canaryFixture(t)
 	res := httptest.NewRecorder()
-	srv.handleExtensionByID(res, httptest.NewRequest(http.MethodGet, "/v1/extensions/canary.ext/canary", nil))
+	srv.handleExtensionByID(res, operatorRequest(http.MethodGet, "/v1/extensions/canary.ext/canary", nil))
 	if res.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 with no deployment, got %d", res.Code)
 	}

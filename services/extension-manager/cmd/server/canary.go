@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"hash/fnv"
 	"log"
@@ -185,6 +186,11 @@ func (s *extServer) handleCanary(w http.ResponseWriter, r *http.Request) {
 		action = parts[2]
 	}
 
+	// Status includes operator-approved cohorts, signed manifests and
+	// outbound hook URLs. It is audit data, not tenant discovery.
+	if r.Method == http.MethodGet && action == "" && !operatorOnly(w, r) {
+		return
+	}
 	// Even read-only canary resolution is misleading until an uncertain
 	// durable state has been reconciled by the operator.
 	if s.rejectUncertainMutation(w) {
@@ -214,20 +220,34 @@ func (s *extServer) handleCanary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *extServer) canaryStatus(w http.ResponseWriter, packageID string) {
+	// Capture only a committed operator state. Marshal under both locks to
+	// detach nested hook/manifest maps before releasing them for HTTP I/O.
+	s.operatorMutationMu.RLock()
 	s.mu.RLock()
 	deployment, ok := s.canaries[packageID]
-	var snapshot CanaryDeployment
+	var snapshot []byte
+	var err error
 	if ok {
-		snapshot = *deployment
+		snapshot, err = json.Marshal(deployment)
 	}
+	uncertain := s.persistenceUncertain.Load()
 	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
+	if uncertain {
+		http.Error(w, "extension persistence requires recovery", http.StatusServiceUnavailable)
+		return
+	}
+	if err != nil {
+		http.Error(w, "canary status serialization failed", http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		writeJSONStatus(w, http.StatusNotFound, map[string]any{
 			"package_id": packageID, "error": "no canary deployment for this package",
 		})
 		return
 	}
-	writeJSON(w, snapshot)
+	writeJSON(w, json.RawMessage(snapshot))
 }
 
 func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageID string) {
@@ -336,9 +356,17 @@ func (s *extServer) canaryResolve(w http.ResponseWriter, r *http.Request, packag
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Do not resolve an uncommitted candidate that may still roll back.
+	s.operatorMutationMu.RLock()
 	s.mu.RLock()
 	resolution, err := s.resolveVersionLocked(packageID, c)
+	uncertain := s.persistenceUncertain.Load()
 	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
+	if uncertain {
+		http.Error(w, "extension persistence requires recovery", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return

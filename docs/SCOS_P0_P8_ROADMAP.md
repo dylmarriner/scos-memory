@@ -3748,3 +3748,39 @@ reader coherence, full §22 deployed lifecycle qualification, §25 integration,
 §32 metrics acceptance, representative P0 benchmarks, P3–P8 acceptance,
 production rollout/recovery and canonical §41 completion remain open.
 No live service, production database, migration or paid resource was changed.
+
+### 2026-11-02 §22 canary operator confidentiality and durable read/dispatch fence (TDD source slice)
+
+The canary status endpoint previously returned a full operator-approved
+deployment to anonymous and ordinary tenant callers, including the candidate
+manifest's outbound hook URL, activation cohort and scope authentication MAC.
+A real loopback HTTP regression reproduced the leak (HTTP 200 instead of 403).
+GET canary status now requires `extensions:admin` or an authenticated
+internal-service identity, while authorized operators retain diagnostic access.
+
+Three further real HTTP regressions reproduced read/side-effect integrity
+failures while a canary start was blocked before a durable write that later
+failed: GET status exposed the uncommitted candidate, POST resolve selected
+its version, and hook dispatch delivered the tenant event to the candidate
+endpoint. Status, resolve and outbound hook target selection now take the
+operator mutation read fence until the candidate is committed or compensated.
+The status response is serialized under the state lock to detach nested
+manifest/hook data, and locks are released before HTTP writing or network
+hook delivery. A slow-writer regression checks that an operator mutation
+remains possible while a status response is blocked on client I/O.
+
+**Evidence:** `services/extension-manager/cmd/server/canary_read_integrity_test.go`
+and the existing no-deployment test, with RED-before-fix and GREEN-after-fix
+results. Focused race-enabled regressions passed three repetitions, the full
+extension-manager race suite passed, repository-wide `make test` passed
+using the existing Python 3.11/Pydantic test environment, and
+`go vet ./...` passed on AMD. The canonical §41 checker still reports
+FAIL (governance PARTIAL). PR review, merge and merged-main CI are separate
+acceptance checks and must be recorded after completion.
+
+**Limits:** This proves single-instance read/dispatch selection fencing,
+not cross-instance reader coherence, durable exactly-once hook delivery,
+mixed-version rollout, full §22 lifecycle qualification, §25 integration,
+§32 metrics breadth, representative P0 benchmarks, broader P3–P8
+acceptance, or production rollout/recovery. No production services, live
+migrations or paid resources were used.

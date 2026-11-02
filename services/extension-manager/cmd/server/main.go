@@ -1539,12 +1539,19 @@ type hookPersistenceFailure struct{ cause error }
 func (e *hookPersistenceFailure) Error() string { return "hook state persistence failed" }
 
 func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchRequest) ([]hookDispatchResult, error) {
+	// Select outbound targets only from acknowledged operator state. Otherwise
+	// an uncommitted canary could receive tenant data before a failed activation
+	// rolls back. Release the fence before network I/O so slow endpoints cannot
+	// hold up operator mutations.
+	s.operatorMutationMu.RLock()
 	if s.persistenceUncertain.Load() {
+		s.operatorMutationMu.RUnlock()
 		return nil, errPersistenceOutcomeUnknown
 	}
 	s.mu.RLock()
 	targets := s.hookTargetsLocked(req.Event, req.canaryContext())
 	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
 	// Return a per-extension failure record even when preflight aborts
 	// before any network delivery. The handler persists this alongside the
 	// dispatch-level abort marker, so operators can identify the blocker.
