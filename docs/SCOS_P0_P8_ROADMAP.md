@@ -3849,3 +3849,41 @@ This is §22 hardening, not complete §22 qualification.
 §25 cross-service integration, §32 metrics breadth, representative P0
 benchmarks, P3–P8 acceptance and production rollout/recovery evidence.
 No production services, live migrations or paid resources were used.
+
+
+### 2026-11-03 §22 cancellation-safe committed discovery reads (TDD source slice)
+
+Eight extension-manager discovery and audit endpoints previously acquired the
+operator persistence fence with an unconditional `RWMutex.RLock`. When an
+operator mutation was waiting on durable storage, a canceled HTTP request
+could remain blocked indefinitely and consume a server goroutine even though
+its client had disconnected. An already expired request could also return
+HTTP 200. These failures did not justify bypassing the persistence fence,
+because doing so could expose uncommitted operator state.
+
+The extension, skill, hook, installation-receipt and capability GET handlers
+now reuse the existing bounded, cancellation-aware `lockOperatorCommittedRead`
+mechanism. Cancellation or a five-second acquisition timeout returns 503
+without reading tentative state; successful requests still snapshot committed
+state and release locks before HTTP response I/O. The existing canary
+status/resolve/dispatch protections remain unchanged.
+
+**TDD evidence:**
+`services/extension-manager/cmd/server/discovery_fence_cancellation_test.go`.
+Eight endpoint regressions reproduced blocked canceled reads RED, and a ninth
+regression reproduced HTTP 200 for an expired request. They passed GREEN after
+the correction. A real `httptest.NewServer` HTTP client-disconnect regression
+also verifies the server handler exits while the writer lock is held.
+Focused race-enabled tests passed three repetitions; the existing failed-write
+visibility and slow-client regressions also passed. The full extension-manager
+race suite, `go vet ./...`, and final repository-wide `make test` passed on
+AMD using the existing Python 3.11/Pydantic venv; `git diff --check` passed.
+The §41 evidence checker still fails because the canonical audit records
+PARTIAL governance. PR review, merge and merged-main CI remain separate
+acceptance checks.
+
+**Remaining:** Cross-instance read coherence, full §22 deployed lifecycle and
+mixed-version qualification, §25 integration, §32 metrics breadth,
+representative P0 benchmarks, P3–P8 acceptance and production rollout/recovery
+evidence. The canonical §41 definition-of-done gate remains FAIL/PARTIAL.
+No production deployment, live migration or paid resource was used.
