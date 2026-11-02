@@ -24,7 +24,12 @@ with the read held until the outcome is known. RED failures and GREEN tests
 were observed on AMD; focused regression tests passed three repetitions and
 race-enabled tests passed three repetitions. Full `make test` passed using an
 isolated Python 3.11 virtual environment with offline cached dependencies;
-`go vet ./...` passed.
+`go vet ./...` passed. CodeRabbit review identified a test scheduling
+blind spot: the 200 ms read-fence assertion could run before the HTTP GET
+entered the handler. The regression now synchronizes on handler entry before
+starting that assertion; focused tests passed five repetitions, race-enabled
+focused tests passed three repetitions, the full extension-manager race suite
+passed, and full `make test` and `go vet ./...` passed again on AMD.
 
 **Qualification boundary:** after a failed audit persistence attempt, existing
 in-memory best-effort execution evidence remains readable even though it is

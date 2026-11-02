@@ -33,6 +33,7 @@ func TestHookExecutionReadWaitsForPersistenceOutcomeHTTP(t *testing.T) {
 				Endpoint: endpoint.URL, FallbackPolicy: "fail_closed",
 			}}
 			entered := make(chan struct{})
+			readEntered := make(chan struct{})
 			release := make(chan struct{})
 			srv.persistHookExecutions = func(context.Context) error {
 				close(entered)
@@ -46,6 +47,7 @@ func TestHookExecutionReadWaitsForPersistenceOutcomeHTTP(t *testing.T) {
 				if r.Method == http.MethodPost {
 					srv.handleHookDispatch(w, r)
 				} else {
+					close(readEntered)
 					srv.handleHookExecutions(w, r)
 				}
 			})
@@ -109,6 +111,12 @@ func TestHookExecutionReadWaitsForPersistenceOutcomeHTTP(t *testing.T) {
 					body   string
 				}{resp.StatusCode, string(raw)}
 			}()
+			select {
+			case <-readEntered:
+			case <-time.After(3 * time.Second):
+				close(release)
+				t.Fatal("audit read did not reach execution handler")
+			}
 			select {
 			case early := <-readDone:
 				close(release)
