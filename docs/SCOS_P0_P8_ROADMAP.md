@@ -3498,3 +3498,33 @@ integration, §32 collector qualification, P0 model benchmarks, P3–P8
 acceptance or §41 governance completion. No production deployment, migration
 or paid resources were used. Full-suite and merged-main CI evidence must be
 recorded after validation and merge.
+
+### 2026-11-02 §22 hook-dispatch JSON ambiguity and side-effect isolation (TDD source slice)
+
+The hook dispatcher previously accepted duplicate JSON members in event,
+caller tenant/principal, canary agent cohort and nested payload data. Go's
+last-wins decoding could reinterpret a caller's submitted event or tenant
+context, then send an external HTTP hook and record execution evidence for
+an ambiguous request. Seven real outbound HTTP regressions reproduced the
+problem **RED**: each returned HTTP 200 and delivered a hook despite duplicate,
+case-folded, escaped or nested duplicate keys.
+
+Dispatch now uses the existing bounded `strictjson.DecodeObject` validator,
+which rejects ambiguous keys at every depth and enforces exactly one complete
+JSON object before any external delivery. The existing tenant/agent identity
+checks, 1 MiB body bound and unknown-field rejection remain. All seven cases
+passed **GREEN** with HTTP 400, zero outbound deliveries and zero execution
+records. Five focused regression repetitions and three race-enabled repetitions
+passed; the full repository `make test` suite passed with the existing
+Python 3.11/Pydantic environment, and `go vet ./...` and `git diff --check`
+passed on AMD.
+
+**Limitations:** This is source-level hook request integrity, not proof of
+cross-instance hook exactly-once delivery, end-to-end §22 lifecycle, §25
+integration, §32 collector qualification, representative P0 benchmarks,
+P3–P8 acceptance, production recovery or §41 definition-of-done. Duplicate
+keys in arbitrary payload maps are now rejected even where an upstream caller
+previously relied on last-wins semantics; compatibility must be assessed
+before production rollout. No production deployment, migration or paid
+resources were used. Full-suite and merged-main CI evidence must be
+recorded after validation and merge.
