@@ -3475,3 +3475,26 @@ The operator must recover/restart a fenced instance; dual-store local mirror
 reconciliation and deployed failover drills remain unqualified. This does not
 close full §22 lifecycle, §25 integration, §32 metrics, representative P0
 benchmarks, P3–P8 acceptance, production recovery or §41 governance.
+
+### 2026-11-02 §22 operator extension PATCH JSON ambiguity (TDD source slice)
+
+An authenticated operator PATCH previously accepted duplicate top-level status,
+agent cohort and config fields, including case-folded and escaped aliases, and
+nested duplicate config keys. Go's last-wins JSON decoding could silently
+replace the first operator-visible value. Eight real HTTP regression cases
+reproduced acceptance **RED** before the fix. PATCH now uses the shared
+bounded `strictjson.DecodeObject` validator, rejecting ambiguous fields at
+all depths before changing extension state; the original full-document,
+unknown-field and size-limit protections remain. Five focused repetitions
+and three race-enabled repetitions passed **GREEN** on AMD. The full
+repository `make test` suite passed with the existing Python 3.11/Pydantic
+venv; `go vet ./...` and `git diff --check` passed. The system Python
+3.14 lacks Pydantic, so its first full-suite attempt failed at import before
+the existing compatible venv was selected.
+
+**Limits:** This is PATCH request integrity only, not proof of complete §22
+lifecycle coverage, cross-instance hook side-effect coordination, §25
+integration, §32 collector qualification, P0 model benchmarks, P3–P8
+acceptance or §41 governance completion. No production deployment, migration
+or paid resources were used. Full-suite and merged-main CI evidence must be
+recorded after validation and merge.
