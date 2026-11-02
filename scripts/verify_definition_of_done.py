@@ -90,6 +90,84 @@ def _go_code_only(text: str) -> str:
     return "".join(output)
 
 
+def _python_skipped(decorators: list[ast.expr], aliases: dict[str, str]) -> bool:
+    """Conservatively exclude explicitly disabled unittest/pytest evidence."""
+    for decorator in decorators:
+        name = decorator.func if isinstance(decorator, ast.Call) else decorator
+        parts: list[str] = []
+        while isinstance(name, ast.Attribute):
+            parts.append(name.attr)
+            name = name.value
+        if isinstance(name, ast.Name):
+            parts.append(name.id)
+        parts.reverse()
+        if parts:
+            parts[0] = aliases.get(parts[0], parts[0])
+        dotted = ".".join(parts)
+        if dotted in {"unittest.skip", "pytest.mark.skip"}:
+            return True
+        if dotted in {"unittest.skipIf", "pytest.mark.skipif", "unittest.skipUnless"}:
+            # Positional and keyword conditions are both legal. Dynamic
+            # conditions cannot establish that a test will actually execute.
+            if not isinstance(decorator, ast.Call):
+                return True
+            condition = decorator.args[0] if decorator.args else next(
+                (keyword.value for keyword in decorator.keywords if keyword.arg == "condition"),
+                None,
+            )
+            enabled = dotted == "unittest.skipUnless"
+            if not isinstance(condition, ast.Constant):
+                return True
+            # pytest treats string skipif conditions as expressions, not
+            # truthy strings. Do not execute expressions during evidence checks.
+            if dotted == "pytest.mark.skipif" and isinstance(condition.value, str):
+                return True
+            if bool(condition.value) is not enabled:
+                return True
+    return False
+
+
+def _python_live_evidence(tree: ast.AST, lines: list[str], pattern: str) -> bool:
+    aliases: dict[str, str] = {}
+    for statement in ast.walk(tree):
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                if alias.name in ("unittest", "pytest"):
+                    aliases[alias.asname or alias.name] = alias.name
+        elif isinstance(statement, ast.ImportFrom) and statement.module in ("unittest", "pytest"):
+            for alias in statement.names:
+                aliases[alias.asname or alias.name] = f"{statement.module}.{alias.name}"
+
+    class EvidenceVisitor(ast.NodeVisitor):
+        found = False
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            if not _python_skipped(node.decorator_list, aliases):
+                for statement in node.body:
+                    self.visit(statement)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            # Nested function declarations are not discovered as tests.
+            if not _python_skipped(node.decorator_list, aliases) and re.search(
+                pattern, lines[node.lineno - 1], re.MULTILINE
+            ):
+                self.found = True
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_If(self, node: ast.If) -> None:
+            if isinstance(node.test, ast.Constant):
+                selected = node.body if bool(node.test.value) else node.orelse
+                for statement in selected:
+                    self.visit(statement)
+            else:
+                self.generic_visit(node)
+
+    visitor = EvidenceVisitor()
+    visitor.visit(tree)
+    return visitor.found
+
+
 def function_exists(path: Path, pattern: str) -> bool:
     if not path.is_file():
         return False
@@ -101,12 +179,7 @@ def function_exists(path: Path, pattern: str) -> bool:
             tree = ast.parse(text, filename=str(path))
         except SyntaxError:
             return False
-        lines = text.splitlines()
-        return any(
-            re.search(pattern, lines[node.lineno - 1], re.MULTILINE)
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        )
+        return _python_live_evidence(tree, text.splitlines(), pattern)
     return False
 
 
