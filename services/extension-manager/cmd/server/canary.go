@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"hash/fnv"
@@ -205,7 +206,7 @@ func (s *extServer) handleCanary(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == http.MethodGet && action == "":
-		s.canaryStatus(w, packageID)
+		s.canaryStatus(w, r, packageID)
 	case r.Method == http.MethodPost && action == "":
 		s.canaryStart(w, r, packageID)
 	case r.Method == http.MethodPost && action == "resolve":
@@ -219,10 +220,49 @@ func (s *extServer) handleCanary(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *extServer) canaryStatus(w http.ResponseWriter, packageID string) {
+// operatorFenceError identifies requests that never selected a committed
+// snapshot. Dispatch must not persist an abort record while a writer holds
+// the fence, since doing so could persist the writer's tentative state.
+type operatorFenceError struct{ cause error }
+
+func (e *operatorFenceError) Error() string { return "operator committed-state read unavailable" }
+func (e *operatorFenceError) Unwrap() error { return e.cause }
+
+// lockOperatorCommittedRead acquires the durable-state fence without keeping
+// canceled or stalled requests blocked behind an operator's database write.
+// A timeout fails closed rather than returning an uncommitted snapshot.
+// The caller must RUnlock on success.
+func (s *extServer) lockOperatorCommittedRead(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return &operatorFenceError{cause: err}
+		}
+		if s.operatorMutationMu.TryRLock() {
+			if err := ctx.Err(); err != nil {
+				s.operatorMutationMu.RUnlock()
+				return &operatorFenceError{cause: err}
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return &operatorFenceError{cause: ctx.Err()}
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *extServer) canaryStatus(w http.ResponseWriter, r *http.Request, packageID string) {
 	// Capture only a committed operator state. Marshal under both locks to
 	// detach nested hook/manifest maps before releasing them for HTTP I/O.
-	s.operatorMutationMu.RLock()
+	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+		http.Error(w, "canary state temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	s.mu.RLock()
 	deployment, ok := s.canaries[packageID]
 	var snapshot []byte
@@ -357,7 +397,10 @@ func (s *extServer) canaryResolve(w http.ResponseWriter, r *http.Request, packag
 		return
 	}
 	// Do not resolve an uncommitted candidate that may still roll back.
-	s.operatorMutationMu.RLock()
+	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+		http.Error(w, "canary state temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	s.mu.RLock()
 	resolution, err := s.resolveVersionLocked(packageID, c)
 	uncertain := s.persistenceUncertain.Load()

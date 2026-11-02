@@ -3784,3 +3784,37 @@ mixed-version rollout, full §22 lifecycle qualification, §25 integration,
 §32 metrics breadth, representative P0 benchmarks, broader P3–P8
 acceptance, or production rollout/recovery. No production services, live
 migrations or paid resources were used.
+
+### 2026-11-03 §22 canceled canary read/dispatch fence and audit persistence (PR #254 review follow-up)
+
+CodeRabbit identified an availability defect in PR #254: while an operator
+mutation waits for durable persistence, canceled canary status, resolution and
+hook-dispatch requests could remain blocked on a Go RWMutex. A regression
+reproduced all three failures RED before the correction. The committed-state
+read fence now uses bounded, cancellation-aware TryRLock acquisition (five
+seconds maximum), failing closed with 503 rather than reading tentative state.
+
+A separate TDD regression exposed an integrity consequence: a canceled
+dispatch that never acquired the operator fence nevertheless wrote an audit
+record and invoked persistence, potentially committing the writer's tentative
+operator state. A typed fence-unavailable error now stops hook dispatch before
+any audit mutation, persistence or network delivery. The original commit/rollback
+fencing remains intact. The existing failed-canary-start real HTTP regressions
+now synchronize on handler entry, not merely on client goroutine scheduling.
+Additional tests cover real HTTP client disconnect, cancellation, deadline,
+and the absence of canceled-dispatch persistence.
+
+**Evidence:** services/extension-manager/cmd/server/canary_read_integrity_test.go.
+RED reproductions: three blocked cancellation modes, and canceled dispatch
+persisting tentative state. GREEN: focused race-enabled tests three times,
+full extension-manager race suite, go vet ./..., git diff --check. Repository-
+wide make test and PR/main CI evidence are recorded only after verification.
+Canonical §41 DoD remains FAIL/PARTIAL; this is not a full lifecycle or
+production qualification.
+
+**Limits:** The five-second fail-closed fence is a single-instance
+availability safeguard, not cross-instance read coherence or exactly-once
+hook delivery. §22 deployed lifecycle qualification, §25 integration,
+§32 metrics breadth, representative P0 benchmarks, P3–P8 acceptance,
+mixed-version rollout and production recovery evidence remain open.
+No production deployment, live migration or paid resource was used.

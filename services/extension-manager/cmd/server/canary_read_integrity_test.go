@@ -82,10 +82,17 @@ func TestCanaryReadsWaitForFailedStartHTTP(t *testing.T) {
 	for _, mode := range []string{"status", "resolve"} {
 		t.Run(mode, func(t *testing.T) {
 			srv, key := canaryFixture(t)
+			readArrived := make(chan struct{}, 1)
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				r = r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{
 					TenantID: "operator-tenant", PrincipalID: "operator", Scopes: []string{extensionsAdminScope},
 				}))
+				if r.Method == http.MethodGet || strings.HasSuffix(r.URL.Path, "/resolve") {
+					select {
+					case readArrived <- struct{}{}:
+					default:
+					}
+				}
 				srv.handleExtensionByID(w, r)
 			})
 			server := httptest.NewServer(handler)
@@ -142,6 +149,11 @@ func TestCanaryReadsWaitForFailedStartHTTP(t *testing.T) {
 						[]byte(`{"agent_id":"agent-canary"}`))
 				}
 			}()
+			select {
+			case <-readArrived:
+			case <-time.After(5 * time.Second):
+				t.Fatal("read never reached the handler")
+			}
 			var got result
 			premature := false
 			select {
@@ -237,6 +249,7 @@ func TestSlowCanaryStatusWriterDoesNotBlockOperatorMutation(t *testing.T) {
 func TestHookDispatchWaitsForFailedCanaryStartHTTP(t *testing.T) {
 	srv, key := canaryFixture(t)
 	var candidateCalls atomic.Int32
+	dispatchArrived := make(chan struct{}, 1)
 	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		candidateCalls.Add(1)
 		w.WriteHeader(http.StatusNoContent)
@@ -267,6 +280,10 @@ func TestHookDispatchWaitsForFailedCanaryStartHTTP(t *testing.T) {
 			TenantID: "operator-tenant", PrincipalID: "operator", Scopes: []string{extensionsAdminScope},
 		}))
 		if r.URL.Path == "/v1/hooks/dispatch" {
+			select {
+			case dispatchArrived <- struct{}{}:
+			default:
+			}
 			srv.handleHookDispatch(w, r)
 		} else {
 			srv.handleExtensionByID(w, r)
@@ -304,6 +321,11 @@ func TestHookDispatchWaitsForFailedCanaryStartHTTP(t *testing.T) {
 	go func() {
 		dispatchDone <- call("/v1/hooks/dispatch", []byte(`{"event":"on_checkpoint","agent_id":"agent-canary","payload":{}}`))
 	}()
+	select {
+	case <-dispatchArrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatch never reached the handler")
+	}
 	premature := false
 	var dispatched result
 	select {
@@ -336,5 +358,181 @@ func TestHookDispatchWaitsForFailedCanaryStartHTTP(t *testing.T) {
 	}
 	if premature || candidateCalls.Load() != 0 {
 		t.Fatalf("candidate received uncommitted tenant event: premature=%t calls=%d", premature, candidateCalls.Load())
+	}
+}
+
+// A stalled durable write must not retain canceled readers or hook dispatches
+// indefinitely. Keep the writer lock held until after checking cancellation.
+func TestCanaryOperatorFenceHonorsCancellation(t *testing.T) {
+	for _, mode := range []string{"status", "resolve", "dispatch"} {
+		t.Run(mode, func(t *testing.T) {
+			srv, _ := canaryFixture(t)
+			srv.operatorMutationMu.Lock()
+			locked := true
+			defer func() {
+				if locked {
+					srv.operatorMutationMu.Unlock()
+				}
+			}()
+			ctx, cancel := context.WithCancel(auth.ContextWithClaims(context.Background(), auth.Claims{
+				TenantID: "operator-tenant", PrincipalID: "operator", Scopes: []string{extensionsAdminScope},
+			}))
+			defer cancel()
+			done := make(chan int, 1)
+			started := make(chan struct{})
+			go func() {
+				close(started)
+				if mode == "dispatch" {
+					_, err := srv.dispatchHooks(ctx, hookDispatchRequest{Event: "on_checkpoint"})
+					if errors.Is(err, context.Canceled) {
+						done <- http.StatusServiceUnavailable
+					} else {
+						done <- http.StatusOK
+					}
+					return
+				}
+				path := "/v1/extensions/canary.ext/canary"
+				method := http.MethodGet
+				var body io.Reader
+				if mode == "resolve" {
+					path += "/resolve"
+					method = http.MethodPost
+					body = strings.NewReader(`{"agent_id":"agent-canary"}`)
+				}
+				req := operatorRequest(method, path, body).WithContext(ctx)
+				res := httptest.NewRecorder()
+				srv.handleExtensionByID(res, req)
+				done <- res.Code
+			}()
+			<-started
+			time.Sleep(40 * time.Millisecond)
+			cancel()
+			var got int
+			returnedWhileLocked := false
+			select {
+			case got = <-done:
+				returnedWhileLocked = true
+			case <-time.After(250 * time.Millisecond):
+			}
+			srv.operatorMutationMu.Unlock()
+			locked = false
+			if !returnedWhileLocked {
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("handler did not return after lock release")
+				}
+				t.Fatal("canceled request stayed blocked on the operator mutation lock")
+			}
+			if got != http.StatusServiceUnavailable {
+				t.Fatalf("canceled %s returned status=%d, want 503", mode, got)
+			}
+		})
+	}
+}
+
+// A client disconnect must release the HTTP handler while the operator write
+// remains blocked, rather than leaking one goroutine per canceled request.
+func TestCanaryResolveHTTPClientCancellationDuringPersistence(t *testing.T) {
+	srv, _ := canaryFixture(t)
+	srv.operatorMutationMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			srv.operatorMutationMu.Unlock()
+		}
+	}()
+	entered := make(chan struct{})
+	returned := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		r = r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{
+			TenantID: "operator-tenant", PrincipalID: "operator", Scopes: []string{extensionsAdminScope},
+		}))
+		srv.handleExtensionByID(w, r)
+		close(returned)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		server.URL+"/v1/extensions/canary.ext/canary/resolve",
+		strings.NewReader(`{"agent_id":"agent-canary"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientDone := make(chan error, 1)
+	go func() {
+		resp, err := server.Client().Do(req)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		clientDone <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolve never reached HTTP handler")
+	}
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("canceled HTTP handler remained blocked behind operator persistence")
+	}
+	select {
+	case <-clientDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client cancellation did not complete")
+	}
+	srv.operatorMutationMu.Unlock()
+	locked = false
+}
+
+func TestCanaryOperatorFenceHonorsDeadline(t *testing.T) {
+	srv, _ := canaryFixture(t)
+	srv.operatorMutationMu.Lock()
+	defer srv.operatorMutationMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	if err := srv.lockOperatorCommittedRead(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		if err == nil {
+			srv.operatorMutationMu.RUnlock()
+		}
+		t.Fatalf("blocked operator fence returned %v, want deadline exceeded", err)
+	}
+}
+
+// A canceled dispatch never selected a committed target. It must not create
+// audit records or persist the operator's tentative state while a writer holds
+// the durability fence.
+func TestHookDispatchCanceledFenceDoesNotPersistUncommittedState(t *testing.T) {
+	srv, _ := canaryFixture(t)
+	var writes atomic.Int32
+	srv.persistHookExecutions = func(context.Context) error {
+		writes.Add(1)
+		return nil
+	}
+	srv.operatorMutationMu.Lock()
+	defer srv.operatorMutationMu.Unlock()
+	ctx, cancel := context.WithCancel(auth.ContextWithClaims(context.Background(), auth.Claims{
+		TenantID: "operator-tenant", PrincipalID: "operator", Scopes: []string{extensionsAdminScope},
+	}))
+	cancel()
+	req := operatorRequest(http.MethodPost, "/v1/hooks/dispatch",
+		strings.NewReader(`{"event":"on_checkpoint","payload":{}}`)).WithContext(ctx)
+	res := httptest.NewRecorder()
+	srv.handleHookDispatch(res, req)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("canceled dispatch returned %d, want 503", res.Code)
+	}
+	if got := writes.Load(); got != 0 {
+		t.Fatalf("canceled dispatch persisted tentative operator state: writes=%d", got)
+	}
+	srv.mu.RLock()
+	n := len(srv.executions)
+	srv.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("canceled dispatch mutated audit records: count=%d", n)
 	}
 }
