@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -1741,17 +1740,15 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var manifest ExtensionManifest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&manifest); err != nil {
+	// Verify one unambiguous bounded document before signature checks or
+	// registration. encoding/json silently accepts last-wins duplicates,
+	// including package identity and signed hook routing members.
+	// Hook event names are case-sensitive map keys, unlike typed fields.
+	if err := strictjson.DecodeObjectWithExactKeyFields(
+		http.MaxBytesReader(w, r.Body, 2<<20), &manifest,
+		"hook_endpoints", "hook_fallback_policies",
+	); err != nil {
 		http.Error(w, "invalid manifest: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	// Validate the complete bounded request before signature verification,
-	// registration, receipts, or persistence can have side effects.
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		http.Error(w, "invalid manifest: expected one JSON document", http.StatusBadRequest)
 		return
 	}
 	if manifest.PackageID == "" || manifest.Version == "" {
@@ -1880,17 +1877,15 @@ func (s *extServer) handleInstallDryRun(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var manifest ExtensionManifest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&manifest); err != nil {
+	// Verify one unambiguous bounded document before signature checks or
+	// registration. encoding/json silently accepts last-wins duplicates,
+	// including package identity and signed hook routing members.
+	// Hook event names are case-sensitive map keys, unlike typed fields.
+	if err := strictjson.DecodeObjectWithExactKeyFields(
+		http.MaxBytesReader(w, r.Body, 2<<20), &manifest,
+		"hook_endpoints", "hook_fallback_policies",
+	); err != nil {
 		http.Error(w, "invalid manifest: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	// Validate the complete bounded request before signature verification,
-	// registration, receipts, or persistence can have side effects.
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		http.Error(w, "invalid manifest: expected one JSON document", http.StatusBadRequest)
 		return
 	}
 

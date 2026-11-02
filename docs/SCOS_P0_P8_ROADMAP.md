@@ -1852,6 +1852,25 @@ lifecycle enforcement only. The required CI, merged-main qualification,
 installed extension integration, fleet-wide §22 coverage, §32 metrics,
 production rollout/recovery and canonical §41 completion are separate gates.
 
+## §22 signed extension installation JSON integrity (2026-11-02; source qualification)
+
+Real loopback HTTP regressions exposed that both install routes and the
+dry-run route accepted duplicate signed-manifest JSON members, including
+last-wins `package_id` and nested hook endpoints. Signature verification
+did not catch this ambiguity: the final decoded manifest was legitimately
+signed, but the original submitted document contained conflicting operator
+instructions. Case-folded and escaped aliases reproduced the same defect.
+The new bounded strict decoder rejects ambiguous typed fields and exact
+duplicate hook-routing map keys before signature verification, registration,
+receipts or persistence. Hook event names remain case-sensitive. The
+regression suite exercises 21 HTTP scenarios across `/v1/install`,
+`/v1/extensions/install` and `/v1/install/dryrun`, including valid signed
+manifests and trailing-document rejection; RED-before-fix and GREEN-after-fix
+results were observed. Focused extension-manager and race-enabled tests
+passed locally. This is **source-level §22 integrity evidence only**:
+broader lifecycle, P0–P8 acceptance, production compatibility and recovery
+gates remain open. Production was not modified.
+
 ## P0 frozen benchmark evidence integrity (2026-10-27)
 
 The isolated lexical smoke quality gate now rejects duplicate JSON keys at
