@@ -3327,3 +3327,37 @@ skills or cross-instance state synchronization. It is not proof of deployed
 §22 lifecycle coverage, §25 integration, §32 metrics, representative P0
 benchmarks, P3–P8 acceptance, production rollout/recovery or §41 completion.
 No live services, migrations or paid resources were touched.
+
+### 2026-11-02 §22 direct-skill persistence compensation and error isolation (TDD source slice)
+
+Standalone skill creation and deletion previously returned HTTP 503 on a failed
+snapshot write but left the tentative mutation in memory. Creation also consumed
+a skill ID; both endpoints exposed internal persistence errors, including
+filesystem paths, to callers. A subsequent successful snapshot could therefore
+make a previously rejected mutation durable. Two real HTTP fault-injection
+regressions reproduced the unsafe failure responses **RED**.
+
+Both endpoints now serialize through persistence and compensate confirmed
+non-commits under the existing operator mutation lock. Creation restores the
+prior ID counter and removes the tentative skill; deletion restores its original
+registration. Local state mirrors are repaired after compensation, and external
+503 responses are sanitized while operator logs retain diagnostics. Unknown
+PostgreSQL commit outcomes are **not** blindly compensated: the existing
+readback/fencing mechanism remains authoritative.
+
+**GREEN evidence:** five repeated local-store HTTP regression runs; an isolated
+loopback PostgreSQL 16 instance exercised real CHECK-constraint write rejection
+for both create and delete, verifying live, database and local mirror state.
+Two additional real-PostgreSQL cases simulated lost acknowledgements after
+successful create/delete commits and verified readback reconciliation. A
+separate deterministic regression reproduced an ID-rewind race **RED** when
+a hook execution allocated an ID during failed skill persistence; compensation
+now rewinds only if no newer allocation occurred (**GREEN**). Three
+race-enabled repetitions of all direct-skill tests passed. No production
+database, migration, service deployment or paid resources were touched.
+
+**Limitations:** This is single-process compensation, not cross-instance CAS.
+Readers may observe tentative skill state before persistence resolves, and
+operator recovery remains necessary for unverified database outcomes. Full
+§22 lifecycle, §25 integration, §32 metrics, representative P0 benchmarks,
+P3–P8 qualification, production recovery and §41 DoD remain open.
