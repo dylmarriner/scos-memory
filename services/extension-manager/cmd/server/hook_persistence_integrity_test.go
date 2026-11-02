@@ -65,8 +65,8 @@ func TestHookDispatchDoesNotAcknowledgeUnpersistedExecution(t *testing.T) {
 				read.Header.Set("X-SCOS-Principal-ID", "principal-a")
 				readRes := httptest.NewRecorder()
 				srv.handleHookExecutions(readRes, read)
-				if readRes.Code != http.StatusOK || strings.Contains(readRes.Body.String(), store) || !strings.Contains(readRes.Body.String(), "hook state persistence failed") {
-					t.Fatalf("tenant audit readback exposed storage details or lost failure marker: status=%d body=%q", readRes.Code, readRes.Body.String())
+				if readRes.Code != http.StatusOK || strings.TrimSpace(readRes.Body.String()) != "[]" {
+					t.Fatalf("tenant audit readback exposed uncommitted evidence: status=%d body=%q", readRes.Code, readRes.Body.String())
 				}
 			} else {
 				raw, err := os.ReadFile(store)
