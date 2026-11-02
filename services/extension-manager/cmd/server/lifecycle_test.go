@@ -188,12 +188,12 @@ func TestEnableDisableGatesHookDispatchAndSkills(t *testing.T) {
 
 	// An extension skill cannot be deleted on its own or forged by POST.
 	res = httptest.NewRecorder()
-	srv.handleSkillByID(res, httptest.NewRequest(http.MethodDelete, "/v1/skills/ext/summarise", nil))
+	srv.handleSkillByID(res, operatorRequest(http.MethodDelete, "/v1/skills/ext/summarise", nil))
 	if res.Code != http.StatusConflict {
 		t.Fatalf("delete extension skill = %d", res.Code)
 	}
 	res = httptest.NewRecorder()
-	srv.handleSkills(res, httptest.NewRequest(http.MethodPost, "/v1/skills", strings.NewReader(`{"name":"x","extension_id":"ext"}`)))
+	srv.handleSkills(res, operatorRequest(http.MethodPost, "/v1/skills", strings.NewReader(`{"name":"x","extension_id":"ext"}`)))
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("forged extension skill = %d", res.Code)
 	}

@@ -4,6 +4,29 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 direct skill operator authorization (2026-11-02; TDD source candidate)
+
+Direct skill POST and DELETE previously bypassed the extension-manager's
+`extensions:admin` operator authorization check, even though direct skills
+are shared, persistent registry entries. An ordinary authenticated tenant
+could create a new shared skill or delete another operator's direct skill.
+Both cases were reproduced with request-context tenant claims before the
+fix (RED, HTTP 200). The handlers now require `operatorOnly` before
+decoding or mutating state, returning HTTP 403 for non-operator and
+unauthenticated callers. Operator-scoped requests continue to work.
+Existing persistence compensation and lifecycle tests now explicitly use
+operator identity rather than relying on the missing authorization gate.
+Unauthorized requests preserve both live and persisted skill state. Focused
+race-enabled tests passed three repetitions; full `make test` passed with
+the existing Python 3.11 test environment; `go vet ./...` passed.
+The §41 evidence checker still reports FAIL (governance PARTIAL).
+
+This is isolated source-level authorization hardening, not evidence of
+deployed policy enforcement, representative P0 benchmarks, full §22
+lifecycle qualification, §25 integration, §32 metrics, P3–P8 acceptance,
+or §41 production rollout/recovery completion. PR CI, review and merged-main
+verification are separate gates.
+
 ## §22 cross-instance ABA replay fencing (2026-11-02; source qualification)
 
 A JSON-content compare-and-swap prevented direct stale overwrites but did not

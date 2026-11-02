@@ -18,14 +18,14 @@ import (
 func TestDirectSkillCreateFailureCompensatesLiveAndLocal(t *testing.T) {
 	srv := newExtServerAt(filepath.Join(t.TempDir(), "state.json"))
 	initial := httptest.NewRecorder()
-	srv.handleSkills(initial, httptest.NewRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"existing"}`)))
+	srv.handleSkills(initial, operatorRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"existing"}`)))
 	if initial.Code != http.StatusOK {
 		t.Fatalf("seed: %d %s", initial.Code, initial.Body.String())
 	}
 	beforeID := srv.nextID
 	srv.persistBeforeWrite = func(context.Context) error { return errors.New("sensitive /private/skill-state.json") }
 	res := httptest.NewRecorder()
-	srv.handleSkills(res, httptest.NewRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"uncommitted","capabilities":["memory.write"]}`)))
+	srv.handleSkills(res, operatorRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"uncommitted","capabilities":["memory.write"]}`)))
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503: %d %s", res.Code, res.Body.String())
 	}
@@ -41,7 +41,7 @@ func TestDirectSkillCreateFailureCompensatesLiveAndLocal(t *testing.T) {
 	}
 	srv.persistBeforeWrite = nil
 	retry := httptest.NewRecorder()
-	srv.handleSkills(retry, httptest.NewRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"committed"}`)))
+	srv.handleSkills(retry, operatorRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"committed"}`)))
 	if retry.Code != http.StatusOK || srv.skills["skill-2"] == nil {
 		t.Fatalf("retry failed: %d %s", retry.Code, retry.Body.String())
 	}
@@ -50,14 +50,14 @@ func TestDirectSkillCreateFailureCompensatesLiveAndLocal(t *testing.T) {
 func TestDirectSkillDeleteFailureCompensatesLiveAndLocal(t *testing.T) {
 	srv := newExtServerAt(filepath.Join(t.TempDir(), "state.json"))
 	create := httptest.NewRecorder()
-	srv.handleSkills(create, httptest.NewRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"keep","capabilities":["memory.read"]}`)))
+	srv.handleSkills(create, operatorRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"keep","capabilities":["memory.read"]}`)))
 	if create.Code != http.StatusOK {
 		t.Fatalf("seed: %d %s", create.Code, create.Body.String())
 	}
 	before := *srv.skills["skill-1"]
 	srv.persistBeforeWrite = func(context.Context) error { return errors.New("sensitive /private/delete-state.json") }
 	res := httptest.NewRecorder()
-	srv.handleSkillByID(res, httptest.NewRequest(http.MethodDelete, "/v1/skills/skill-1", nil))
+	srv.handleSkillByID(res, operatorRequest(http.MethodDelete, "/v1/skills/skill-1", nil))
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503: %d %s", res.Code, res.Body.String())
 	}
@@ -73,7 +73,7 @@ func TestDirectSkillDeleteFailureCompensatesLiveAndLocal(t *testing.T) {
 	}
 	srv.persistBeforeWrite = nil
 	retry := httptest.NewRecorder()
-	srv.handleSkillByID(retry, httptest.NewRequest(http.MethodDelete, "/v1/skills/skill-1", nil))
+	srv.handleSkillByID(retry, operatorRequest(http.MethodDelete, "/v1/skills/skill-1", nil))
 	if retry.Code != http.StatusOK || srv.skills["skill-1"] != nil {
 		t.Fatalf("retry delete failed: %d %s", retry.Code, retry.Body.String())
 	}
@@ -97,7 +97,7 @@ func TestDirectSkillRejectedDBWriteRepairsLocalMirror(t *testing.T) {
 			srv := newExtServerAt(filepath.Join(t.TempDir(), "state.json"))
 			srv.db = pool
 			seed := httptest.NewRecorder()
-			srv.handleSkills(seed, httptest.NewRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"existing"}`)))
+			srv.handleSkills(seed, operatorRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"existing"}`)))
 			if seed.Code != http.StatusOK {
 				t.Fatalf("seed: %d %s", seed.Code, seed.Body.String())
 			}
@@ -106,9 +106,9 @@ func TestDirectSkillRejectedDBWriteRepairsLocalMirror(t *testing.T) {
 			}
 			res := httptest.NewRecorder()
 			if tc.method == http.MethodPost {
-				srv.handleSkills(res, httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body)))
+				srv.handleSkills(res, operatorRequest(tc.method, tc.path, bytes.NewBufferString(tc.body)))
 			} else {
-				srv.handleSkillByID(res, httptest.NewRequest(tc.method, tc.path, nil))
+				srv.handleSkillByID(res, operatorRequest(tc.method, tc.path, nil))
 			}
 			if res.Code != http.StatusServiceUnavailable {
 				t.Fatalf("expected 503: %d %s", res.Code, res.Body.String())
@@ -144,16 +144,16 @@ func TestDirectSkillLostDBAcknowledgementReconciles(t *testing.T) {
 			srv := newExtServerAt("")
 			srv.db = pool
 			seed := httptest.NewRecorder()
-			srv.handleSkills(seed, httptest.NewRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"existing"}`)))
+			srv.handleSkills(seed, operatorRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"existing"}`)))
 			if seed.Code != http.StatusOK {
 				t.Fatalf("seed: %d %s", seed.Code, seed.Body.String())
 			}
 			srv.persistAfterDBWrite = func(context.Context) error { return errors.New("lost acknowledgement after commit") }
 			res := httptest.NewRecorder()
 			if method == http.MethodPost {
-				srv.handleSkills(res, httptest.NewRequest(method, "/v1/skills", bytes.NewBufferString(`{"name":"committed"}`)))
+				srv.handleSkills(res, operatorRequest(method, "/v1/skills", bytes.NewBufferString(`{"name":"committed"}`)))
 			} else {
-				srv.handleSkillByID(res, httptest.NewRequest(method, "/v1/skills/skill-1", nil))
+				srv.handleSkillByID(res, operatorRequest(method, "/v1/skills/skill-1", nil))
 			}
 			if res.Code != http.StatusOK {
 				t.Fatalf("committed change wrongly rejected: %d %s", res.Code, res.Body.String())
@@ -186,7 +186,7 @@ func TestDirectSkillCreateFailurePreservesConcurrentExecutionID(t *testing.T) {
 		return errors.New("injected skill persistence failure")
 	}
 	res := httptest.NewRecorder()
-	srv.handleSkills(res, httptest.NewRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"not-committed"}`)))
+	srv.handleSkills(res, operatorRequest(http.MethodPost, "/v1/skills", bytes.NewBufferString(`{"name":"not-committed"}`)))
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503: %d", res.Code)
 	}
