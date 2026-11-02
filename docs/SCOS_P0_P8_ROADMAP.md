@@ -4,6 +4,33 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §41 governance master-table evidence isolation (2026-11-03; TDD source candidate)
+
+The §41 definition-of-done checker previously accepted the first text row
+matching section 41 / Definition of done, even when that row appeared outside
+the governance master table, inside a fenced Markdown example, or before a
+second contradictory row. A fabricated PASS could therefore override the
+real PARTIAL (Carried, synthesized) state and falsely close the gate.
+
+RED-before-fix tests reproduced four independent cases: a forged PASS
+preceding the actual master table, a PASS inside a fenced example without
+a real master table, duplicate conflicting §41 rows, and a PASS inside a
+Markdown HTML comment. The checker now recognizes the actual
+§ / Topic / Status / Basis table and separator, ignores fenced examples,
+HTML comments, indented code examples and stray rows. Review-found
+regressions also enforce exactly four §41 row cells, rejecting extra columns.
+The gate fails closed if the master table or §41 row is absent, duplicated,
+or malformed. It still accepts a single
+unqualified PASS in the real table, verified by positive regression tests.
+
+This is evidence-integrity hardening, not proof that §41 acceptance gates are
+complete. Focused regression results and canonical §41 FAIL/PARTIAL are
+source-level evidence only. Full-suite, review, merge and merged-main CI
+evidence must be recorded separately. Deployed §22 lifecycle, §25 integration,
+§32 metrics, representative P0 benchmarks, P3–P8 acceptance, and
+production rollout/recovery evidence remain outstanding. No deployment,
+live migration, or paid resource use is authorized.
+
 ## §22 slow receipt audit response CI regression (2026-11-03; source test reliability)
 
 After PR #262 was squash-merged at `64875992809c42ea6156870f9bb1a298c93c26b6`,

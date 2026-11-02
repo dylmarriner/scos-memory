@@ -42,9 +42,9 @@ class DefinitionOfDoneEvidenceTests(unittest.TestCase):
             doc = root / "docs" / "governance-audit-current.md"
             doc.parent.mkdir(parents=True)
             with patch.object(dod, "ROOT", root):
-                doc.write_text("| 41 | Definition of done | PARTIAL | still open |\n")
+                doc.write_text("| § | Topic | Status | Basis |\n|---|---|---|---|\n| 41 | Definition of done | PARTIAL | still open |\n")
                 self.assertTrue(dod.audit_doc_gate())
-                doc.write_text("| 41 | Definition of done | PASS | verified |\n")
+                doc.write_text("| § | Topic | Status | Basis |\n|---|---|---|---|\n| 41 | Definition of done | PASS | verified |\n")
                 self.assertFalse(dod.audit_doc_gate())
 
     def test_a_comment_does_not_count_as_a_test_function(self):
@@ -91,10 +91,128 @@ class DefinitionOfDoneEvidenceTests(unittest.TestCase):
             with patch.object(dod, "ROOT", root):
                 for status in ("PASS (Carried)", "PASS pending deployment", "PASS-UNVERIFIED"):
                     with self.subTest(status=status):
-                        doc.write_text(f"| 41 | Definition of done | {status} | unresolved |\n")
+                        doc.write_text(f"| § | Topic | Status | Basis |\n|---|---|---|---|\n| 41 | Definition of done | {status} | unresolved |\n")
                         self.assertTrue(dod.audit_doc_gate())
-                doc.write_text("| 41 | Definition of done | PASS | verified |\n")
+                doc.write_text("| § | Topic | Status | Basis |\n|---|---|---|---|\n| 41 | Definition of done | PASS | verified |\n")
                 self.assertFalse(dod.audit_doc_gate())
+
+
+    def test_forged_pass_before_master_table_cannot_override_real_partial(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "| 41 | Definition of done | PASS | fabricated outside master table |\n"
+                "\n| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 41 | Definition of done | PARTIAL (Carried) | outstanding gates |\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertTrue(dod.audit_doc_gate())
+
+    def test_fenced_example_and_missing_master_table_fail_closed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "```markdown\n| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 41 | Definition of done | PASS | example only |\n```\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertTrue(dod.audit_doc_gate())
+
+    def test_duplicate_master_table_rows_fail_closed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 41 | Definition of done | PASS | first |\n"
+                "| 41 | Definition of done | PARTIAL | second |\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertTrue(dod.audit_doc_gate())
+
+
+    def test_fenced_example_does_not_override_valid_master_pass(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "\x60\x60\x60markdown\n| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 41 | Definition of done | PARTIAL | historical example |\n"
+                "\x60\x60\x60\n"
+                "| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 40 | Delivery phases | PASS | completed |\n"
+                "| 41 | Definition of done | PASS | verified |\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertFalse(dod.audit_doc_gate())
+
+    def test_multiple_master_tables_or_wrong_section_topic_fail_closed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            table = (
+                "| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 41 | Definition of done | PASS | verified |\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                doc.write_text(table + "\n" + table)
+                self.assertTrue(dod.audit_doc_gate())
+                doc.write_text(table.replace("Definition of done", "Other topic"))
+                self.assertTrue(dod.audit_doc_gate())
+
+
+    def test_html_comment_cannot_forge_master_table_pass(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "<!--\n| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 41 | Definition of done | PASS | commented out |\n-->\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertTrue(dod.audit_doc_gate())
+
+
+    def test_indented_code_example_cannot_forge_master_table_pass(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "    | § | Topic | Status | Basis |\n"
+                "    |---|---|---|---|\n"
+                "    | 41 | Definition of done | PASS | indented example |\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertTrue(dod.audit_doc_gate())
+
+    def test_extra_columns_in_section_41_row_fail_closed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            doc.write_text(
+                "| § | Topic | Status | Basis |\n"
+                "|---|---|---|---|\n"
+                "| 41 | Definition of done | PASS | verified | conflicting basis |\n"
+            )
+            with patch.object(dod, "ROOT", root):
+                self.assertTrue(dod.audit_doc_gate())
 
 
 if __name__ == "__main__":

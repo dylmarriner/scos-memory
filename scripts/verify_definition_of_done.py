@@ -262,24 +262,100 @@ def check_items() -> tuple[list[str], list[str]]:
     return failures, carried
 
 
+def _master_audit_tables(text: str) -> list[list[list[str]]]:
+    """Read real master-table rows, ignoring Markdown examples and stray rows."""
+    lines = text.splitlines()
+    tables: list[list[list[str]]] = []
+    fence_char = ""
+    fence_width = 0
+    in_html_comment = False
+    i = 0
+
+    def cells(line: str) -> list[str] | None:
+        # Four spaces or a tab denotes Markdown indented code, not a table.
+        prefix = line[: len(line) - len(line.lstrip(" \t"))]
+        if len(prefix) >= 4 or "\t" in prefix:
+            return None
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            return None
+        return [part.strip() for part in stripped[1:-1].split("|")]
+
+    while i < len(lines):
+        line = lines[i]
+        if fence_char:
+            closing = r"^\s{0,3}" + re.escape(fence_char) + (
+                "{" + str(fence_width) + r",}\s*$"
+            )
+            if re.match(closing, line):
+                fence_char = ""
+            i += 1
+            continue
+        if in_html_comment:
+            if "-->" in line:
+                in_html_comment = False
+            i += 1
+            continue
+        if "<!--" in line:
+            in_html_comment = "-->" not in line.split("<!--", 1)[1]
+            i += 1
+            continue
+        opening = re.match(r"^\s{0,3}((?:\x60){3,}|~{3,})", line)
+        if opening:
+            fence_char = opening.group(1)[0]
+            fence_width = len(opening.group(1))
+            i += 1
+            continue
+
+        if cells(line) != ["§", "Topic", "Status", "Basis"]:
+            i += 1
+            continue
+        separator = cells(lines[i + 1]) if i + 1 < len(lines) else None
+        if separator is None or len(separator) != 4 or not all(
+            re.fullmatch(r":?-{3,}:?", cell) for cell in separator
+        ):
+            i += 1
+            continue
+
+        rows: list[list[str]] = []
+        i += 2
+        while i < len(lines):
+            row = cells(lines[i])
+            if row is None:
+                break
+            rows.append(row)
+            i += 1
+        tables.append(rows)
+    return tables
+
+
 def audit_doc_gate() -> list[str]:
-    """Refuse to report overall PASS unless the audit doc's own §41 row says PASS."""
+    """Require one unambiguous §41 row in the actual governance master table."""
     doc = ROOT / "docs" / "governance-audit-current.md"
     if not doc.is_file():
         return ["docs/governance-audit-current.md is missing; cannot confirm §41 gate status"]
     text = doc.read_text(encoding="utf-8", errors="replace")
-    match = re.search(r"^\|\s*41\s*\|\s*Definition of done\s*\|\s*([^\|]+)\|", text, re.MULTILINE)
-    if not match:
-        return ["docs/governance-audit-current.md has no master-table row for section 41"]
-    status = match.group(1).strip()
+    tables = _master_audit_tables(text)
+    if len(tables) != 1:
+        return [
+            "docs/governance-audit-current.md must contain exactly one valid "
+            f"governance master table (found {len(tables)}); §41 cannot be verified"
+        ]
+    rows = [row for row in tables[0] if row and row[0] == "41"]
+    if len(rows) != 1 or len(rows[0]) != 4 or rows[0][1] != "Definition of done":
+        return [
+            "docs/governance-audit-current.md must contain exactly one valid "
+            "§41 Definition of done row in the master table"
+        ]
+    status = rows[0][2]
     if status != "PASS":
         return [
-            f"docs/governance-audit-current.md master table reports §41 as "
-            f"\"{status}\", not PASS — the definition-of-done gate cannot be "
-            f"considered closed while the audit doc itself carries this open. "
-            f"See that document's \"What Remains Open\" section for the specific "
-            f"blocking items (§22 hook coverage, §32 metric-emission breadth, "
-            f"§25 integration evidence, and the other Carried sections)."
+            f'docs/governance-audit-current.md master table reports §41 as "{status}", '
+            "not PASS — the definition-of-done gate cannot be considered closed "
+            "while the audit doc itself carries this open. See that document's "
+            '"What Remains Open" section for the specific blocking items '
+            "(§22 hook coverage, §32 metric-emission breadth, §25 integration "
+            "evidence, and the other Carried sections)."
         ]
     return []
 
