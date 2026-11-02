@@ -619,7 +619,10 @@ func (s *extServer) handleExtensions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	// Snapshot only committed operator state, including failed-write compensation.
 	case http.MethodGet:
-		s.operatorMutationMu.RLock()
+		if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+			http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		s.mu.RLock()
 		var exts []Extension
 		privileged := extensionOperatorRead(r)
@@ -664,7 +667,10 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 	switch r.Method {
 	// Snapshot only committed operator state, including failed-write compensation.
 	case http.MethodGet:
-		s.operatorMutationMu.RLock()
+		if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+			http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		s.mu.RLock()
 		ext, ok := s.extensions[id]
 		var view Extension
@@ -1000,7 +1006,10 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// A failed operator write is compensated before readers can see it.
-		s.operatorMutationMu.RLock()
+		if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+			http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		// Only available skills are listed; ?include_disabled=true also
 		// lists skills whose extension is disabled, reported as disabled.
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
@@ -1088,7 +1097,10 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// Hide tentative creations and deletions until persistence resolves.
-		s.operatorMutationMu.RLock()
+		if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+			http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		s.mu.RLock()
 		skill, ok := s.skills[id]
 		var view Skill
@@ -1154,7 +1166,10 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *extServer) handleHooks(w http.ResponseWriter, r *http.Request) {
 	// Hold the operator read fence only while capturing the response.
-	s.operatorMutationMu.RLock()
+	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+		http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	s.mu.RLock()
 	// Flatten hooks into list
 	allHooks := []map[string]any{}
@@ -1185,7 +1200,10 @@ func (s *extServer) handleHooks(w http.ResponseWriter, r *http.Request) {
 
 func (s *extServer) handleHookByEvent(w http.ResponseWriter, r *http.Request) {
 	event := strings.TrimPrefix(r.URL.Path, "/v1/hooks/")
-	s.operatorMutationMu.RLock()
+	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+		http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	s.mu.RLock()
 	hooks, ok := s.hooks[event]
 	views := make([]Hook, 0, len(hooks))
@@ -1987,7 +2005,10 @@ func (s *extServer) handleReceipts(w http.ResponseWriter, r *http.Request) {
 	// Never expose an install that may still fail durable persistence. Copy
 	// the complete response while fenced, then release both locks before
 	// writing to a potentially slow HTTP client.
-	s.operatorMutationMu.RLock()
+	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+		http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	s.mu.RLock()
 	receipts := make([]InstallationReceipt, 0, len(s.receipts))
 	for _, receipt := range s.receipts {
@@ -2012,7 +2033,10 @@ func (s *extServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Hold the persistence fence only while taking a committed snapshot.
-	s.operatorMutationMu.RLock()
+	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+		http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	s.mu.RLock()
 	var caps []map[string]any
 	for _, ext := range s.extensions {
