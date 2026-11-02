@@ -215,5 +215,84 @@ class DefinitionOfDoneEvidenceTests(unittest.TestCase):
                 self.assertTrue(dod.audit_doc_gate())
 
 
+    def test_explicitly_skipped_python_evidence_is_not_live(self):
+        item = next(i for i in dod.ITEMS if i.bullet == "Corrections preserve versions.")
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_promoter.py"
+            path.write_text(
+                "import unittest\n"
+                "class TestPromoter(unittest.TestCase):\n"
+                "    @unittest.skip('not implemented')\n"
+                "    def test_build_memory_version_contains_version_1(self): pass\n"
+            )
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text(path.read_text().replace("@unittest.skip('not implemented')", "@unittest.skipIf(True, 'not implemented')"))
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text(path.read_text().replace("@unittest.skipIf(True, 'not implemented')", "@unittest.skipUnless(False, 'not implemented')"))
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text(path.read_text().replace("    @unittest.skipUnless(False, 'not implemented')\n", ""))
+            self.assertTrue(dod.function_exists(path, item.pattern))
+
+    def test_skipped_class_and_unreachable_branch_do_not_count_as_evidence(self):
+        item = next(i for i in dod.ITEMS if i.bullet == "Corrections preserve versions.")
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_promoter.py"
+            path.write_text(
+                "import unittest\n"
+                "@unittest.skip('entire suite disabled')\n"
+                "class TestPromoter(unittest.TestCase):\n"
+                "    def test_build_memory_version_contains_version_1(self): pass\n"
+            )
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text(
+                "if False:\n"
+                "    def test_build_memory_version_contains_version_1(self): pass\n"
+            )
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text(
+                "class TestPromoter:\n"
+                "    def test_build_memory_version_contains_version_1(self): pass\n"
+            )
+            self.assertTrue(dod.function_exists(path, item.pattern))
+
+
+    def test_skip_aliases_and_nested_functions_cannot_forge_evidence(self):
+        item = next(i for i in dod.ITEMS if i.bullet == "Corrections preserve versions.")
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_promoter.py"
+            path.write_text(
+                "from unittest import skip as disabled\n"
+                "class TestPromoter:\n"
+                "    @disabled('not active')\n"
+                "    def test_build_memory_version_contains_version_1(self): pass\n"
+            )
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text(
+                "import unittest as ut\n"
+                "class TestPromoter:\n"
+                "    @ut.skip('not active')\n"
+                "    def test_build_memory_version_contains_version_1(self): pass\n"
+            )
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text(
+                "def helper():\n"
+                "    def test_build_memory_version_contains_version_1(self): pass\n"
+            )
+            self.assertFalse(dod.function_exists(path, item.pattern))
+
+    def test_conditionally_enabled_python_evidence_remains_live(self):
+        item = next(i for i in dod.ITEMS if i.bullet == "Corrections preserve versions.")
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test_promoter.py"
+            for decorator in ("@unittest.skipIf(False, 'enabled')", "@unittest.skipUnless(True, 'enabled')"):
+                path.write_text(
+                    "import unittest\n"
+                    "class TestPromoter:\n"
+                    f"    {decorator}\n"
+                    "    def test_build_memory_version_contains_version_1(self): pass\n"
+                )
+                self.assertTrue(dod.function_exists(path, item.pattern))
+
+
 if __name__ == "__main__":
     unittest.main()

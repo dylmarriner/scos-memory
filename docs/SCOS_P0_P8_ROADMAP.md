@@ -4,6 +4,29 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §41 live Python test evidence qualification (2026-11-03; TDD source candidate)
+
+The canonical definition-of-done checker previously counted Python test
+functions as evidence even when the test or its entire class was explicitly
+skipped, when its declaration sat behind a literal `if False`, or when it was
+nested inside an undiscoverable helper function. This could overstate the
+§41 source-level evidence without any executable regression coverage.
+
+RED-before-fix regressions reproduced skipped methods/classes and import-
+alias skips. The checker now walks executable Python AST branches, excludes
+skipped `unittest` and `pytest.mark` tests (including common import aliases),
+and does not count nested function declarations. Positive controls retain
+recognition of active tests and explicitly enabled conditional decorators.
+The check is conservative for dynamic skip conditions. These are source
+qualification tests, **not** proof that the cited tests executed in CI or
+that production acceptance is complete.
+
+§41 remains FAIL / PARTIAL (Carried, synthesized) pending deployed §22
+lifecycle and mixed-version qualification, §25 integration, §32 telemetry,
+representative P0 benchmarks, P3–P8 acceptance, and production
+rollout/recovery evidence. PR reviews, CI and merged-main tests are separate
+gates. No production deployment, migration or paid resource use is authorized.
+
 ## §41 governance master-table evidence isolation (2026-11-03; TDD source candidate)
 
 The §41 definition-of-done checker previously accepted the first text row
