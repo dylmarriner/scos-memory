@@ -155,3 +155,56 @@ func TestExtensionCrossInstanceConcurrentCASRejectsLostUpdate(t *testing.T) {
 		t.Fatalf("concurrent CAS overwrote newer decision: %v", got)
 	}
 }
+
+// A content-only compare-and-swap cannot distinguish A->B->A from no update.
+// The stale instance must not overwrite an intervening pair of commits even
+// when the business payload has returned to its original value.
+func TestExtensionCrossInstanceABACannotBypassCAS(t *testing.T) {
+	pool, _ := extensionOperatorTestDB(t)
+	writer := newExtServerAt("")
+	writer.db = pool
+	writer.nextID = 11
+	if err := writer.persist(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := newExtServerAt("")
+	stale.db = pool
+	if err := stale.loadState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	writer.mu.Lock()
+	writer.nextID = 12
+	writer.mu.Unlock()
+	if err := writer.persist(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writer.mu.Lock()
+	writer.nextID = 11
+	writer.mu.Unlock()
+	if err := writer.persist(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	stale.mu.Lock()
+	stale.nextID = 99
+	stale.mu.Unlock()
+	if err := stale.persist(context.Background()); !errors.Is(err, errPersistenceOutcomeUnknown) {
+		t.Fatalf("ABA stale writer unexpectedly accepted: %v", err)
+	}
+	if !stale.persistenceUncertain.Load() {
+		t.Fatal("ABA stale instance was not fenced")
+	}
+	var raw []byte
+	if err := pool.QueryRow(context.Background(), `SELECT state FROM extension_manager_state WHERE id=true`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var state persistedExtensionState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.NextID != 11 {
+		t.Fatalf("stale instance overwrote intervening commits: %d", state.NextID)
+	}
+}

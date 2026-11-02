@@ -4,6 +4,33 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 cross-instance ABA replay fencing (2026-11-02; source qualification)
+
+A JSON-content compare-and-swap prevented direct stale overwrites but did not
+recognize an A -> B -> A sequence: the second instance's old snapshot compared
+equal to the restored business payload and could commit a stale operator
+decision. A real isolated PostgreSQL regression reproduced the stale commit
+(RED) before correction. The persisted state now carries a monotonic revision
+generation that increments only after an acknowledged durable write or verified
+committed readback. PostgreSQL's existing atomic JSONB CAS includes that
+generation, so a stale writer is fenced even if business state returns to A.
+Legacy records without revision load as generation zero and upgrade on the
+first new write. A local-file regression covers restart, successful revision
+advance, and no advance after a confirmed atomic-rename failure.
+
+Evidence on isolated development source: real PostgreSQL ABA regression RED then
+GREEN; cross-instance/CAS/ambiguous-commit tests pass; focused race-enabled
+tests pass three repetitions; full make test passes with Python 3.11 venv;
+go vet ./... passes. Review, PR CI and merged-main verification are separate
+gates and must not be inferred from local tests.
+
+Rollout restriction: this prevents ABA only once every writer of the shared
+row uses revision-aware persistence. Mixed old/new writers and untrusted direct
+database writes are not protected; production requires a separately approved
+coordinated rollout, compatibility check, backup and recovery drill. It does
+not close §22 lifecycle coverage, §25 integration, §32 metrics, P0 benchmarks,
+P3–P8 acceptance, or §41 definition-of-done.
+
 ## §22 operator install/uninstall persistence atomicity (2026-11-02; TDD source candidate)
 
 Extension installation and removal previously changed the live extension,

@@ -178,6 +178,7 @@ type extServer struct {
 	canaryScopeKey    []byte
 	canaryScopeKeyErr error
 	nextID            int
+	revision          uint64
 	db                *pgxpool.Pool
 	storePath         string
 	// Optional audit-persistence fault injection for deterministic HTTP tests.
@@ -212,6 +213,7 @@ type persistedExtensionState struct {
 	History    map[string][]ExtensionManifest `json:"history"`
 	Canaries   map[string]*CanaryDeployment   `json:"canaries,omitempty"`
 	NextID     int                            `json:"next_id"`
+	Revision   uint64                         `json:"revision,omitempty"`
 }
 
 func newExtServer() *extServer {
@@ -350,6 +352,7 @@ func (s *extServer) applyState(state persistedExtensionState) {
 		s.canaries = state.Canaries
 	}
 	s.nextID = state.NextID
+	s.revision = state.Revision
 	s.normalizeLocked()
 }
 
@@ -404,11 +407,21 @@ func samePersistedJSON(a, b []byte) bool {
 func (s *extServer) snapshotState() ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.marshalStateLocked(s.revision)
+}
+
+func (s *extServer) marshalStateLocked(revision uint64) ([]byte, error) {
 	return json.Marshal(persistedExtensionState{
 		Extensions: s.extensions, Skills: s.skills, Hooks: s.hooks,
 		Receipts: s.receipts, Executions: s.executions, History: s.history,
-		Canaries: s.canaries, NextID: s.nextID,
+		Canaries: s.canaries, NextID: s.nextID, Revision: revision,
 	})
+}
+
+func (s *extServer) acknowledgeRevision(revision uint64) {
+	s.mu.Lock()
+	s.revision = revision
+	s.mu.Unlock()
 }
 
 func (s *extServer) writeLocalState(raw []byte) error {
@@ -475,7 +488,14 @@ func (s *extServer) persist(ctx context.Context) error {
 	if s.db == nil && s.storePath == "" {
 		return nil
 	}
-	raw, err := s.snapshotState()
+	s.mu.RLock()
+	if s.revision == ^uint64(0) {
+		s.mu.RUnlock()
+		return errors.New("extension persistence revision exhausted")
+	}
+	nextRevision := s.revision + 1
+	raw, err := s.marshalStateLocked(nextRevision)
+	s.mu.RUnlock()
 	if err != nil {
 		return err
 	}
@@ -503,12 +523,13 @@ func (s *extServer) persist(ctx context.Context) error {
 		return err
 	}
 	if s.db == nil {
+		s.acknowledgeRevision(nextRevision)
 		return nil
 	}
 	// PostgreSQL atomically compares the expected JSONB state at the write
 	// boundary. A concurrent writer between readback and UPDATE cannot win
-	// silently. This content CAS does not detect ABA; production multi-writer
-	// rollout still needs a monotonic revision and recovery qualification.
+	// silently. A monotonically increasing revision also detects ABA when
+	// every writer uses this format; mixed-version rollout needs qualification.
 	tag, err := s.db.Exec(ctx, `
 		INSERT INTO extension_manager_state (id,state,updated_at)
 		VALUES (true,$1::jsonb,now())
@@ -525,6 +546,7 @@ func (s *extServer) persist(ctx context.Context) error {
 	}
 	if err == nil {
 		s.persistedState = append([]byte(nil), raw...)
+		s.acknowledgeRevision(nextRevision)
 		return nil
 	}
 
@@ -536,6 +558,7 @@ func (s *extServer) persist(ctx context.Context) error {
 	if readErr == nil {
 		if samePersistedJSON(after, raw) {
 			s.persistedState = append([]byte(nil), raw...)
+			s.acknowledgeRevision(nextRevision)
 			return nil
 		} // write committed
 		if samePersistedJSON(after, before) {
