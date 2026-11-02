@@ -3719,3 +3719,32 @@ representative P0 benchmarks, P3–P8 acceptance, live production rollout and
 recovery evidence, and canonical §41 completion remain unverified. No live
 service, migration, or paid resource is involved. Merge/main CI evidence is
 recorded only after the PR and checks complete.
+
+### 2026-11-02 §22 capability discovery committed-read isolation (TDD source slice)
+
+GET /v1/capabilities previously read the in-memory extension map without
+holding the operator persistence fence. A real loopback HTTP regression
+reproduced a disabled capability disappearing while the operator PATCH was
+still waiting on a durable write that subsequently failed and rolled back.
+The same handler also accepted POST, PATCH, PUT and DELETE as successful
+capability discovery requests instead of enforcing GET-only semantics.
+Both defects were reproduced RED before the fix.
+
+Capability discovery now takes the operator mutation read fence while copying
+its response, releases it before HTTP writing, and rejects non-GET methods.
+The focused regression suite includes a failed persisted mutation, real HTTP
+read-after-rollback consistency, method restrictions and a slow response
+writer that must not block a concurrent operator PATCH. Evidence:
+`services/extension-manager/cmd/server/capabilities_read_integrity_test.go`.
+The focused tests passed three repetitions with the race detector after
+fixing the reproduced failures. The full extension-manager race suite,
+repository-wide `make test` using the existing Python 3.11/Pydantic
+environment, `go vet ./...`, and `git diff --check` passed on AMD.
+The canonical §41 checker remains FAIL (governance PARTIAL).
+Merged-main CI evidence must be recorded after verification and merge.
+
+**Scope and limits:** Single-instance committed discovery only. Cross-instance
+reader coherence, full §22 deployed lifecycle qualification, §25 integration,
+§32 metrics acceptance, representative P0 benchmarks, P3–P8 acceptance,
+production rollout/recovery and canonical §41 completion remain open.
+No live service, production database, migration or paid resource was changed.
