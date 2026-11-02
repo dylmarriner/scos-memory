@@ -5,7 +5,7 @@ This script does not re-implement or re-prove the underlying behaviour that
 §41 requires (that belongs to the owning services' own test suites). It
 mechanically checks, per DoD bullet, whether the specific test evidence that
 would justify claiming the bullet is satisfied still exists in the tree —
-by grepping for the exact test function names cited in this script — and it
+by checking for actual test declarations named in this script — and it
 fails loudly, per item, when that evidence is missing, renamed, or deleted.
 
 It also parses the master table row for section 41 in
@@ -25,6 +25,7 @@ see docs/governance-audit-current.md line 104).
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from dataclasses import dataclass
@@ -42,11 +43,71 @@ class DoDItem:
     in_scope: bool = True
 
 
+def _go_code_only(text: str) -> str:
+    """Mask Go comments and string/rune literals without moving line boundaries.
+
+    This is intentionally a conservative lexical check, not a Go parser.
+    Only code-position function declarations can count as DoD evidence.
+    """
+    output: list[str] = []
+    state = "code"
+    escaped = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if state == "code":
+            if char == "/" and nxt in ("/", "*"):
+                state = "line_comment" if nxt == "/" else "block_comment"
+                output.extend((" ", " "))
+                i += 2
+                continue
+            if char in ('"', "'", "`"):
+                state = {"\"": "quoted", "'": "rune", "`": "raw"}[char]
+                output.append(" ")
+            else:
+                output.append(char)
+        elif state == "line_comment":
+            if char == "\n":
+                state = "code"
+            output.append("\n" if char == "\n" else " ")
+        elif state == "block_comment":
+            if char == "*" and nxt == "/":
+                output.extend((" ", " "))
+                i += 2
+                state = "code"
+                continue
+            output.append("\n" if char == "\n" else " ")
+        else:
+            if state in ("quoted", "rune") and escaped:
+                escaped = False
+            elif state in ("quoted", "rune") and char == "\\":
+                escaped = True
+            elif (state == "raw" and char == "`") or (state == "quoted" and char == '"') or (state == "rune" and char == "'"):
+                state = "code"
+            output.append("\n" if char == "\n" else " ")
+        i += 1
+    return "".join(output)
+
+
 def function_exists(path: Path, pattern: str) -> bool:
     if not path.is_file():
         return False
     text = path.read_text(encoding="utf-8", errors="replace")
-    return re.search(pattern, text, re.MULTILINE) is not None
+    if path.suffix == ".go":
+        return re.search(pattern, _go_code_only(text), re.MULTILINE) is not None
+    if path.suffix == ".py":
+        try:
+            tree = ast.parse(text, filename=str(path))
+        except SyntaxError:
+            return False
+        lines = text.splitlines()
+        return any(
+            re.search(pattern, lines[node.lineno - 1], re.MULTILINE)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+    return False
 
 
 ITEMS: list[DoDItem] = [
@@ -211,7 +272,7 @@ def audit_doc_gate() -> list[str]:
     if not match:
         return ["docs/governance-audit-current.md has no master-table row for section 41"]
     status = match.group(1).strip()
-    if not status.upper().startswith("PASS"):
+    if status != "PASS":
         return [
             f"docs/governance-audit-current.md master table reports §41 as "
             f"\"{status}\", not PASS — the definition-of-done gate cannot be "
