@@ -1,3 +1,19 @@
+## §32 signed extension permission declaration telemetry (2026-11-03; source-only)
+
+The extension manager now emits `scos.extension.permissions` after a verified,
+durably persisted signed installation, reporting the **count of declared**
+manifest permissions with extension/version identity and `scope=declared`.
+This metric does **not** assert permissions were granted or enforced. A rejected
+signature or failed durable write cannot emit this metric. The extension-manager
+required-metrics registry now includes this producer path.
+
+`TestExtensionPermissionMetricsOnlyAfterDurableSignedInstall` failed RED
+before instrumentation (no permission metric), then passed GREEN with a real
+HTTP collector, signed installs, invalid-signature rejection and injected
+persistence failure. This qualifies a source-level §32 producer, **not**
+deployed collector coverage, permissions enforcement, or production alerting.
+Canonical §41 remains FAIL until the independent acceptance gates close.
+
 # SCOS Memory Fabric — P0–P8 Engineering Roadmap
 
 > **Canonical roadmap as of 2026-09-10.** Repository state is authoritative. This roadmap distinguishes source implementation, benchmark acceptance, merge state, and live-production activation instead of treating them as one checkbox.

@@ -2043,6 +2043,11 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		serviceMetrics.Gauge(telemetry.MetricSignatureState, 1, "1",
 			map[string]string{"extension": manifest.PackageID, "version": manifest.Version, "state": "verified"},
 			telemetry.Correlation{})
+		// This is a count of declared permissions in the verified manifest,
+		// not proof that the runtime granted or enforced them.
+		serviceMetrics.Gauge(telemetry.MetricExtensionPermissions, float64(len(manifest.Permissions)), "1",
+			map[string]string{"extension": manifest.PackageID, "version": manifest.Version, "scope": "declared"},
+			telemetry.Correlation{})
 	}
 	writeJSON(w, map[string]any{
 		"status":                "installed",

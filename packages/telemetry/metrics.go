@@ -142,6 +142,7 @@ var RequiredMetrics = map[string][]string{
 	"extension-manager": {
 		MetricPluginHealth,
 		MetricSignatureState,
+		MetricExtensionPermissions,
 		MetricHookLatency,
 		MetricHookFailure,
 	},
