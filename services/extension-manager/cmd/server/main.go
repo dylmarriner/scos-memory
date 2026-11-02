@@ -1959,6 +1959,12 @@ func (s *extServer) handleReceipts(w http.ResponseWriter, r *http.Request) {
 // ── capabilities ─────────────────────────────────────────────────────────
 
 func (s *extServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Hold the persistence fence only while taking a committed snapshot.
+	s.operatorMutationMu.RLock()
 	s.mu.RLock()
 	var caps []map[string]any
 	for _, ext := range s.extensions {
@@ -1977,6 +1983,7 @@ func (s *extServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
 	if caps == nil {
 		caps = []map[string]any{}
 	}
