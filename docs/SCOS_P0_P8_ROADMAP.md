@@ -4,6 +4,34 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 direct skill creation JSON integrity (2026-11-02; TDD source candidate)
+
+The operator-authorized direct-skill POST endpoint used Go's permissive
+last-wins JSON decoding. Duplicate or case-folded field names could silently
+replace an approved skill name, capabilities, permissions, status, required
+tools or token budget before persistence. A real loopback HTTP regression
+reproduced HTTP 200 for seven ambiguous request variants **RED** (the escaped
+alias case was also covered). This could persist an operator-unintended shared
+skill despite the authorization gate.
+
+The handler now reuses the existing bounded `strictjson.DecodeObject` path,
+rejecting duplicate, case-folded and escaped member aliases before allocating
+an ID or changing shared state. It preserves the 512 KiB request bound,
+unknown-field rejection and complete-document enforcement. Eight HTTP
+regression cases pass **GREEN**, checking both in-memory and reloaded local
+state; a valid request with trailing whitespace still persists correctly.
+Focused race-enabled skill tests passed three repetitions. The complete
+repository `make test` suite passed on AMD using the existing Python
+3.11/Pydantic virtual environment; `go vet ./...` and `git diff --check`
+also passed. The canonical §41 checker still reports FAIL because the
+governance audit remains PARTIAL.
+
+**Remaining gates:** PR review and merged-main CI must be verified
+separately. This source-level input-integrity slice does not prove
+complete §22 lifecycle, §25 integration, §32 metrics, representative P0
+benchmarks, P3–P8 acceptance, production rollout/recovery or §41 DoD.
+No production services, live migrations or paid resources were used.
+
 ## §22 direct skill operator authorization (2026-11-02; TDD source candidate)
 
 Direct skill POST and DELETE previously bypassed the extension-manager's

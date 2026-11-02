@@ -952,17 +952,12 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var skill Skill
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512<<10))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&skill); err != nil {
+		// Shared skill definitions are operator-managed. Reject duplicate,
+		// case-folded and escaped member aliases before any mutation so a
+		// last-wins decoder cannot silently replace approved capabilities.
+		// The strict decoder also enforces one complete, bounded document.
+		if err := strictjson.DecodeObject(http.MaxBytesReader(w, r.Body, 512<<10), &skill); err != nil {
 			http.Error(w, "invalid skill: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		// Do not register a skill from a valid prefix of an invalid request.
-		// Consuming to EOF also enforces MaxBytesReader on trailing whitespace.
-		var trailing any
-		if err := dec.Decode(&trailing); err != io.EOF {
-			http.Error(w, "invalid skill: expected one JSON document", http.StatusBadRequest)
 			return
 		}
 		if skill.Name == "" {
