@@ -945,6 +945,9 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, sk)
 
 	case http.MethodPost:
+		if !operatorOnly(w, r) {
+			return
+		}
 		if s.rejectUncertainMutation(w) {
 			return
 		}
@@ -1030,6 +1033,9 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, view)
 
 	case http.MethodDelete:
+		if !operatorOnly(w, r) {
+			return
+		}
 		if s.rejectUncertainMutation(w) {
 			return
 		}
