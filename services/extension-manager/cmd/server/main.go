@@ -1339,6 +1339,14 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	dispatchStarted := time.Now()
 	results, err := s.dispatchHooks(r.Context(), req)
+	// No target was selected when the committed-state fence could not be
+	// acquired. Do not write an abort record: persisting here could commit
+	// the operator's tentative state before its own durable write resolves.
+	var fenceErr *operatorFenceError
+	if errors.As(err, &fenceErr) {
+		http.Error(w, "hook dispatch temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	startedAt := dispatchStarted.UTC().Format(time.RFC3339Nano)
 	// Preserve every completed hook's execution evidence even if a later
 	// mandatory hook aborts the overall dispatch. The aborted marker remains
@@ -1539,12 +1547,21 @@ type hookPersistenceFailure struct{ cause error }
 func (e *hookPersistenceFailure) Error() string { return "hook state persistence failed" }
 
 func (s *extServer) dispatchHooks(parent context.Context, req hookDispatchRequest) ([]hookDispatchResult, error) {
+	// Select outbound targets only from acknowledged operator state. Otherwise
+	// an uncommitted canary could receive tenant data before a failed activation
+	// rolls back. Release the fence before network I/O so slow endpoints cannot
+	// hold up operator mutations.
+	if err := s.lockOperatorCommittedRead(parent); err != nil {
+		return nil, err
+	}
 	if s.persistenceUncertain.Load() {
+		s.operatorMutationMu.RUnlock()
 		return nil, errPersistenceOutcomeUnknown
 	}
 	s.mu.RLock()
 	targets := s.hookTargetsLocked(req.Event, req.canaryContext())
 	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
 	// Return a per-extension failure record even when preflight aborts
 	// before any network delivery. The handler persists this alongside the
 	// dispatch-level abort marker, so operators can identify the blocker.
