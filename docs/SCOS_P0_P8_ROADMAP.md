@@ -3585,3 +3585,36 @@ remain supported. Upstream compatibility must still be assessed before
 production rollout. No production deployment, migration or paid
 resources were used. Full-suite and merged-main CI evidence must be
 recorded after validation and merge.
+
+### 2026-11-02 §22 tenant discovery confidentiality (TDD source slice)
+
+Extension and hook discovery previously returned operator-managed configuration,
+installation principal and outbound webhook endpoint URLs to ordinary tenant
+callers. These fields can contain credentials or other privileged routing data.
+A real HTTP-handler regression reproduced all three leaks **RED** for
+`GET /v1/extensions`, `GET /v1/extensions/{id}` and
+`GET /v1/hooks/{event}`.
+
+Discovery now returns per-request read-only projections. Tenant callers retain
+extension IDs, names, status and hook event/type metadata, but do not receive
+extension config, manifest hook endpoints, installed-by principal or hook
+destination URL. Authorized `extensions:admin` operators and authenticated
+internal services retain full diagnostic detail. Read projections do not
+modify persisted or in-memory registration state. The by-event handler now
+copies the selected hook records while holding the state read lock.
+
+**Evidence:** deterministic HTTP-handler TDD failure before the change and
+success after it; `read_projection_privacy_test.go`. Three repetitions of
+focused race-enabled regressions passed on AMD, as did repository-wide
+`make test` with Python 3.11/Pydantic, `go vet ./...` and `git diff --check`.
+The first full-suite attempt failed solely because a stale venv activation
+script selected system Python 3.14 without Pydantic; explicitly selecting
+the existing Python 3.11 venv resolved that environment issue. PR checks and
+merged-main CI must still be verified after source acceptance.
+
+**Limits:** This addresses these three discovery endpoints, not every
+potentially sensitive field in all administrative or audit surfaces. Complete
+§22 lifecycle, §25 integration, §32 collector qualification, representative
+P0 benchmarks, P3–P8 acceptance and production rollout/recovery evidence
+remain open. No production service, database migration or paid resource
+was touched.

@@ -587,13 +587,43 @@ func healthOK(w http.ResponseWriter, _ *http.Request) {
 
 // ── extensions ───────────────────────────────────────────────────────────
 
+// extensionOperatorRead permits privileged discovery only for operators or
+// authenticated internal services. Tenant discovery remains available, but
+// never includes stored configuration or outbound webhook credentials.
+func extensionOperatorRead(r *http.Request) bool {
+	if claims, ok := auth.CanonicalClaims(r.Context()); ok {
+		return auth.HasScope(claims, extensionsAdminScope)
+	}
+	return auth.Identity(r.Context()) != ""
+}
+
+func extensionDiscoveryView(ext *Extension, privileged bool) Extension {
+	view := *ext
+	if !privileged {
+		view.Config = nil
+		view.InstalledBy = ""
+		view.Manifest = ext.Manifest
+		view.Manifest.HookEndpoints = nil
+	}
+	return view
+}
+
+func hookDiscoveryView(hook *Hook, privileged bool) Hook {
+	view := *hook
+	if !privileged {
+		view.Endpoint = ""
+	}
+	return view
+}
+
 func (s *extServer) handleExtensions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.mu.RLock()
-		var exts []*Extension
+		var exts []Extension
+		privileged := extensionOperatorRead(r)
 		for _, ext := range s.extensions {
-			exts = append(exts, ext)
+			exts = append(exts, extensionDiscoveryView(ext, privileged))
 		}
 		s.mu.RUnlock()
 		writeJSON(w, exts)
@@ -633,12 +663,16 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 	case http.MethodGet:
 		s.mu.RLock()
 		ext, ok := s.extensions[id]
+		var view Extension
+		if ok {
+			view = extensionDiscoveryView(ext, extensionOperatorRead(r))
+		}
 		s.mu.RUnlock()
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		writeJSON(w, ext)
+		writeJSON(w, view)
 
 	case http.MethodPatch:
 		var update struct {
@@ -1108,12 +1142,17 @@ func (s *extServer) handleHookByEvent(w http.ResponseWriter, r *http.Request) {
 	event := strings.TrimPrefix(r.URL.Path, "/v1/hooks/")
 	s.mu.RLock()
 	hooks, ok := s.hooks[event]
+	views := make([]Hook, 0, len(hooks))
+	privileged := extensionOperatorRead(r)
+	for _, hook := range hooks {
+		views = append(views, hookDiscoveryView(hook, privileged))
+	}
 	s.mu.RUnlock()
-	if !ok || len(hooks) == 0 {
+	if !ok || len(views) == 0 {
 		http.Error(w, "no hooks for event", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, hooks)
+	writeJSON(w, views)
 }
 
 type hookDispatchRequest struct {
