@@ -45,6 +45,9 @@ func TestPersistedExtensionSkillsReconcileToSignedManifest(t *testing.T) {
 	}
 	delete(state.Skills, "skill.guard/review")
 	state.Skills["skill.guard/nil"] = nil
+	// A valid signature under an alias map key does not authorize alias skills.
+	state.Extensions["alias"] = state.Extensions["skill.guard"]
+	state.Skills["alias/summarise"] = &Skill{ID: "alias/summarise", Name: "summarise", Status: "active", ExtensionID: "alias"}
 	state.Skills["skill-77"] = &Skill{ID: "skill-77", Name: "manual", Status: "active"}
 	state.Skills["skill-78"] = &Skill{ID: "skill-78", Name: "forged", Status: "active", ExtensionID: "skill.guard"}
 	raw, err = json.Marshal(state)
@@ -56,7 +59,7 @@ func TestPersistedExtensionSkillsReconcileToSignedManifest(t *testing.T) {
 	}
 
 	restored := newExtServerAt(path)
-	if restored.skills["skill.guard/admin"] != nil || restored.skills["skill.guard/nil"] != nil || restored.skills["skill-78"] != nil {
+	if restored.skills["skill.guard/admin"] != nil || restored.skills["skill.guard/nil"] != nil || restored.skills["skill-78"] != nil || restored.skills["alias/summarise"] != nil {
 		t.Fatalf("unexported or nil skill survived restoration: %+v", restored.skills)
 	}
 	if restored.skills["skill-77"] == nil || restored.skills["skill-77"].Name != "manual" {

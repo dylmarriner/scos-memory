@@ -237,7 +237,7 @@ func (s *extServer) normalizeLocked() {
 		}
 		owner, name := id[:slash], id[slash+1:]
 		ext, ok := s.extensions[owner]
-		if !ok || !trusted[owner] || !contains(ext.Manifest.SkillsExported, name) {
+		if !ok || !trusted[owner] || ext.Manifest.PackageID != owner || !contains(ext.Manifest.SkillsExported, name) {
 			delete(s.skills, id)
 			continue
 		}
@@ -247,7 +247,7 @@ func (s *extServer) normalizeLocked() {
 	// A disabled but trusted extension retains its skill definitions; the
 	// read path correctly reports them as unavailable until re-enabled.
 	for id, ext := range s.extensions {
-		if !trusted[id] {
+		if !trusted[id] || ext.Manifest.PackageID != id {
 			continue
 		}
 		for _, name := range ext.Manifest.SkillsExported {

@@ -3305,7 +3305,11 @@ forge its extension owner, or remove a mandatory export; a JSON `null` skill
 record crashed restoration before readiness. A local-state restart regression
 reproduced the nil-pointer crash **RED** and exercises forged owned skills,
 capability escalation, missing signed exports, legacy missing ownership, and
-HTTP skill-list visibility. **GREEN:** on load, the registry rejects nil and
+HTTP skill-list visibility. CodeRabbit review also identified a signed
+manifest stored under a different extension-map key: a dedicated regression
+reproduced duplicate alias-owned skills **RED**, and both reconciliation and
+restoration now require exact map-key/manifest-package identity **GREEN**.
+**GREEN:** on load, the registry rejects nil and
 unexported/invalidly owned entries and reconstructs each extension-owned skill
 from the publisher-signed, verified manifest, including omitted exports.
 Unrelated directly registered skills retain their existing records. Installation
