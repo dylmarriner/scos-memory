@@ -35,11 +35,15 @@ func TestHookExecutionReadWaitsForPersistenceOutcomeHTTP(t *testing.T) {
 			entered := make(chan struct{})
 			readEntered := make(chan struct{})
 			release := make(chan struct{})
+			writeCount := 0
 			srv.persistHookExecutions = func(context.Context) error {
-				close(entered)
-				<-release
-				if fail {
-					return errors.New("injected audit persistence failure")
+				writeCount++
+				if writeCount == 1 {
+					close(entered)
+					<-release
+					if fail {
+						return errors.New("injected audit persistence failure")
+					}
 				}
 				return nil
 			}
@@ -126,7 +130,7 @@ func TestHookExecutionReadWaitsForPersistenceOutcomeHTTP(t *testing.T) {
 			close(release)
 			select {
 			case result := <-readDone:
-				if result.status != http.StatusOK || !strings.Contains(result.body, "audit-fence") {
+				if result.status != http.StatusOK || (fail && strings.TrimSpace(result.body) != "[]") || (!fail && !strings.Contains(result.body, "audit-fence")) {
 					t.Fatalf("audit read after persistence resolution: %+v", result)
 				}
 			case <-time.After(3 * time.Second):
