@@ -410,10 +410,55 @@ func (s *extServer) snapshotState() ([]byte, error) {
 	return s.marshalStateLocked(s.revision)
 }
 
+// durableExecutionsLocked excludes failed writes from later unrelated commits.
+// The caller holds s.mu; failed records remain in memory for operator forensics.
+func (s *extServer) durableExecutionsLocked() []*HookExecution {
+	var durable []*HookExecution
+	for _, execution := range s.executions {
+		if execution != nil && !execution.persistFailed {
+			durable = append(durable, execution)
+		}
+	}
+	if len(durable) > maxHookExecutions {
+		durable = durable[len(durable)-maxHookExecutions:]
+	}
+	return durable
+}
+
+// Bound committed and failed forensic histories independently. A failed
+// execution must not evict a committed record before the durability outcome
+// is known. Retain the newest entries in their original chronological order.
+func (s *extServer) pruneExecutionsLocked() {
+	committed, failed := 0, 0
+	kept := make([]*HookExecution, 0, len(s.executions))
+	for i := len(s.executions) - 1; i >= 0; i-- {
+		execution := s.executions[i]
+		if execution == nil {
+			continue
+		}
+		if execution.persistFailed {
+			if failed >= maxHookExecutions {
+				continue
+			}
+			failed++
+		} else {
+			if committed >= maxHookExecutions {
+				continue
+			}
+			committed++
+		}
+		kept = append(kept, execution)
+	}
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	s.executions = kept
+}
+
 func (s *extServer) marshalStateLocked(revision uint64) ([]byte, error) {
 	return json.Marshal(persistedExtensionState{
 		Extensions: s.extensions, Skills: s.skills, Hooks: s.hooks,
-		Receipts: s.receipts, Executions: s.executions, History: s.history,
+		Receipts: s.receipts, Executions: s.durableExecutionsLocked(), History: s.history,
 		Canaries: s.canaries, NextID: s.nextID, Revision: revision,
 	})
 }
@@ -1267,6 +1312,10 @@ type HookExecution struct {
 	Reason      string  `json:"reason,omitempty"`
 	DurationMs  float64 `json:"duration_ms"`
 	StartedAt   string  `json:"started_at"`
+	// A failed durability write cannot be presented as committed audit evidence.
+	// Keep the record in process for operator forensics, but exclude it from
+	// tenant reads and every subsequent persisted snapshot.
+	persistFailed bool
 }
 
 const maxHookExecutions = 2000
@@ -1279,9 +1328,8 @@ func (s *extServer) recordExecutions(execs []*HookExecution) {
 		e.ID = fmt.Sprintf("hookexec-%d", s.nextID)
 		s.executions = append(s.executions, e)
 	}
-	if len(s.executions) > maxHookExecutions {
-		s.executions = s.executions[len(s.executions)-maxHookExecutions:]
-	}
+	// Do not prune until the durability outcome is known. A failed append
+	// cannot be allowed to evict an earlier committed execution.
 }
 
 // handleHookExecutions lists the caller tenant's hook executions, newest
@@ -1316,14 +1364,19 @@ func (s *extServer) handleHookExecutions(w http.ResponseWriter, r *http.Request)
 	out := make([]*HookExecution, 0)
 	for i := len(s.executions) - 1; i >= 0 && len(out) < limit; i-- {
 		e := s.executions[i]
-		if e.TenantID != identity.TenantID || (event != "" && e.Event != event) {
+		if e.persistFailed || e.TenantID != identity.TenantID || (event != "" && e.Event != event) {
 			continue
 		}
 		cp := *e
 		out = append(out, &cp)
 	}
+	uncertain := s.persistenceUncertain.Load()
 	s.mu.RUnlock()
 	s.operatorMutationMu.RUnlock()
+	if uncertain {
+		http.Error(w, "hook execution audit requires persistence recovery", http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -1438,7 +1491,19 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	if s.persistHookExecutions != nil {
 		persistExecutions = s.persistHookExecutions
 	}
-	if persistErr := persistExecutions(r.Context()); persistErr != nil {
+	persistErr := persistExecutions(r.Context())
+	s.mu.Lock()
+	if persistErr != nil {
+		// A delivery may have caused an external side effect, so retain the
+		// failed audit attempt in memory. Never silently promote it to a
+		// durable tenant audit record on a later unrelated persistence write.
+		for _, execution := range execs {
+			execution.persistFailed = true
+		}
+	}
+	s.pruneExecutionsLocked()
+	s.mu.Unlock()
+	if persistErr != nil {
 		log.Printf("persist hook executions: %v", persistErr)
 		if err == nil {
 			err = &hookPersistenceFailure{cause: persistErr}

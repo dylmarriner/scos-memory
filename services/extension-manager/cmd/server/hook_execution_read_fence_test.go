@@ -126,7 +126,7 @@ func TestHookExecutionReadWaitsForPersistenceOutcomeHTTP(t *testing.T) {
 			close(release)
 			select {
 			case result := <-readDone:
-				if result.status != http.StatusOK || !strings.Contains(result.body, "audit-fence") {
+				if result.status != http.StatusOK || (fail && strings.TrimSpace(result.body) != "[]") || (!fail && !strings.Contains(result.body, "audit-fence")) {
 					t.Fatalf("audit read after persistence resolution: %+v", result)
 				}
 			case <-time.After(3 * time.Second):
