@@ -241,13 +241,14 @@ func TestSlowSkillDiscoveryWriterDoesNotBlockOperator(t *testing.T) {
 				srv.handleSkills(res, operatorRequest(http.MethodPost, "/v1/skills", strings.NewReader(`{"name":"second"}`)))
 				writeDone <- res.Code
 			}()
+			// The writer must complete before the blocked reader is released.
+			// Allow for a loaded CI runner; a 250ms scheduling deadline can
+			// fail even when no lock is held by the response writer.
+			var writeStatus int
 			var blocked bool
 			select {
-			case status := <-writeDone:
-				if status != http.StatusOK {
-					t.Fatalf("operator mutation failed: %d", status)
-				}
-			case <-time.After(250 * time.Millisecond):
+			case writeStatus = <-writeDone:
+			case <-time.After(5 * time.Second):
 				blocked = true
 			}
 			close(w.release)
@@ -257,7 +258,21 @@ func TestSlowSkillDiscoveryWriterDoesNotBlockOperator(t *testing.T) {
 				t.Fatal("read did not finish")
 			}
 			if blocked {
+				// Drain the operator goroutine before TempDir cleanup. A
+				// previous failure returned while persistence was still
+				// running, causing unrelated file-not-found log noise.
+				select {
+				case <-writeDone:
+				case <-time.After(5 * time.Second):
+					t.Fatal("operator mutation remained hung after reader release")
+				}
 				t.Fatal("slow discovery response blocked an unrelated operator write")
+			}
+			if writeStatus != http.StatusOK {
+				t.Fatalf("operator mutation failed: %d", writeStatus)
+			}
+			if got := w.Body.String(); !strings.Contains(got, "committed") || strings.Contains(got, "second") {
+				t.Fatalf("discovery response did not retain committed snapshot: %s", got)
 			}
 		})
 	}
