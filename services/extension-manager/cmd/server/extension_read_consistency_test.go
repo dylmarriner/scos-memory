@@ -125,10 +125,10 @@ func TestSlowExtensionDiscoveryDoesNotBlockOperatorMutation(t *testing.T) {
 	for _, tc := range []struct {
 		name, path string
 	}{
-		{"extensions", "/v1/extensions", nil},
-		{"extension", "/v1/extensions/ext", nil},
-		{"hooks", "/v1/hooks", nil},
-		{"hook", "/v1/hooks/on_turn_start", nil},
+		{"extensions", "/v1/extensions"},
+		{"extension", "/v1/extensions/ext"},
+		{"hooks", "/v1/hooks"},
+		{"hook", "/v1/hooks/on_turn_start"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			key := withSigningKey(t)
