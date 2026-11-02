@@ -159,7 +159,7 @@ type Hook struct {
 type extServer struct {
 	// Serialize operator package mutations through durable writes and compensation.
 	// s.mu alone protects only the in-memory portion, not the persistence gap.
-	operatorMutationMu sync.Mutex
+	operatorMutationMu sync.RWMutex
 	// Serialize durable snapshots and track the last acknowledged PostgreSQL
 	// value. A different instance must not overwrite a newer decision.
 	persistMu      sync.Mutex
@@ -963,6 +963,9 @@ func (s *extServer) skillViewLocked(skill *Skill) Skill {
 func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// A failed operator write is compensated before readers can see it.
+		s.operatorMutationMu.RLock()
+		defer s.operatorMutationMu.RUnlock()
 		// Only available skills are listed; ?include_disabled=true also
 		// lists skills whose extension is disabled, reported as disabled.
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
@@ -1048,6 +1051,9 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/skills/")
 	switch r.Method {
 	case http.MethodGet:
+		// Hide tentative creations and deletions until persistence resolves.
+		s.operatorMutationMu.RLock()
+		defer s.operatorMutationMu.RUnlock()
 		s.mu.RLock()
 		skill, ok := s.skills[id]
 		var view Skill

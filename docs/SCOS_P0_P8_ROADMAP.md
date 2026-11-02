@@ -3618,3 +3618,27 @@ potentially sensitive field in all administrative or audit surfaces. Complete
 P0 benchmarks, P3–P8 acceptance and production rollout/recovery evidence
 remain open. No production service, database migration or paid resource
 was touched.
+
+### 2026-11-02 §22 direct-skill read-after-persistence isolation (TDD source slice)
+
+Direct skill create/delete endpoints previously changed the shared in-memory
+registry before their durable snapshot completed. Concurrent GET list and
+GET-by-ID requests could observe uncommitted skill creation or deletion even
+when persistence ultimately failed and the mutation was compensated. Four
+deterministic concurrent HTTP-handler regressions reproduced the visibility
+failure **RED**; a fifth test exercises real loopback HTTP transport.
+
+The operator mutation lock is now an RWMutex. Both skill discovery reads
+take its read lock, so an in-flight operator mutation and its persistence
+reconciliation/compensation finish before either response is assembled.
+Focused tests pass for failed create/delete, list/by-ID and real HTTP
+transport; three repetitions with Go's race detector pass.
+
+**Scope and limits:** This is single-instance read isolation for direct
+skill discovery. It does not establish cross-instance read consistency,
+exactly-once hook delivery, §22 lifecycle qualification, §25 integration,
+§32 metrics acceptance, representative P0 benchmarks, P3–P8 acceptance,
+production rollout/recovery or §41 definition-of-done. Long-running
+persistence can delay skill reads. No production system or live database
+was modified. Full-suite, review, PR and merged-main CI evidence must
+be recorded before source acceptance is considered complete.
