@@ -1258,7 +1258,7 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 	var req hookDispatchRequest
 	// Validate one unambiguous bounded document before triggering any hook.
 	// Duplicate caller/cohort or nested payload keys must not be last-wins.
-	if err := strictjson.DecodeObject(http.MaxBytesReader(w, r.Body, 1<<20), &req); err != nil {
+	if err := strictjson.DecodeObjectWithExactKeyFields(http.MaxBytesReader(w, r.Body, 1<<20), &req, "payload"); err != nil {
 		http.Error(w, "invalid hook dispatch: "+err.Error(), http.StatusBadRequest)
 		return
 	}

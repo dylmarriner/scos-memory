@@ -3509,22 +3509,28 @@ an ambiguous request. Seven real outbound HTTP regressions reproduced the
 problem **RED**: each returned HTTP 200 and delivered a hook despite duplicate,
 case-folded, escaped or nested duplicate keys.
 
-Dispatch now uses the existing bounded `strictjson.DecodeObject` validator,
-which rejects ambiguous keys at every depth and enforces exactly one complete
-JSON object before any external delivery. The existing tenant/agent identity
-checks, 1 MiB body bound and unknown-field rejection remain. All seven cases
+Dispatch now uses the bounded strict-JSON validator with case-folded
+duplicate rejection for the typed dispatch envelope and exact-key duplicate
+rejection inside the untyped payload map, including nested arrays/objects.
+The validator enforces exactly one complete JSON object before any external
+delivery. The existing tenant/agent identity checks, 1 MiB body bound and
+unknown-field rejection remain. All seven cases
 passed **GREEN** with HTTP 400, zero outbound deliveries and zero execution
 records. Five focused regression repetitions and three race-enabled repetitions
 passed; the full repository `make test` suite passed with the existing
 Python 3.11/Pydantic environment, and `go vet ./...` and `git diff --check`
-passed on AMD.
+passed on AMD. A substantive CodeRabbit review identified that case-folded
+rejection inside arbitrary payload maps would break valid `Role`/`role` keys.
+A new real outbound HTTP regression reproduced that breakage **RED**; the
+scoped exact-key validation now preserves both keys **GREEN**, with additional
+unit tests for nested maps, arrays, and duplicate typed envelope fields.
 
 **Limitations:** This is source-level hook request integrity, not proof of
 cross-instance hook exactly-once delivery, end-to-end §22 lifecycle, §25
 integration, §32 collector qualification, representative P0 benchmarks,
-P3–P8 acceptance, production recovery or §41 definition-of-done. Duplicate
-keys in arbitrary payload maps are now rejected even where an upstream caller
-previously relied on last-wins semantics; compatibility must be assessed
-before production rollout. No production deployment, migration or paid
+P3–P8 acceptance, production recovery or §41 definition-of-done. Exact
+duplicate keys in arbitrary payload maps are rejected; case-distinct map keys
+remain supported. Upstream compatibility must still be assessed before
+production rollout. No production deployment, migration or paid
 resources were used. Full-suite and merged-main CI evidence must be
 recorded after validation and merge.
