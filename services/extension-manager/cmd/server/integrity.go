@@ -140,6 +140,15 @@ func ownedSkillID(packageID, skill string) string {
 	return packageID + "/" + skill
 }
 
+// newExtensionSkill derives every exported field from the verified manifest.
+func newExtensionSkill(manifest ExtensionManifest, name string) *Skill {
+	return &Skill{
+		ID: ownedSkillID(manifest.PackageID, name), Name: name,
+		Version: manifest.Version, Capabilities: manifest.CapabilitiesProvided,
+		Status: "active", ExtensionID: manifest.PackageID,
+	}
+}
+
 // normalizeLocked brings state written by earlier versions of this service
 // in line with what the dispatcher actually does: hooks report their real
 // semantics, extension-exported skills record their owner, skills left
@@ -211,26 +220,40 @@ func (s *extServer) normalizeLocked() {
 			}
 		}
 	}
+	// The persisted skill map is a cache. Only the signed extension manifest
+	// authorizes exported names, versions and capabilities. A stored record
+	// must not invent a skill, change its owner or escalate its permissions.
 	for id, skill := range s.skills {
-		if skill.ExtensionID != "" {
-			if _, ok := s.extensions[skill.ExtensionID]; !ok {
-				delete(s.skills, id)
-			}
+		if skill == nil {
+			delete(s.skills, id)
 			continue
 		}
 		slash := strings.Index(id, "/")
 		if slash < 0 {
-			continue
+			if skill.ExtensionID != "" {
+				delete(s.skills, id)
+			}
+			continue // Directly registered skills have generated IDs.
 		}
-		owner := id[:slash]
+		owner, name := id[:slash], id[slash+1:]
 		ext, ok := s.extensions[owner]
-		if !ok || !contains(ext.Manifest.SkillsExported, id[slash+1:]) {
-			// Registered by an extension that was uninstalled while the old
-			// uninstall left its skills behind.
+		if !ok || !trusted[owner] || !contains(ext.Manifest.SkillsExported, name) {
 			delete(s.skills, id)
 			continue
 		}
-		skill.ExtensionID = owner
+		s.skills[id] = newExtensionSkill(ext.Manifest, name)
+	}
+	// Restore omitted exports, just as signed hook subscriptions are restored.
+	// A disabled but trusted extension retains its skill definitions; the
+	// read path correctly reports them as unavailable until re-enabled.
+	for id, ext := range s.extensions {
+		if !trusted[id] {
+			continue
+		}
+		for _, name := range ext.Manifest.SkillsExported {
+			key := ownedSkillID(id, name)
+			s.skills[key] = newExtensionSkill(ext.Manifest, name)
+		}
 	}
 	for _, ext := range s.extensions {
 		ext.Isolation = isolationRemoteEndpoint

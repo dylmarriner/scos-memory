@@ -1688,7 +1688,7 @@ func (s *extServer) registerExtensionLocked(manifest ExtensionManifest) {
 	}
 	for _, skillName := range manifest.SkillsExported {
 		id := ownedSkillID(manifest.PackageID, skillName)
-		s.skills[id] = &Skill{ID: id, Name: skillName, Version: manifest.Version, Capabilities: manifest.CapabilitiesProvided, Status: "active", ExtensionID: manifest.PackageID}
+		s.skills[id] = newExtensionSkill(manifest, skillName)
 	}
 }
 

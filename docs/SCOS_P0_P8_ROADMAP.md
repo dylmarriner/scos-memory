@@ -3295,3 +3295,31 @@ outcome requires operator reconciliation and controlled restart; this source
 change is not production rollout/recovery evidence. §22 deployed lifecycle,
 §25 integration, §32 metrics, representative P0 benchmarks, P3–P8 acceptance,
 production recovery and §41 governance remain open.
+
+### 2026-11-02 §22 persisted exported-skill manifest authority (TDD source slice)
+
+The extension manager treated persisted `skills` records as authoritative when
+an installed extension ID existed. An attacker or corrupted store could invent
+an exported skill, replace an authorized skill's name/version/capabilities,
+forge its extension owner, or remove a mandatory export; a JSON `null` skill
+record crashed restoration before readiness. A local-state restart regression
+reproduced the nil-pointer crash **RED** and exercises forged owned skills,
+capability escalation, missing signed exports, legacy missing ownership, and
+HTTP skill-list visibility. **GREEN:** on load, the registry rejects nil and
+unexported/invalidly owned entries and reconstructs each extension-owned skill
+from the publisher-signed, verified manifest, including omitted exports.
+Unrelated directly registered skills retain their existing records. Installation
+uses the same canonical skill constructor, avoiding divergent definitions.
+
+Five focused regression repetitions, three race-enabled lifecycle/skill test
+repetitions, the full `make test` suite (with the existing Python 3.11/Pydantic
+venv), `go vet ./...` and `git diff --check` passed on AMD. The default system
+Python 3.14 lacks Pydantic, so its initial `make test` failed at Python import;
+rerunning with the existing compatible venv passed without changing dependencies.
+
+**Limitations:** this authenticates only extension-owned skill definitions at
+state restoration, not the independent provenance of directly registered
+skills or cross-instance state synchronization. It is not proof of deployed
+§22 lifecycle coverage, §25 integration, §32 metrics, representative P0
+benchmarks, P3–P8 acceptance, production rollout/recovery or §41 completion.
+No live services, migrations or paid resources were touched.
