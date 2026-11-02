@@ -56,3 +56,40 @@ func TestExtensionPatchAllowsTrailingWhitespace(t *testing.T) {
 		t.Fatalf("valid PATCH failed: status=%d body=%q", w.Code, w.Body.String())
 	}
 }
+
+// Operator PATCH must not silently apply a last-wins status, agent cohort,
+// or nested configuration from an ambiguous JSON document.
+func TestExtensionPatchRejectsAmbiguousJSONMembersBeforeMutation(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"duplicate status", `{"status":"enabled","status":"disabled"}`},
+		{"case folded status", `{"status":"enabled","Status":"disabled"}`},
+		{"escaped status", `{"status":"enabled","\u0073tatus":"disabled"}`},
+		{"duplicate scope", `{"agent_ids":["trusted"],"agent_ids":["other"]}`},
+		{"case folded scope", `{"agent_ids":["trusted"],"Agent_Ids":["other"]}`},
+		{"duplicate config", `{"config":{"mode":"safe"},"config":{"mode":"unsafe"}}`},
+		{"nested config", `{"config":{"mode":"safe","mode":"unsafe"}}`},
+		{"escaped nested config", `{"config":{"mode":"safe","\u006dode":"unsafe"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newExtServer()
+			srv.extensions["ext"] = &Extension{
+				Manifest:   ExtensionManifest{PackageID: "ext"},
+				Status:     "enabled",
+				Config:     map[string]any{"mode": "safe"},
+				AgentScope: []string{"trusted"},
+			}
+			w := httptest.NewRecorder()
+			srv.handleExtensionByID(w, operatorRequest(http.MethodPatch,
+				"/v1/extensions/ext", strings.NewReader(tc.body)))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("ambiguous PATCH accepted: status=%d body=%q", w.Code, w.Body.String())
+			}
+			ext := srv.extensions["ext"]
+			if ext.Status != "enabled" || ext.Config["mode"] != "safe" ||
+				len(ext.AgentScope) != 1 || ext.AgentScope[0] != "trusted" {
+				t.Fatalf("rejected PATCH changed operator state: %+v", ext)
+			}
+		})
+	}
+}

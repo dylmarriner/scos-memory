@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/dylmarriner/scos-memory/packages/database"
+	"github.com/dylmarriner/scos-memory/packages/strictjson"
 	"github.com/dylmarriner/scos-memory/packages/telemetry"
 	"github.com/dylmarriner/scos-memory/services/readiness"
 	"github.com/jackc/pgx/v5"
@@ -645,18 +646,10 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			Config   map[string]any `json:"config,omitempty"`
 			AgentIDs []string       `json:"agent_ids,omitempty"`
 		}
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&update); err != nil {
+		// Reject ambiguous member aliases and nested duplicates as well as
+		// extra documents before applying any operator-managed state changes.
+		if err := strictjson.DecodeObject(http.MaxBytesReader(w, r.Body, 256<<10), &update); err != nil {
 			http.Error(w, "invalid update: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		// Consume the entire bounded body before changing operator-managed
-		// extension state. A valid JSON prefix must not hide extra documents,
-		// malformed trailing bytes or an oversized whitespace suffix.
-		var trailing any
-		if err := dec.Decode(&trailing); err != io.EOF {
-			http.Error(w, "invalid update: expected one JSON document", http.StatusBadRequest)
 			return
 		}
 		if update.Status != "" && update.Status != "enabled" && update.Status != "disabled" {
