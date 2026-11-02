@@ -1165,6 +1165,10 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 // ── hooks ────────────────────────────────────────────────────────────────
 
 func (s *extServer) handleHooks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	// Hold the operator read fence only while capturing the response.
 	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
 		http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
@@ -1199,6 +1203,10 @@ func (s *extServer) handleHooks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *extServer) handleHookByEvent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	event := strings.TrimPrefix(r.URL.Path, "/v1/hooks/")
 	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
 		http.Error(w, "extension state temporarily unavailable", http.StatusServiceUnavailable)
