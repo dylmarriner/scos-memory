@@ -3689,3 +3689,33 @@ production rollout/recovery or §41 definition-of-done. Long-running
 persistence can delay skill reads. No production system or live database
 was modified. Full-suite, review, PR and merged-main CI evidence must
 be recorded before source acceptance is considered complete.
+
+### 2026-11-02 §22 installation receipt confidentiality and committed-read integrity (TDD source slice)
+
+GET /v1/receipts previously returned the full operator installation audit
+record, including the installing tenant/principal and agent cohort, to an
+ordinary authenticated tenant. A real loopback HTTP regression reproduced
+this exposure **RED** (HTTP 200 instead of 403). A second concurrent real HTTP
+regression reproduced an uncommitted receipt from a signed extension upgrade
+while the durable write was blocked; the failed write then compensated the
+installation, but the reader had already observed the nonexistent upgrade.
+
+Receipt reads now require extensions:admin or authenticated internal-service
+identity, enforce GET-only semantics, and hold the operator mutation read
+fence until a deep-copied audit snapshot is complete. Response writing occurs
+after both locks are released so slow clients cannot block operator changes.
+The regression suite covers authorization, successful privileged audit reads,
+failed-install visibility, and slow-response isolation. Evidence:
+services/extension-manager/cmd/server/receipt_read_integrity_test.go.
+Three focused race-enabled repetitions, the complete extension-manager race
+suite, repository-wide make test using the existing Python 3.11/Pydantic
+environment, go vet ./..., and git diff --check passed on AMD.
+The canonical §41 checker still reports FAIL (governance PARTIAL).
+
+**Scope and limits:** Source-level single-instance confidentiality and
+read-after-persistence consistency only. Cross-instance reader coherence,
+§22 deployed lifecycle qualification, §25 integration, §32 metrics acceptance,
+representative P0 benchmarks, P3–P8 acceptance, live production rollout and
+recovery evidence, and canonical §41 completion remain unverified. No live
+service, migration, or paid resource is involved. Merge/main CI evidence is
+recorded only after the PR and checks complete.
