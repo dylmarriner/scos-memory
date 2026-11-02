@@ -4,6 +4,33 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 hook discovery method enforcement (2026-11-03; TDD source candidate)
+
+The read-only `GET /v1/hooks` and `GET /v1/hooks/{event}` handlers
+previously accepted mutation verbs as successful discovery (HTTP 200 or 404)
+instead of rejecting them with HTTP 405. When operator persistence was blocked,
+invalid-method requests also unnecessarily waited on the committed-state read
+fence and could consume request capacity. The dedicated `POST
+/v1/hooks/dispatch` endpoint is unchanged.
+
+TDD regressions on AMD reproduced **RED** for POST, PUT, PATCH, DELETE and
+HEAD against both handlers with an already-canceled request while the operator
+fence was held (HTTP 503 instead of 405), plus six real HTTP requests showing
+200/404 instead of 405. The review-driven regression also exercises a live
+POST while the exclusive persistence fence is held and requires immediate 405. Both discovery handlers now reject non-GET methods
+**before** taking the persistence fence, preserving committed-state reads and
+normal GET behavior. Focused tests passed **GREEN** for ten repetitions. The full repository
+`make test` suite passed with the existing Python 3.11/Pydantic environment;
+`go vet ./...`, focused race-enabled tests (five repetitions) and
+`git diff --check` passed on AMD.
+
+This closes only the hook discovery HTTP-method contract gap, not deployed
+§22 lifecycle qualification. Full test/review/merge/main-CI evidence is tracked
+separately. The canonical §41 DoD remains FAIL/PARTIAL pending §25 integration,
+§32 metrics breadth, representative P0 benchmarks, P3–P8 acceptance,
+mixed-version qualification and production rollout/recovery. No production
+change, migration or paid resource was authorized.
+
 ## §22 hook execution audit read commit visibility (2026-11-03; TDD source candidate)
 
 Two real HTTP regressions reproduced an audit visibility race (RED): while a
