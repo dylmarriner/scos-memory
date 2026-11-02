@@ -191,3 +191,74 @@ func TestSkillDiscoveryHTTPWaitsForFailedCreate(t *testing.T) {
 		t.Fatalf("HTTP discovery observed uncommitted create: premature=%t result=%+v", premature, got)
 	}
 }
+
+type blockingSkillResponse struct {
+	*httptest.ResponseRecorder
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *blockingSkillResponse) Write(p []byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	return w.ResponseRecorder.Write(p)
+}
+
+// A slow discovery client must not hold the operator mutation lock after
+// the response snapshot has been taken.
+func TestSlowSkillDiscoveryWriterDoesNotBlockOperator(t *testing.T) {
+	for _, read := range []string{"list", "by-id"} {
+		t.Run(read, func(t *testing.T) {
+			srv := newExtServerAt(filepath.Join(t.TempDir(), "state.json"))
+			seed := httptest.NewRecorder()
+			srv.handleSkills(seed, operatorRequest(http.MethodPost, "/v1/skills", strings.NewReader(`{"name":"committed"}`)))
+			if seed.Code != http.StatusOK {
+				t.Fatalf("seed: %d %s", seed.Code, seed.Body.String())
+			}
+
+			w := &blockingSkillResponse{
+				ResponseRecorder: httptest.NewRecorder(),
+				entered:          make(chan struct{}),
+				release:          make(chan struct{}),
+			}
+			readDone := make(chan struct{})
+			go func() {
+				defer close(readDone)
+				if read == "list" {
+					srv.handleSkills(w, httptest.NewRequest(http.MethodGet, "/v1/skills", nil))
+				} else {
+					srv.handleSkillByID(w, httptest.NewRequest(http.MethodGet, "/v1/skills/skill-1", nil))
+				}
+			}()
+			select {
+			case <-w.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("read never reached response writer")
+			}
+			writeDone := make(chan int, 1)
+			go func() {
+				res := httptest.NewRecorder()
+				srv.handleSkills(res, operatorRequest(http.MethodPost, "/v1/skills", strings.NewReader(`{"name":"second"}`)))
+				writeDone <- res.Code
+			}()
+			var blocked bool
+			select {
+			case status := <-writeDone:
+				if status != http.StatusOK {
+					t.Fatalf("operator mutation failed: %d", status)
+				}
+			case <-time.After(250 * time.Millisecond):
+				blocked = true
+			}
+			close(w.release)
+			select {
+			case <-readDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("read did not finish")
+			}
+			if blocked {
+				t.Fatal("slow discovery response blocked an unrelated operator write")
+			}
+		})
+	}
+}

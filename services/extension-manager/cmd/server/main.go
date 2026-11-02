@@ -965,7 +965,6 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// A failed operator write is compensated before readers can see it.
 		s.operatorMutationMu.RLock()
-		defer s.operatorMutationMu.RUnlock()
 		// Only available skills are listed; ?include_disabled=true also
 		// lists skills whose extension is disabled, reported as disabled.
 		includeDisabled := r.URL.Query().Get("include_disabled") == "true"
@@ -978,6 +977,7 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 			sk = append(sk, s.skillViewLocked(skill))
 		}
 		s.mu.RUnlock()
+		s.operatorMutationMu.RUnlock()
 		sort.Slice(sk, func(i, j int) bool { return sk[i].ID < sk[j].ID })
 		writeJSON(w, sk)
 
@@ -1053,7 +1053,6 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// Hide tentative creations and deletions until persistence resolves.
 		s.operatorMutationMu.RLock()
-		defer s.operatorMutationMu.RUnlock()
 		s.mu.RLock()
 		skill, ok := s.skills[id]
 		var view Skill
@@ -1061,6 +1060,7 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 			view = s.skillViewLocked(skill)
 		}
 		s.mu.RUnlock()
+		s.operatorMutationMu.RUnlock()
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return

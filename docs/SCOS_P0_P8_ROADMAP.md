@@ -3632,7 +3632,10 @@ The operator mutation lock is now an RWMutex. Both skill discovery reads
 take its read lock, so an in-flight operator mutation and its persistence
 reconciliation/compensation finish before either response is assembled.
 Focused tests pass for failed create/delete, list/by-ID and real HTTP
-transport; three repetitions with Go's race detector pass.
+transport. A further two RED regressions demonstrated that a slow response
+writer could otherwise block operator mutations; the read lock is now
+released after snapshot assembly and before response I/O. All seven
+regressions pass three times with Go's race detector.
 
 **Scope and limits:** This is single-instance read isolation for direct
 skill discovery. It does not establish cross-instance read consistency,
