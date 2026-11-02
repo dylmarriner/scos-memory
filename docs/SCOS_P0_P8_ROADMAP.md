@@ -17,6 +17,9 @@ alias skips. The checker now walks executable Python AST branches, excludes
 skipped `unittest` and `pytest.mark` tests (including common import aliases),
 and does not count nested function declarations. Positive controls retain
 recognition of active tests and explicitly enabled conditional decorators.
+Codex review identified that enabled `skipIf(condition=False)` and
+`skipUnless(condition=True)` keyword forms were initially rejected; a
+RED-before-fix regression now covers both, and the parser recognizes them.
 The check is conservative for dynamic skip conditions. These are source
 qualification tests, **not** proof that the cited tests executed in CI or
 that production acceptance is complete.

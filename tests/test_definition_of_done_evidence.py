@@ -284,7 +284,12 @@ class DefinitionOfDoneEvidenceTests(unittest.TestCase):
         item = next(i for i in dod.ITEMS if i.bullet == "Corrections preserve versions.")
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "test_promoter.py"
-            for decorator in ("@unittest.skipIf(False, 'enabled')", "@unittest.skipUnless(True, 'enabled')"):
+            for decorator in (
+                "@unittest.skipIf(False, 'enabled')",
+                "@unittest.skipUnless(True, 'enabled')",
+                "@unittest.skipIf(condition=False, reason='enabled')",
+                "@unittest.skipUnless(condition=True, reason='enabled')",
+            ):
                 path.write_text(
                     "import unittest\n"
                     "class TestPromoter:\n"

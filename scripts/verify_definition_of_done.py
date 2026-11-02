@@ -106,16 +106,17 @@ def _python_skipped(decorators: list[ast.expr], aliases: dict[str, str]) -> bool
         dotted = ".".join(parts)
         if dotted in {"unittest.skip", "pytest.mark.skip"}:
             return True
-        if dotted in {"unittest.skipIf", "pytest.mark.skipif"}:
-            # A dynamic condition cannot prove that the test will run.
-            if not isinstance(decorator, ast.Call) or not decorator.args:
+        if dotted in {"unittest.skipIf", "pytest.mark.skipif", "unittest.skipUnless"}:
+            # Positional and keyword conditions are both legal. Dynamic
+            # conditions cannot establish that a test will actually execute.
+            if not isinstance(decorator, ast.Call):
                 return True
-            if not isinstance(decorator.args[0], ast.Constant) or decorator.args[0].value is not False:
-                return True
-        if dotted == "unittest.skipUnless":
-            if not isinstance(decorator, ast.Call) or not decorator.args:
-                return True
-            if not isinstance(decorator.args[0], ast.Constant) or decorator.args[0].value is not True:
+            condition = decorator.args[0] if decorator.args else next(
+                (keyword.value for keyword in decorator.keywords if keyword.arg == "condition"),
+                None,
+            )
+            enabled = dotted == "unittest.skipUnless"
+            if not isinstance(condition, ast.Constant) or condition.value is not enabled:
                 return True
     return False
 
