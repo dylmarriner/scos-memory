@@ -164,6 +164,11 @@ func TestReceiptReadWaitsForFailedInstallHTTP(t *testing.T) {
 
 func TestSlowReceiptReaderDoesNotBlockOperatorMutation(t *testing.T) {
 	srv, _ := canaryFixture(t)
+	baseline := httptest.NewRecorder()
+	srv.handleReceipts(baseline, operatorRequest(http.MethodGet, "/v1/receipts", nil))
+	if baseline.Code != http.StatusOK {
+		t.Fatalf("baseline receipt read failed: %d %s", baseline.Code, baseline.Body.String())
+	}
 	writer := &blockingSkillResponse{
 		ResponseRecorder: httptest.NewRecorder(),
 		entered:          make(chan struct{}),
@@ -185,20 +190,35 @@ func TestSlowReceiptReaderDoesNotBlockOperatorMutation(t *testing.T) {
 		srv.handleExtensionByID(res, operatorRequest(http.MethodPatch, "/v1/extensions/canary.ext", strings.NewReader(`{"config":{"mode":"updated"}}`)))
 		writeDone <- res.Code
 	}()
+	// The operator mutation must complete before the slow response is
+	// released. Allow for loaded CI workers without weakening that ordering.
+	var writeStatus int
+	blocked := false
 	select {
-	case status := <-writeDone:
-		if status != http.StatusOK {
-			t.Fatalf("operator patch status=%d", status)
-		}
-	case <-time.After(250 * time.Millisecond):
-		close(writer.release)
-		<-readDone
-		t.Fatal("slow receipt response blocked operator mutation")
+	case writeStatus = <-writeDone:
+	case <-time.After(5 * time.Second):
+		blocked = true
 	}
 	close(writer.release)
 	select {
 	case <-readDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("receipt response hung")
+	}
+	if blocked {
+		// Drain the mutation before fixture cleanup; a blocked response
+		// must not leave a background persistence write running.
+		select {
+		case <-writeDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("operator mutation remained hung after receipt response release")
+		}
+		t.Fatal("slow receipt response blocked operator mutation")
+	}
+	if writeStatus != http.StatusOK {
+		t.Fatalf("operator patch status=%d", writeStatus)
+	}
+	if got := writer.Body.String(); got != baseline.Body.String() {
+		t.Fatalf("receipt response changed after snapshot: got=%s baseline=%s", got, baseline.Body.String())
 	}
 }

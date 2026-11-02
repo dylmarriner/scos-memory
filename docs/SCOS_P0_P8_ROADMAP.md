@@ -4,6 +4,28 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 slow receipt audit response CI regression (2026-11-03; source test reliability)
+
+After PR #262 was squash-merged at `64875992809c42ea6156870f9bb1a298c93c26b6`,
+[merged-main CI run 41509149779](https://github.com/dylmarriner/scos-memory/actions/runs/41509149779)
+failed `TestSlowReceiptReaderDoesNotBlockOperatorMutation` in the Go test job.
+The regression used a 250ms scheduling deadline while deliberately blocking
+an HTTP receipt response writer. This can fail on a busy CI worker without
+any lock held by the response writer. The failure returned while a persistence
+goroutine was still active, producing secondary missing temporary-file errors.
+
+The test now allows five seconds for the unrelated operator patch to complete
+**before** releasing the blocked receipt reader, drains the operator goroutine
+before fixture cleanup if the deadline is exceeded, and compares the emitted
+receipt response against the committed pre-mutation snapshot. This does not
+weaken the ordering assertion or alter production behavior. The failed
+merged-main CI is the RED evidence; focused 30-repeat and race-enabled
+5-repeat tests passed after correction. Full suite, review, and new merged-main
+CI must be verified separately. Canonical §41 remains FAIL/PARTIAL pending
+§22 deployed lifecycle and mixed-version qualification, §25 integration,
+§32 metrics, P0 benchmarks, P3–P8 acceptance, and rollout/recovery evidence.
+No production deployment, live migration or paid resources are authorized.
+
 ## §22 execution audit durability readback (2026-11-03; TDD source candidate)
 
 The tenant `GET /v1/hooks/executions` endpoint previously returned execution
