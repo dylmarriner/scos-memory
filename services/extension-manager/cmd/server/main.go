@@ -1926,12 +1926,33 @@ func (s *extServer) handleInstallDryRun(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *extServer) handleReceipts(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	receipts := s.receipts
-	s.mu.RUnlock()
-	if receipts == nil {
-		receipts = []*InstallationReceipt{}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+	// Installation receipts are operator audit records: they include the
+	// installing principal and agent cohort, not just public package metadata.
+	if !extensionOperatorRead(r) {
+		http.Error(w, "reading installation receipts requires the "+extensionsAdminScope+" scope", http.StatusForbidden)
+		return
+	}
+	// Never expose an install that may still fail durable persistence. Copy
+	// the complete response while fenced, then release both locks before
+	// writing to a potentially slow HTTP client.
+	s.operatorMutationMu.RLock()
+	s.mu.RLock()
+	receipts := make([]InstallationReceipt, 0, len(s.receipts))
+	for _, receipt := range s.receipts {
+		if receipt == nil {
+			continue
+		}
+		copy := *receipt
+		copy.AgentIDs = append([]string(nil), receipt.AgentIDs...)
+		copy.Warnings = append([]string(nil), receipt.Warnings...)
+		receipts = append(receipts, copy)
+	}
+	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
 	writeJSON(w, receipts)
 }
 
