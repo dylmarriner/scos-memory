@@ -4,6 +4,41 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 hook execution audit read commit visibility (2026-11-03; TDD source candidate)
+
+Two real HTTP regressions reproduced an audit visibility race (RED): while a
+hook dispatch had appended its execution record but was blocked in the separate
+execution-ledger persistence attempt, a tenant GET to
+`/v1/hooks/executions` immediately returned HTTP 200 with a successful
+execution record. The same premature visibility occurred when the write would
+ultimately fail. Such records were not yet durable audit evidence.
+
+The dispatch handler now holds the existing operator mutation fence across
+execution-record append and its persistence outcome. Tenant execution audit
+GETs acquire the cancellation-aware committed-read fence before copying their
+tenant-scoped snapshot, releasing it before HTTP response writing. This
+serializes the audit append/commit window with operator mutations and audit
+readers without holding locks during network delivery or slow client writes.
+Real loopback HTTP tests cover both committed and failed persistence outcomes,
+with the read held until the outcome is known. RED failures and GREEN tests
+were observed on AMD; focused regression tests passed three repetitions and
+race-enabled tests passed three repetitions. Full `make test` passed using an
+isolated Python 3.11 virtual environment with offline cached dependencies;
+`go vet ./...` passed. CodeRabbit review identified a test scheduling
+blind spot: the 200 ms read-fence assertion could run before the HTTP GET
+entered the handler. The regression now synchronizes on handler entry before
+starting that assertion; focused tests passed five repetitions, race-enabled
+focused tests passed three repetitions, the full extension-manager race suite
+passed, and full `make test` and `go vet ./...` passed again on AMD.
+
+**Qualification boundary:** after a failed audit persistence attempt, existing
+in-memory best-effort execution evidence remains readable even though it is
+not durable. Durable-failure readback semantics, multi-instance audit replay,
+cross-service §25 evidence, §32 metrics, P0 benchmarks, P3–P8 acceptance and
+production rollout/recovery remain open. This source correction does not close
+canonical §41 DoD; PR review, merge and merged-main CI require separate
+verification. No live deployment or paid resource activation was performed.
+
 ## §22 extension and hook discovery commit visibility (2026-11-02; TDD source candidate)
 
 Extension and hook GET endpoints read in-memory operator state while PATCH,

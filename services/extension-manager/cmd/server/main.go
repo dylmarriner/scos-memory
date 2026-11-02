@@ -1298,6 +1298,12 @@ func (s *extServer) handleHookExecutions(w http.ResponseWriter, r *http.Request)
 		limit = n
 	}
 	event := r.URL.Query().Get("event")
+	// A dispatch appends execution records before its durability write.
+	// Wait for the write outcome before exposing a tenant audit snapshot.
+	if err := s.lockOperatorCommittedRead(r.Context()); err != nil {
+		http.Error(w, "hook execution audit temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	s.mu.RLock()
 	out := make([]*HookExecution, 0)
 	for i := len(s.executions) - 1; i >= 0 && len(out) < limit; i-- {
@@ -1309,6 +1315,7 @@ func (s *extServer) handleHookExecutions(w http.ResponseWriter, r *http.Request)
 		out = append(out, &cp)
 	}
 	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
 	writeJSON(w, out)
 }
 
@@ -1412,6 +1419,9 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		}
 		execs = append(execs, &HookExecution{Event: req.Event, TenantID: req.TenantID, Status: "aborted", Reason: err.Error(), DurationMs: float64(time.Since(dispatchStarted).Microseconds()) / 1000, StartedAt: startedAt})
 	}
+	// Keep audit append and its durable write one transaction from the
+	// perspective of readers and concurrent operator mutations.
+	s.operatorMutationMu.Lock()
 	s.recordExecutions(execs)
 	// The dispatcher's earlier state write is not sufficient: the audit
 	// execution records must also be durable before acknowledging success.
@@ -1426,6 +1436,7 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 			err = &hookPersistenceFailure{cause: persistErr}
 		}
 	}
+	s.operatorMutationMu.Unlock()
 	// §32 hook latency and failure. Latency covers the whole bounded dispatch;
 	// failures are counted per hook so one failing extension is attributable.
 	serviceMetrics.Observe(telemetry.MetricHookLatency, time.Since(dispatchStarted),
