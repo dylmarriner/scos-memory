@@ -1,3 +1,23 @@
+## §32 extension hook telemetry caller correlation (2026-11-03; source-only TDD)
+
+Extension-manager hook latency and failure metrics previously emitted empty
+correlation despite dispatch resolving the initiating tenant and agent. This
+prevented collector-side attribution of real hook failures to their initiating
+scope. The HTTP collector regression
+`TestHookLatencyAndFailureMetricsCarryCallerCorrelation` failed RED with
+empty Tenant/AgentID fields, then passed GREEN after the dispatch path began
+populating the telemetry correlation object for latency, per-hook failure,
+and dispatch-level persistence failure. The test covers a real failing HTTP
+hook, a separate injected persistence failure, and five repeated runs.
+
+Only tenant/agent identifiers already resolved by dispatch are emitted in
+dedicated correlation fields, not high-cardinality labels. This is source-level
+§32 observability improvement, not proof of deployed collector delivery or
+production alerting. Canonical §41 remains FAIL/PARTIAL pending deployed §22
+lifecycle/mixed-version qualification, §25 integration, fleet §32 telemetry,
+representative P0 benchmarks, P3–P8 acceptance, and rollout/recovery evidence.
+No production deployment, irreversible migration, or paid resource use.
+
 ## §32 signed extension permission declaration telemetry (2026-11-03; source-only)
 
 The extension manager now emits `scos.extension.permissions` after a verified,
