@@ -35,11 +35,15 @@ func TestHookExecutionReadWaitsForPersistenceOutcomeHTTP(t *testing.T) {
 			entered := make(chan struct{})
 			readEntered := make(chan struct{})
 			release := make(chan struct{})
+			writeCount := 0
 			srv.persistHookExecutions = func(context.Context) error {
-				close(entered)
-				<-release
-				if fail {
-					return errors.New("injected audit persistence failure")
+				writeCount++
+				if writeCount == 1 {
+					close(entered)
+					<-release
+					if fail {
+						return errors.New("injected audit persistence failure")
+					}
 				}
 				return nil
 			}

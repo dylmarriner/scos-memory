@@ -20,6 +20,24 @@ forensics but excludes them from tenant audit readback and subsequent durable
 snapshots. The bounded ledger now retains up to 2,000 committed and 2,000
 failed forensic records independently, pruning only after the write outcome.
 Tenant audit reads return HTTP 503 while persistence outcome is uncertain.
+
+A substantive CodeRabbit review identified a restart gap: a PostgreSQL
+write could commit while both its acknowledgement and readback failed.
+The correction stages new executions in a separate persisted
+`pending_hook_executions` field. Only after that write is positively
+acknowledged does a second durable write promote the entries into
+`hook_executions`. An uncertain first write stays pending after restart.
+Older binaries ignore the new field rather than treating staged records as
+committed audit evidence. Pending and committed histories each have an
+independent 2,000-record bound, preserving existing committed evidence.
+A lost acknowledgement during the second promotion write cannot fabricate
+an audit record: its first-stage durability was already verified.
+
+New TDD regressions reproduced restart resurrection and missing confirmation
+failure handling RED before the correction, then passed GREEN. Additional
+regressions cover bounded history preservation, legacy-reader separation,
+and an isolated PostgreSQL committed-write/lost-readback restart scenario.
+Mixed-version persistence/CAS and deployed recovery remain unqualified.
 Existing HTTP fence tests now require that failed writes do not become
 visible merely because the persistence attempt finished. A real local-file
 restart regression verifies that a later successful write cannot resurrect
