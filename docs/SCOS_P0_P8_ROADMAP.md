@@ -4,6 +4,27 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22.3 unambiguous canary activation and caller identity (2026-11-02; source verification)
+
+Canary start and read-only resolve accepted duplicate JSON object members at
+multiple levels, including case-folded aliases. The default Go decoder could
+silently replace an operator's narrow cohort with a different agent list or
+resolve a caller using the last supplied identity. Real HTTP regressions
+reproduced successful activation and candidate resolution from ambiguous JSON
+before the correction (RED). Both endpoints now reuse the bounded, recursive
+`packages/strictjson.DecodeObject` validator: duplicate, escaped and folded
+member aliases, nested manifest/scope duplicates, unknown fields, trailing
+JSON and excessive nesting fail before canary mutation or resolution. Tests
+also confirm a rejected request does not alter persisted routing and ordinary
+single-object requests still work. Focused race-enabled regressions (three
+repetitions), full `make test` (isolated Python 3.11 test environment) and
+`go vet ./...` pass. The §41 evidence checker still reports FAIL.
+
+This closes an input-integrity defect, not §22's deployed lifecycle
+qualification or cross-instance persistence/replay guarantees. §41 remains
+PARTIAL; §25 integration, §32 metrics, representative P0 benchmarks, P3–P8
+acceptance, production rollout and recovery evidence remain outstanding.
+
 ## §22.3 canary persistence-failure atomicity (2026-11-02; TDD source candidate)
 
 Canary promotion changed the installed hook/skill registration maps before

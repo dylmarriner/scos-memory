@@ -1,14 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"hash/fnv"
-	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/dylmarriner/scos-memory/packages/strictjson"
 )
 
 // Side-by-side extension versions for canary testing (GOVERNANCE.md §22.3).
@@ -235,17 +235,10 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 		Manifest ExtensionManifest `json:"manifest"`
 		Scope    CanaryScope       `json:"scope"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	// A canary scope is operator-approved authority: reject duplicate keys,
+	// case-folded aliases and nested ambiguity before signing or persisting it.
+	if err := strictjson.DecodeObject(http.MaxBytesReader(w, r.Body, 1<<20), &req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	// Consume the complete bounded body before changing deployment state.
-	// Otherwise a valid prefix can conceal another JSON document or oversized tail.
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		http.Error(w, "invalid request: expected one JSON document", http.StatusBadRequest)
 		return
 	}
 	// A canary candidate is an installation and faces the same fail-closed
@@ -337,15 +330,10 @@ func (s *extServer) canaryStart(w http.ResponseWriter, r *http.Request, packageI
 
 func (s *extServer) canaryResolve(w http.ResponseWriter, r *http.Request, packageID string) {
 	var c CanaryContext
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c); err != nil {
+	// Resolve exactly one unambiguous caller identity; the last duplicate
+	// member must never silently select a different canary cohort.
+	if err := strictjson.DecodeObject(http.MaxBytesReader(w, r.Body, 64<<10), &c); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		http.Error(w, "invalid request: expected one JSON document", http.StatusBadRequest)
 		return
 	}
 	s.mu.RLock()
