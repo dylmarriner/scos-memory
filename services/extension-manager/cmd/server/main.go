@@ -618,7 +618,9 @@ func hookDiscoveryView(hook *Hook, privileged bool) Hook {
 
 func (s *extServer) handleExtensions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	// Snapshot only committed operator state, including failed-write compensation.
 	case http.MethodGet:
+		s.operatorMutationMu.RLock()
 		s.mu.RLock()
 		var exts []Extension
 		privileged := extensionOperatorRead(r)
@@ -626,6 +628,7 @@ func (s *extServer) handleExtensions(w http.ResponseWriter, r *http.Request) {
 			exts = append(exts, extensionDiscoveryView(ext, privileged))
 		}
 		s.mu.RUnlock()
+		s.operatorMutationMu.RUnlock()
 		writeJSON(w, exts)
 
 	default:
@@ -660,7 +663,9 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	switch r.Method {
+	// Snapshot only committed operator state, including failed-write compensation.
 	case http.MethodGet:
+		s.operatorMutationMu.RLock()
 		s.mu.RLock()
 		ext, ok := s.extensions[id]
 		var view Extension
@@ -668,6 +673,7 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			view = extensionDiscoveryView(ext, extensionOperatorRead(r))
 		}
 		s.mu.RUnlock()
+		s.operatorMutationMu.RUnlock()
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1117,6 +1123,8 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 // ── hooks ────────────────────────────────────────────────────────────────
 
 func (s *extServer) handleHooks(w http.ResponseWriter, r *http.Request) {
+	// Hold the operator read fence only while capturing the response.
+	s.operatorMutationMu.RLock()
 	s.mu.RLock()
 	// Flatten hooks into list
 	allHooks := []map[string]any{}
@@ -1141,11 +1149,13 @@ func (s *extServer) handleHooks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
 	writeJSON(w, allHooks)
 }
 
 func (s *extServer) handleHookByEvent(w http.ResponseWriter, r *http.Request) {
 	event := strings.TrimPrefix(r.URL.Path, "/v1/hooks/")
+	s.operatorMutationMu.RLock()
 	s.mu.RLock()
 	hooks, ok := s.hooks[event]
 	views := make([]Hook, 0, len(hooks))
@@ -1154,6 +1164,7 @@ func (s *extServer) handleHookByEvent(w http.ResponseWriter, r *http.Request) {
 		views = append(views, hookDiscoveryView(hook, privileged))
 	}
 	s.mu.RUnlock()
+	s.operatorMutationMu.RUnlock()
 	if !ok || len(views) == 0 {
 		http.Error(w, "no hooks for event", http.StatusNotFound)
 		return

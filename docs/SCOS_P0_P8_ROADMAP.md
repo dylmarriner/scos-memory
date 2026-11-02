@@ -4,6 +4,31 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 extension and hook discovery commit visibility (2026-11-02; TDD source candidate)
+
+Extension and hook GET endpoints read in-memory operator state while PATCH,
+disable and uninstall were waiting for durable persistence. Seven real HTTP
+regressions reproduced tenant-visible uncommitted state (RED): disabled
+extensions, inactive hooks, missing packages and 404 hook lookups all appeared
+during a write that subsequently failed and was compensated. This contradicts
+the registry's durable-read guarantee and could mislead routing and operators.
+
+All four discovery endpoints now share the existing operator mutation read
+fence, taking a consistent snapshot only after persistence or compensation
+completes. The fence is released **before** writing HTTP responses, so a slow
+client cannot stall unrelated operator writes. Tests cover list and by-ID
+extension/hook reads during failed PATCH and uninstall, real loopback HTTP,
+post-compensation state equality, and four blocked-response-writer regressions.
+The RED failures and GREEN focused tests were observed on AMD in an isolated
+development worktree. Full suite, race checks, review, PR checks, merge and
+merged-main CI require separately recorded verification.
+
+This is source-level §22 integrity hardening only. Cross-service §25 evidence,
+§32 metrics breadth, representative P0 benchmarks, P3–P8 acceptance, full
+lifecycle qualification and production rollout/recovery remain open. The
+canonical §41 DoD is not claimed complete. No production deployment or paid
+resource activation is authorized by this change.
+
 ## §22 direct skill creation JSON integrity (2026-11-02; TDD source candidate)
 
 The operator-authorized direct-skill POST endpoint used Go's permissive
