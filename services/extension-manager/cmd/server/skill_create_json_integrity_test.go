@@ -69,6 +69,9 @@ func TestDirectSkillCreateValidDocumentStillPersists(t *testing.T) {
 	restored := newExtServerAt(storePath)
 	if restored.nextID != 1 || restored.skills["skill-1"] == nil ||
 		restored.skills["skill-1"].Name != "approved" ||
+		restored.skills["skill-1"].Status != "active" ||
+		len(restored.skills["skill-1"].Capabilities) != 1 ||
+		restored.skills["skill-1"].Capabilities[0] != "memory.read" ||
 		!strings.Contains(string(response), `"approved"`) {
 		t.Fatalf("valid skill not persisted: skills=%+v response=%q", restored.skills, response)
 	}
