@@ -2078,6 +2078,26 @@ passed locally. This is **source-level §22 integrity evidence only**:
 broader lifecycle, P0–P8 acceptance, production compatibility and recovery
 gates remain open. Production was not modified.
 
+## §32 extension-state telemetry slice (2026-11-03)
+
+The extension manager now emits the required **plugin health** metric from
+actual hook-delivery outcomes (healthy, failing, circuit_open) instead of
+claiming a newly installed extension is healthy while its health is still
+unknown. It also emits **signature state** for a cryptographically verified
+extension installation **only after** its operator state has been durably
+persisted. A rejected signature or a failed persistence attempt must not
+produce a verified-install metric.
+
+TestExtensionHookHealthMetricsReflectActualHTTPDelivery exercises real
+HTTP hook success and failure with a collector receiving emitted metrics;
+TestExtensionVerifiedSignatureMetricRequiresDurableInstallHTTP exercises
+signed HTTP installation, invalid signatures, and injected persistence
+failure against an isolated local state store. Both tests were RED before
+instrumentation and GREEN afterward. This closes **two extension-manager
+producer paths**, not the full §32 cross-service coverage or production
+collector/alerting qualification. The §41 definition-of-done gate remains
+open.
+
 ## P0 frozen benchmark evidence integrity (2026-10-27)
 
 The isolated lexical smoke quality gate now rejects duplicate JSON keys at
