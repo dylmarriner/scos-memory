@@ -3887,3 +3887,36 @@ mixed-version qualification, §25 integration, §32 metrics breadth,
 representative P0 benchmarks, P3–P8 acceptance and production rollout/recovery
 evidence. The canonical §41 definition-of-done gate remains FAIL/PARTIAL.
 No production deployment, live migration or paid resource was used.
+
+
+### 2026-11-03 §22 slow-skill-discovery CI regression reliability
+
+Merged `main` at `c96a4429551a1b38b268c705a8b5ac70e5cbe1c6` failed
+[CI run 41451391971](https://github.com/dylmarriner/scos-memory/actions/runs/41451391971)
+in `TestSlowSkillDiscoveryWriterDoesNotBlockOperator/list`. The existing
+regression used a 250ms wall-clock deadline for an unrelated operator write
+while a skill discovery HTTP response writer was deliberately blocked. A
+loaded runner can exceed this deadline without a lock leak. Its failure
+path released the response writer but returned before the operator goroutine
+finished, producing misleading temporary-state-file errors during cleanup.
+
+The regression now allows five seconds for scheduling and persistence while
+**still requiring the operator write to finish before releasing the blocked
+HTTP writer**. If that deadline is exceeded, it releases the reader and drains
+the operator goroutine before failing. It also verifies that the original
+HTTP response retains the committed pre-mutation snapshot. This is a test
+reliability correction, not proof of production latency or lifecycle acceptance.
+
+**Verification:** focused test 30 repetitions and race-enabled focused test
+eight repetitions passed on AMD against the exact merged-main base. Full
+extension-manager race suite, repository-wide `make test` (Go, Python,
+schemas, failure injection and governance structural audit), `go vet ./...`,
+and `git diff --check` passed with the existing Python 3.11/Pydantic venv.
+The canonical `scripts/verify_definition_of_done.py` checker still reports
+FAIL because `docs/governance-audit-current.md` records §41 as PARTIAL
+(Carried, synthesized). Independent PR review, PR-head CI and merged-main
+verification remain separate gates.
+Remaining: §22 deployed lifecycle/mixed-version qualification, §25 integration,
+§32 metrics, representative P0 benchmarks, P3–P8 acceptance and production
+rollout/recovery. The canonical §41 DoD is not complete. No live deployment,
+migration or paid resources were used.
