@@ -843,6 +843,20 @@ func (s *extServer) handleExtensionAction(w http.ResponseWriter, r *http.Request
 			writeJSONStatus(w, http.StatusConflict, map[string]any{"package_id": id, "error": "prior manifest failed verification: " + err.Error()})
 			return
 		}
+		// A valid historical signature does not imply that its dependency graph
+		// is still valid. Refuse rollback before touching hooks, skills or history
+		// if a required provider is gone, or an enabled consumer needs the
+		// currently installed version of this package.
+		if err := s.dependenciesSatisfiedLocked(previous); err != nil {
+			s.mu.Unlock()
+			writeJSONStatus(w, http.StatusConflict, map[string]any{"package_id": id, "error": "rollback dependency check failed: " + err.Error()})
+			return
+		}
+		if err := s.rollbackDependentVersionsSatisfiedLocked(id, previous.Version); err != nil {
+			s.mu.Unlock()
+			writeJSONStatus(w, http.StatusConflict, map[string]any{"package_id": id, "error": "rollback dependent check failed: " + err.Error()})
+			return
+		}
 		s.removeExtensionRegistrationsLocked(id)
 		ext.Manifest = previous
 		s.history[id] = versions[:len(versions)-1]
@@ -930,6 +944,23 @@ func (s *extServer) enabledDependentLocked(id string) string {
 		}
 	}
 	return ""
+}
+
+// rollbackDependentVersionsSatisfiedLocked checks consumers against the
+// proposed historical version, not the currently installed provider version.
+// Call with s.mu held before mutating rollback state.
+func (s *extServer) rollbackDependentVersionsSatisfiedLocked(id, version string) error {
+	for otherID, ext := range s.extensions {
+		if otherID == id || ext.Status != "enabled" {
+			continue
+		}
+		for _, dep := range ext.Manifest.Dependencies {
+			if dep.PackageID == id && !compatibleVersion(version, dep.Version) {
+				return fmt.Errorf("enabled extension %s requires %s %q", otherID, id, dep.Version)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *extServer) dependenciesSatisfiedLocked(m ExtensionManifest) error {

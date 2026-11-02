@@ -3818,3 +3818,34 @@ hook delivery. §22 deployed lifecycle qualification, §25 integration,
 §32 metrics breadth, representative P0 benchmarks, P3–P8 acceptance,
 mixed-version rollout and production recovery evidence remain open.
 No production deployment, live migration or paid resource was used.
+
+### 2026-11-03 §22 historical rollback dependency graph integrity (engineering slice)
+
+Signed historical manifests were accepted for rollback even when their
+required providers had since been removed or disabled, and even when an
+enabled dependent required a newer provider version. Both cases could
+activate an inconsistent extension graph, exposing skills and hooks from an
+extension that could not meet its declared runtime dependencies.
+
+The rollback handler now checks the historical manifest's dependencies and
+all currently enabled dependents against the proposed historical version
+**before** changing registrations, history, status or durable state. It
+returns HTTP 409 when either constraint is violated; disabling a dependent
+allows a compatible rollback without discarding the historical version.
+
+**TDD evidence:** `services/extension-manager/cmd/server/rollback_dependency_test.go`.
+Two regressions reproduced the defect RED (HTTP 200 for invalid rollbacks)
+then passed GREEN (HTTP 409 and byte-identical snapshots). A real HTTP
+transport and local durable-state restart regression confirms rejection
+leaves the persisted graph unchanged, and verifies the compatible rollback
+path after disabling the dependent. Focused race tests passed three runs;
+the complete extension-manager race suite and `go vet ./...` passed on AMD.
+Repository-wide `make test` passed with the existing Python 3.11/Pydantic
+environment, including the structural governance audit; `git diff --check`
+passed. PR review and merged-main CI require separate recorded verification.
+This is §22 hardening, not complete §22 qualification.
+
+**Remaining:** §22 deployed lifecycle and mixed-version qualification,
+§25 cross-service integration, §32 metrics breadth, representative P0
+benchmarks, P3–P8 acceptance and production rollout/recovery evidence.
+No production services, live migrations or paid resources were used.
