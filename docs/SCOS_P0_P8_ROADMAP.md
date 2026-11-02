@@ -3382,3 +3382,36 @@ Readers may observe tentative skill state before persistence resolves, and
 operator recovery remains necessary for unverified database outcomes. Full
 §22 lifecycle, §25 integration, §32 metrics, representative P0 benchmarks,
 P3–P8 qualification, production recovery and §41 DoD remain open.
+
+### 2026-11-02 §22 cross-instance persisted-state content CAS (TDD source slice)
+
+Two extension-manager instances previously read the same PostgreSQL state and
+then unconditionally upserted their entire in-memory snapshot. A stale operator
+instance could return HTTP 200 after overwriting a newer instance's committed
+extension configuration. A second stale instance could also overwrite the first
+writer's initial state row. Three isolated, real-PostgreSQL regressions now
+cover stale sequential operator mutations, first-insert contention and an
+interleaving where another instance commits **after** the stale writer's
+pre-write readback but **before** its SQL UPDATE. The first two tests failed
+**RED** before correction; all three pass **GREEN** after correction.
+
+The service now tracks its last acknowledged/loaded PostgreSQL JSONB state,
+serializes local persistence attempts, checks for a divergent durable state
+before touching the local mirror and uses PostgreSQL's conditional UPSERT to
+reject concurrent writes at the actual update boundary. A stale instance is
+fenced, fails readiness, rejects subsequent operator mutations and outbound
+hook dispatch, and returns a sanitized 503 instead of a false success.
+Acknowledgement-loss readback continues to reconcile committed writes.
+
+**Evidence:** isolated PostgreSQL 16 loopback integration tests with deterministic
+post-read barrier, race-enabled focused tests (three repetitions), full
+repository `make test`, `go vet ./...`, and merged-main CI to be recorded
+after PR acceptance. No production database, migration or service was touched.
+
+**Limitations:** JSONB content CAS prevents stale divergent snapshots but does
+not provide a monotonic revision against ABA/replay, durable multi-instance
+coordination of hook side effects, or automatic stale-instance resynchronization.
+The operator must recover/restart a fenced instance; dual-store local mirror
+reconciliation and deployed failover drills remain unqualified. This does not
+close full §22 lifecycle, §25 integration, §32 metrics, representative P0
+benchmarks, P3–P8 acceptance, production recovery or §41 governance.
