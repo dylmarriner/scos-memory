@@ -899,15 +899,31 @@ func (s *extServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
+		previousNextID := s.nextID
 		s.nextID++
-		skill.ID = fmt.Sprintf("skill-%d", s.nextID)
+		allocatedID := s.nextID
+		skill.ID = fmt.Sprintf("skill-%d", allocatedID)
 		if skill.Status == "" {
 			skill.Status = "active"
 		}
 		s.skills[skill.ID] = &skill
 		s.mu.Unlock()
 		if err := s.persist(r.Context()); err != nil {
-			http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
+			// A confirmed failed write must not leave a callable skill or
+			// consume an ID. Unknown DB outcomes cannot safely be undone.
+			if !errors.Is(err, errPersistenceOutcomeUnknown) {
+				s.mu.Lock()
+				delete(s.skills, skill.ID)
+				// Hook executions also allocate from nextID without holding
+				// operatorMutationMu. Never rewind their newer IDs.
+				if s.nextID == allocatedID {
+					s.nextID = previousNextID
+				}
+				s.mu.Unlock()
+				s.repairLocalAfterCompensation()
+			}
+			log.Printf("direct skill creation persistence failed: %v", err)
+			http.Error(w, "extension persistence failed", http.StatusServiceUnavailable)
 			return
 		}
 		writeJSON(w, skill)
@@ -959,7 +975,16 @@ func (s *extServer) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		delete(s.skills, id)
 		s.mu.Unlock()
 		if err := s.persist(r.Context()); err != nil {
-			http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
+			// Restore the exact prior registration only after a confirmed
+			// non-commit. Unknown DB outcomes fence further mutations.
+			if !errors.Is(err, errPersistenceOutcomeUnknown) {
+				s.mu.Lock()
+				s.skills[id] = skill
+				s.mu.Unlock()
+				s.repairLocalAfterCompensation()
+			}
+			log.Printf("direct skill deletion persistence failed: %v", err)
+			http.Error(w, "extension persistence failed", http.StatusServiceUnavailable)
 			return
 		}
 		writeJSON(w, map[string]string{"status": "deleted"})
