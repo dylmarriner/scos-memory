@@ -4,6 +4,24 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §41 definition-of-done evidence integrity (2026-11-03; TDD source candidate)
+
+The canonical DoD checker previously used line-anchored regex matches against
+raw Go/Python source and accepted any §41 master-table status beginning with
+`PASS`. This could count test names embedded in Go raw strings, block comments
+or Python multiline strings as real test declarations, or accept ambiguous
+statuses such as `PASS (Carried)` while outstanding work remained.
+
+RED-before-fix regression cases reproduced all of these false positives. The
+checker now masks Go comments/string/rune literals while retaining declaration
+line boundaries, uses Python AST function nodes rather than text search, and
+requires an exact `PASS` audit status. Regression tests also preserve real
+Go/Python test-declaration recognition. This is a **source evidence-integrity
+hardening**, not proof that cited tests passed in deployment or that §41 is
+complete. The canonical DoD checker must remain FAIL while §41 remains
+`PARTIAL (Carried, synthesized)`. Full-suite/PR/merge evidence is tracked
+separately; no production deployment or paid resources are authorized.
+
 ## §22 hook discovery method enforcement (2026-11-03; TDD source candidate)
 
 The read-only `GET /v1/hooks` and `GET /v1/hooks/{event}` handlers

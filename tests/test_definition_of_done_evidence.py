@@ -1,4 +1,5 @@
 """Regression checks for the §41 evidence pointers, not a production acceptance claim."""
+import ast
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -52,6 +53,48 @@ class DefinitionOfDoneEvidenceTests(unittest.TestCase):
             p = Path(tmp) / "evidence_test.go"
             p.write_text("// func TestBackupAndDrillsAgainstPostgreSQL(t *testing.T) {}\n")
             self.assertFalse(dod.function_exists(p, item.pattern))
+
+
+    def test_go_test_names_inside_raw_strings_and_block_comments_are_not_evidence(self):
+        item = next(i for i in dod.ITEMS if i.bullet == "Backups have been restored successfully.")
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fake_test.go"
+            path.write_text(
+                'package fake\n'
+                'var description = `\nfunc TestBackupAndDrillsAgainstPostgreSQL(t *testing.T) {}\n`\n'
+                '/*\nfunc TestBackupAndDrillsAgainstPostgreSQL(t *testing.T) {}\n*/\n'
+            )
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text(path.read_text() + '\nfunc TestBackupAndDrillsAgainstPostgreSQL(t *testing.T) {}\n')
+            self.assertTrue(dod.function_exists(path, item.pattern))
+
+    def test_python_test_names_inside_multiline_strings_are_not_evidence(self):
+        item = next(i for i in dod.ITEMS if i.bullet == "Corrections preserve versions.")
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fake_test.py"
+            path.write_text(
+                'class TestPromoter:\n'
+                '    note = """\n'
+                '    def test_build_memory_version_contains_version_1(self): pass\n'
+                '    """\n'
+            )
+            ast.parse(path.read_text())  # Valid Python, not a syntax-error false negative.
+            self.assertFalse(dod.function_exists(path, item.pattern))
+            path.write_text('class TestPromoter:\n    def test_build_memory_version_contains_version_1(self): pass\n')
+            self.assertTrue(dod.function_exists(path, item.pattern))
+
+    def test_audit_does_not_accept_qualified_or_misleading_pass_status(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = root / "docs" / "governance-audit-current.md"
+            doc.parent.mkdir(parents=True)
+            with patch.object(dod, "ROOT", root):
+                for status in ("PASS (Carried)", "PASS pending deployment", "PASS-UNVERIFIED"):
+                    with self.subTest(status=status):
+                        doc.write_text(f"| 41 | Definition of done | {status} | unresolved |\n")
+                        self.assertTrue(dod.audit_doc_gate())
+                doc.write_text("| 41 | Definition of done | PASS | verified |\n")
+                self.assertFalse(dod.audit_doc_gate())
 
 
 if __name__ == "__main__":
