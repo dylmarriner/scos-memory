@@ -693,16 +693,40 @@ func (s *extServer) handleExtensionByID(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "extension "+dependent+" depends on "+id+" and is enabled", http.StatusConflict)
 			return
 		}
-		// Uninstall removes exactly this extension's hooks and skills, its
-		// canary and its rollback history; other extensions' subscriptions
-		// to the same events are untouched.
+		// Keep the complete prior package decision until its removal is
+		// durable. This includes the signed manifest, canary, history, and
+		// all subscriptions, not merely the extension metadata.
+		previousExtension := s.extensions[id]
+		previousHistory, hadHistory := s.history[id]
+		previousCanary, hadCanary := s.canaries[id]
+		previousRegistrations := s.snapshotCanaryRegistrationsLocked(id)
 		s.removeExtensionRegistrationsLocked(id)
 		delete(s.canaries, id)
 		delete(s.history, id)
 		delete(s.extensions, id)
 		s.mu.Unlock()
 		if err := s.persist(r.Context()); err != nil {
-			http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
+			// An unverified commit must remain fenced, not be compensated
+			// against a possibly successful database delete.
+			if !errors.Is(err, errPersistenceOutcomeUnknown) {
+				s.mu.Lock()
+				s.extensions[id] = previousExtension
+				if hadHistory {
+					s.history[id] = previousHistory
+				} else {
+					delete(s.history, id)
+				}
+				if hadCanary {
+					s.canaries[id] = previousCanary
+				} else {
+					delete(s.canaries, id)
+				}
+				s.restoreCanaryRegistrationsLocked(id, previousRegistrations)
+				s.mu.Unlock()
+				s.repairLocalAfterCompensation()
+			}
+			log.Printf("extension uninstall persistence failed: %v", err)
+			http.Error(w, "extension persistence failed", http.StatusServiceUnavailable)
 			return
 		}
 		writeJSON(w, map[string]string{"status": "uninstalled", "package_id": id})
@@ -1680,9 +1704,17 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 	warnings := []string{}
 
 	s.mu.Lock()
+	// An install can replace an existing manifest and its registrations.
+	// Snapshot everything it changes so a rejected durable write cannot
+	// leave uncommitted hooks, skills, receipts or rollback history live.
+	previousExtension, hadPrevious := s.extensions[manifest.PackageID]
+	previousHistory, hadHistory := s.history[manifest.PackageID]
+	previousHistory = append([]ExtensionManifest(nil), previousHistory...)
+	previousRegistrations := s.snapshotCanaryRegistrationsLocked(manifest.PackageID)
+	previousReceiptCount := len(s.receipts)
 	now := time.Now().UTC().Format(time.RFC3339)
-	if previous, exists := s.extensions[manifest.PackageID]; exists {
-		s.history[manifest.PackageID] = append(s.history[manifest.PackageID], previous.Manifest)
+	if hadPrevious {
+		s.history[manifest.PackageID] = append(s.history[manifest.PackageID], previousExtension.Manifest)
 		s.removeExtensionRegistrationsLocked(manifest.PackageID)
 	}
 	ext := &Extension{
@@ -1711,7 +1743,26 @@ func (s *extServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 	s.receipts = append(s.receipts, receipt)
 	s.mu.Unlock()
 	if err := s.persist(r.Context()); err != nil {
-		http.Error(w, "persist extension state: "+err.Error(), http.StatusServiceUnavailable)
+		if !errors.Is(err, errPersistenceOutcomeUnknown) {
+			s.mu.Lock()
+			s.removeExtensionRegistrationsLocked(manifest.PackageID)
+			if hadPrevious {
+				s.extensions[manifest.PackageID] = previousExtension
+			} else {
+				delete(s.extensions, manifest.PackageID)
+			}
+			if hadHistory {
+				s.history[manifest.PackageID] = previousHistory
+			} else {
+				delete(s.history, manifest.PackageID)
+			}
+			s.restoreCanaryRegistrationsLocked(manifest.PackageID, previousRegistrations)
+			s.receipts = s.receipts[:previousReceiptCount]
+			s.mu.Unlock()
+			s.repairLocalAfterCompensation()
+		}
+		log.Printf("extension install persistence failed: %v", err)
+		http.Error(w, "extension persistence failed", http.StatusServiceUnavailable)
 		return
 	}
 

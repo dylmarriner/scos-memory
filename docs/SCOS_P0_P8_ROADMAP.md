@@ -4,6 +4,39 @@
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
 
+## §22 operator install/uninstall persistence atomicity (2026-11-02; TDD source candidate)
+
+Extension installation and removal previously changed the live extension,
+hook, skill, receipt, history and canary registries **before** durable
+persistence, but unlike PATCH, action, skill and canary handlers, neither
+operation compensated a confirmed failed write. A rejected database write or
+filesystem failure could therefore leave an uncommitted installation callable
+or an installed package silently removed until restart. Both handlers also
+returned raw persistence errors, exposing filesystem paths or SQL diagnostics
+to operator HTTP callers.
+
+Regression tests reproduced the leaked storage details (RED) and verify that
+fresh installation, version replacement and uninstall now restore the complete
+prior snapshot (GREEN), including shared-event hook ordering, exported skills,
+canary routing, rollback history, receipts and the local mirror. A confirmed
+non-commit compensates and repairs the local mirror; an uncertain database
+commit **never** compensates blindly and instead fences further mutations.
+Operator HTTP 503 responses are generic; underlying errors remain in logs.
+Isolated loopback PostgreSQL integration exercises actual CHECK rejections,
+lost acknowledgements with successful readback, and committed writes whose
+readback is unavailable. These are real database tests, not mocked SQL.
+
+Evidence on the isolated development branch: focused regressions RED then
+GREEN; isolated PostgreSQL integration and race-enabled focused tests pass;
+full `make test` passes using a Python 3.11 environment; `go vet ./...`
+passes. PR review, required checks, merged-main tests and CI must be verified
+separately before claiming merge completion.
+
+This is source-level §22 integrity hardening, not cross-instance monotonic
+revision/ABA protection, complete lifecycle coverage, §25 integration,
+§32 metrics breadth, representative P0 benchmarks, P3–P8 acceptance or
+production rollout/recovery qualification. Canonical §41 remains incomplete.
+
 ## §22.3 unambiguous canary activation and caller identity (2026-11-02; source verification)
 
 Canary start and read-only resolve accepted duplicate JSON object members at
