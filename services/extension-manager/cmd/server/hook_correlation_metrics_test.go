@@ -55,6 +55,7 @@ func TestHookLatencyAndFailureMetricsCarryCallerCorrelation(t *testing.T) {
 		bytes.NewBufferString(`{"event":"on_checkpoint","agent_id":"agent-a","payload":{}}`))
 	req.Header.Set("X-SCOS-Tenant-ID", "tenant-a")
 	req.Header.Set("X-SCOS-Principal-ID", "principal-a")
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4730-00f067aa0ba902b7-01")
 	res = httptest.NewRecorder()
 	srv.handleHookDispatch(res, req)
 	if res.Code != http.StatusServiceUnavailable {
@@ -66,6 +67,9 @@ func TestHookLatencyAndFailureMetricsCarryCallerCorrelation(t *testing.T) {
 			dispatchErrors++
 			if point.Tenant != "tenant-a" || point.AgentID != "agent-a" {
 				t.Fatalf("dispatch error missing caller correlation: %+v", point)
+			}
+			if point.TraceID != "4bf92f3577b34da6a3ce929d0e0e4730" || point.SpanID != "00f067aa0ba902b7" {
+				t.Fatalf("dispatch error missing trace correlation: %+v", point)
 			}
 		}
 	}

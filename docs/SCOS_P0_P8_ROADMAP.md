@@ -4215,3 +4215,12 @@ requires separate deployed acceptance and evidence.
 cross-service integration, §32 fleet-wide collector qualification,
 representative P0 benchmarks, P3–P8 acceptance and production recovery.
 No production deployment, migration or paid resource was used.
+
+
+**PR #270 review qualification (2026-11-03):** Added negative traceparent
+separator cases at offsets 35 and 52, a collector-level middleware regression
+for both valid and rejected trace context with preserved tenant identity, and
+a persistence-failure dispatch_error regression asserting trace/span alongside
+tenant/agent. The race-enabled telemetry and extension-manager tests passed
+three repetitions on AMD. These are source-level checks, not §32 fleet-wide
+collector or production recovery acceptance evidence.

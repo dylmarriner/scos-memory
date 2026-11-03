@@ -17,6 +17,8 @@ func TestTraceparentIntegrity(t *testing.T) {
 		{"00-4bf92f3577b34da6a3ce929d0e0e4730-00f067aa0ba902b7-gg", "", ""},
 		{"00-4BF92F3577B34DA6A3CE929D0E0E4730-00f067aa0ba902b7-01", "", ""},
 		{"00-4bf92f3577b34da6a3ce929d0e0e4730-00f067aa0ba902b7-01-extra", "", ""},
+		{"00-4bf92f3577b34da6a3ce929d0e0e4730x00f067aa0ba902b7-01", "", ""},
+		{"00-4bf92f3577b34da6a3ce929d0e0e4730-00f067aa0ba902b7x01", "", ""},
 	}
 	for _, tc := range cases {
 		got := TraceCorrelation(tc.input)
