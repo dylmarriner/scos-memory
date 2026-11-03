@@ -69,11 +69,25 @@ def local_json_authority(root: Path) -> list[str]:
         if not path.is_file():
             continue
         regex = re.compile(pattern)
-        for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-            if regex.search(line):
-                findings.append(
-                    f"{name}:{line_number}: local JSON authority fallback is allowed where PostgreSQL is required"
+        source = path.read_text(encoding="utf-8", errors="replace")
+        for match in regex.finditer(source):
+            line_number = source.count("\n", 0, match.start()) + 1
+            # The extension manager explicitly rejects storage-free writes,
+            # except for opt-in ephemeral test instances. A bare storage-free
+            # return remains a finding; the presence of a condition alone is
+            # not proof of an unsafe fallback.
+            if name.startswith("services/extension-manager/"):
+                guarded = re.search(
+                    r's\.db == nil && s\.storePath == ""\s*\{'
+                    r'\s*if s\.allowEphemeral\s*\{\s*return nil\s*\}'
+                    r'\s*return errors\.New\("durable extension storage is not configured"\)',
+                    source[match.start():],
                 )
+                if guarded:
+                    continue
+            findings.append(
+                f"{name}:{line_number}: local JSON authority fallback is allowed where PostgreSQL is required"
+            )
     return findings
 
 
