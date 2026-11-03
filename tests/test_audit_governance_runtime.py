@@ -34,6 +34,62 @@ class RuntimeGovernanceAuditTests(unittest.TestCase):
         )
         self.assertFalse(any("benchmark evidence is absent" in finding for finding in findings))
 
+    def test_extension_manager_storage_free_write_must_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "services/extension-manager/cmd/server/main.go"
+            path.parent.mkdir(parents=True)
+            path.write_text('func persist() error {\n if s.db == nil && s.storePath == "" { return nil }\n return nil\n}\n')
+            self.assertTrue(any("local JSON authority fallback" in f for f in audit_runtime.local_json_authority(root)))
+            path.write_text("""func persist() error {
+ if s.db == nil && s.storePath == "" {
+  if s.allowEphemeral { return nil }
+  return errors.New("durable extension storage is not configured")
+ }
+ return nil
+}
+""")
+            self.assertEqual(audit_runtime.local_json_authority(root), [])
+
+    def test_extension_manager_guard_must_be_on_same_branch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "services/extension-manager/cmd/server/main.go"
+            path.parent.mkdir(parents=True)
+            path.write_text("""func persist() error {
+ if s.db == nil && s.storePath == "" { return nil }
+ if s.db == nil && s.storePath == "" {
+  if s.allowEphemeral { return nil }
+  return errors.New("durable extension storage is not configured")
+ }
+ return nil
+}
+""")
+            findings = audit_runtime.local_json_authority(root)
+            self.assertEqual(len(findings), 1, findings)
+
+    def test_extension_manager_guard_allows_line_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "services/extension-manager/cmd/server/main.go"
+            path.parent.mkdir(parents=True)
+            path.write_text("""func persist() error {
+ if s.db == nil && s.storePath == "" // comment
+ {
+  // before test
+  if s.allowEphemeral // comment
+  {
+   // before return
+   return nil // comment
+  }
+  // before error
+  return errors.New("durable extension storage is not configured")
+ }
+ return nil
+}
+""")
+            self.assertEqual(audit_runtime.local_json_authority(root), [])
+
     def test_clean_fixture_passes_each_runtime_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
