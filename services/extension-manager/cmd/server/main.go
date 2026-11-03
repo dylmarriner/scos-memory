@@ -1556,21 +1556,23 @@ func (s *extServer) handleHookDispatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.operatorMutationMu.Unlock()
-	// §32 hook latency and failure. Latency covers the whole bounded dispatch;
-	// failures are counted per hook so one failing extension is attributable.
+	// §32 hook latency and failure. Use the same validated W3C trace/span
+	// as inbound HTTP telemetry, using the resolved dispatch identity.
+	correlation := telemetry.TraceCorrelation(r.Header.Get("traceparent"))
+	correlation.Tenant, correlation.AgentID = req.TenantID, req.AgentID
 	serviceMetrics.Observe(telemetry.MetricHookLatency, time.Since(dispatchStarted),
-		map[string]string{"event": req.Event}, telemetry.Correlation{Tenant: req.TenantID, AgentID: req.AgentID})
+		map[string]string{"event": req.Event}, correlation)
 	for _, result := range results {
 		if result.Status == "ok" || result.Status == "succeeded" {
 			continue
 		}
 		serviceMetrics.Count(telemetry.MetricHookFailure, map[string]string{
 			"event": req.Event, "extension": result.ExtensionID, "reason": result.Status,
-		}, telemetry.Correlation{Tenant: req.TenantID, AgentID: req.AgentID})
+		}, correlation)
 	}
 	if err != nil {
 		serviceMetrics.Count(telemetry.MetricHookFailure,
-			map[string]string{"event": req.Event, "reason": "dispatch_error"}, telemetry.Correlation{Tenant: req.TenantID, AgentID: req.AgentID})
+			map[string]string{"event": req.Event, "reason": "dispatch_error"}, correlation)
 		http.Error(w, "hook dispatch failed: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}

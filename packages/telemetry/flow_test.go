@@ -161,3 +161,43 @@ func TestMiddlewareRecordsStreamsSeparately(t *testing.T) {
 		t.Fatalf("stream point lost its edge labels: %+v", got[0])
 	}
 }
+
+// The middleware must carry validated trace context through the actual metric
+// emitter, not just through the requestCorrelation helper.
+func TestMiddlewareEmitsValidatedTraceAndTenant(t *testing.T) {
+	var points []MetricPoint
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&points); err != nil {
+			t.Errorf("decode metric points: %v", err)
+		}
+	}))
+	defer collector.Close()
+	emitter := New("memory-intelligence", collector.URL, nil)
+	defer emitter.Close()
+	handler := emitter.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	const valid = "00-4bf92f3577b34da6a3ce929d0e0e4730-00f067aa0ba902b7-01"
+	for _, tc := range []struct{ path, traceparent string }{
+		{"/v1/trace-valid", valid},
+		{"/v1/trace-invalid", "00-00000000000000000000000000000000-00f067aa0ba902b7-01"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.Header.Set(CallerHeader, "external-agent")
+		req.Header.Set("X-SCOS-Tenant-ID", "tenant-a")
+		req.Header.Set("traceparent", tc.traceparent)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if err := emitter.Flush(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("expected two HTTP metrics, got %+v", points)
+	}
+	if points[0].Tenant != "tenant-a" || points[0].TraceID != "4bf92f3577b34da6a3ce929d0e0e4730" || points[0].SpanID != "00f067aa0ba902b7" {
+		t.Fatalf("valid trace lost by middleware: %+v", points[0])
+	}
+	if points[1].Tenant != "tenant-a" || points[1].TraceID != "" || points[1].SpanID != "" {
+		t.Fatalf("invalid trace accepted or tenant lost: %+v", points[1])
+	}
+}
