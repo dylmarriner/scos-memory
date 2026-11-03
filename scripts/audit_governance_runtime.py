@@ -77,10 +77,10 @@ def local_json_authority(root: Path) -> list[str]:
             # return remains a finding; the presence of a condition alone is
             # not proof of an unsafe fallback.
             if name.startswith("services/extension-manager/"):
-                guarded = re.search(
-                    r's\.db == nil && s\.storePath == ""\s*\{'
-                    r'\s*if s\.allowEphemeral\s*\{\s*return nil\s*\}'
-                    r'\s*return errors\.New\("durable extension storage is not configured"\)',
+                guarded = re.match(
+                    r's\.db == nil && s\.storePath == ""(?:\s|//[^\n]*)*\{'
+                    r'(?:\s|//[^\n]*)*if s\.allowEphemeral(?:\s|//[^\n]*)*\{(?:\s|//[^\n]*)*return nil(?:\s|//[^\n]*)*\}'
+                    r'(?:\s|//[^\n]*)*return errors\.New\("durable extension storage is not configured"\)',
                     source[match.start():],
                 )
                 if guarded:
