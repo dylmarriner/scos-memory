@@ -22,7 +22,7 @@ func TestExtensionPatchRejectsTrailingJSONWithoutMutation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newExtServer()
+			srv := newTestExtServer()
 			srv.extensions["ext"] = &Extension{
 				Manifest: ExtensionManifest{PackageID: "ext"},
 				Status:   "enabled",
@@ -43,7 +43,7 @@ func TestExtensionPatchRejectsTrailingJSONWithoutMutation(t *testing.T) {
 }
 
 func TestExtensionPatchAllowsTrailingWhitespace(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["ext"] = &Extension{
 		Manifest: ExtensionManifest{PackageID: "ext"},
 		Status:   "enabled",
@@ -72,7 +72,7 @@ func TestExtensionPatchRejectsAmbiguousJSONMembersBeforeMutation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newExtServer()
+			srv := newTestExtServer()
 			srv.extensions["ext"] = &Extension{
 				Manifest:   ExtensionManifest{PackageID: "ext"},
 				Status:     "enabled",

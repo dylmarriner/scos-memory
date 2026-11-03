@@ -20,7 +20,7 @@ import (
 // TestRequireTenantPrefersClaimsOverSpoofedHeader): a verified identity must
 // win over anything the caller supplies itself.
 func TestHandleHookDispatchRejectsSpoofedTenantInBody(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.hooks["turn.completed"] = []*Hook{{
 		Event: "turn.completed", ExtensionID: "hook-ext", Endpoint: "https://127.0.0.1:0", TimeoutMs: 1000,
 	}}
@@ -41,7 +41,7 @@ func TestHandleHookDispatchRejectsSpoofedTenantInBody(t *testing.T) {
 // autonomous-control-plane's dispatchHook actually sends) must still
 // dispatch, using the authenticated identity.
 func TestHandleHookDispatchUsesAuthenticatedIdentityWhenBodyOmitsTenant(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	called := make(chan string, 1)
 	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called <- r.Header.Get("X-SCOS-Tenant-ID")

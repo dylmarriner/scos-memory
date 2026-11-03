@@ -30,7 +30,7 @@ func TestHookRedirectCannotForwardInternalContext(t *testing.T) {
 				}))
 				defer source.Close()
 
-				srv := newExtServer()
+				srv := newTestExtServer()
 				enableForTest(srv, "redirecting-ext")
 				srv.hooks["on_before_tool"] = []*Hook{{
 					Event: "on_before_tool", ExtensionID: "redirecting-ext",

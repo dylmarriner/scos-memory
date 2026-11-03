@@ -16,7 +16,7 @@ func TestHookMetricsCarryValidatedTraceAndSpan(t *testing.T) {
 	}))
 	defer endpoint.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "trace-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{{
 		Event: "on_checkpoint", ExtensionID: "trace-ext", Endpoint: endpoint.URL,

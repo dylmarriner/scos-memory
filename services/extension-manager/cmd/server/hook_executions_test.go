@@ -14,7 +14,7 @@ func TestHookExecutionsAreRecordedPerTenant(t *testing.T) {
 	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }))
 	defer failing.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "good", "bad")
 	srv.hooks["turn.completed"] = []*Hook{
 		{Event: "turn.completed", ExtensionID: "good", Endpoint: ok.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},

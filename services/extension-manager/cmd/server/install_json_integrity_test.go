@@ -86,7 +86,7 @@ func TestInstallDryRunRejectsTrailingJSONBeforeVerdict(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newExtServer()
+			srv := newTestExtServer()
 			status, response := postIntegrityRequest(t, http.HandlerFunc(srv.handleInstallDryRun), "/v1/install/dryrun", append(append([]byte{}, prefix...), tc.tail...))
 			if status != tc.want {
 				t.Fatalf("status=%d want=%d response=%q", status, tc.want, response)
@@ -119,7 +119,7 @@ func TestSkillCreationRejectsTrailingJSONBeforeStateMutation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newExtServer()
+			srv := newTestExtServer()
 			status, response := postIntegrityRequest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				srv.handleSkills(w, r.WithContext(auth.ContextWithClaims(r.Context(), auth.Claims{TenantID: "operator-tenant", PrincipalID: "operator", Scopes: []string{extensionsAdminScope}})))
 			}), "/v1/skills", append(append([]byte{}, prefix...), tc.tail...))

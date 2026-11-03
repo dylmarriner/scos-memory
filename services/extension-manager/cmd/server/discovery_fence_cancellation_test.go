@@ -26,7 +26,7 @@ func TestCommittedDiscoveryFenceHonorsCanceledRequests(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newExtServer()
+			srv := newTestExtServer()
 			srv.operatorMutationMu.Lock()
 			locked := true
 			defer func() {
@@ -74,7 +74,7 @@ func TestCommittedDiscoveryFenceHonorsCanceledRequests(t *testing.T) {
 }
 
 func TestCommittedDiscoveryFenceRejectsAlreadyExpiredContext(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/v1/extensions", nil).WithContext(ctx)
@@ -88,7 +88,7 @@ func TestCommittedDiscoveryFenceRejectsAlreadyExpiredContext(t *testing.T) {
 // Exercise the actual net/http transport: the server-side handler must exit
 // after a client disconnect even when a concurrent operator write is stalled.
 func TestCommittedDiscoveryHTTPClientDisconnectReleasesHandler(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.operatorMutationMu.Lock()
 	locked := true
 	defer func() {

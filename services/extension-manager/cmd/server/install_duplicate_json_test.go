@@ -42,7 +42,7 @@ func TestInstallRoutesRejectAmbiguousSignedManifestJSON(t *testing.T) {
 				if tc.body == clean && tc.reject {
 					t.Fatal("test mutation did not alter signed JSON")
 				}
-				srv := newExtServer()
+				srv := newTestExtServer()
 				mux := http.NewServeMux()
 				mux.HandleFunc("/v1/install", srv.handleInstall)
 				mux.HandleFunc("/v1/extensions/install", srv.handleInstall)

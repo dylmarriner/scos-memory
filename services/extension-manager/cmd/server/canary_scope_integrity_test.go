@@ -101,7 +101,7 @@ func TestCanaryPersistedBlankSelectorFailsClosed(t *testing.T) {
 // even when a 100% percentage canary exists.
 func TestCanaryAnonymousDispatchStaysOnStableEndpoint(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	stable, candidate := newCountingEndpoint(t), newCountingEndpoint(t)
 	if res := installForTest(t, srv, sealManifest(t, hookManifest("ext", "1.0.0", stable.URL), key)); res.Code != http.StatusOK {
 		t.Fatalf("stable install: %d %s", res.Code, res.Body.String())
