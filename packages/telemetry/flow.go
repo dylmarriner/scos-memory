@@ -126,10 +126,7 @@ func (e *Emitter) Middleware(next http.Handler) http.Handler {
 			"route":  NormalizeRoute(r.URL.Path),
 			"method": r.Method,
 			"status": strconv.Itoa(sw.status),
-		}, Correlation{
-			TraceID: traceIDFrom(r.Header.Get("traceparent")),
-			Tenant:  r.Header.Get("X-SCOS-Tenant-ID"),
-		})
+		}, requestCorrelation(r))
 	})
 }
 
@@ -198,12 +195,36 @@ func looksLikeID(segment string) bool {
 	return digits >= 4 && digits*3 >= len(segment)
 }
 
-func traceIDFrom(traceparent string) string {
-	parts := strings.Split(strings.TrimSpace(traceparent), "-")
-	if len(parts) == 4 && len(parts[1]) == 32 {
-		return parts[1]
+// TraceCorrelation extracts W3C trace context only when the complete
+// version-00 traceparent is valid. Reject malformed IDs rather than joining
+// unrelated metrics under attacker-supplied or zero trace identifiers.
+func TraceCorrelation(traceparent string) Correlation {
+	if len(traceparent) != 55 || traceparent[:3] != "00-" ||
+		traceparent[35] != '-' || traceparent[52] != '-' {
+		return Correlation{}
 	}
-	return ""
+	traceID, spanID := traceparent[3:35], traceparent[36:52]
+	if !lowerHex(traceID) || !lowerHex(spanID) ||
+		!lowerHex(traceparent[53:55]) ||
+		strings.Trim(traceID, "0") == "" || strings.Trim(spanID, "0") == "" {
+		return Correlation{}
+	}
+	return Correlation{TraceID: traceID, SpanID: spanID}
+}
+
+func lowerHex(value string) bool {
+	for _, ch := range value {
+		if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func requestCorrelation(r *http.Request) Correlation {
+	c := TraceCorrelation(r.Header.Get("traceparent"))
+	c.Tenant = r.Header.Get("X-SCOS-Tenant-ID")
+	return c
 }
 
 type statusRecorder struct {

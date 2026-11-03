@@ -4183,3 +4183,35 @@ Remaining: §22 deployed lifecycle/mixed-version qualification, §25 integration
 §32 metrics, representative P0 benchmarks, P3–P8 acceptance and production
 rollout/recovery. The canonical §41 DoD is not complete. No live deployment,
 migration or paid resources were used.
+
+
+### 2026-11-03 §32 validated W3C trace correlation for hook telemetry (source slice)
+
+The inbound HTTP telemetry parser previously accepted a trace ID based only
+on its length. A malformed or all-zero traceparent could therefore produce
+false trace correlation, while hook latency and failure points omitted trace
+and span IDs entirely. This prevented reliable joining of real hook failures
+to their inbound request spans.
+
+The shared telemetry parser now accepts complete lowercase W3C version-00
+traceparent values only, rejecting malformed versions, IDs, separators,
+flags, zero trace/span IDs and additional fields. Inbound HTTP telemetry and
+hook dispatch metrics share the validated trace/span IDs; hook points retain
+the resolved tenant and agent, including on persistence failures. Invalid
+trace headers produce no trace/span correlation instead of fabricated IDs.
+
+**TDD evidence:** packages/telemetry/trace_context_test.go and
+services/extension-manager/cmd/server/hook_trace_metrics_test.go. The
+first RED run exposed the missing parser API and missing hook trace/span
+correlation. Focused tests passed GREEN three repetitions. The complete
+telemetry and extension-manager race-enabled suites, go vet ./..., and
+repository-wide make test passed on AMD with the existing Python 3.11
+Pydantic venv. The initial default Python 3.14 run failed because Pydantic
+was absent from that environment, not because of code regressions.
+The structural governance audit passed, but §41 canonical completion still
+requires separate deployed acceptance and evidence.
+
+**Remaining:** deployed §22 lifecycle/mixed-version qualification, §25
+cross-service integration, §32 fleet-wide collector qualification,
+representative P0 benchmarks, P3–P8 acceptance and production recovery.
+No production deployment, migration or paid resource was used.
