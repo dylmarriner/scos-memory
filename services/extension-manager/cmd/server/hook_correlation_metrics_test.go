@@ -20,7 +20,7 @@ func TestHookLatencyAndFailureMetricsCarryCallerCorrelation(t *testing.T) {
 	}))
 	defer endpoint.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "correlation-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{{
 		Event: "on_checkpoint", ExtensionID: "correlation-ext",

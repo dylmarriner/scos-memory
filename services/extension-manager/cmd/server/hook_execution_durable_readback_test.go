@@ -127,7 +127,7 @@ func TestFailedHookExecutionDoesNotEvictCommittedAuditHistory(t *testing.T) {
 }
 
 func TestHookExecutionAuditFailsClosedWhenPersistenceOutcomeUnknown(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.executions = []*HookExecution{{ID: "hookexec-1", TenantID: "tenant-a", Status: "succeeded"}}
 	srv.persistenceUncertain.Store(true)
 	req := httptest.NewRequest(http.MethodGet, "/v1/hooks/executions", nil)

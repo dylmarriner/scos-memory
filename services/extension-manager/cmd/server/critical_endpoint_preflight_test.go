@@ -28,7 +28,7 @@ func TestHookDispatchPreflightsAllCriticalEndpointsBeforeDelivery(t *testing.T) 
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			defer prior.Close()
-			srv := newExtServer()
+			srv := newTestExtServer()
 			enableForTest(srv, "prior-ext")
 			enableForTest(srv, "critical-ext")
 			srv.hooks["on_checkpoint"] = []*Hook{
@@ -58,7 +58,7 @@ func TestHookDispatchPreflightPreservesValidCriticalEndpoint(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer endpoint.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "critical-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{{Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: endpoint.URL, FallbackPolicy: "fail_closed"}}
 	results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{Event: "on_checkpoint", TenantID: "tenant-a", PrincipalID: "principal-a"})

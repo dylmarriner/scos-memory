@@ -15,7 +15,7 @@ import (
 // have since been removed or disabled.
 func TestRollbackRejectsMissingHistoricalDependencyWithoutMutatingState(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	current := validManifest("consumer")
 	current.Version = "2.0.0"
 	previous := validManifest("consumer")
@@ -50,7 +50,7 @@ func TestRollbackRejectsMissingHistoricalDependencyWithoutMutatingState(t *testi
 // is rolled back to an older, otherwise valid signed version.
 func TestRollbackRejectsBreakingEnabledDependentsWithoutMutatingState(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	current := validManifest("provider")
 	current.Version = "2.0.0"
 	previous := validManifest("provider")

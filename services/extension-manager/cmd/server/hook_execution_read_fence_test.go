@@ -26,7 +26,7 @@ func TestHookExecutionReadWaitsForPersistenceOutcomeHTTP(t *testing.T) {
 			}))
 			defer endpoint.Close()
 
-			srv := newExtServer()
+			srv := newTestExtServer()
 			enableForTest(srv, "audit-fence")
 			srv.hooks["on_checkpoint"] = []*Hook{{
 				Event: "on_checkpoint", ExtensionID: "audit-fence",

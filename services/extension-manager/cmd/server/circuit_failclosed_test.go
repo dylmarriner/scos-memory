@@ -19,7 +19,7 @@ func TestCriticalHookOpenCircuitBlocksDispatchAndFollowingHooks(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer endpoint.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "critical-ext", "later-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{
 		{Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: endpoint.URL, TimeoutMs: 1000, FallbackPolicy: "fail_closed", CircuitOpenUntil: time.Now().Add(time.Minute).UTC().Format(time.RFC3339)},
@@ -45,7 +45,7 @@ func TestCriticalHookInvalidCircuitStateFailsClosed(t *testing.T) {
 	var calls atomic.Int32
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(http.StatusNoContent) }))
 	defer endpoint.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "critical-ext")
 	srv.extensions["critical-ext"].Health = "healthy"
 	srv.hooks["on_checkpoint"] = []*Hook{{Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: endpoint.URL, TimeoutMs: 1000, FallbackPolicy: "fail_closed", CircuitOpenUntil: "not-a-timestamp"}}
@@ -72,7 +72,7 @@ func TestCriticalHookExpiredCircuitCanRecover(t *testing.T) {
 	var calls atomic.Int32
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(http.StatusNoContent) }))
 	defer endpoint.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "critical-ext")
 	hook := &Hook{Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: endpoint.URL, TimeoutMs: 1000, FallbackPolicy: "fail_closed", CircuitOpenUntil: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)}
 	srv.hooks["on_checkpoint"] = []*Hook{hook}
@@ -95,7 +95,7 @@ func TestOptionalHookInvalidCircuitStateContinues(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer endpoint.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "optional-ext")
 	srv.hooks["on_after_tool"] = []*Hook{{
 		Event: "on_after_tool", ExtensionID: "optional-ext", Endpoint: endpoint.URL,
@@ -125,7 +125,7 @@ func TestLaterCriticalBreakerPreflightPreventsEarlierDeliveries(t *testing.T) {
 			var calls atomic.Int32
 			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(http.StatusNoContent) }))
 			defer endpoint.Close()
-			srv := newExtServer()
+			srv := newTestExtServer()
 			enableForTest(srv, "earlier-ext", "critical-ext")
 			srv.extensions["critical-ext"].Health = "healthy"
 			srv.hooks["on_checkpoint"] = []*Hook{

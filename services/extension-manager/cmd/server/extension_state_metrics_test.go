@@ -107,7 +107,7 @@ func TestExtensionHookHealthMetricsReflectActualHTTPDelivery(t *testing.T) {
 	}))
 	defer endpoint.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "metric-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{{Event: "on_checkpoint", ExtensionID: "metric-ext", Endpoint: endpoint.URL, TimeoutMs: 1000, FallbackPolicy: "continue"}}
 	dispatch := func() {

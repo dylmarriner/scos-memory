@@ -68,7 +68,7 @@ func dispatchForTest(t *testing.T, srv *extServer, req hookDispatchRequest) []ho
 
 func TestInstallVerifiesContentHash(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 
 	// A hash that does not match the content is refused even when the
 	// publisher signed it.
@@ -94,7 +94,7 @@ func TestInstallVerifiesContentHash(t *testing.T) {
 
 func TestEnableReverifiesStoredManifest(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	endpoint := newCountingEndpoint(t)
 	if res := installForTest(t, srv, sealManifest(t, hookManifest("ext", "1.0.0", endpoint.URL), key)); res.Code != http.StatusOK {
 		t.Fatalf("install = %d %s", res.Code, res.Body.String())
@@ -126,7 +126,7 @@ func TestEnableReverifiesStoredManifest(t *testing.T) {
 
 func TestEnableDisableGatesHookDispatchAndSkills(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	endpoint := newCountingEndpoint(t)
 	if res := installForTest(t, srv, sealManifest(t, hookManifest("ext", "1.0.0", endpoint.URL), key)); res.Code != http.StatusOK {
 		t.Fatalf("install = %d %s", res.Code, res.Body.String())
@@ -201,7 +201,7 @@ func TestEnableDisableGatesHookDispatchAndSkills(t *testing.T) {
 
 func TestHookSemanticsDescribeTheDispatcher(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	m := hookManifest("ext", "1.0.0", "https://ext.example/hook")
 	m.HooksSubscribed = []string{"on_turn_start", "on_checkpoint"}
 	m.HookEndpoints["on_checkpoint"] = "https://ext.example/checkpoint"
@@ -222,7 +222,7 @@ func TestHookSemanticsDescribeTheDispatcher(t *testing.T) {
 // delivered the candidate version's hook, everyone else the stable one's.
 func TestCanaryRoutesHookDispatchToItsCohort(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	stable, candidate := newCountingEndpoint(t), newCountingEndpoint(t)
 	if res := installForTest(t, srv, sealManifest(t, hookManifest("ext", "1.0.0", stable.URL), key)); res.Code != http.StatusOK {
 		t.Fatalf("install = %d %s", res.Code, res.Body.String())

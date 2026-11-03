@@ -23,7 +23,7 @@ func TestCriticalAbortPreservesEarlierHookExecutionEvidence(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer critical.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "first", "invalid", "critical")
 	srv.hooks["on_checkpoint"] = []*Hook{
 		{Event: "on_checkpoint", ExtensionID: "first", Endpoint: first.URL, FallbackPolicy: "continue"},
@@ -81,7 +81,7 @@ func TestCriticalHookFailureRecordsAttributableEvidence(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			defer later.Close()
-			srv := newExtServer()
+			srv := newTestExtServer()
 			enableForTest(srv, "critical", "later")
 			srv.hooks["on_checkpoint"] = []*Hook{
 				{Event: "on_checkpoint", ExtensionID: "critical", Version: "1.0.0", Endpoint: critical.URL, FallbackPolicy: "fail_closed"},
@@ -125,7 +125,7 @@ func TestCanaryCriticalPreflightPersistsSelectedRoute(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer stable.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "critical")
 	srv.hooks["on_checkpoint"] = []*Hook{{
 		Event: "on_checkpoint", ExtensionID: "critical", Version: "1.0.0",

@@ -181,6 +181,7 @@ type extServer struct {
 	revision          uint64
 	db                *pgxpool.Pool
 	storePath         string
+	allowEphemeral    bool // explicit test-only opt-in; never set in production
 	// Optional audit-persistence fault injection for deterministic HTTP tests.
 	persistHookExecutions func(context.Context) error
 	// Test-only persistence fault/barrier injection for concurrent operator requests.
@@ -561,7 +562,10 @@ func (s *extServer) persist(ctx context.Context) error {
 		}
 	}
 	if s.db == nil && s.storePath == "" {
-		return nil
+		if s.allowEphemeral {
+			return nil
+		}
+		return errors.New("durable extension storage is not configured")
 	}
 	s.mu.RLock()
 	if s.revision == ^uint64(0) {

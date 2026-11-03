@@ -61,7 +61,7 @@ func TestHookDispatchInvokesEndpointAndPropagatesIdentity(t *testing.T) {
 	}))
 	defer hookServer.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["hook-ext"] = &Extension{Manifest: ExtensionManifest{PackageID: "hook-ext"}, Status: "enabled"}
 	srv.hooks["turn.completed"] = []*Hook{{
 		Event: "turn.completed", ExtensionID: "hook-ext", Endpoint: hookServer.URL,
@@ -83,7 +83,7 @@ func TestHookDispatchInvokesEndpointAndPropagatesIdentity(t *testing.T) {
 }
 
 func TestHookDispatchRejectsUnknownFields(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/dispatch", bytes.NewBufferString(`{
 		"event":"turn.completed",
 		"tenant_id":"tenant-a",
@@ -108,7 +108,7 @@ func mustJSON(t *testing.T, value any) []byte {
 }
 
 func TestNewExtServer(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	if srv == nil {
 		t.Fatal("expected non-nil server")
 	}
@@ -139,7 +139,7 @@ func TestPersistedStateRoundTrip(t *testing.T) {
 }
 
 func TestInstallExtension(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	manifest := ExtensionManifest{
 		SchemaVersion:        "1.0",
 		PackageID:            "com.example.test-ext",
@@ -174,7 +174,7 @@ func TestInstallExtension(t *testing.T) {
 }
 
 func TestInstallDryRun(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	manifest := ExtensionManifest{
 		SchemaVersion:       "1.0",
 		PackageID:           "com.example.test-ext",
@@ -196,7 +196,7 @@ func TestInstallDryRun(t *testing.T) {
 }
 
 func TestValidateManifestMissingFields(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	manifest := ExtensionManifest{
 		PackageID: "com.example.bad",
 		Version:   "1.0",
@@ -212,7 +212,7 @@ func TestValidateManifestMissingFields(t *testing.T) {
 // a manifest asking for any other mode is refused rather than labelled.
 func TestInstallRefusesIsolationTheRuntimeDoesNotProvide(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	for _, mode := range []string{"in_process_trusted", "separate_process", "container", "wasm_sandbox", "made_up"} {
 		m := validManifest("iso-" + mode)
 		m.Isolation = mode
@@ -236,7 +236,7 @@ func TestInstallRefusesIsolationTheRuntimeDoesNotProvide(t *testing.T) {
 }
 
 func TestCreateSkill(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.mu.Lock()
 	srv.nextID++
 	skill := &Skill{
@@ -265,7 +265,7 @@ func TestCreateSkill(t *testing.T) {
 // the same event keeps its hook and skills.
 func TestUninstallRemovesExactlyThatExtension(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	install := func(id string) {
 		t.Helper()
 		m := validManifest(id)
@@ -304,7 +304,7 @@ func TestUninstallRemovesExactlyThatExtension(t *testing.T) {
 
 func TestUninstallAndDisableRefusedWhileAnEnabledExtensionDependsOnIt(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	provider := sealManifest(t, validManifest("provider"), key)
 	consumer := validManifest("consumer")
 	consumer.Dependencies = []ExtensionDependency{{PackageID: "provider", Version: "^1.0.0"}}
@@ -329,7 +329,7 @@ func TestUninstallAndDisableRefusedWhileAnEnabledExtensionDependsOnIt(t *testing
 }
 
 func TestCapabilityGraph(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["ext-cap"] = &Extension{
 		Manifest: ExtensionManifest{
 			PackageID:            "ext-cap",
@@ -357,7 +357,7 @@ func TestCapabilityGraph(t *testing.T) {
 }
 
 func TestUpdateExtensionStatus(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["ext-update"] = &Extension{
 		Manifest: ExtensionManifest{PackageID: "ext-update"},
 		Status:   "enabled",
@@ -376,7 +376,7 @@ func TestUpdateExtensionStatus(t *testing.T) {
 
 func TestExtensionLifecycleEndpoints(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, validManifest("ext"), key), Status: "enabled"}
 	for _, action := range []string{"disable", "enable"} {
 		res := httptest.NewRecorder()
@@ -391,7 +391,7 @@ func TestExtensionLifecycleEndpoints(t *testing.T) {
 }
 
 func TestRollbackUnavailableWithoutHistory(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["ext"] = &Extension{Manifest: ExtensionManifest{PackageID: "ext"}}
 	res := httptest.NewRecorder()
 	srv.handleExtensionByID(res, operatorRequest(http.MethodPost, "/v1/extensions/ext/rollback", nil))
@@ -402,7 +402,7 @@ func TestRollbackUnavailableWithoutHistory(t *testing.T) {
 
 func TestRollbackRestoresPreviousManifest(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	current, previous := validManifest("ext"), validManifest("ext")
 	current.Version, previous.Version = "2", "1"
 	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, current, key), Status: "enabled"}
@@ -415,7 +415,7 @@ func TestRollbackRestoresPreviousManifest(t *testing.T) {
 }
 
 func TestInstallRejectsMaliciousManifest(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	manifest := ExtensionManifest{PackageID: "evil", Version: "1.0.0", Signature: "not-a-signature"}
 	res := httptest.NewRecorder()
 	srv.handleInstall(res, operatorRequest(http.MethodPost, "/v1/install", bytes.NewReader(mustJSON(t, manifest))))
@@ -427,7 +427,7 @@ func TestInstallRejectsMaliciousManifest(t *testing.T) {
 func TestInstallRejectsMissingRollbackPlan(t *testing.T) {
 	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
 	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))
-	srv := newExtServer()
+	srv := newTestExtServer()
 	manifest := validManifest("no-rollback")
 	manifest.RollbackPlan = ""
 	manifest = sealManifest(t, manifest, privateKey)
@@ -441,7 +441,7 @@ func TestInstallRejectsMissingRollbackPlan(t *testing.T) {
 func TestInstallRejectsInvalidSignature(t *testing.T) {
 	publicKey, _, _ := ed25519.GenerateKey(nil)
 	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))
-	srv := newExtServer()
+	srv := newTestExtServer()
 	manifest := validManifest("bad-signature")
 	manifest.Signature = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
 	res := httptest.NewRecorder()
@@ -454,7 +454,7 @@ func TestInstallRejectsInvalidSignature(t *testing.T) {
 func TestInstallRejectsDependencyConflict(t *testing.T) {
 	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
 	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["provider"] = &Extension{Manifest: ExtensionManifest{PackageID: "provider", Version: "1.0.0"}, Status: "enabled"}
 	manifest := validManifest("consumer")
 	manifest.Dependencies = []ExtensionDependency{{PackageID: "provider", Version: ">=2.0.0"}}
@@ -468,7 +468,7 @@ func TestInstallRejectsDependencyConflict(t *testing.T) {
 
 func TestRollbackRestoresRegistrationsAndIsolation(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	current, previous := validManifest("ext"), validManifest("ext")
 	current.Version, previous.Version = "2", "1"
 	previous.ExtensionTypes = []string{"skill"}
@@ -485,7 +485,7 @@ func TestRollbackRestoresRegistrationsAndIsolation(t *testing.T) {
 
 func TestRollbackRefusesTamperedPriorManifest(t *testing.T) {
 	key := withSigningKey(t)
-	srv := newExtServer()
+	srv := newTestExtServer()
 	current, previous := validManifest("ext"), validManifest("ext")
 	current.Version, previous.Version = "2", "1"
 	srv.extensions["ext"] = &Extension{Manifest: sealManifest(t, current, key), Status: "enabled"}
@@ -546,7 +546,7 @@ func enableForTest(srv *extServer, ids ...string) {
 }
 
 func TestHookRegistration(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	event := "on_turn_start"
 	h := &Hook{
 		Event:       event,
@@ -571,7 +571,7 @@ func TestHookRegistration(t *testing.T) {
 }
 
 func TestReceiptLogging(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	receipt := &InstallationReceipt{
 		PackageID:   "com.example.ext",
 		Version:     "1.0.0",
@@ -668,7 +668,7 @@ func TestHookDispatchOrderingIsDeterministic(t *testing.T) {
 	third := makeHook("ext-c")
 	defer third.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "ext-a", "ext-b", "ext-c")
 	srv.hooks["on_turn_start"] = []*Hook{
 		{Event: "on_turn_start", ExtensionID: "ext-a", Endpoint: first.URL, TimeoutMs: 1000, FallbackPolicy: "continue"},
@@ -725,7 +725,7 @@ func TestHookDispatchTimeoutFallsBackToContinue(t *testing.T) {
 	}))
 	defer slow.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "slow-ext")
 	srv.hooks["on_before_tool"] = []*Hook{{
 		Event: "on_before_tool", ExtensionID: "slow-ext", Endpoint: slow.URL,
@@ -755,7 +755,7 @@ func TestHookDispatchCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	}))
 	defer failing.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "flaky-ext")
 	hook := &Hook{Event: "on_after_tool", ExtensionID: "flaky-ext", Endpoint: failing.URL, TimeoutMs: 1000, FallbackPolicy: "continue"}
 	srv.hooks["on_after_tool"] = []*Hook{hook}
@@ -789,7 +789,7 @@ func TestHookDispatchCircuitBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 // critical (fail_closed) hook that has no declared endpoint SHALL NOT be
 // silently skipped — it SHALL fail the dispatch closed.
 func TestHookDispatchFailsClosedOnUndeclaredEndpoint(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "critical-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{{
 		Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: "", FallbackPolicy: "fail_closed",
@@ -807,7 +807,7 @@ func TestHookDispatchFailsClosedOnUndeclaredEndpoint(t *testing.T) {
 // non-critical hook without a declared endpoint SHALL be visibly skipped
 // rather than silently dropped, and SHALL NOT block dispatch.
 func TestHookDispatchSkipsUndeclaredEndpointWhenNotCritical(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "optional-ext")
 	srv.hooks["on_memory_candidate"] = []*Hook{{
 		Event: "on_memory_candidate", ExtensionID: "optional-ext", Endpoint: "", FallbackPolicy: "continue",
@@ -854,7 +854,7 @@ func TestAllRequiredLifecycleHooksAreRegistrable(t *testing.T) {
 
 	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
 	t.Setenv("SCOS_EXTENSION_SIGNING_PUBLIC_KEY", base64.StdEncoding.EncodeToString(publicKey))
-	srv := newExtServer()
+	srv := newTestExtServer()
 
 	endpoints := make(map[string]string)
 	for _, hookEvent := range requiredHooks {
@@ -890,7 +890,7 @@ func TestAllRequiredLifecycleHooksAreRegistrable(t *testing.T) {
 // whether the real install would be accepted: an unsigned manifest that is
 // otherwise complete still must not be reported as installable.
 func TestInstallDryRunReportsTheInstallVerdict(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	body := `{"schema_version":"1.0","package_id":"com.example.unsigned","name":"Unsigned","version":"1.0.0","publisher":"Pub","license":"MIT","extension_types":["ui_extension"],"required_core_version":"^0.1.0","isolation":"wasm_sandbox","content_hash":"abc","rollback_plan":"remove","permissions":["filesystem.root"]}`
 	w := httptest.NewRecorder()
 	srv.handleInstallDryRun(w, operatorRequest(http.MethodPost, "/v1/install/dryrun", strings.NewReader(body)))
@@ -920,7 +920,7 @@ func operatorRequest(method, target string, body io.Reader) *http.Request {
 }
 
 func TestChangingExtensionsRequiresTheAdminScope(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["x"] = &Extension{Manifest: ExtensionManifest{PackageID: "x"}, Status: "enabled"}
 	tenantUser := func(method, target string) *http.Request {
 		r := httptest.NewRequest(method, target, bytes.NewBufferString(`{}`))
@@ -962,7 +962,7 @@ func TestHookDispatchHonoursAgentScopeSendsConfigAndRecordsHealth(t *testing.T) 
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer hookServer.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	srv.extensions["scoped"] = &Extension{Manifest: ExtensionManifest{PackageID: "scoped"}, Status: "enabled",
 		AgentScope: []string{"agent-a"}, Config: map[string]any{"threshold": 3.0}, Health: "unknown"}
 	srv.hooks["pre_turn"] = []*Hook{{Event: "pre_turn", ExtensionID: "scoped", Endpoint: hookServer.URL, TimeoutMs: 1000, FallbackPolicy: "continue"}}

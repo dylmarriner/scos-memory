@@ -18,7 +18,7 @@ func TestHookDispatchRejectsTrailingJSONBeforeExternalDelivery(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer endpoint.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "critical-ext")
 	srv.hooks["on_checkpoint"] = []*Hook{{Event: "on_checkpoint", ExtensionID: "critical-ext", Endpoint: endpoint.URL, FallbackPolicy: "fail_closed"}}
 	valid := `{"event":"on_checkpoint","payload":{"source":"test"}}`

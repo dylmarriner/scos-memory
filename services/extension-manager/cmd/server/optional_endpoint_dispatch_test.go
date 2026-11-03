@@ -34,7 +34,7 @@ func TestOptionalInvalidEndpointContinuesAndRecordsFailure(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			defer last.Close()
-			srv := newExtServer()
+			srv := newTestExtServer()
 			enableForTest(srv, "first", "invalid-optional", "last-critical")
 			srv.hooks["on_checkpoint"] = []*Hook{
 				{Event: "on_checkpoint", ExtensionID: "first", Endpoint: first.URL, FallbackPolicy: "continue"},
@@ -83,7 +83,7 @@ func TestOptionalInvalidEndpointOpensCircuitWithoutBlockingOtherHooks(t *testing
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer endpoint.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "invalid", "later")
 	invalid := &Hook{Event: "on_checkpoint", ExtensionID: "invalid", Endpoint: "http://example.com/unsafe", FallbackPolicy: "continue"}
 	srv.hooks["on_checkpoint"] = []*Hook{invalid, {Event: "on_checkpoint", ExtensionID: "later", Endpoint: endpoint.URL, FallbackPolicy: "continue"}}
@@ -120,7 +120,7 @@ func TestOptionalUserinfoEndpointMakesNoOutboundRequest(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer endpoint.Close()
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "invalid")
 	srv.hooks["on_checkpoint"] = []*Hook{{Event: "on_checkpoint", ExtensionID: "invalid", Endpoint: strings.Replace(endpoint.URL, "http://", "http://user:pass@", 1), FallbackPolicy: "continue"}}
 	results, err := srv.dispatchHooks(context.Background(), hookDispatchRequest{Event: "on_checkpoint", TenantID: "tenant-a", PrincipalID: "principal-a"})

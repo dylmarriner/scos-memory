@@ -20,7 +20,7 @@ func TestCriticalHookOpenCircuitAbortsDispatch(t *testing.T) {
 	}))
 	defer endpoint.Close()
 
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "critical", "later")
 	future := time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339)
 	srv.hooks["on_before_tool"] = []*Hook{
@@ -42,7 +42,7 @@ func TestCriticalHookOpenCircuitAbortsDispatch(t *testing.T) {
 // Optional hooks retain their documented continue behavior on an open
 // circuit; a mandatory hook must be an HTTP 503, not an HTTP 200.
 func TestCriticalOpenCircuitReturnsHTTPServiceUnavailable(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "mandatory")
 	srv.hooks["on_before_tool"] = []*Hook{{
 		Event: "on_before_tool", ExtensionID: "mandatory",
@@ -64,7 +64,7 @@ func TestCriticalOpenCircuitReturnsHTTPServiceUnavailable(t *testing.T) {
 }
 
 func TestOptionalHookOpenCircuitContinuesWithRecordedSkip(t *testing.T) {
-	srv := newExtServer()
+	srv := newTestExtServer()
 	enableForTest(srv, "optional")
 	srv.hooks["on_before_tool"] = []*Hook{{
 		Event: "on_before_tool", ExtensionID: "optional",
