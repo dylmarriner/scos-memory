@@ -70,12 +70,47 @@ func TestP5ConflictEvidenceRequiresReadableBothEndpoints(t *testing.T) {
         VALUES($1,$2,$3,'semantic','active','above ceiling conflict','above ceiling conflict',70,0.9,'secret','2020-01-01T00:00:00Z') RETURNING id`, tenant, readableNS, principal).Scan(&aboveCeiling); err != nil {
 		t.Fatal(err)
 	}
+	// Valid-time conflict projections must check the target fact's own
+	// valid_until, not just the relation interval or the source memory.
+	var expiredByFactUntil, expiredByEdgeUntil string
+	if err := admin.QueryRow(ctx, `INSERT INTO memory_items(
+        tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+        authority_level,confidence_score,sensitivity,valid_from,valid_until)
+        VALUES($1,$2,$3,'semantic','active','temporal fact target','temporal fact target',
+        70,0.9,'internal','2020-01-01T00:00:00Z','2020-12-31T00:00:00Z') RETURNING id`,
+		tenant, readableNS, principal).Scan(&expiredByFactUntil); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRow(ctx, `INSERT INTO memory_items(
+        tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+        authority_level,confidence_score,sensitivity,valid_from)
+        VALUES($1,$2,$3,'semantic','active','temporal edge target','temporal edge target',
+        70,0.9,'internal','2020-01-01T00:00:00Z') RETURNING id`,
+		tenant, readableNS, principal).Scan(&expiredByEdgeUntil); err != nil {
+		t.Fatal(err)
+	}
+	// This fact was valid at the requested time but has expired by the current
+	// clock. It distinguishes valid-time filtering from an accidental now().
+	var requestOnlyTarget string
+	if err := admin.QueryRow(ctx, `INSERT INTO memory_items(
+        tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,
+        authority_level,confidence_score,sensitivity,valid_from,valid_until)
+        VALUES($1,$2,$3,'semantic','active','requested-time target','requested-time target',
+        70,0.9,'internal','2020-01-01T00:00:00Z','2023-01-01T00:00:00Z') RETURNING id`,
+		tenant, readableNS, principal).Scan(&requestOnlyTarget); err != nil {
+		t.Fatal(err)
+	}
 
 	revoked := insertMemory(tenant, readableNS, principal, "revoked conflict", "revoked", "2020-01-01T00:00:00Z")
-	for _, edge := range [][2]string{{visible, allowed}, {visible, hidden}, {hidden, visible}, {visible, foreign}, {visible, future}, {visible, revoked}, {visible, outsideSelection}, {visible, aboveCeiling}, {allowed, hidden}} {
+	for _, edge := range [][2]string{{visible, allowed}, {visible, hidden}, {hidden, visible}, {visible, foreign}, {visible, future}, {visible, revoked}, {visible, outsideSelection}, {visible, aboveCeiling}, {visible, expiredByFactUntil}, {visible, requestOnlyTarget}, {allowed, hidden}} {
 		if _, err := admin.Exec(ctx, `INSERT INTO memory_relations(source_memory_id,target_memory_id,relation_type,confidence_score) VALUES ($1,$2,'contradicts',0.9)`, edge[0], edge[1]); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := admin.Exec(ctx, `INSERT INTO memory_relations(
+        source_memory_id,target_memory_id,relation_type,confidence_score,valid_until)
+        VALUES($1,$2,'contradicts',0.9,'2020-12-31T00:00:00Z')`, visible, expiredByEdgeUntil); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := admin.Exec(ctx, `UPDATE memory_items SET type='working', metadata='{"session_id":"p5-visibility"}'::jsonb WHERE id=$1`, visible); err != nil {
 		t.Fatal(err)
@@ -133,13 +168,23 @@ func TestP5ConflictEvidenceRequiresReadableBothEndpoints(t *testing.T) {
 				continue
 			}
 			found = true
-			if len(item.Conflicts) != 1 {
-				t.Errorf("%s: returned %d conflicts for visible item, want only readable peer: %+v", name, len(item.Conflicts), item.Conflicts)
+			if len(item.Conflicts) != 2 {
+				t.Errorf("%s: returned %d conflicts for visible item, want both readable peers: %+v", name, len(item.Conflicts), item.Conflicts)
 				continue
 			}
-			c, ok := item.Conflicts[0].(map[string]any)
-			if !ok || c["target_memory_id"] != allowed {
-				t.Errorf("%s: exposed wrong conflict: %+v", name, item.Conflicts)
+			seen := make(map[string]bool, len(item.Conflicts))
+			for _, raw := range item.Conflicts {
+				c, ok := raw.(map[string]any)
+				if !ok {
+					t.Errorf("%s: conflict has unexpected type %T", name, raw)
+					continue
+				}
+				if target, ok := c["target_memory_id"].(string); ok {
+					seen[target] = true
+				}
+			}
+			if !seen[allowed] || !seen[requestOnlyTarget] || len(seen) != 2 {
+				t.Errorf("%s: returned unexpected conflict targets: %+v", name, item.Conflicts)
 			}
 		}
 		if !found {
@@ -156,7 +201,7 @@ func TestP5ConflictEvidenceRequiresReadableBothEndpoints(t *testing.T) {
 		if item.MemoryID != visible {
 			continue
 		}
-		if len(item.Conflicts) != 1 {
+		if len(item.Conflicts) != 2 {
 			t.Errorf("namespace sensitivity ceiling bypassed: %+v", item.Conflicts)
 		}
 	}
@@ -168,6 +213,9 @@ func TestP5ConflictEvidenceRequiresReadableBothEndpoints(t *testing.T) {
 	}
 	foundPeer := false
 	for _, item := range expanded {
+		if item.MemoryID == expiredByFactUntil || item.MemoryID == expiredByEdgeUntil {
+			t.Errorf("relation expansion returned expired temporal conflict target %s", item.MemoryID)
+		}
 		if item.MemoryID != allowed {
 			continue
 		}
@@ -199,7 +247,41 @@ func TestP5ConflictEvidenceRequiresReadableBothEndpoints(t *testing.T) {
 	if !bytes.Contains(rec.Body.Bytes(), []byte(visible)) {
 		t.Error("HTTP response omitted readable seed")
 	}
-	for label, forbidden := range map[string]string{"hidden": hidden, "foreign": foreign, "future": future, "revoked": revoked, "unselected": outsideSelection, "above_ceiling": aboveCeiling} {
+	var httpResponse RetrieveResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &httpResponse); err != nil {
+		t.Fatalf("decode HTTP retrieval response: %v", err)
+	}
+	var visibleResponse *RetrievalResult
+	for sectionIndex := range httpResponse.Sections {
+		for itemIndex := range httpResponse.Sections[sectionIndex].Items {
+			item := &httpResponse.Sections[sectionIndex].Items[itemIndex]
+			if item.MemoryID == visible {
+				visibleResponse = item
+				break
+			}
+		}
+		if visibleResponse != nil {
+			break
+		}
+	}
+	if visibleResponse == nil {
+		t.Fatal("HTTP response omitted the readable seed item")
+	}
+	httpConflictTargets := make(map[string]bool, len(visibleResponse.Conflicts))
+	for _, raw := range visibleResponse.Conflicts {
+		conflict, ok := raw.(map[string]any)
+		if !ok {
+			t.Errorf("HTTP conflict has unexpected type %T", raw)
+			continue
+		}
+		if target, ok := conflict["target_memory_id"].(string); ok {
+			httpConflictTargets[target] = true
+		}
+	}
+	if !httpConflictTargets[allowed] || !httpConflictTargets[requestOnlyTarget] || len(httpConflictTargets) != 2 {
+		t.Errorf("HTTP response omitted or leaked conflict evidence: %+v", visibleResponse.Conflicts)
+	}
+	for label, forbidden := range map[string]string{"hidden": hidden, "foreign": foreign, "future": future, "revoked": revoked, "unselected": outsideSelection, "above_ceiling": aboveCeiling, "expired_fact_validity": expiredByFactUntil, "expired_relation_validity": expiredByEdgeUntil} {
 		if bytes.Contains(rec.Body.Bytes(), []byte(forbidden)) {
 			t.Errorf("HTTP response leaked %s target UUID %s", label, forbidden)
 		}
@@ -231,7 +313,7 @@ func TestP5ConflictEvidenceRequiresReadableBothEndpoints(t *testing.T) {
 			if err := rows.Scan(&source, &target); err != nil {
 				return err
 			}
-			if source != visible || (target != allowed && target != future && target != revoked && target != outsideSelection) {
+			if source != visible || (target != allowed && target != future && target != revoked && target != outsideSelection && target != expiredByFactUntil && target != expiredByEdgeUntil && target != requestOnlyTarget) {
 				t.Errorf("scos_app exposed hidden/foreign/noncurrent relation %s -> %s", source, target)
 			}
 			count++
@@ -239,8 +321,8 @@ func TestP5ConflictEvidenceRequiresReadableBothEndpoints(t *testing.T) {
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		if count != 4 {
-			t.Errorf("scos_app returned %d relation rows, want four readable endpoint pairs", count)
+		if count != 7 {
+			t.Errorf("scos_app returned %d relation rows, want seven readable endpoint pairs (RLS visibility is separate from valid-time retrieval filtering)", count)
 		}
 		return nil
 	}); err != nil {

@@ -39,11 +39,11 @@ func TestP5SupersededActiveMemoryExcludedFromCurrentRetrieval(t *testing.T) {
 	if err := admin.QueryRow(ctx, "INSERT INTO embedding_spaces(role,provider,model,model_revision,dimensions,generation) VALUES('text','test',$1,'r1',3,1) ON CONFLICT (role,provider,model,model_revision,dimensions,generation) DO UPDATE SET model=EXCLUDED.model RETURNING id", space.Model).Scan(&spaceID); err != nil {
 		t.Fatal(err)
 	}
-	insert := func(label string) string {
+	insert := func(label, validFrom string) string {
 		t.Helper()
 		var id, version string
-		if err := admin.QueryRow(ctx, `INSERT INTO memory_items(tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,authority_level,confidence_score,sensitivity,metadata)
-            VALUES($1,$2,$3,'working','active',$4,$4,80,0.9,'internal','{"session_id":"p5-supersession"}'::jsonb) RETURNING id`, tenant, ns, principal, label).Scan(&id); err != nil {
+		if err := admin.QueryRow(ctx, `INSERT INTO memory_items(tenant_id,namespace_id,owner_principal_id,type,status,title,canonical_summary,authority_level,confidence_score,sensitivity,valid_from,metadata)
+            VALUES($1,$2,$3,'working','active',$4,$4,80,0.9,'internal',$5::timestamptz,'{"session_id":"p5-supersession"}'::jsonb) RETURNING id`, tenant, ns, principal, label, validFrom).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
 		if err := admin.QueryRow(ctx, `INSERT INTO memory_versions(memory_id,version_number,content,content_hash,change_reason,created_by)
@@ -59,43 +59,45 @@ func TestP5SupersededActiveMemoryExcludedFromCurrentRetrieval(t *testing.T) {
 		}
 		return id
 	}
-	source := insert("supersession source")
-	stale := insert("supersession stale")
-	replacement := insert("supersession replacement")
+	source := insert("supersession source", "2020-01-01T00:00:00Z")
+	stale := insert("supersession stale", "2020-01-01T00:00:00Z")
+	replacement := insert("supersession replacement", "2020-01-01T00:00:00Z")
+	futureReplacement := insert("supersession future replacement", "2022-01-01T00:00:00Z")
 	if _, err := admin.Exec(ctx, "UPDATE memory_items SET superseded_by_id=$1 WHERE id=$2", replacement, stale); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{stale, replacement} {
+	for _, target := range []string{stale, replacement, futureReplacement} {
 		if _, err := admin.Exec(ctx, "INSERT INTO memory_relations(source_memory_id,target_memory_id,relation_type,confidence_score) VALUES($1,$2,'contradicts',0.9)", source, target); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	req := RetrieveRequest{TenantID: tenant, PrincipalID: principal, Query: "supersession", SessionID: "p5-supersession", QueryEmbedding: []float64{1, 0, 0}, QueryEmbeddingSpace: &space}
+	req := RetrieveRequest{TenantID: tenant, PrincipalID: principal, Query: "supersession", SessionID: "p5-supersession", AsOfValidTime: "2021-01-01T00:00:00Z", QueryEmbedding: []float64{1, 0, 0}, QueryEmbeddingSpace: &space}
+	queryCtx := withRequestedValidTime(ctx, req.AsOfValidTime)
 	check := func(role string, db *pgxpool.Pool) {
 		t.Helper()
 		srv := &server{db: db, textSpace: space}
 		lanes := map[string]func() ([]RetrievalResult, error){
 			"exact": func() ([]RetrievalResult, error) {
-				return srv.exactSearch(ctx, req, []string{t.Name()}, "internal", 20)
+				return srv.exactSearch(queryCtx, req, []string{t.Name()}, "internal", 20)
 			},
 			"fulltext": func() ([]RetrievalResult, error) {
-				return srv.fullTextSearch(ctx, req, []string{t.Name()}, "internal", toTSQuery(req.Query), 20)
+				return srv.fullTextSearch(queryCtx, req, []string{t.Name()}, "internal", toTSQuery(req.Query), 20)
 			},
 			"recent": func() ([]RetrievalResult, error) {
-				return srv.recentMemories(ctx, req, []string{t.Name()}, "internal", "7 days", 20)
+				return srv.recentMemories(queryCtx, req, []string{t.Name()}, "internal", "7 days", 20)
 			},
 			"task_state": func() ([]RetrievalResult, error) {
-				return srv.activeTaskState(ctx, req, []string{t.Name()}, "internal", 20)
+				return srv.activeTaskState(queryCtx, req, []string{t.Name()}, "internal", 20)
 			},
 			"session_state": func() ([]RetrievalResult, error) {
-				return srv.recentSessionState(ctx, req, []string{t.Name()}, "internal", 20)
+				return srv.recentSessionState(queryCtx, req, []string{t.Name()}, "internal", 20)
 			},
 			"semantic": func() ([]RetrievalResult, error) {
-				return srv.vectorSearch(ctx, req, []string{t.Name()}, "internal", 20)
+				return srv.vectorSearch(queryCtx, req, []string{t.Name()}, "internal", 20)
 			},
 			"relation_expansion": func() ([]RetrievalResult, error) {
-				return srv.relationExpansion(ctx, req, []string{t.Name()}, "internal", []RetrievalResult{{MemoryID: source}}, 20)
+				return srv.relationExpansion(queryCtx, req, []string{t.Name()}, "internal", []RetrievalResult{{MemoryID: source}}, 20)
 			},
 		}
 		for name, fetch := range lanes {
@@ -105,6 +107,9 @@ func TestP5SupersededActiveMemoryExcludedFromCurrentRetrieval(t *testing.T) {
 			}
 			foundSource, foundReplacement := false, false
 			for _, item := range got {
+				if item.MemoryID == futureReplacement {
+					t.Errorf("%s %s returned future-valid memory %s", role, name, futureReplacement)
+				}
 				if item.MemoryID == stale {
 					t.Errorf("%s %s returned superseded active memory %s", role, name, stale)
 				}
@@ -131,7 +136,7 @@ func TestP5SupersededActiveMemoryExcludedFromCurrentRetrieval(t *testing.T) {
 				t.Errorf("%s %s omitted source", role, name)
 			}
 		}
-		body, _ := json.Marshal(RetrieveRequest{TenantID: tenant, PrincipalID: principal, Namespaces: []string{t.Name()}, Query: "supersession", MaxResults: 20, TokenBudget: 8000})
+		body, _ := json.Marshal(RetrieveRequest{TenantID: tenant, PrincipalID: principal, Namespaces: []string{t.Name()}, Query: "supersession", AsOfValidTime: req.AsOfValidTime, MaxResults: 20, TokenBudget: 8000})
 		rec := httptest.NewRecorder()
 		srv.handleRetrieve(rec, httptest.NewRequest(http.MethodPost, "/v1/retrieve", bytes.NewReader(body)))
 		if rec.Code != http.StatusOK {
@@ -139,6 +144,9 @@ func TestP5SupersededActiveMemoryExcludedFromCurrentRetrieval(t *testing.T) {
 		}
 		if bytes.Contains(rec.Body.Bytes(), []byte(stale)) {
 			t.Errorf("%s HTTP leaked superseded active memory UUID", role)
+		}
+		if bytes.Contains(rec.Body.Bytes(), []byte(futureReplacement)) {
+			t.Errorf("%s HTTP leaked future-valid memory UUID", role)
 		}
 		if !bytes.Contains(rec.Body.Bytes(), []byte(source)) {
 			t.Errorf("%s HTTP omitted current source", role)
