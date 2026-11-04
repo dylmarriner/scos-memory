@@ -548,12 +548,19 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 		if factID == "" || symbolVersionID == "" {
 			return nil, fmt.Errorf("fact_id and code_symbol_version_id are required")
 		}
-		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/evidence-links", map[string]any{
+		payload := map[string]any{
 			"fact_id":                factID,
 			"code_symbol_version_id": symbolVersionID,
 			"link_type":              stringArg(args, "link_type"),
-			"confidence":             args["confidence"],
-		})
+		}
+		if rawConfidence, exists := args["confidence"]; exists {
+			confidence, ok := rawConfidence.(float64)
+			if !ok || math.IsNaN(confidence) || math.IsInf(confidence, 0) || confidence < 0 || confidence > 1 {
+				return nil, fmt.Errorf("confidence must be a finite number between 0 and 1")
+			}
+			payload["confidence"] = confidence
+		}
+		return s.forwardPOST(ctx, r, s.memoryIntelligenceURL+"/v1/evidence-links", payload)
 	case "scos_remember":
 		content := strings.TrimSpace(stringArg(args, "content"))
 		if content == "" {
@@ -1834,7 +1841,7 @@ func governedTools() []map[string]any {
 					"fact_id":                map[string]any{"type": "string", "description": "Memory fact ID"},
 					"code_symbol_version_id": map[string]any{"type": "string", "description": "code_symbol_versions.id from scos_code_query/scos_code_impact"},
 					"link_type":              map[string]any{"type": "string", "enum": []string{"evidences", "motivated_by", "invalidated_by"}, "description": "Relationship type; defaults to evidences"},
-					"confidence":             map[string]any{"type": "number", "description": "0-1, defaults to 1.0"},
+					"confidence":             map[string]any{"type": "number", "minimum": 0, "maximum": 1, "description": "Finite probability from 0 to 1 inclusive; defaults to 1.0"},
 				},
 				"required": []string{"fact_id", "code_symbol_version_id"},
 			},

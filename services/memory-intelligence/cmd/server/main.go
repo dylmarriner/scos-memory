@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -1245,10 +1246,10 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req struct {
-		FactID              string  `json:"fact_id"`
-		CodeSymbolVersionID string  `json:"code_symbol_version_id"`
-		LinkType            string  `json:"link_type"`
-		Confidence          float64 `json:"confidence"`
+		FactID              string          `json:"fact_id"`
+		CodeSymbolVersionID string          `json:"code_symbol_version_id"`
+		LinkType            string          `json:"link_type"`
+		Confidence          json.RawMessage `json:"confidence"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request: "+err.Error(), http.StatusBadRequest)
@@ -1270,9 +1271,19 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "link_type must be one of evidences, motivated_by, invalidated_by", http.StatusBadRequest)
 		return
 	}
-	confidence := req.Confidence
-	if confidence == 0 {
-		confidence = 1.0
+	confidence := 1.0
+	if len(req.Confidence) > 0 {
+		var rawConfidence any
+		if err := json.Unmarshal(req.Confidence, &rawConfidence); err != nil {
+			http.Error(w, "confidence must be a finite number between 0 and 1", http.StatusBadRequest)
+			return
+		}
+		value, ok := rawConfidence.(float64)
+		if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
+			http.Error(w, "confidence must be a finite number between 0 and 1", http.StatusBadRequest)
+			return
+		}
+		confidence = value
 	}
 	identity, status, msg := resolveIdentityFromRequest(r)
 	if status != 0 {

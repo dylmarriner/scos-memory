@@ -3174,6 +3174,12 @@ See `docs/P6_MEMORY_CODE_READBACK.md`. The **one-hop** reverse code→memory evi
 
 ---
 
+## P6 evidence-link confidence integrity (2026-11-05; source candidate, not merged/deployed)
+
+The `scos_link_evidence` MCP tool previously forwarded confidence without checking it, and memory-intelligence treated numeric zero as “missing” and replaced it with `1.0`. The gateway now accepts only finite numeric values in `[0, 1]`, preserves explicit zero, and omits an unspecified value. The memory-intelligence handler distinguishes omitted confidence from explicit zero and rejects null, string, boolean, array, non-finite, and out-of-range values. Migration `000094_memory_code_link_confidence_bounds.sql` adds a `NOT VALID` check constraint so new and updated rows are bounded without rewriting historical rows. Existing-row inventory/remediation and migration rollout qualification remain separate gates.
+
+AMD verification: gateway and memory-intelligence unit tests passed; the P6 confidence PostgreSQL integration tests passed three repetitions; the full memory-intelligence integration package passed against disposable PostgreSQL 17/pgvector after 92 migrations and 23 policies; full uncached `go test -count=1 ./...`, `go vet ./...`, JSON schema validation, governance structural audit, gofmt and diff checks passed. Temporary test files were redirected to the development drive after the default `/tmp` location returned `disk quota exceeded`. No production database, deployment or paid resource was used. This closes one source-level P6 input-integrity gap, not P6 acceptance or canonical §41 completion. Existing-row inventory, production rollout/recovery and the remaining P0–P8 gates remain open; §41 remains FAIL/PARTIAL.
+
 # P7 — Stale-Memory Revalidation
 
 **Objective:** detect when code changes make linked memory/knowledge potentially stale and revalidate without silent rewriting.
