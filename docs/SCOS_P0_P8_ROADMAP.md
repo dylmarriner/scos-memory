@@ -1,3 +1,7 @@
+## P5 current-belief conflict temporal filtering regressions (2026-11-04; test-only)
+
+The P5 integration regressions now exercise both fact-level and relation-level valid-time expiry in conflict metadata and relation expansion, and make the supersession regression use explicit `as_of_valid_time` across exact, full-text, recent, task-state, session-state, semantic, and relation-expansion lanes. This preserves the distinction between current valid-time visibility and historical system-time reconstruction. Focused PostgreSQL 17 integration tests passed three repetitions against the disposable `scos-p5-temporal-conflict-20261104` database with both owner and restricted `scos_app` role required. `go test ./...`, `go vet ./...`, JSON schema validation, the governance structural audit, and `git diff --check` passed. This is regression coverage for existing query filters, not a new runtime behavior; `as_of_system_time` remains HTTP 501, P5 system-time reconstruction and canonical §41 remain incomplete. No production data was touched.
+
 ## §7 revalidation decision record-time integrity (2026-11-04; TDD source slice)
 
 An authorized runtime principal with INSERT permission on `memory_revalidation_decisions` could supply an arbitrary `created_at`, backdating or future-dating append-only review evidence. A disposable PostgreSQL 17 integration regression failed RED for both year-2000 and year-2100 values while inserting as `scos_app`.
