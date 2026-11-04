@@ -1,3 +1,11 @@
+## §7 revalidation decision record-time integrity (2026-11-04; TDD source slice)
+
+An authorized runtime principal with INSERT permission on `memory_revalidation_decisions` could supply an arbitrary `created_at`, backdating or future-dating append-only review evidence. A disposable PostgreSQL 17 integration regression failed RED for both year-2000 and year-2100 values while inserting as `scos_app`.
+
+Migration `000092_memory_revalidation_decision_record_time.sql` changes the default to `clock_timestamp()` and adds a BEFORE INSERT trigger that overwrites caller-supplied timestamps. Existing rows are intentionally untouched because their actual insertion or commit time cannot be inferred. `TestP7RevalidationDecisionRecordTimeCannotBeForged` passed three focused integration repetitions after the migration was applied to the disposable test database.
+
+This is a database-assigned insertion timestamp, **not** a transaction commit timestamp and does not enable `as_of_system_time`. Historical approval/revocation/deletion reconstruction, trustworthy commit-time ordering, P0 benchmark acceptance, other P3–P8 gates and production rollout/recovery evidence remain open. Canonical §41 remains FAIL/PARTIAL. No production migration, deployment or paid resource was used.
+
 ## §32 extension hook telemetry caller correlation (2026-11-03; source-only TDD)
 
 Extension-manager hook latency and failure metrics previously emitted empty
