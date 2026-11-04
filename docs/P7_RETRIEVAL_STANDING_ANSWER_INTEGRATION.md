@@ -109,3 +109,12 @@ A transaction ending before the HTTP response cannot guarantee that no
 revocation commits in the intervening network interval; the response must
 not be treated as a durable authorization grant. Further concurrency,
 representative latency, and fleet-wide integration evidence remain open.
+
+
+## Revalidation decision record-time integrity (2026-11-04; source-only)
+
+`memory_revalidation_decisions.created_at` previously had a `now()` default but did not reject an explicit timestamp. An authorized runtime reviewer could therefore backdate or future-date an append-only decision. Migration `000092_memory_revalidation_decision_record_time.sql` changes the default to `clock_timestamp()` and installs a `BEFORE INSERT` trigger that always assigns the database insertion time, regardless of the supplied value.
+
+`TestP7RevalidationDecisionRecordTimeCannotBeForged` reproduced both a year-2000 backdate and a year-2100 future date as the restricted `scos_app` role (RED), then passed three repetitions against a disposable PostgreSQL 17 database after migration `000092` (GREEN). The test verifies the resulting timestamp falls within the database-observed insertion window.
+
+Existing rows are not rewritten. The timestamp records insertion time, not transaction commit time; this change does not qualify historical system-time retrieval, and the `as_of_system_time` HTTP 501 guard remains. Production rollout and recovery qualification are separate gates.
