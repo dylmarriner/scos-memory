@@ -8,6 +8,7 @@ import "github.com/dylmarriner/scos-memory/packages/auth"
 import "github.com/dylmarriner/scos-memory/packages/tlsserve"
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +18,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -221,13 +223,75 @@ func (s *gatewayServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func decodeToolArguments(raw json.RawMessage) (map[string]any, error) {
+	if len(raw) == 0 {
+		return map[string]any{}, nil
+	}
+	var encoded map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		return nil, err
+	}
+	if encoded == nil {
+		return map[string]any{}, nil
+	}
+	arguments := make(map[string]any, len(encoded))
+	for key, value := range encoded {
+		if key == "confidence" {
+			decoder := json.NewDecoder(bytes.NewReader(value))
+			decoder.UseNumber()
+			var decoded any
+			if err := decoder.Decode(&decoded); err != nil {
+				return nil, err
+			}
+			arguments[key] = decoded
+			continue
+		}
+		var decoded any
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return nil, err
+		}
+		arguments[key] = decoded
+	}
+	return arguments, nil
+}
+
+func validateLinkEvidenceConfidence(value any) (any, error) {
+	const message = "confidence must be a finite number between 0 and 1"
+	switch confidence := value.(type) {
+	case json.Number:
+		parsed, err := strconv.ParseFloat(confidence.String(), 64)
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return nil, fmt.Errorf(message)
+		}
+		exact, ok := new(big.Rat).SetString(confidence.String())
+		if !ok || exact.Sign() < 0 || exact.Cmp(big.NewRat(1, 1)) > 0 {
+			return nil, fmt.Errorf(message)
+		}
+		// Keep the original JSON number so downstream validation sees the same
+		// decimal token instead of a float64-rounded approximation.
+		return confidence, nil
+	case float64:
+		if math.IsNaN(confidence) || math.IsInf(confidence, 0) || confidence < 0 || confidence > 1 {
+			return nil, fmt.Errorf(message)
+		}
+		return confidence, nil
+	default:
+		return nil, fmt.Errorf(message)
+	}
+}
+
 func (s *gatewayServer) handleToolsCall(w http.ResponseWriter, r *http.Request, req rpcRequest) {
 	var call struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal(req.Params, &call); err != nil || strings.TrimSpace(call.Name) == "" {
 		writeRPCError(w, req.ID, -32602, "tools/call requires params.name")
+		return
+	}
+	arguments, err := decodeToolArguments(call.Arguments)
+	if err != nil {
+		writeRPCError(w, req.ID, -32602, "tools/call arguments must be a JSON object")
 		return
 	}
 	if !governedToolNames()[call.Name] {
@@ -246,7 +310,7 @@ func (s *gatewayServer) handleToolsCall(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	result, err := s.dispatchTool(r.Context(), r, identity, call.Name, call.Arguments)
+	result, err := s.dispatchTool(r.Context(), r, identity, call.Name, arguments)
 	if err != nil {
 		writeRPCError(w, req.ID, -32000, err.Error())
 		return
@@ -554,9 +618,9 @@ func (s *gatewayServer) dispatchTool(ctx context.Context, r *http.Request, ident
 			"link_type":              stringArg(args, "link_type"),
 		}
 		if rawConfidence, exists := args["confidence"]; exists {
-			confidence, ok := rawConfidence.(float64)
-			if !ok || math.IsNaN(confidence) || math.IsInf(confidence, 0) || confidence < 0 || confidence > 1 {
-				return nil, fmt.Errorf("confidence must be a finite number between 0 and 1")
+			confidence, err := validateLinkEvidenceConfidence(rawConfidence)
+			if err != nil {
+				return nil, err
 			}
 			payload["confidence"] = confidence
 		}

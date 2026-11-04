@@ -171,3 +171,46 @@ func TestP6EvidenceLinkConfidenceConstraintRejectsInvalidSQLValues(t *testing.T)
 		}
 	}
 }
+
+func TestP6EvidenceLinkConfidenceCreatesExplicitZero(t *testing.T) {
+	f, fact, version := p6EvidenceLinkConfidenceFixture(t)
+	zero := 0.0
+	code, created := postP6EvidenceLink(t, f, fact, version, "evidences", &zero)
+	if code != http.StatusOK {
+		t.Fatalf("explicit zero create = HTTP %d: %v", code, created)
+	}
+	var confidence float64
+	if err := f.admin.QueryRow(
+		"SELECT confidence FROM memory_code_links WHERE id=$1",
+		created["id"],
+	).Scan(&confidence); err != nil {
+		t.Fatal(err)
+	}
+	if confidence != 0 {
+		t.Fatalf("explicit zero create stored confidence %v, want 0", confidence)
+	}
+}
+
+func TestP6EvidenceLinkConfidenceRejectsPrecisionLossHTTP(t *testing.T) {
+	f, fact, version := p6EvidenceLinkConfidenceFixture(t)
+	for _, raw := range []string{"1.0000000000000001", "-0.0000000000000001"} {
+		body := fmt.Sprintf(
+			`{"fact_id":%q,"code_symbol_version_id":%q,"link_type":"evidences","confidence":%s}`,
+			fact, version, raw,
+		)
+		code, response, _ := f.call(f.srv.handleEvidenceLinks, http.MethodPost, "/v1/evidence-links", body)
+		if code != http.StatusBadRequest {
+			t.Fatalf("confidence %s = HTTP %d: %v, want 400", raw, code, response)
+		}
+	}
+	var count int
+	if err := f.admin.QueryRow(
+		"SELECT count(*) FROM memory_code_links WHERE fact_id=$1",
+		fact,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("precision-loss values created %d evidence links", count)
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/big"
 	"net/http"
 	"os"
 	"regexp"
@@ -1236,6 +1237,29 @@ If durable is false, category/slug/title/type/authority/tags/summary may be empt
 // caller already knows the relationship; this just persists it. The other
 // P1-C write point (maybePromoteToOKF auto-linking on promotion) is
 // separate and unconditional on this endpoint existing.
+func parseEvidenceLinkConfidence(raw json.RawMessage) (float64, error) {
+	const message = "confidence must be a finite number between 0 and 1"
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return 0, fmt.Errorf(message)
+	}
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, fmt.Errorf(message)
+	}
+	parsed, err := strconv.ParseFloat(number.String(), 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, fmt.Errorf(message)
+	}
+	exact, ok := new(big.Rat).SetString(number.String())
+	if !ok || exact.Sign() < 0 || exact.Cmp(big.NewRat(1, 1)) > 0 {
+		return 0, fmt.Errorf(message)
+	}
+	return parsed, nil
+}
+
 func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		s.handleEvidenceLinksRead(w, r)
@@ -1273,14 +1297,9 @@ func (s *engineServer) handleEvidenceLinks(w http.ResponseWriter, r *http.Reques
 	}
 	confidence := 1.0
 	if len(req.Confidence) > 0 {
-		var rawConfidence any
-		if err := json.Unmarshal(req.Confidence, &rawConfidence); err != nil {
-			http.Error(w, "confidence must be a finite number between 0 and 1", http.StatusBadRequest)
-			return
-		}
-		value, ok := rawConfidence.(float64)
-		if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
-			http.Error(w, "confidence must be a finite number between 0 and 1", http.StatusBadRequest)
+		value, err := parseEvidenceLinkConfidence(req.Confidence)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		confidence = value
