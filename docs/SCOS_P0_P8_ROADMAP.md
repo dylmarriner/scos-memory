@@ -51,6 +51,8 @@ Canonical §41 remains FAIL until the independent acceptance gates close.
 > **Canonical roadmap as of 2026-09-10.** Repository state is authoritative. This roadmap distinguishes source implementation, benchmark acceptance, merge state, and live-production activation instead of treating them as one checkbox.
 >
 > `docs/IMPLEMENTATION_PLAN_P0_P3.md` is historical implementation detail. This file is the canonical P0–P8 roadmap.
+>
+> Competitive memory capability extensions are tracked separately in [`docs/COMPETITIVE_MEMORY_CAPABILITY_ROADMAP.md`](COMPETITIVE_MEMORY_CAPABILITY_ROADMAP.md). That overlay builds on existing P0–P8 capabilities and does not change their status or §41 acceptance evidence.
 
 ## §41 live Python test evidence qualification (2026-11-03; TDD source candidate)
 
