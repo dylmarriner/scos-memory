@@ -21,7 +21,7 @@
 # Security-patched Go 1.27.3 build image (2026-10-19 crypto/x509 fix).
 # The module's minimum preferred toolchain is Go 1.26.10; the build stage
 # intentionally uses a newer, patched Go 1.27 release.
-FROM golang:1.27.3-alpine AS build
+FROM golang:1.27.4-alpine AS build
 # CGO_ENABLED=1: code-intelligence's Tree-sitter parsers (tree-sitter-go,
 # -javascript, -python, -rust, -typescript) are cgo bindings around the C
 # tree-sitter runtime -- built with CGO disabled their Go files are excluded
